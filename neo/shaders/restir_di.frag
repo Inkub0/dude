@@ -300,12 +300,10 @@ void main() {
 	if ( useGrid ) { draws = lgN; }
 	bool pdfOne = exhaustive || useGrid;		// candidate pdf 1 (enumeration) vs the uniform-M draw's 1/nLights
 	for ( uint i = 0u; i < draws; i++ ) {
-		uint  li;
-		float q = 1.0;									// the candidate's selection weight (a residual grid slot: < 1)
+		uint li;
 		if ( useGrid ) {
 			li = lgSlotLight( lgGrid, lgBase, i );			// the cell's i-th stored candidate
 			if ( li >= nLights ) { continue; }				// a stale slot never walks past the buffer
-			q  = lgSlotQ( lgGrid, lgBase, i );
 		} else {
 			li = i;
 			if ( !exhaustive ) {
@@ -322,7 +320,7 @@ void main() {
 		if ( diShadeLight( lights, li, S, contrib, ldir, dl, ndl, cheapTarget ) ) {
 			pHat = dot( contrib, vec3( 0.2126, 0.7152, 0.0722 ) );		// luminance of the target
 		}
-		float w    = pdfOne ? pHat / q : pHat * float( nLights );	// pHat / candidate pdf (grid: 1 / q, exhaustive: pdf 1; uniform-M: 1/nLights)
+		float w    = pdfOne ? pHat : pHat * float( nLights );	// pHat / candidate pdf (grid + exhaustive: pdf 1; uniform-M: 1/nLights)
 		wSum += w;
 		if ( wSum > 0.0 && rnd( rng ) < ( w / wSum ) ) {
 			pHatChosen  = pHat;

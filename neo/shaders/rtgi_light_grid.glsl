@@ -8,10 +8,8 @@
 // the cell size so cells do not swim). A world point picks the smallest cascade whose box contains it, then a cell.
 //
 // Cell record (flat uint buffer `g[]`, stride LG_HEADER + 2*slots uints): [0] count (lights stored, 0 = empty), [1]
-// sumImp (float bits: the cell's total in-range importance, debug), then per slot { uint light index, float q bits }:
-// q = the slot's SELECTION WEIGHT - 1 for a light kept outright (a pdf-1 candidate), < 1 for a RESIDUAL slot an
-// overflowing cell filled by importance-sampling the lights it could not hold (light_grid_fill.comp); the consumer
-// weighs the candidate by 1 / q. A cold / empty cell has count 0 -> the consumer falls back to its old path (never wrong).
+// sumImp (float bits: the cell's total in-range importance, the consume pdf denominator), then per slot { uint light
+// index, float imp bits }. A cold / empty cell has count 0 -> the consumer falls back to its old path (never wrong).
 //
 // Needs buffer_reference (the VK prelude enables it) + GL_EXT_buffer_reference_uvec2 in the including shader.
 
@@ -102,8 +100,7 @@ int lgCellBase( LgParms p, vec3 world ) {
 uint  lgCount( LgGrid grid, int base )            { return grid.g[ base ]; }
 float lgSumImp( LgGrid grid, int base )           { return uintBitsToFloat( grid.g[ base + 1 ] ); }
 uint  lgSlotLight( LgGrid grid, int base, uint s ){ return grid.g[ base + int( LG_HEADER + 2u * s ) ]; }
-float lgSlotImp( LgGrid grid, int base, uint s )  { return uintBitsToFloat( grid.g[ base + int( LG_HEADER + 2u * s + 1u ) ] ); }	// = the slot's q since the residual slots
-float lgSlotQ( LgGrid grid, int base, uint s )    { float q = uintBitsToFloat( grid.g[ base + int( LG_HEADER + 2u * s + 1u ) ] ); return ( q > 0.0 && q <= 1.0 ) ? q : 1.0; }
+float lgSlotImp( LgGrid grid, int base, uint s )  { return uintBitsToFloat( grid.g[ base + int( LG_HEADER + 2u * s + 1u ) ] ); }
 
 // One candidate from the cell, drawn IMPORTANCE-PROPORTIONALLY among its stored lights (the cell holds the top-N by
 // importance; the fill is deterministic, this draw provides the per-pixel variation the denoiser averages). Returns the

@@ -450,3 +450,7 @@ shaders receive is the count WRITTEN this frame; r_rtEmissiveMaxRows joins Compu
   2 x reach cull sphere gave every cell several times the candidates of the placed lights. An emitter row now occupies
   the volume of the light it replaced (cull = bound + reach, fade 0.75R..R). The residual slots stay as the net for a
   cell that still overflows (inert otherwise).
+- RESIDUAL SLOTS REVERTED (2026-10-20, "actually worse, and those pixels are frying"): a residual draw is per CELL per
+  frame, so every pixel of a cell shared the same lucky pick with weight 1/q - bright cell-shaped blocks that changed
+  every frame. Dead end; removed. The grid is back to deterministic top-N (per-slot float = imp). What stands against
+  overflow: the cull at one reach. If blocks persist, read r_rtLightGridDebug 2 (white = full cells) before anything else.

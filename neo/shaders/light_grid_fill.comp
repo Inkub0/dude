@@ -25,7 +25,6 @@ layout( push_constant ) uniform PC {
 	float cellBase;					// cascade-0 cell size (units)
 	float camX, camY, camZ;			// camera position (cascade snapping)
 	float parallelFlux;				// flux weight for parallel (sun) lights, which have no 1/d^2 term
-	uint  frame;					// frame index: the residual slots' sampling seed (a fresh draw every frame)
 } pc;
 
 void main() {
@@ -60,7 +59,6 @@ void main() {
 	float chosenImpB[ 2 ];
 	uint  countB  = 0u, minSlotB = 0u;
 	float minImpB = 1e30;
-	uint  nIn     = 0u;				// in-range light candidates seen (more than slotsL = the cell OVERFLOWS)
 
 	for ( uint li = 0u; li < pc.nLights; li++ ) {
 		uint flags = lights.l[ li ].flags;
@@ -104,7 +102,6 @@ void main() {
 			}
 			continue;
 		}
-		nIn++;
 		// streaming TOP-N by importance (deterministic - no rng, so the grid is stable frame-to-frame)
 		if ( count < slotsL ) {
 			chosen[ count ] = li;
@@ -121,88 +118,17 @@ void main() {
 			for ( uint k = 1u; k < slotsL; k++ ) { if ( chosenImp[ k ] < minImp ) { minImp = chosenImp[ k ]; minSlot = k; } }
 		}
 	}
-	// Per slot the record stores the light index and its SELECTION WEIGHT q: 1 for a deterministically kept light (the
-	// consumer treats it as a pdf-1 candidate), q < 1 for a RESIDUAL slot (below). The consumer divides by q.
-	float chosenQ[ LG_MAX_SLOTS ];
-	for ( uint k = 0u; k < LG_MAX_SLOTS; k++ ) { chosenQ[ k ] = 1.0; }
-	float sumStored = 0.0;
-	for ( uint k = 0u; k < count; k++ ) { sumStored += chosenImp[ k ]; }
-
-	// OVERFLOW (ReGIR proper, docs/rtx-light-grid.md): a cell with MORE in-range lights than slots - emissive mode's 300
-	// emitter rows reaching two radii put a hundred into every cell - used to keep the top slotsL and silently DROP the
-	// rest, so neighbouring cells kept different sets and the lighting stepped at every cell border (the blocky shadows
-	// of 2026-10-20). Now the weakest kS deterministic slots become RESIDUAL slots: kS independent draws from every
-	// in-range light outside the kept set, in proportion to importance (weighted reservoir sampling, a fresh draw each
-	// frame), stored with q = kS x imp / sumRest. The consumer weighs such a candidate by pHat / q: an unbiased estimate
-	// of everything the cell cannot hold, as noise the denoiser averages instead of a step. A cell that fits is unchanged.
-	if ( nIn > slotsL && slotsL >= 4u ) {
-		uint  kS = max( slotsL / 4u, 1u );
-		uint  nKeep = slotsL - kS;
-		// drop the weakest kS of the kept set (selection by repeated min extraction; <= 16 entries)
-		for ( uint drop = 0u; drop < kS; drop++ ) {
-			uint  wk = 0u;
-			for ( uint k = 1u; k < count; k++ ) { if ( chosenImp[ k ] < chosenImp[ wk ] ) { wk = k; } }
-			count--;
-			chosen[ wk ] = chosen[ count ]; chosenImp[ wk ] = chosenImp[ count ];
-		}
-		// kS reservoirs over the residual (everything in range not in the kept set)
-		uint  resL[ 4 ];
-		float resImp[ 4 ];
-		float resW[ 4 ];
-		uint  rng[ 4 ];
-		for ( uint j = 0u; j < 4u; j++ ) { resL[ j ] = 0u; resImp[ j ] = 0.0; resW[ j ] = 0.0; rng[ j ] = lgPcg( cellIndex * 9781u + pc.frame * 6271u + j * 7919u ) | 1u; }
-		float sumRest = 0.0;
-		for ( uint li = 0u; li < pc.nLights; li++ ) {
-			uint flags = lights.l[ li ].flags;
-			if ( ( flags & ( DUDE_LIGHT_FOGVOLUME | DUDE_LIGHT_DIFORWARD | DUDE_LIGHT_BOUNCEONLY ) ) != 0u ) { continue; }
-			vec4 cull = lights.l[ li ].cull;
-			vec3 cd   = cull.xyz - center;
-			float rr  = cull.w + cellHalfDiag;
-			if ( dot( cd, cd ) > rr * rr ) { continue; }
-			float lum = dot( lights.l[ li ].color, vec3( 0.2126, 0.7152, 0.0722 ) );
-			if ( lum <= 0.0 ) { continue; }
-			float imp;
-			if ( ( flags & DUDE_LIGHT_PARALLEL ) != 0u ) {
-				imp = lum * pc.parallelFlux;
-			} else {
-				float rad  = max( lights.l[ li ].radius, 1.0 );
-				vec3  pd   = center - lights.l[ li ].pos;
-				float d2   = max( dot( pd, pd ), cs * cs );
-				imp = lum * ( rad * rad ) / d2;
-			}
-			if ( imp <= 0.0 ) { continue; }
-			bool kept = false;
-			for ( uint k = 0u; k < count; k++ ) { if ( chosen[ k ] == li ) { kept = true; break; } }
-			if ( kept ) { continue; }
-			sumRest += imp;
-			for ( uint j = 0u; j < kS; j++ ) {
-				resW[ j ] += imp;
-				if ( lgRand( rng[ j ] ) * resW[ j ] < imp ) { resL[ j ] = li; resImp[ j ] = imp; }
-			}
-		}
-		if ( sumRest > 0.0 ) {
-			for ( uint j = 0u; j < kS && count < slotsL; j++ ) {
-				if ( !( resImp[ j ] > 0.0 ) ) { continue; }
-				chosen[ count ] = resL[ j ];
-				chosenImp[ count ] = resImp[ j ];
-				chosenQ[ count ] = min( float( kS ) * resImp[ j ] / sumRest, 1.0 );
-				count++;
-			}
-		}
-		sumStored = 0.0;
-		for ( uint k = 0u; k < nKeep && k < count; k++ ) { sumStored += chosenImp[ k ]; }
-		sumStored += sumRest;													// the cell's total in-range importance (debug view 3)
-	}
-
 	// the bounce-only rows ride behind the lights in the same record (their quota never exceeds the free slots)
-	for ( uint k = 0u; k < countB && count < slots; k++ ) { chosen[ count ] = chosenB[ k ]; chosenImp[ count ] = chosenImpB[ k ]; chosenQ[ count ] = 1.0; count++; }
+	for ( uint k = 0u; k < countB && count < slots; k++ ) { chosen[ count ] = chosenB[ k ]; chosenImp[ count ] = chosenImpB[ k ]; count++; }
 
 	if ( cellLive && count > 0u ) {
+		float sumStored = 0.0;											// sum over the KEPT lights = the consume's pdf denominator
+		for ( uint k = 0u; k < count; k++ ) { sumStored += chosenImp[ k ]; }
 		grid.g[ base ]     = count;
 		grid.g[ base + 1 ] = floatBitsToUint( sumStored );
 		for ( uint k = 0u; k < count; k++ ) {
 			grid.g[ base + int( LG_HEADER + 2u * k ) ]      = chosen[ k ];
-			grid.g[ base + int( LG_HEADER + 2u * k + 1u ) ] = floatBitsToUint( chosenQ[ k ] );		// the selection weight q (1 = kept outright)
+			grid.g[ base + int( LG_HEADER + 2u * k + 1u ) ] = floatBitsToUint( chosenImp[ k ] );
 		}
 	} else if ( cellLive ) {
 		grid.g[ base ] = 0u;											// no in-range light: empty, the consumer falls back
