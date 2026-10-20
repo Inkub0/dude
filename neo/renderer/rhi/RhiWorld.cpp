@@ -8254,13 +8254,14 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		// same direct emitter->P path the DI stream now estimates properly, and would count it twice.
 		{
 			int emTris = 0; float emTotal = 0.0f, emMean = 0.0f;
-			const unsigned long long emAddr = ( r_rtEmissiveLighting.GetBool() && r_rtEmissiveCandidates.GetInteger() > 0 )
+			const bool diStream = r_rtEmissiveLighting.GetBool() && r_rtEmissiveCandidates.GetInteger() > 0;
+			const unsigned long long emAddr = ( diStream || r_rtEmissiveBounce.GetBool() )		// the bounce sample works in both modes
 				? R_RtEmissiveTableAddress( &emTris, &emTotal, &emMean ) : 0;
 			const unsigned int emLo = (unsigned int)( emAddr & 0xFFFFFFFFull ), emHi = (unsigned int)( emAddr >> 32 );
 			memcpy( &parms.texGen0S[0], &emLo, sizeof( emLo ) );
 			memcpy( &parms.texGen0S[1], &emHi, sizeof( emHi ) );
 			parms.texGen0S[2] = idMath::ClampFloat( 0.0f, 64.0f, r_rtEmissiveIntensity.GetFloat() );
-			parms.texGen0S[3] = ( emAddr != 0 && emTris > 0 ) ? (float)idMath::ClampInt( 0, 16, r_rtEmissiveCandidates.GetInteger() ) : 0.0f;
+			parms.texGen0S[3] = ( diStream && emAddr != 0 && emTris > 0 ) ? (float)idMath::ClampInt( 0, 16, r_rtEmissiveCandidates.GetInteger() ) : 0.0f;
 			int emGroups = 0;
 			const unsigned long long grpAddr = ( emAddr != 0 ) ? R_RtEmissiveGroupsAddress( &emGroups ) : 0;
 			const unsigned int grpLo = (unsigned int)( grpAddr & 0xFFFFFFFFull ), grpHi = (unsigned int)( grpAddr >> 32 );
@@ -8270,8 +8271,8 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 			parms.texGen0Q[1] = (float)emTris;														// triangle count: every stored triangle index likewise
 			parms.texGen0T[2] = r_rtEmissiveBounce.GetBool() ? 1.0f : 0.0f;						// emitter sample at the bounce hit
 			parms.texGen0T[3] = idMath::ClampFloat( 0.0f, 64.0f, r_rtEmissiveClamp.GetFloat() );	// per-pixel emitter luminance cap (0 = off)
-			if ( emAddr != 0 && emTris > 0 ) {
-				parms.pbrParms[1] = 0.0f;
+			if ( diStream && emAddr != 0 && emTris > 0 ) {
+				parms.pbrParms[1] = 0.0f;			// the DI stream carries the direct emitter light: no glow at a bounce hit (twice)
 			}
 		}
 		parms.pbrParms[2] = idMath::ClampFloat( 0.0f, 16.0f, r_rtgiEmissiveClamp.GetFloat() );
@@ -9628,9 +9629,12 @@ static bool RB_RHI_LightGridBegin( rhi::RHI *r, const viewDef_t *viewDef ) {
 	const int cascades = idMath::ClampInt( 1, 4, r_rtLightGridCascades.GetInteger() );
 	// E2 v2b: emissive mode adds an emissive record (8 group slots) to every cell. r_rtEmissiveLighting is in the gfx-cfg
 	// signature, so the size change idles the device like the others.
+	// the emissive record is wanted by the DI stream (the mode) OR by the bounce-hit emitter sample alone (r_rtEmissiveBounce
+	// in normal mode: the glowing surfaces add real bounce light while the placed lights keep the direct term)
 	int emGroups = 0;
-	const unsigned long long emGroupAddr = ( r_rtEmissiveLighting.GetBool() && r_rtEmissiveCandidates.GetInteger() > 0 ) ? R_RtEmissiveGroupsAddress( &emGroups ) : 0;
-	const int slotsE   = r_rtEmissiveLighting.GetBool() ? 16 : 0;		// 16: the per-pixel triangle lists (near cascades) need the room; groups use 8 of them
+	const bool emWanted = ( r_rtEmissiveLighting.GetBool() && r_rtEmissiveCandidates.GetInteger() > 0 ) || r_rtEmissiveBounce.GetBool();
+	const unsigned long long emGroupAddr = emWanted ? R_RtEmissiveGroupsAddress( &emGroups ) : 0;
+	const int slotsE   = ( emGroupAddr != 0 ) ? 16 : 0;				// 16: the per-pixel triangle lists (near cascades) need the room; groups use 8 of them
 	const int sizeKey  = slots | ( res << 8 ) | ( cascades << 16 ) | ( slotsE << 24 );		// identity of the buffer size (all in the gfx-cfg signature)
 	if ( g.gridBuf != 0 && g.sizeKey != sizeKey ) {
 		// a size cvar changed: it is in ComputeGfxCfgSignature, so the device idled at this frame's start; DestroyBuffer

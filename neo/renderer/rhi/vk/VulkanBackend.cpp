@@ -3006,7 +3006,7 @@ uint64_t VulkanBackend::ComputeGfxCfgSignature() const {
 	mixI( r_rtgiCacheSlotsLog2 );
 	// RT light grid (docs/rtx-light-grid.md): slots / res / cascades change the grid buffer size -> re-allocate
 	mixI( r_rtLightGridSlots ); mixI( r_rtLightGridRes ); mixI( r_rtLightGridCascades );
-	mixB( r_rtEmissiveLighting );		// E2 v2b: emissive mode adds an emissive record to every light-grid cell (a grid re-allocation)
+	mixB( r_rtEmissiveLighting ); mixB( r_rtEmissiveBounce ); mixB( r_rtEmissiveTable );		// E2: the emissive record in every light-grid cell (a grid re-allocation) follows these
 	return h;
 }
 

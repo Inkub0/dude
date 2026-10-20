@@ -264,14 +264,14 @@ int rtgiTraceBounce( RtgiBounceParms bp, vec3 Pw, vec3 Nw, vec3 eyeW, float d, v
 				if ( ok && ti >= et.count ) { ok = false; }
 				RtEmissiveTri e;
 				if ( ok ) { e = rtEmissiveFetch( et, ti ); } else { e.flux = 0.0; e.emit = 0u; e.p0 = e.p1 = e.p2 = vec3( 0.0 ); e.scale = 0.0; e.meanRG = 0u; e.meanB = 0u; e.st0 = e.st1 = e.st2 = 0u; e.tint = 0u; e.pad0 = e.pad1 = 0u; }
-				vec3 Pe, nUnit; float pdfw;
-				if ( e.flux > 0.0 && rtEmissiveSampleSolidAngle( e, hitWorld, vec2( lgRand( rngE ), lgRand( rngE ) ), Pe, nUnit, pdfw ) ) {
+				vec3 Pe, nUnit; float pdfw; bool front;
+				if ( e.flux > 0.0 && rtEmissiveSampleSolidAngle( e, hitWorld, vec2( lgRand( rngE ), lgRand( rngE ) ), Pe, nUnit, pdfw, front )
+						&& ( front || ( e.emit & RT_EMIT_TWOSIDED ) != 0u ) ) {
 					vec3  ed = Pe - hitWorld;
 					float edl = length( ed );
 					vec3  edir = ed / max( edl, 1e-3 );
 					float endl = max( dot( hitN, edir ), 0.0 );
-					float ecos = dot( -nUnit, -edir );
-					if ( ( e.emit & RT_EMIT_TWOSIDED ) != 0u ) { ecos = abs( ecos ); }
+					float ecos = max( -dot( nUnit, edir ), 0.0 );				// nUnit points at the hit (the sampler re-winds)
 					float p = qG * pIn * pdfw;
 					if ( endl > 0.0 && ecos > 0.0 && p > 0.0 ) {
 						vec3 Le = rtEmissiveMeanRadiance( e ) * ( e.scale * bp.emIntensity );
@@ -281,10 +281,13 @@ int rtgiTraceBounce( RtgiBounceParms bp, vec3 Pw, vec3 Nw, vec3 eyeW, float d, v
 							hitWorld + hitN * 0.2 + edir * 0.05, 0.0, edir, max( edl - 1.0, 0.1 ) );
 						while ( rayQueryProceedEXT( erq ) ) { }
 						if ( rayQueryGetIntersectionTypeEXT( erq, true ) == gl_RayQueryCommittedIntersectionNoneEXT ) {
-							// clamp the single sample like the glow term (bp.emissiveClamp): a 1-spp hit on a bright tile is the
-							// strobe-raindrop input NRD cannot merge (memory: strobe GI raindrops)
+							// a soft cap on the single sample, SCALED by the emitter intensity: the glow-hit clamp (0.15, tuned for
+							// L ~ 1 strobe hits) applied as-is threw away the emitter bounce at intensity 10 (Mars City read
+							// dark away from the tiles, 2026-10-20). This sample is importance-sampled, not hit-or-miss, so it
+							// only needs a firefly guard: 8 x the clamp x the intensity.
+							float cap = bp.emissiveClamp * 8.0 * max( bp.emIntensity, 1.0 );
 							float ep = max( max( ec.r, ec.g ), ec.b );
-							if ( bp.emissiveClamp > 0.0 && ep > bp.emissiveClamp ) { ec *= bp.emissiveClamp / ep; }
+							if ( bp.emissiveClamp > 0.0 && ep > cap ) { ec *= cap / ep; }
 							Li += ec;
 							LiCache += ec;
 						}

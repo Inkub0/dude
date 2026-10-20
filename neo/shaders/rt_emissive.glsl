@@ -143,15 +143,28 @@ vec3 rtEmissiveUniformPoint( RtEmissiveTri e, vec2 xi, out vec3 nUnnorm, out vec
 // angle - no 1/d^2 blow-up for a receiver near the emitter. Returns false when the spherical triangle is degenerate
 // (P in the triangle's plane, or the triangle too small / far to resolve). nUnit = the triangle's unit normal
 // (cross( p1 - p0, p2 - p0 ) - the engine's face normal is the opposite sign).
-bool rtEmissiveSampleSolidAngle( RtEmissiveTri e, vec3 P, vec2 rnd, out vec3 Pe, out vec3 nUnit, out float pdfw ) {
+// ORIENTATION: Arvo's construction (as Q2RTX wrote it) expects the triangle wound CLOCKWISE as seen from P, i.e.
+// cross( p1 - p0, p2 - p0 ) pointing AT P (o < 0). Our table's emitters wind the other way when they face the receiver
+// (the engine's face normal is cross( p2 - p0, p1 - p0 )), so the raw sampler got a MIRRORED triangle and its
+// directions missed the emitter - the sparse salt-and-pepper DI of 2026-10-20. The vertices are re-wound here so the
+// routine always sees its convention; nUnit is returned pointing AT P, and `front` says whether the emitter's FACE
+// (the side that emits, one-sided) looks at P.
+bool rtEmissiveSampleSolidAngle( RtEmissiveTri e, vec3 P, vec2 rnd, out vec3 Pe, out vec3 nUnit, out float pdfw, out bool front ) {
 	vec3 n = cross( e.p1 - e.p0, e.p2 - e.p0 );
 	float nl = length( n );
-	Pe = e.p0; nUnit = vec3( 0.0, 0.0, 1.0 ); pdfw = 0.0;
+	Pe = e.p0; nUnit = vec3( 0.0, 0.0, 1.0 ); pdfw = 0.0; front = false;
 	if ( !( nl > 1e-8 ) ) { return false; }
 	nUnit = n / nl;
 	vec3 v0 = e.p0 - P, v1 = e.p1 - P, v2 = e.p2 - P;
 	float o = dot( nUnit, v0 );											// signed distance of the plane
 	if ( abs( o ) < 1e-3 ) { return false; }
+	// the face normal -n points at P exactly when o > 0: that is the emitting side facing the receiver
+	front = o > 0.0;
+	if ( o > 0.0 ) {													// re-wind to Arvo's convention: n at P, o < 0
+		vec3 t = v1; v1 = v2; v2 = t;
+		nUnit = -nUnit;
+		o = -o;
+	}
 	vec3 A = normalize( v0 ), B = normalize( v1 ), C = normalize( v2 );
 	vec3 cross_BC = cross( B, C );
 	vec3 norm_AB = normalize( cross( A, B ) ), norm_BC = normalize( cross_BC ), norm_CA = normalize( cross( C, A ) );

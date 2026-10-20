@@ -283,3 +283,17 @@ tune on a corridor). Overlay mode 5 draws every placed light as an 8-unit sphere
 ambience, yellow = parallel, blue = fog / blend - the check that the drop list is the one the room needs. OPEN:
 cookies / grate patterns go with the dropped light (by design); rooms whose fixture emitter is weak will read darker
 than before until the D2 intensity table exists - that is the E6 calibration.
+
+**Round (Marine HQ, 2026-10-20): drop confirmed, cost measured, two bugs found by the raw view.** Console: 211
+fixtured placed lights dropped / 28 kept. GPU: fill 0.58 ms (fixed), gather 9.3 (baseline 6.1), denoise 5.5 (4.4),
+total 24.3 vs 20.8. Intensity 10 matches the vanilla room's brightness (the Mars City calibration number) but the
+raw DI (`r_rtReStirDIDebug 1`) was salt-and-pepper: most emitter samples FAILED. Cause: the Arvo sampler expects
+the triangle wound clockwise as seen from P (cross( p1-p0, p2-p0 ) at P, o < 0 - Q2RTX's light polys); our facing
+emitters wind the other way, so the routine got a mirrored triangle and its directions missed the emitter (then the
+visibility ray hit the ceiling). `rtEmissiveSampleSolidAngle` now re-winds to its convention, returns nUnit pointing
+at P and a `front` flag (one-sided emitters seen from the back are rejected by the callers). Second bias: the
+bounce-hit emitter sample was capped by the strobe glow clamp (0.15 peak) - at intensity 10 the emitter bounce was
+thrown away (rooms dark away from the tiles); the cap is now 8 x clamp x intensity. **r_rtEmissiveBounce works in
+BOTH modes** (user request): with the mode off, the table + the grid's emissive record still exist and the bounce hit
+samples emitters (the placed lights keep the direct term; the glow-at-hit term stays since no DI stream carries the
+direct emitter light); r_rtEmissiveBounce / r_rtEmissiveTable join the gfx-cfg signature (grid re-size).

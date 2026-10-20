@@ -4900,9 +4900,12 @@ static void DrawDbgGroup_ExperimentalLighting()
 		"with the inverse square, so there is no exact equivalence - tune by eye on a lit corridor. (r_rtEmissiveIntensity)" );
 	ImGui::SameLine();
 	if ( ImGui::SmallButton( "reset##rtEmissiveIntensity" ) ) { r_rtEmissiveIntensity.Reset(); }
-	CvarCheckbox( "Emitters at the GI Bounce", r_rtEmissiveBounce, "The bounce hit draws one emitter sample from its grid cell "
-		"(one extra visibility ray per pixel) so walls lit only by emitters bounce light. Off = emitters light directly "
-		"only (cheaper; the A/B for the bounce's share of the noise). (r_rtEmissiveBounce)" );
+	ImGui::EndDisabled();	// r_rtEmissiveLighting (the bounce works in BOTH modes)
+	CvarCheckbox( "Emitters at the GI Bounce", r_rtEmissiveBounce, "The GI bounce hit draws one emitter sample from its grid cell "
+		"(one extra visibility ray per pixel) so the glowing surfaces add real bounce light. Works in BOTH modes: with "
+		"Emissive Mode off the placed lights keep the direct term and the emitters only add to the GI (needs the Emitter "
+		"Table on); with it on, walls lit only by emitters bounce. (r_rtEmissiveBounce)" );
+	ImGui::BeginDisabled( !r_rtEmissiveLighting.GetBool() );
 
 	// ===== Sampling =====
 	ImGui::SeparatorText( "Sampling" );

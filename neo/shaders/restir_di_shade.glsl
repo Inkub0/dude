@@ -144,18 +144,18 @@ bool diShadeEmitter( RtEmissiveTable t, uint tri, vec2 xi, in DiSurface s, float
 	if ( !( e.flux > 0.0 ) ) { return false; }									// dark (switched off / gone)
 	// the sample point UNIFORM IN SOLID ANGLE from the receiver (Arvo; Q2RTX): the contribution is then per unit solid
 	// angle, L x N.L, bounded by the solid angle - no 1/d^2 term at all (it is inside pdfw)
-	vec3 Pe, nUnit;
-	if ( !rtEmissiveSampleSolidAngle( e, s.Pw, xi, Pe, nUnit, pdfw ) ) { return false; }
+	vec3 Pe, nUnit; bool front;
+	if ( !rtEmissiveSampleSolidAngle( e, s.Pw, xi, Pe, nUnit, pdfw, front ) ) { return false; }
+	if ( !front && ( e.emit & RT_EMIT_TWOSIDED ) == 0u ) { return false; }	// a one-sided emitter seen from its back
 	vec3 d = Pe - s.Pw;
 	dl   = length( d );
 	if ( !( dl > 1e-3 ) ) { return false; }
 	ldir = d / dl;
 	ndl  = max( dot( s.Nw, ldir ), 0.0 );
 	if ( !( ndl > 0.0 ) ) { return false; }
-	// the engine's face normal is -nUnit (R_DeriveFacePlanes: d2 x d1); the emitter faces the receiver when that normal
-	// points at it. Emission profile sqrt( cos_e ) (Q2RTX's "spotlight"): a tube reads directional, a tile stays broad.
-	float cosL = dot( -nUnit, -ldir );
-	if ( ( e.emit & RT_EMIT_TWOSIDED ) != 0u ) { cosL = abs( cosL ); }
+	// nUnit points AT the receiver (the sampler re-winds): cos at the emitter = nUnit . (emitter -> receiver) = -nUnit . ldir.
+	// Emission profile sqrt( cos_e ) (Q2RTX's "spotlight"): a tube reads directional, a tile stays broad.
+	float cosL = max( -dot( nUnit, ldir ), 0.0 );
 	if ( !( cosL > 0.0 ) ) { return false; }
 	vec3 L = rtEmissiveMeanRadiance( e ) * ( e.scale * intensity );			// a uniform emitter: its mean radiance
 	contrib = L * ( sqrt( cosL ) * ndl );

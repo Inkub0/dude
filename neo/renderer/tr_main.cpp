@@ -3929,7 +3929,7 @@ static bool R_RtEmissiveNewEntityAppeared( const idRenderWorldLocal *world ) {
 // Keep the table in step with the live RT scene: build once per map (or when its cvars change), free when off.
 // Called from R_RtWorldUpdate while the persistent scene is live for `world`.
 static void R_RtEmissiveUpdate( const idRenderWorldLocal *world, rhi::RHI *r ) {
-	if ( !r_rtEmissiveTable.GetBool() && !r_rtEmissiveLighting.GetBool() ) {		// D6: the mode implies the table
+	if ( !r_rtEmissiveTable.GetBool() && !r_rtEmissiveLighting.GetBool() ) {		// D6: the mode implies the table (the bounce alone does not: it needs r_rtEmissiveTable)
 		if ( s_rtEmissiveMap.Length() > 0 || s_rtEmissiveBuf != 0 ) {
 			R_RtEmissiveFree();
 		}
