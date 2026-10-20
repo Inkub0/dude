@@ -3134,7 +3134,7 @@ static void R_RtEmissiveBuild( const idRenderWorldLocal *world, rhi::RHI *r ) {
 	common->Printf( "r_rtEmissiveTable: %d emissive triangles (%d world, %d from %d static entities = mover-tracked groups), %d materials (%d register-driven), %d screen surfaces excluded, total flux %.1f (mean %.2f), %d KB, %d ms%s\n",
 		n, worldTris, entityTris, entities, census.Num(), animatedMats, screens, s_rtEmissiveTotalFlux, meanFlux, bytes >> 10,
 		Sys_Milliseconds() - msStart, overflow ? va( " - TABLE FULL: %d triangles dropped (raise RT_EMISSIVE_MAX_TRIS)", overflow ) : "" );
-	const int show = census.Num() < 12 ? census.Num() : 12;
+	const int show = census.Num() < 64 ? census.Num() : 64;													// every material (a level has a few dozen): each painted tint gets a name
 	for ( int i = 0; i < show; i++ ) {
 		int rgb[3]; const char *hue = "";
 		R_RtEmissiveDebugTint( census[i].slot, rgb, &hue );
