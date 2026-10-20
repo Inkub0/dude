@@ -421,3 +421,22 @@ blend / filter), image and flags (not resident / cube / texgen / cinematic / ren
 (index, model + its dynamic kind, callback, skin, custom material, parms 0-3 and parm7, gatherable yes/no), and the
 table's VERDICT: emitter (+ how many of its triangles are in the table), not an emitter with the exclusion reason, or
 "no additive stage" (what glows is lit diffuse, not self-illumination).
+
+**The EnPro door strip, solved (probe, 2026-10-20).** `models/mapobjects/doors/techdoor1/techdr1frame_cop` (skin
+`skins/techdr1frame_cop`) has NO additive stage - bump / diffuse / specular only. The "tube" is a white patch in the
+DIFFUSE map lit by the placed light, with the light entity's flare sprite (`textures/sfx/flare`, deform sprite) in
+front of it. The engine never considered it self-lit; the table is right to leave it out. In emitter mode such a
+fixture goes dark once its (fixtured) placed light is dropped. => **D2 extension (decided):** the intensity table
+gets a DIFFUSE-GLOW row form for materials without a glow stage - `<material> <intensity> diffuse <luminance
+threshold>` - meaning "texels of the diffuse map brighter than the threshold emit at this intensity"; the gather
+then takes such a material's diffuse image as the glow source (flux from the thresholded average) and E2 reads the
+diffuse at the sampled st through the same threshold. Skin-remapped names (`_cop`) are matched as written. The
+classifier script can propose candidates: a `models/mapobjects/lights|doors` material with a bright, saturated-free
+diffuse patch and a light entity within 64 units. Not built until D2.
+
+**Flares hidden in emitter mode (user, 2026-10-20).** `r_rtEmissiveHideFlares` (default 0; E5 folds it into the
+mode): at build, every entity whose model has a sprite-deformed additive material (a light entity's flare) with its
+origin within 64 units of a table triangle is marked; `R_AddModelSurfaces` skips those entities while the cvar is on.
+The probe reports the mark. A flare is a painted stand-in for glare; once the fixture is the light it is a second,
+fake highlight. Flares of fixtures that are NOT emitters (the EnPro frame above) are kept - they are all that fixture
+has until its D2 row exists.

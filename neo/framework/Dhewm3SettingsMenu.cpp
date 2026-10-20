@@ -4918,6 +4918,9 @@ static void DrawDbgGroup_ExperimentalLighting()
 			"emitter sits inside a placed light's volume (that light is fixtured and would be dropped once emitters light the "
 			"scene), red = no placed light covers it. (r_rtEmissiveTableDebug)" );
 	}
+	CvarCheckbox( "Hide Fixture Flares", r_rtEmissiveHideFlares, "Emitter mode: do not draw the flare sprites that sit on "
+		"light fixtures which are emitters in the table (a light entity's camera-facing flare). The flare is a painted "
+		"stand-in for glare; once the fixture is the light it only adds a second, fake highlight. (r_rtEmissiveHideFlares)" );
 	ImGui::EndDisabled();	// r_rtEmissiveTable
 
 	ImGui::EndDisabled();	// rtCapable

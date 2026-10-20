@@ -2348,6 +2348,11 @@ void R_AddModelSurfaces( void ) {
 		if ( tr.takingEnvProbe && vEntity->weaponDepthHack ) {
 			continue;
 		}
+		// emitter mode (docs/rtx-emissive-triangles.md): a fixture's flare sprite is not drawn while the fixture itself is
+		// the light (r_rtEmissiveHideFlares)
+		if ( R_RtEmissiveHideEntity( vEntity->entityDef->index ) ) {
+			continue;
+		}
 
 		if ( r_useEntityScissors.GetBool() ) {
 			// calculate the screen area covered by the entity

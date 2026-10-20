@@ -2819,7 +2819,9 @@ static bool R_RtEmissiveIsScreen( const idMaterial *mat ) {
 // render-to-texture (dynamic) stage, a generated image (_scratch & co.) or a missing (defaulted) image is NOT a
 // table emitter - the GUI/video screens keep the legacy fill lights, and such images never went through the
 // averaging path (averageColor is the white default).
-static idList<const idImage *>	s_rtEmissiveNotResident;	// glow images that were not on the GPU at build time: a later residency rebuilds
+static idList<const idImage *>	s_rtEmissiveNotResident;
+static idList<bool>				s_rtEmissiveFlareHidden;	// per entity index: a flare sprite sitting on an emitter (r_rtEmissiveHideFlares skips its draw)
+static int						s_rtEmissiveFlareCount = 0;	// glow images that were not on the GPU at build time: a later residency rebuilds
 
 static const shaderStage_t *R_RtEmissiveStage( const idMaterial *mat, const char **why = NULL, const float *entityParms = NULL ) {
 	const char *reason = "";
@@ -3092,6 +3094,8 @@ static void R_RtEmissiveFree( void ) {
 	s_rtEmissiveLocalVerts.Clear();
 	s_rtEmissiveLabels.Clear();
 	s_rtEmissiveScreenLabels.Clear();
+	s_rtEmissiveFlareHidden.Clear();
+	s_rtEmissiveFlareCount = 0;
 	s_rtEmissiveMovedGroups = 0;
 	s_rtEmissiveMap.Clear();
 }
@@ -3243,6 +3247,43 @@ static void R_RtEmissiveBuild( const idRenderWorldLocal *world, rhi::RHI *r ) {
 			common->Printf( "    %-38s %s\n", excluded[i].why, excluded[i].mat->GetName() );
 		}
 	}
+	// emitter mode: the FLARE sprites of emitting fixtures (a light entity's flare model: a sprite-deformed additive
+	// material, its origin within 64 units of a table triangle) - hidden while r_rtEmissiveHideFlares is on
+	s_rtEmissiveFlareHidden.SetNum( world->entityDefs.Num(), false );
+	s_rtEmissiveFlareCount = 0;
+	for ( int i = 0; i < world->entityDefs.Num(); i++ ) {
+		s_rtEmissiveFlareHidden[i] = false;
+		const idRenderEntityLocal *def = world->entityDefs[i];
+		if ( def == NULL || def->parms.hModel == NULL ) {
+			continue;
+		}
+		const idRenderModel *model = def->parms.hModel;
+		bool flare = false;
+		for ( int sf = 0; sf < model->NumSurfaces() && !flare; sf++ ) {
+			const idMaterial *mat = R_RemapShaderBySkin( model->Surface( sf )->shader, def->parms.customSkin, def->parms.customShader );
+			if ( mat == NULL || mat->Deform() != DFRM_SPRITE ) {
+				continue;
+			}
+			for ( int k = 0; k < mat->GetNumStages(); k++ ) {
+				const shaderStage_t *st = mat->GetStage( k );
+				if ( ( st->drawStateBits & GLS_SRCBLEND_BITS ) == GLS_SRCBLEND_ONE && ( st->drawStateBits & GLS_DSTBLEND_BITS ) == GLS_DSTBLEND_ONE ) { flare = true; break; }
+			}
+		}
+		if ( !flare ) {
+			continue;
+		}
+		const idVec3 o = def->parms.origin;
+		for ( int t = 0; t < n; t++ ) {
+			const rtEmissiveTriGPU_t &e = s_rtEmissiveTris[t];
+			const idVec3 c( ( e.p0[0] + e.p1[0] + e.p2[0] ) * ( 1.0f / 3.0f ), ( e.p0[1] + e.p1[1] + e.p2[1] ) * ( 1.0f / 3.0f ), ( e.p0[2] + e.p1[2] + e.p2[2] ) * ( 1.0f / 3.0f ) );
+			if ( ( c - o ).LengthSqr() < 64.0f * 64.0f ) {
+				s_rtEmissiveFlareHidden[i] = true;
+				s_rtEmissiveFlareCount++;
+				break;
+			}
+		}
+	}
+	common->Printf( "r_rtEmissiveTable: %d flare sprites sit on emitters (hidden while r_rtEmissiveHideFlares is on)\n", s_rtEmissiveFlareCount );
 }
 
 // The debug overlay's vertices for table triangles [firstTri, firstTri + numTris): xyz world, st, normal = (flux,
@@ -3734,6 +3775,11 @@ void R_RtEmissiveProjectLabels( const viewDef_t *viewDef ) {
 	}
 }
 
+bool R_RtEmissiveHideEntity( int entityIndex ) {
+	return r_rtEmissiveHideFlares.GetBool() && s_rtEmissiveBuf != 0
+		&& entityIndex >= 0 && entityIndex < s_rtEmissiveFlareHidden.Num() && s_rtEmissiveFlareHidden[entityIndex];
+}
+
 bool R_RtEmissiveLabelsWanted( void ) {
 	return r_rtEmissiveTableDebug.GetInteger() > 0 && s_rtEmissiveBuf != 0 && s_rtEmissiveLabels.Num() > 0;
 }
@@ -3795,7 +3841,8 @@ void R_RtEmissiveProbe_f( const idCmdArgs &args ) {
 			def->parms.customSkin ? def->parms.customSkin->GetName() : "-", def->parms.customShader ? def->parms.customShader->GetName() : "-",
 			def->parms.shaderParms[0], def->parms.shaderParms[1], def->parms.shaderParms[2], def->parms.shaderParms[3], def->parms.shaderParms[7] );
 		mat = R_RemapShaderBySkin( mat, def->parms.customSkin, def->parms.customShader );
-		common->Printf( "  gatherable as a static entity: %s\n", R_RtEmissiveEntityGatherable( def ) ? "yes" : "NO" );
+		common->Printf( "  gatherable as a static entity: %s%s\n", R_RtEmissiveEntityGatherable( def ) ? "yes" : "NO",
+			( entityIndex >= 0 && entityIndex < s_rtEmissiveFlareHidden.Num() && s_rtEmissiveFlareHidden[entityIndex] ) ? " | a FLARE sprite on an emitter: hidden while r_rtEmissiveHideFlares is on" : "" );
 	} else {
 		common->Printf( "  worldspawn surface\n" );
 	}

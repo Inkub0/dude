@@ -1087,7 +1087,8 @@ extern idCVar r_rtLightGridCellBase;		// RT light grid: cascade-0 cell size in u
 extern idCVar r_rtLightGridDebug;			// RT light grid debug overlay: 1 cascade, 2 candidate count, 3 dominant light, 4 importance
 extern idCVar r_rtEmissiveTable;			// RT emissive triangle table (docs/rtx-emissive-triangles.md E1): every emissive triangle + flux CDF in a GPU table
 extern idCVar r_rtEmissiveTableDebug;		// RT emissive table debug overlay: 1 per-texture tint, 2 flux, 3 emitted colour
-extern idCVar r_rtEmissiveScale;			// RT emissive table: global flux / emitted-colour multiplier (rebuilds the table)
+extern idCVar r_rtEmissiveScale;
+extern idCVar r_rtEmissiveHideFlares;		// emitter mode: hide the flare sprites of fixtures that are table emitters			// RT emissive table: global flux / emitted-colour multiplier (rebuilds the table)
 extern idCVar r_rtReflTemporal;				// RR6: accumulate RT reflections through the SSR temporal pipeline (+ ray jitter) to kill the firefly grid
 extern idCVar r_rtReflJitter;				// RR6: per-frame RT-reflection ray jitter cone scale (needs r_rtReflTemporal)
 extern idCVar r_rtReflBlur;					// RR6b: box-blur the RT reflection before compositing (dissolves the static firefly grid)
@@ -1133,6 +1134,7 @@ void R_RtEmissiveProjectLabels( const struct viewDef_s *viewDef );
 bool R_RtEmissiveLabelsWanted( void );
 int  R_RtEmissiveGetScreenLabels( const rtEmissiveScreenLabel_t **out );
 void R_RtEmissiveProbe_f( const idCmdArgs &args );		// console: name the surface under the crosshair + the table's verdict on it
+bool R_RtEmissiveHideEntity( int entityIndex );	// emitter mode (r_rtEmissiveHideFlares): this entity is a fixture's flare sprite - skip its draw surfaces
 extern idCVar r_rtPerforatedShadows;		// alpha-tested grate/fence casters in the RT shadow rays
 extern idCVar r_rtAllLights;				// RT shadows for EVERY shadow-casting light (mode 4 inline ray), no shadow maps at all
 extern idCVar r_rtShadowBlur;				// screen-space blur on top of the hard RT shadows (sun / moving lights), docs/rtx-shadow-blur.md
