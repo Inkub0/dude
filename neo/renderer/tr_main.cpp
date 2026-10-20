@@ -3764,14 +3764,19 @@ void R_RtEmissiveProbe_f( const idCmdArgs &args ) {
 		common->Printf( "rtEmissiveProbe: no map view\n" );
 		return;
 	}
-	const idVec3 start = tr.primaryRenderView.vieworg;
-	const idVec3 end   = start + tr.primaryRenderView.viewaxis[0] * 4096.0f;
+	const idVec3 dir   = tr.primaryRenderView.viewaxis[0];
+	const idVec3 eye   = tr.primaryRenderView.vieworg;
+	// walk THROUGH translucent / deformed hits (a light's flare sprite, glass, a decal) so the fixture behind them is
+	// reported too: up to 6 hits along the ray, each one named
+	idVec3 start = eye;
+	for ( int hit = 0; hit < 6; hit++ ) {
 	modelTrace_t mt;
-	if ( !world->Trace( mt, start, end, 0.0f, false, true, false ) || mt.material == NULL ) {
-		common->Printf( "rtEmissiveProbe: nothing hit within 4096 units\n" );
+	if ( !world->Trace( mt, start, eye + dir * 4096.0f, 0.0f, false, true, false ) || mt.material == NULL ) {
+		common->Printf( hit == 0 ? "rtEmissiveProbe: nothing hit within 4096 units\n" : "rtEmissiveProbe: nothing further along the ray\n" );
 		return;
 	}
 	const idMaterial *mat = mt.material;
+	common->Printf( "---- hit %d ----\n", hit + 1 );
 	const float *entityParms = NULL;
 	int entityIndex = -1;
 	const idRenderEntityLocal *def = NULL;
@@ -3817,6 +3822,11 @@ void R_RtEmissiveProbe_f( const idCmdArgs &args ) {
 		common->Printf( "  verdict: NOT an emitter - %s\n", why );
 	} else {
 		common->Printf( "  verdict: NOT an emitter - the material has no additive (blend add) stage: what glows is lit diffuse, not self-illumination\n" );
+	}
+	if ( mt.material->Coverage() == MC_OPAQUE || mt.material->Coverage() == MC_PERFORATED ) {
+		return;																// solid: the ray ends here
+	}
+	start = mt.point + dir * 0.5f;											// see-through (flare, glass, decal): carry on behind it
 	}
 }
 
