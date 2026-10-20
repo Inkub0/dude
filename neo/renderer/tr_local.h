@@ -1091,6 +1091,10 @@ extern idCVar r_rtEmissiveScale;
 extern idCVar r_rtEmissiveLighting;		// EMISSIVE MODE master switch (D6): emitters light the scene (E2); implies the table, hides flares
 extern idCVar r_rtEmissiveIntensity;		// emissive mode: radiance multiplier of every emitter
 extern idCVar r_rtEmissiveCandidates;		// emissive mode: emissive sample points per pixel in the DI gather
+extern idCVar r_rtEmissiveGridTris;		// emissive mode: near grid cells store triangles weighed per pixel by solid angle (Q2RTX lists)
+extern idCVar r_rtEmissiveNearCascades;	// emissive mode: cascades with per-triangle lists
+extern idCVar r_rtEmissiveBounce;			// emissive mode: emitter sample at the GI bounce hit
+extern idCVar r_rtEmissiveClamp;			// emissive mode: luminance cap on a pixel's emitter sample (0 = off)
 extern idCVar r_rtEmissiveHideFlares;		// emitter mode: hide the flare sprites of fixtures that are table emitters			// RT emissive table: global flux / emitted-colour multiplier (rebuilds the table)
 extern idCVar r_rtEmissiveFlareInfer;		// RT emissive table: promote the diffuse patch under a flare on a glow-less fixture to an emitter
 extern idCVar r_rtReflTemporal;				// RR6: accumulate RT reflections through the SSR temporal pipeline (+ ray jitter) to kill the firefly grid

@@ -4877,18 +4877,19 @@ static void DrawDbgGroup_RTGI()
 
 static void DrawDbgGroup_ExperimentalLighting()
 {
-	// Experimental lighting (docs/rtx-experimental-lighting.md): emissive surfaces light the scene. E1 = the emissive
-	// triangle table (docs/rtx-emissive-triangles.md) - built, inspectable, consumed by nothing yet (E2).
+	// EMISSIVE LIGHTS (docs/rtx-experimental-lighting.md): every knob of the mode in one place, for tuning.
 	const bool rtCapable = R_SupportsRayTracing();
-	if ( BeginSettingsGroup( "Experimental Lighting" ) ) {
+	if ( BeginSettingsGroup( "Emissive Lights" ) ) {
 
 	if ( !rtCapable ) {
 		ImGui::TextDisabled( "Requires the Vulkan backend + ray-query (RT) hardware." );
 	}
-	ImGui::TextDisabled( "Emissive surfaces as real area lights. Stage E1: the emissive triangle table (nothing is lit by it yet)." );
+	ImGui::TextDisabled( "The map's self-illuminated surfaces as real area lights (Path Tracing tier)." );
 	ImGui::Spacing();
 	ImGui::BeginDisabled( !rtCapable );
 
+	// ===== Mode =====
+	ImGui::SeparatorText( "Mode" );
 	CvarCheckbox( "EMISSIVE MODE", r_rtEmissiveLighting, "The master switch: the map's self-illuminated surfaces light the "
 		"scene as real area lights - the direct-lighting gather draws sample points on them next to the placed lights, "
 		"with physical falloff, the emitter's real shape and a visibility ray through the real geometry. Implies the "
@@ -4899,6 +4900,12 @@ static void DrawDbgGroup_ExperimentalLighting()
 		"with the inverse square, so there is no exact equivalence - tune by eye on a lit corridor. (r_rtEmissiveIntensity)" );
 	ImGui::SameLine();
 	if ( ImGui::SmallButton( "reset##rtEmissiveIntensity" ) ) { r_rtEmissiveIntensity.Reset(); }
+	CvarCheckbox( "Emitters at the GI Bounce", r_rtEmissiveBounce, "The bounce hit draws one emitter sample from its grid cell "
+		"(one extra visibility ray per pixel) so walls lit only by emitters bounce light. Off = emitters light directly "
+		"only (cheaper; the A/B for the bounce's share of the noise). (r_rtEmissiveBounce)" );
+
+	// ===== Sampling =====
+	ImGui::SeparatorText( "Sampling" );
 	{
 		int cand = idMath::ClampInt( 0, 16, r_rtEmissiveCandidates.GetInteger() );
 		ImGui::SetNextItemWidth( 240.0f );
@@ -4909,42 +4916,64 @@ static void DrawDbgGroup_ExperimentalLighting()
 			"More = less noise from many small emitters, dearer gather. 0 = emitters do not light (the mode's A/B). "
 			"(r_rtEmissiveCandidates)" );
 	}
+	CvarCheckbox( "Per-pixel Triangle Lists (near cells)", r_rtEmissiveGridTris, "Near light-grid cells store the 16 most "
+		"important emissive TRIANGLES and each pixel weighs them by their projected solid angle before picking - Q2RTX's "
+		"per-cluster light list. Off = cells store whole emitting surfaces and a triangle is picked inside by flux alone, "
+		"blind to the pixel (a long strip light's far end drawn as often as its near end: sparkle). (r_rtEmissiveGridTris)" );
+	{
+		int nc = idMath::ClampInt( 1, 4, r_rtEmissiveNearCascades.GetInteger() );
+		ImGui::SetNextItemWidth( 240.0f );
+		if ( ImGui::SliderInt( "Triangle-list Cascades##rtEmissiveNearCascades", &nc, 1, 4 ) ) {
+			r_rtEmissiveNearCascades.SetInteger( nc );
+		}
+		AddTooltip( "How many grid cascades (from the camera out) carry per-triangle lists; the farther ones carry surface "
+			"groups. More = the per-pixel weighing reaches farther, dearer grid fill. (r_rtEmissiveNearCascades)" );
+	}
+	CvarSliderF( "Sample Luminance Cap", r_rtEmissiveClamp, 0.0f, 16.0f, "%.2f", "Cap on the luminance one pixel's emitter "
+		"sample may add to the direct lighting before the denoiser. A firefly guard: biased (dims rare very bright samples), "
+		"but the denoiser cannot merge isolated spikes. 0 = off. (r_rtEmissiveClamp)" );
+	ImGui::SameLine();
+	if ( ImGui::SmallButton( "reset##rtEmissiveClamp" ) ) { r_rtEmissiveClamp.Reset(); }
 	ImGui::EndDisabled();	// r_rtEmissiveLighting
-	ImGui::Spacing();
 
+	// ===== Table =====
+	ImGui::SeparatorText( "Emitter Table" );
 	CvarCheckbox( "Emissive Triangle Table", r_rtEmissiveTable, "Gather every self-illuminated triangle of the map (additive "
 		"glow stages: neon tubes, light tiles, LED panels, lava - world and static props, including the pure light-source "
 		"surfaces that cast no shadow and are not in the ray-tracing scene) into a GPU table with its position, glow "
 		"texture and flux, plus a flux CDF for area-light sampling. Built once per level; the console prints a census "
-		"(triangle counts, the strongest materials). Nothing consumes it yet, so the picture is unchanged - use the "
-		"view below to inspect it. GUI / video screens are excluded (they keep the Emissive Surfaces fill lights). "
-		"(r_rtEmissiveTable)" );
-
+		"(triangle counts, the strongest materials). Nothing consumes it unless Emissive Mode is on - use the view below "
+		"to inspect it. GUI / video screens are excluded (they keep the Emissive Surfaces fill lights). (r_rtEmissiveTable)" );
 	ImGui::BeginDisabled( !r_rtEmissiveTable.GetBool() && !r_rtEmissiveLighting.GetBool() );
 	CvarSliderF( "Emissive Scale", r_rtEmissiveScale, 0.0f, 16.0f, "%.2f", "Global multiplier on every emitter's flux and "
 		"emitted colour - the stand-in for the per-material intensity table until it lands. A change rebuilds the table. "
 		"(r_rtEmissiveScale)" );
 	ImGui::SameLine();
 	if ( ImGui::SmallButton( "reset##rtEmissiveScale" ) ) { r_rtEmissiveScale.Reset(); }
+	CvarCheckbox( "Infer Fixtures from Flares", r_rtEmissiveFlareInfer, "A fixture whose material has no glow stage (its "
+		"'tube' is a white patch in the diffuse map) is found through the flare the mapper put on it: the bright part of "
+		"the diffuse under the flare becomes a small light. Marked FLARE-INFERRED in the census / overlay. A change "
+		"rebuilds the table. (r_rtEmissiveFlareInfer)" );
+	CvarCheckbox( "Hide Fixture Flares", r_rtEmissiveHideFlares, "Do not draw the flare sprites that sit on light fixtures "
+		"which are emitters in the table (Emissive Mode always hides them). (r_rtEmissiveHideFlares)" );
+
+	// ===== Debug =====
+	ImGui::SeparatorText( "Debug" );
 	{
 		int dbg = idMath::ClampInt( 0, 4, r_rtEmissiveTableDebug.GetInteger() );
 		ImGui::SetNextItemWidth( 240.0f );
 		if ( ImGui::Combo( "Table View##rtEmissiveTableDebug", &dbg, "Off\0Emitters by texture\0Flux (vs mean)\0Emitted colour\0Light coverage (fixtured / alone)\0" ) ) {
 			r_rtEmissiveTableDebug.SetInteger( dbg );
 		}
-		AddTooltip( "Draw the table's triangles over the view, depth-tested against the scene. 'Emitters by texture' tints "
-			"each glow texture its own colour (striped = a pulsing / flickering stage colour) - every neon tube, light tile "
-			"and LED panel should be painted, and no plain wall or screen; 'Flux' shows each triangle's power relative to "
-			"the table's mean (blue faint, green average, red 4x, white 16x+) - the big ceiling tiles should dominate; "
-			"'Emitted colour' is the glow texture x stage colour x scale, exactly what a sample of this emitter would light "
-			"the scene with - too-bright or wrong-hued emitters here are calibration findings; 'Light coverage' green = the "
-			"emitter sits inside a placed light's volume (that light is fixtured and would be dropped once emitters light the "
-			"scene), red = no placed light covers it. (r_rtEmissiveTableDebug)" );
+		AddTooltip( "Draw the table's triangles over the view, depth-tested against the scene, with their material names. "
+			"'Emitters by texture' tints each glow texture its own colour (striped = a pulsing stage colour, checkered = "
+			"flare-inferred); 'Flux' shows each triangle's power relative to the table's mean (blue faint, green average, red "
+			"4x, white 16x+); 'Emitted colour' is the flat mean radiance the mode lights with; 'Light coverage' green = the "
+			"emitter sits inside a placed light's volume (that light is fixtured), red = no placed light covers it. "
+			"(r_rtEmissiveTableDebug)" );
 	}
-	CvarCheckbox( "Hide Fixture Flares", r_rtEmissiveHideFlares, "Emitter mode: do not draw the flare sprites that sit on "
-		"light fixtures which are emitters in the table (a light entity's camera-facing flare). The flare is a painted "
-		"stand-in for glare; once the fixture is the light it only adds a second, fake highlight. (r_rtEmissiveHideFlares)" );
-	ImGui::EndDisabled();	// r_rtEmissiveTable
+	ImGui::TextDisabled( "Console: rtEmissiveProbe names the surface under the crosshair and the table's verdict on it." );
+	ImGui::EndDisabled();	// table
 
 	ImGui::EndDisabled();	// rtCapable
 	EndSettingsGroup();

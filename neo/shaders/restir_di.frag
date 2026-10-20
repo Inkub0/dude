@@ -63,6 +63,7 @@
 //   --- EMISSIVE MODE (r_rtEmissiveLighting, docs/rtx-experimental-lighting.md E2) ---
 //   u_texGen0S            = ( emissive table device address lo, hi, r_rtEmissiveIntensity, candidates per pixel (0 = off) )
 //   u_texGen0T.xy         = emitter GROUP buffer device address (v2b: the light grid's emissive record indexes it)
+//   u_texGen0T.z          = emitter sample at the bounce hit (1 / 0);  u_texGen0T.w = per-pixel emitter luminance cap (0 = off)
 //   --- r_rtgiCache (the RT irradiance cache, docs/rtx-irradiance-cache.md; rtgi_cache.glsl's shared packing) ---
 //   u_particleRadius.zw   = cache SLOT buffer device address (bit-cast; 0 = no cache)
 //   u_channelMask         = ( accumulation buffer address lo, hi, slot mask, tan( cell angle / 2 ) )
@@ -348,13 +349,44 @@ void main() {
 	// stored importance (flux / d^2 at the cell: distance-aware), then a triangle inside it by flux (the CDF restricted
 	// to the run), then the solid-angle point - pdf = q_group x p_tri|group x pdfw. Else the global flux CDF (blind).
 	int  lgEB  = ( useGrid && lgp.slotsE > 0u ) ? lgEBase( lgBase, lgp.slots ) : -1;
-	bool emFromGrid = lgEB >= 0 && lgCountE( lgGrid, lgEB ) > 0u;
+	uint lgNE  = ( lgEB >= 0 ) ? lgCountE( lgGrid, lgEB ) : 0u;
+	bool emFromGrid = lgNE > 0u;
+	bool emTriList  = emFromGrid && lgIsTriRecord( lgGrid, lgEB );
 	RtEmissiveGroups emGroups = RtEmissiveGroups( uvec2( 0u ) );
-	if ( emFromGrid ) { emGroups = RtEmissiveGroups( uvec2( floatBitsToUint( u_texGen0T.x ), floatBitsToUint( u_texGen0T.y ) ) ); }
+	if ( emFromGrid && !emTriList ) { emGroups = RtEmissiveGroups( uvec2( floatBitsToUint( u_texGen0T.x ), floatBitsToUint( u_texGen0T.y ) ) ); }
+	// Q2RTX light_lists.h sample_polygonal_lights: the cell's TRIANGLE list weighed PER PIXEL by projected solid angle x
+	// luminance (hemisphere + facing culled), at most 8 brute-forced (a random half of a 16-list, as Q2RTX partitions); the
+	// pick is proportional to that mass - the proposal matches the integrand, so the estimate is nearly constant.
+	float emMass = 0.0;
+	float emM[8];
+	uint  emT[8];
+	uint  emPart = 1u, emPartOff = 0u, emN = 0u;
+	if ( emTriList ) {
+		emPart = ( lgNE > 8u ) ? 2u : 1u;
+		emPartOff = ( emPart > 1u ) ? ( ( rnd( rng ) < 0.5 ) ? 0u : 1u ) : 0u;
+		for ( uint k = 0u; k < 8u; k++ ) {
+			uint s = emPartOff + k * emPart;
+			emM[k] = 0.0; emT[k] = 0u;
+			if ( s >= lgNE ) { continue; }
+			uint ti = lgSlotGroup( lgGrid, lgEB, s );									// a triangle index in a tri record
+			RtEmissiveTri e = rtEmissiveFetch( emTable, ti );
+			if ( !( e.flux > 0.0 ) ) { continue; }
+			float m = rtEmissiveSolidAngle( e, S.Pw, S.Nw, ( e.emit & RT_EMIT_TWOSIDED ) != 0u ) * dot( rtEmissiveMeanRadiance( e ), vec3( 0.2126, 0.7152, 0.0722 ) );
+			emM[k] = m; emT[k] = ti; emMass += m; emN = k + 1u;
+		}
+	}
 	for ( uint i = 0u; i < emDraws; i++ ) {
 		float pdfTri;
 		uint  ti;
-		if ( emFromGrid ) {
+		if ( emTriList ) {
+			if ( !( emMass > 0.0 ) ) { break; }
+			float r = rnd( rng ) * emMass, acc = 0.0;
+			uint  pick = 0u;
+			for ( uint k = 0u; k < emN; k++ ) { acc += emM[k]; pick = k; if ( r < acc ) { break; } }
+			if ( !( emM[pick] > 0.0 ) ) { continue; }
+			ti = emT[pick];
+			pdfTri = ( emM[pick] / emMass ) / float( emPart );							// the pick's share x the partition's
+		} else if ( emFromGrid ) {
 			uint gIdx; float qG;
 			if ( !lgDrawGroup( lgGrid, lgEB, rng, gIdx, qG ) ) { continue; }
 			float pIn;
@@ -421,6 +453,10 @@ void main() {
 
 	// the direct term, at the forward path's light scale (lightColor = lightScale * stage colour there)
 	vec3 outRad = max( radChosen * ( W * vis * u_shadowFalloffS.x ), vec3( 0.0 ) );
+	if ( emChosen != 0u && u_texGen0T.w > 0.0 ) {										// r_rtEmissiveClamp: an emitter sample's luminance cap
+		float lumE = dot( outRad, vec3( 0.2126, 0.7152, 0.0722 ) );
+		if ( lumE > u_texGen0T.w ) { outRad *= u_texGen0T.w / lumE; }
+	}
 	// R3a: average the extra picks' unbiased estimates with the first (each rad_k * W_k * vis_k is unbiased on its own);
 	// shDirect = the averaged direct SH1 term (direction * luminance) the SH block below uses instead of the single pick's
 	vec3 shDirect = ldirChosen * dot( outRad, vec3( 0.2126, 0.7152, 0.0722 ) );
@@ -498,7 +534,7 @@ void main() {
 		bp.grid           = lgp;						// L3: the hit's light loop draws from its cell (lgp built above for the DI RIS)
 		bp.emTable        = emTable.addr;				// E2 v2b: one emitter sample at the hit from ITS cell's groups (the GI side of emissive mode)
 		bp.emGroups       = uvec2( floatBitsToUint( u_texGen0T.x ), floatBitsToUint( u_texGen0T.y ) );
-		bp.emIntensity    = u_texGen0S.z;
+		bp.emIntensity    = ( u_texGen0T.z > 0.5 ) ? u_texGen0S.z : 0.0;	// r_rtEmissiveBounce
 		const vec3 eyeW   = u_modelViewMatrix[3].xyz;
 		vec3 Li; float thit; vec3 bounceDir; vec3 LiCache;
 		const int hit = rtgiTraceBounce( bp, Pw, Nw, eyeW, d, sfrag, Li, thit, bounceDir, LiCache );

@@ -28,6 +28,8 @@ layout( push_constant ) uniform PC {
 	float parallelFlux;				// flux weight for parallel (sun) lights, which have no 1/d^2 term
 	uint  groupLo, groupHi;			// E2 v2b: emitter group buffer device address (0 = emissive mode off)
 	uint  nGroups, slotsE;			// groups in it; emissive slots per cell (0 = no emissive record)
+	uint  tableLo, tableHi;			// the emissive TABLE (triangle entries): per-triangle lists in the near cascades
+	uint  nearCascades, triMode;	// cascades 0..nearCascades-1 store triangles (triMode 1), the rest groups
 } pc;
 
 void main() {
@@ -139,10 +141,46 @@ void main() {
 				}
 			}
 		}
+		// near cascades (Q2RTX's per-cluster light list): the chosen groups' TRIANGLES, the top-slotsE by flux / d^2 at the
+		// cell centre, replace the group list - the pixel then weighs each by its projected solid angle (restir_di.frag)
+		bool triRecord = false;
+		if ( pc.triMode != 0u && uint( c ) < pc.nearCascades && cntE > 0u && ( pc.tableLo | pc.tableHi ) != 0u ) {
+			RtEmissiveTable  et = rtEmissiveOpen( uvec2( pc.tableLo, pc.tableHi ) );
+			RtEmissiveGroups groups = RtEmissiveGroups( uvec2( pc.groupLo, pc.groupHi ) );
+			uint  chosenT[ LG_MAX_SLOTS ];
+			float chosenImpT[ LG_MAX_SLOTS ];
+			uint  cntT = 0u, minSlotT = 0u;
+			float minImpT = 1e30;
+			for ( uint k = 0u; k < cntE; k++ ) {
+				uint first = groups.g[ chosenE[ k ] ].firstTri, num = groups.g[ chosenE[ k ] ].numTris;
+				for ( uint t = first; t < first + num; t++ ) {
+					RtEmissiveTri e = rtEmissiveFetch( et, t );
+					if ( !( e.flux > 0.0 ) ) { continue; }
+					vec3  tc = ( e.p0 + e.p1 + e.p2 ) * ( 1.0 / 3.0 ) - center;
+					float imp = e.flux / max( dot( tc, tc ), cs * cs );
+					if ( cntT < slotsE ) {
+						chosenT[ cntT ] = t; chosenImpT[ cntT ] = imp; cntT++;
+						if ( cntT == slotsE ) {
+							minImpT = chosenImpT[ 0 ]; minSlotT = 0u;
+							for ( uint j = 1u; j < slotsE; j++ ) { if ( chosenImpT[ j ] < minImpT ) { minImpT = chosenImpT[ j ]; minSlotT = j; } }
+						}
+					} else if ( imp > minImpT ) {
+						chosenT[ minSlotT ] = t; chosenImpT[ minSlotT ] = imp;
+						minImpT = chosenImpT[ 0 ]; minSlotT = 0u;
+						for ( uint j = 1u; j < slotsE; j++ ) { if ( chosenImpT[ j ] < minImpT ) { minImpT = chosenImpT[ j ]; minSlotT = j; } }
+					}
+				}
+			}
+			if ( cntT > 0u ) {
+				triRecord = true;
+				cntE = cntT;
+				for ( uint k = 0u; k < cntT; k++ ) { chosenE[ k ] = chosenT[ k ]; chosenImpE[ k ] = chosenImpT[ k ]; }
+			}
+		}
 		if ( cntE > 0u ) {
 			float sumE = 0.0;
 			for ( uint k = 0u; k < cntE; k++ ) { sumE += chosenImpE[ k ]; }
-			grid.g[ eBase ]     = cntE;
+			grid.g[ eBase ]     = cntE | ( triRecord ? LG_E_TRIS : 0u );
 			grid.g[ eBase + 1 ] = floatBitsToUint( sumE );
 			for ( uint k = 0u; k < cntE; k++ ) {
 				grid.g[ eBase + int( LG_HEADER + 2u * k ) ]      = chosenE[ k ];

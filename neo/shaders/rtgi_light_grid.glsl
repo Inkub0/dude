@@ -107,7 +107,11 @@ uint  lgSlotLight( LgGrid grid, int base, uint s ){ return grid.g[ base + int( L
 float lgSlotImp( LgGrid grid, int base, uint s )  { return uintBitsToFloat( grid.g[ base + int( LG_HEADER + 2u * s + 1u ) ] ); }
 
 // E2 v2b: the cell's emissive record (groups) - same accessors over the E base
-uint  lgCountE( LgGrid grid, int eBase )            { return grid.g[ eBase ]; }
+// the emissive record's count word: bit 31 set = the slots hold TRIANGLE indices (near cascades, per-pixel solid-angle
+// weighing), clear = emitter GROUP indices (far cascades / r_rtEmissiveGridTris 0)
+const uint LG_E_TRIS = 0x80000000u;
+uint  lgCountE( LgGrid grid, int eBase )            { return grid.g[ eBase ] & 0x7FFFFFFFu; }
+bool  lgIsTriRecord( LgGrid grid, int eBase )       { return ( grid.g[ eBase ] & LG_E_TRIS ) != 0u; }
 float lgSumImpE( LgGrid grid, int eBase )           { return uintBitsToFloat( grid.g[ eBase + 1 ] ); }
 uint  lgSlotGroup( LgGrid grid, int eBase, uint s ) { return grid.g[ eBase + int( LG_HEADER + 2u * s ) ]; }
 float lgSlotImpE( LgGrid grid, int eBase, uint s )  { return uintBitsToFloat( grid.g[ eBase + int( LG_HEADER + 2u * s + 1u ) ] ); }

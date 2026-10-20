@@ -242,3 +242,20 @@ raindrops gone or much reduced at the same candidate count; `r_rtLightGridDebug 
 unchanged); `r_vkGpuTime 2`: lightgrid.fill grows by the group stream (a few hundred groups x 131k cells: expect
 ~0.3-0.5 ms), restir.di.gather roughly as v2a. If the picture goes dark or the grid overlay shows every cell empty,
 the stride change is the suspect (both fill and consume use lgStride( slots, slotsE )).
+
+**E2 v2c built (2026-10-20): the per-pixel light list - the other half of the Q2RTX port.** v2b still sparkled
+("frying", and the frame went 15 -> 23 ms). Diagnosis: v2b weighed whole surface RUNS at the cell centre and picked
+a triangle inside by flux, blind to the pixel - a long strip light's far end drawn as often as its near end from a
+pixel beside the near end. Q2RTX weighs each light POLYGON per pixel by its projected solid angle. Now:
+- near cascades (`r_rtEmissiveNearCascades`, 2) store per-cell TRIANGLE lists: the fill walks its top-8 groups'
+  triangles and keeps the 16 most important by flux / d^2 at the cell (count word bit 31 = tri record); far cascades
+  keep group records. `r_rtEmissiveGridTris 0` = groups everywhere (the A/B).
+- the gather weighs a random half of the cell's 16 triangles (8 brute-forced, Q2RTX's partition) by projected solid
+  angle x mean luminance (`rtEmissiveSolidAngle`: hemisphere + facing culled), picks proportionally, Arvo-samples;
+  pdf = (m / mass) / partitions x pdfw. `r_rtEmissiveClamp` (0 = off): a luminance cap on an emitter winner's
+  contribution. `r_rtEmissiveBounce`: the bounce-hit sample on / off (it draws a stored triangle by importance in a
+  tri cell, a group then a triangle in a group cell).
+- ImGui: the group is now "Emissive Lights" with every knob: Mode (master, intensity, bounce), Sampling (samples,
+  triangle lists, cascades, cap), Emitter Table (table, scale, flare inference, hide flares), Debug (views, probe).
+Perf (open): the 23 ms of v2b wants an r_vkGpuTime 2 breakdown - lightgrid.fill (the group stream, now + the
+triangle walks in the near cascades), restir.di.gather (8 candidates: CDF walks / grid reads / Arvo), the bounce ray.

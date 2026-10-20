@@ -239,18 +239,21 @@ int rtgiTraceBounce( RtgiBounceParms bp, vec3 Pw, vec3 Nw, vec3 eyeW, float d, v
 
 	// E2 v2b: EMITTER light at the hit - one group from H's cell by stored importance, one triangle in it by flux, one
 	// point by solid angle (rt_emissive.glsl), one visibility ray. Lambert at H as the light loop above (Doom: no 1/pi).
-	if ( ( bp.emTable.x | bp.emTable.y ) != 0u && lgPresent( bp.grid ) && bp.grid.slotsE > 0u ) {
+	if ( ( bp.emTable.x | bp.emTable.y ) != 0u && bp.emIntensity > 0.0 && lgPresent( bp.grid ) && bp.grid.slotsE > 0u ) {
 		int hBase = lgCellBase( bp.grid, hitWorld );
 		if ( hBase >= 0 ) {
 			int  hE = lgEBase( hBase, bp.grid.slots );
 			LgGrid hG = LgGrid( bp.grid.gridAddr );
 			uint rngE = ( uint( sfrag.x ) * 7919u + uint( sfrag.y ) * 104729u + uint( bp.sampleFrame ) * 15485863u ) | 1u;
 			uint gIdx; float qG;
-			if ( lgDrawGroup( hG, hE, rngE, gIdx, qG ) ) {
+			if ( lgDrawGroup( hG, hE, rngE, gIdx, qG ) ) {								// a GROUP (far cells) or a TRIANGLE (near cells) by stored importance
 				RtEmissiveTable  et = rtEmissiveOpen( bp.emTable );
-				RtEmissiveGroups eg = RtEmissiveGroups( bp.emGroups );
-				float pIn;
-				uint  ti = rtEmissiveSampleInGroup( et, eg.g[ gIdx ].firstTri, eg.g[ gIdx ].numTris, lgRand( rngE ), pIn );
+				float pIn = 1.0;
+				uint  ti  = gIdx;
+				if ( !lgIsTriRecord( hG, hE ) ) {
+					RtEmissiveGroups eg = RtEmissiveGroups( bp.emGroups );
+					ti = rtEmissiveSampleInGroup( et, eg.g[ gIdx ].firstTri, eg.g[ gIdx ].numTris, lgRand( rngE ), pIn );
+				}
 				RtEmissiveTri e = rtEmissiveFetch( et, ti );
 				vec3 Pe, nUnit; float pdfw;
 				if ( e.flux > 0.0 && rtEmissiveSampleSolidAngle( e, hitWorld, vec2( lgRand( rngE ), lgRand( rngE ) ), Pe, nUnit, pdfw ) ) {

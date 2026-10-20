@@ -8245,6 +8245,8 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 			const unsigned int grpLo = (unsigned int)( grpAddr & 0xFFFFFFFFull ), grpHi = (unsigned int)( grpAddr >> 32 );
 			memcpy( &parms.texGen0T[0], &grpLo, sizeof( grpLo ) );
 			memcpy( &parms.texGen0T[1], &grpHi, sizeof( grpHi ) );
+			parms.texGen0T[2] = r_rtEmissiveBounce.GetBool() ? 1.0f : 0.0f;						// emitter sample at the bounce hit
+			parms.texGen0T[3] = idMath::ClampFloat( 0.0f, 64.0f, r_rtEmissiveClamp.GetFloat() );	// per-pixel emitter luminance cap (0 = off)
 			if ( emAddr != 0 && emTris > 0 ) {
 				parms.pbrParms[1] = 0.0f;
 			}
@@ -9605,7 +9607,7 @@ static bool RB_RHI_LightGridBegin( rhi::RHI *r, const viewDef_t *viewDef ) {
 	// signature, so the size change idles the device like the others.
 	int emGroups = 0;
 	const unsigned long long emGroupAddr = ( r_rtEmissiveLighting.GetBool() && r_rtEmissiveCandidates.GetInteger() > 0 ) ? R_RtEmissiveGroupsAddress( &emGroups ) : 0;
-	const int slotsE   = r_rtEmissiveLighting.GetBool() ? 8 : 0;
+	const int slotsE   = r_rtEmissiveLighting.GetBool() ? 16 : 0;		// 16: the per-pixel triangle lists (near cascades) need the room; groups use 8 of them
 	const int sizeKey  = slots | ( res << 8 ) | ( cascades << 16 ) | ( slotsE << 24 );		// identity of the buffer size (all in the gfx-cfg signature)
 	if ( g.gridBuf != 0 && g.sizeKey != sizeKey ) {
 		// a size cvar changed: it is in ComputeGfxCfgSignature, so the device idled at this frame's start; DestroyBuffer
@@ -9660,7 +9662,7 @@ static void RB_RHI_LightGridFill( rhi::RHI *r, unsigned long long lightAddr, int
 	if ( !g.readyThisView || g.filledThisFrame || g.fillProg == 0 || lightAddr == 0 || numLights <= 0 ) {
 		return;		// filled once per frame; the first consumer that has the light buffer triggers it
 	}
-	struct { unsigned int gridLo, gridHi, lightLo, lightHi, nLights, cascades, res, slots; float cellBase; float camX, camY, camZ; float parallelFlux; unsigned int groupLo, groupHi, nGroups, slotsE; } pc;	// light_grid_fill.comp PC
+	struct { unsigned int gridLo, gridHi, lightLo, lightHi, nLights, cascades, res, slots; float cellBase; float camX, camY, camZ; float parallelFlux; unsigned int groupLo, groupHi, nGroups, slotsE, tableLo, tableHi, nearCascades, triMode; } pc;	// light_grid_fill.comp PC
 	pc.gridLo      = (unsigned int)( g.gridAddr & 0xFFFFFFFFull );
 	pc.gridHi      = (unsigned int)( g.gridAddr >> 32 );
 	pc.lightLo     = (unsigned int)( lightAddr & 0xFFFFFFFFull );
@@ -9678,6 +9680,14 @@ static void RB_RHI_LightGridFill( rhi::RHI *r, unsigned long long lightAddr, int
 	pc.groupHi     = (unsigned int)( g.parms.groupAddr >> 32 );
 	pc.nGroups     = (unsigned int)g.parms.numGroups;
 	pc.slotsE      = (unsigned int)g.parms.slotsE;
+	{
+		int emTris = 0; float emT = 0.0f, emM = 0.0f;
+		const unsigned long long tAddr = ( g.parms.groupAddr != 0 ) ? R_RtEmissiveTableAddress( &emTris, &emT, &emM ) : 0;
+		pc.tableLo = (unsigned int)( tAddr & 0xFFFFFFFFull );
+		pc.tableHi = (unsigned int)( tAddr >> 32 );
+		pc.nearCascades = (unsigned int)idMath::ClampInt( 1, 4, r_rtEmissiveNearCascades.GetInteger() );
+		pc.triMode = ( r_rtEmissiveGridTris.GetBool() && tAddr != 0 ) ? 1u : 0u;
+	}
 	rhi::ComputeArgs ca = rhi::ComputeArgs();
 	ca.shader = g.fillProg;
 	ca.pushConstants = &pc;
