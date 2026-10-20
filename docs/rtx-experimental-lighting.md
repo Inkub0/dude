@@ -297,3 +297,10 @@ thrown away (rooms dark away from the tiles); the cap is now 8 x clamp x intensi
 BOTH modes** (user request): with the mode off, the table + the grid's emissive record still exist and the bounce hit
 samples emitters (the placed lights keep the direct term; the glow-at-hit term stays since no DI stream carries the
 direct emitter light); r_rtEmissiveBounce / r_rtEmissiveTable join the gfx-cfg signature (grid re-size).
+
+**Round (Marine HQ, 2026-10-20, after the Arvo fix).** Raw DI is a dense grain field with the real structure (the
+sampler works); denoised = a plausible emitter-lit room. Cost split (hybrid tier captures, DI not applied there):
+bounce-hit sample ~1.3 ms of gather, ~0.5 ms per candidate, fill 0.5 ms. Mode 5 showed a red sphere on the comm
+terminal's monitors: DUDE's GUI fill light classed fixtured (the LED decal in its volume) and dropped - GUI screens
+are not emitters, so fill lights are now KEPT (D1's replacement waits for GUI entries). Labels are off in mode 5.
+The normal-mode bounce A/B must be done at dude_rtx 2 (at the hybrid tier the DI buffer is debug-only).

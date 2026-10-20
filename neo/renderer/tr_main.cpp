@@ -3868,6 +3868,11 @@ static void R_RtEmissiveLightCensus( const idRenderWorldLocal *world, rhi::RHI *
 		total++;
 		rtEmissiveLightDbg_t dbg; dbg.origin = ld->globalLightOrigin; dbg.kind = 1;
 		if ( ld->parms.parallel ) { parallel++; dbg.kind = 2; s_rtEmissiveLightDbg.Append( dbg ); continue; }
+		// DUDE's own fill lights (GUI screens' r_emissiveSurfaces, item glow) are KEPT: a GUI screen is not in the table
+		// (its content is a live render), so dropping its fill light would leave the monitors lighting nothing (mode 5
+		// showed one dropped on the Marine HQ comm terminal, 2026-10-20). D1 wanted them replaced by real emitters;
+		// that waits for GUI entries (flat colour from the fill tint).
+		if ( ld->dudeFillLight ) { ambience++; dbg.kind = 1; s_rtEmissiveLightDbg.Append( dbg ); continue; }
 		if ( ld->lightShader->IsFogLight() || ld->lightShader->IsBlendLight() ) { fogBlend++; dbg.kind = 3; s_rtEmissiveLightDbg.Append( dbg ); continue; }
 		const idBounds *lb = ( ld->frustumTris != NULL ) ? &ld->frustumTris->bounds : NULL;
 		bool hit = false;
@@ -3941,8 +3946,10 @@ static void R_RtEmissiveUpdate( const idRenderWorldLocal *world, rhi::RHI *r ) {
 	const bool stale = s_rtEmissiveMap.Icmp( world->mapName ) != 0 || r_rtEmissiveTable.IsModified() || r_rtEmissiveLighting.IsModified() || r_rtEmissiveScale.IsModified();
 	if ( !stale ) {
 		R_RtEmissiveRefreshMovers( world, r );	// E1e: moved doors / lifts / platforms re-bake their slice
-		if ( r_rtEmissiveTableDebug.GetInteger() > 0 ) {
-			R_RtEmissiveProjectLabels( tr.viewDef );	// E1d: the overlay's material names (frontend: the area stamps are current)
+		if ( r_rtEmissiveTableDebug.GetInteger() > 0 && r_rtEmissiveTableDebug.GetInteger() != 5 ) {
+			R_RtEmissiveProjectLabels( tr.viewDef );	// E1d: the overlay's material names (frontend: the area stamps are current; not over the light spheres)
+		} else {
+			s_rtEmissiveScreenLabels.SetNum( 0, false );
 		}
 		// an emissive entity that APPEARED after the build (a dropped item, a respawned pickup, a spawned prop): every 90
 		// frames, scan the entity slots no group tracks for a static model with an emissive surface -> full rebuild
