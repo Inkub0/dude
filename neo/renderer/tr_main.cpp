@@ -2738,7 +2738,7 @@ static int							s_rtEmissiveDbgIndexes = 0;
 // matrix it was baked with, so a func_mover (door, lift, platform) that moves gets its triangles' WORLD positions
 // re-baked and its table slice (+ debug verts) rewritten in place. Area - hence flux and the CDF - is invariant
 // under the rigid move, so only the positions change.
-struct rtEmissiveGroup_t { int entityIndex; const idRenderModel *model; int firstTri, numTris, firstLocalVert; float lastMatrix[16]; };
+struct rtEmissiveGroup_t { int entityIndex; const idRenderModel *model; int firstTri, numTris, firstLocalVert; float lastMatrix[16]; bool reported; };
 static idList<rtEmissiveGroup_t>	s_rtEmissiveGroups;
 static idList<idVec3>				s_rtEmissiveLocalVerts;		// 3 per entity-sourced triangle (model space)
 static int							s_rtEmissiveMovedGroups = 0;	// movers re-baked since the build (census / debugging)
@@ -3088,6 +3088,7 @@ static void R_RtEmissiveBuild( const idRenderWorldLocal *world, rhi::RHI *r ) {
 			g.firstTri = groupFirstTri;
 			g.numTris = s_rtEmissiveTris.Num() - groupFirstTri;
 			g.firstLocalVert = groupFirstLocal;
+			g.reported = false;
 			memcpy( g.lastMatrix, modelMatrix, sizeof( g.lastMatrix ) );
 		}
 	}
@@ -3193,6 +3194,11 @@ static void R_RtEmissiveRefreshMovers( const idRenderWorldLocal *world, rhi::RHI
 			continue;
 		}
 		memcpy( g.lastMatrix, mm, sizeof( mm ) );
+		if ( !g.reported ) {													// name each mover the first time it moves (the E1e test aid)
+			g.reported = true;
+			common->Printf( "r_rtEmissiveTable: mover re-baked: entity %d '%s' (%d emissive tris, origin %.0f %.0f %.0f)\n",
+				g.entityIndex, g.model->Name(), g.numTris, def->parms.origin.x, def->parms.origin.y, def->parms.origin.z );
+		}
 		for ( int t = 0; t < g.numTris; t++ ) {
 			rtEmissiveTriGPU_t &e = s_rtEmissiveTris[ g.firstTri + t ];
 			const idVec3 *lv = &s_rtEmissiveLocalVerts[ g.firstLocalVert + t * 3 ];
