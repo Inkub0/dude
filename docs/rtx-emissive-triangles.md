@@ -326,3 +326,9 @@ inside a placed light's frustum (`RT_EMIT_FLAG_INLIGHT`, bit 19; the table is re
 fixtured and would be dropped) and RED when no placed light covers it (this emitter would be the only light there).
 A level that reads mostly green has its fixtures backed by placed lights, as Doom 3 is authored; red emitters are
 the surfaces that would start lighting rooms no placed light lights today (decals, glow panels in dark corners).
+
+**E1e validated (user, 2026-10-20):** a swinging ceiling fixture in Marine Command Access keeps its painted emitter
+attached through its motion. Mars City's door PANELS carry no glow (the frame glow / door lights are frame parts, so
+the door test was a wrong target); the console's "mover re-baked" lines name every moving emitter as it first moves.
+Merged to local master. E1 + E1e are complete; E2 next (docs/rtx-experimental-lighting.md, the table as a second
+candidate stream through the light grid).
