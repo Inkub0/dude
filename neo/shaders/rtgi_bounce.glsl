@@ -14,6 +14,9 @@ layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer Idx
 struct GeoDesc { VertRef vb; IdxRef ib; uint stride; uint flags; uint baseColor; uint texIndex; };	// RR0/RR3/RR4 geometry table row
 layout(buffer_reference, std430, buffer_reference_align = 8) readonly buffer GeoTable { GeoDesc d[]; };
 
+// E2 v2b: the emissive table / groups the hit samples (guarded include: the DI gather includes it first)
+#include "rt_emissive.glsl"
+
 struct RtgiBounceParms {
 	uvec2 tlas;				// scene TLAS device address (bit-cast)
 	uvec2 geoTable;			// RR0 geometry table device address
@@ -42,6 +45,12 @@ struct RtgiBounceParms {
 	// stands down). Only ever set by the DI gather (diApply && r_rtgiCacheTail); the standalone RTGI pass keeps cacheLookup.
 	bool  cacheTail;
 	RtgiCacheParms cache;
+	// E2 v2b (emissive mode): the emissive table + its groups; one solid-angle emitter sample from the hit cell's emissive
+	// record lights the hit (its visibility ray against the solid scene), so a wall lit only by emitters bounces. The
+	// per-pixel "glow at the hit" term is OFF in that mode (emissiveScale 0: the same path counted twice).
+	uvec2 emTable;			// 0 = none
+	uvec2 emGroups;
+	float emIntensity;
 	// RT light grid (docs/rtx-light-grid.md L3): when present, the hit's light loop enumerates the HIT cell's candidates
 	// (its top-N lights by importance) instead of every scene light. The grid excludes DIFORWARD lights, matching the
 	// bounce's skipForwardLights set. gridAddr 0 (the standalone RTGI pass, or the grid off) = the full light loop.
@@ -226,6 +235,51 @@ int rtgiTraceBounce( RtgiBounceParms bp, vec3 Pw, vec3 Nw, vec3 eyeW, float d, v
 		if ( ep > bp.emissiveClamp ) { e *= bp.emissiveClamp / ep; }
 		Li += e;
 		LiCache += e;
+	}
+
+	// E2 v2b: EMITTER light at the hit - one group from H's cell by stored importance, one triangle in it by flux, one
+	// point by solid angle (rt_emissive.glsl), one visibility ray. Lambert at H as the light loop above (Doom: no 1/pi).
+	if ( ( bp.emTable.x | bp.emTable.y ) != 0u && lgPresent( bp.grid ) && bp.grid.slotsE > 0u ) {
+		int hBase = lgCellBase( bp.grid, hitWorld );
+		if ( hBase >= 0 ) {
+			int  hE = lgEBase( hBase, bp.grid.slots );
+			LgGrid hG = LgGrid( bp.grid.gridAddr );
+			uint rngE = ( uint( sfrag.x ) * 7919u + uint( sfrag.y ) * 104729u + uint( bp.sampleFrame ) * 15485863u ) | 1u;
+			uint gIdx; float qG;
+			if ( lgDrawGroup( hG, hE, rngE, gIdx, qG ) ) {
+				RtEmissiveTable  et = rtEmissiveOpen( bp.emTable );
+				RtEmissiveGroups eg = RtEmissiveGroups( bp.emGroups );
+				float pIn;
+				uint  ti = rtEmissiveSampleInGroup( et, eg.g[ gIdx ].firstTri, eg.g[ gIdx ].numTris, lgRand( rngE ), pIn );
+				RtEmissiveTri e = rtEmissiveFetch( et, ti );
+				vec3 Pe, nUnit; float pdfw;
+				if ( e.flux > 0.0 && rtEmissiveSampleSolidAngle( e, hitWorld, vec2( lgRand( rngE ), lgRand( rngE ) ), Pe, nUnit, pdfw ) ) {
+					vec3  ed = Pe - hitWorld;
+					float edl = length( ed );
+					vec3  edir = ed / max( edl, 1e-3 );
+					float endl = max( dot( hitN, edir ), 0.0 );
+					float ecos = dot( -nUnit, -edir );
+					if ( ( e.emit & RT_EMIT_TWOSIDED ) != 0u ) { ecos = abs( ecos ); }
+					float p = qG * pIn * pdfw;
+					if ( endl > 0.0 && ecos > 0.0 && p > 0.0 ) {
+						vec3 Le = rtEmissiveMeanRadiance( e ) * ( e.scale * bp.emIntensity );
+						vec3 ec = albedo * Le * ( sqrt( ecos ) * endl * bp.lightScale / p );
+						rayQueryEXT erq;
+						rayQueryInitializeEXT( erq, accelerationStructureEXT( bp.tlas ), gl_RayFlagsOpaqueEXT | gl_RayFlagsTerminateOnFirstHitEXT, 0xFDu,
+							hitWorld + hitN * 0.2 + edir * 0.05, 0.0, edir, max( edl - 1.0, 0.1 ) );
+						while ( rayQueryProceedEXT( erq ) ) { }
+						if ( rayQueryGetIntersectionTypeEXT( erq, true ) == gl_RayQueryCommittedIntersectionNoneEXT ) {
+							// clamp the single sample like the glow term (bp.emissiveClamp): a 1-spp hit on a bright tile is the
+							// strobe-raindrop input NRD cannot merge (memory: strobe GI raindrops)
+							float ep = max( max( ec.r, ec.g ), ec.b );
+							if ( bp.emissiveClamp > 0.0 && ep > bp.emissiveClamp ) { ec *= bp.emissiveClamp / ep; }
+							Li += ec;
+							LiCache += ec;
+						}
+					}
+				}
+			}
+		}
 	}
 
 	// H6d (docs/rtx-rtgi.md): one shadow ray at the bounce hit toward the DOMINANT reaching light, so a light

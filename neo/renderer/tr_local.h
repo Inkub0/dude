@@ -1128,6 +1128,7 @@ int  R_RtGatherPerforatedBoxes( const idBounds &b, idBounds *out, int maxOut );	
 // the current map (0 = none / off), with its triangle count and total flux; and the lazily built debug geometry
 // (one idDrawVert per table vertex + an index list) for r_rtEmissiveTableDebug.
 unsigned long long R_RtEmissiveTableAddress( int *numTris, float *totalFlux, float *meanFlux );
+unsigned long long R_RtEmissiveGroupsAddress( int *count );	// E2 v2b: the emitter groups (one per surface run) the light grid streams; 0 = none
 bool R_RtEmissiveDebugGeometry( unsigned int *vb, unsigned int *ib, int *numIndexes );
 // E1d labels: the frontend projects one label per in-sight emissive SURFACE into the 2D VIRTUAL 640x480 space
 // (R_RtEmissiveProjectLabels, from R_RtEmissiveUpdate); the console's debug-text pass (Console.cpp

@@ -12,6 +12,7 @@
 // rt_light_eval.glsl: RtLight / RtLights / DUDE_LIGHT_* / dudeLightInRange. rtgi_light_grid.glsl: LgGrid + mapping + layout.
 #include "rt_light_eval.glsl"
 #include "rtgi_light_grid.glsl"
+#include "rt_emissive.glsl"
 
 #define LG_MAX_SLOTS 16u			// fixed reservoir array size; r_rtLightGridSlots is clamped to this
 
@@ -25,6 +26,8 @@ layout( push_constant ) uniform PC {
 	float cellBase;					// cascade-0 cell size (units)
 	float camX, camY, camZ;			// camera position (cascade snapping)
 	float parallelFlux;				// flux weight for parallel (sun) lights, which have no 1/d^2 term
+	uint  groupLo, groupHi;			// E2 v2b: emitter group buffer device address (0 = emissive mode off)
+	uint  nGroups, slotsE;			// groups in it; emissive slots per cell (0 = no emissive record)
 } pc;
 
 void main() {
@@ -35,7 +38,7 @@ void main() {
 	LgGrid   grid   = LgGrid( uvec2( pc.gridLo, pc.gridHi ) );
 	RtLights lights = RtLights( uvec2( pc.lightLo, pc.lightHi ) );
 	uint     slots  = min( pc.slots, LG_MAX_SLOTS );
-	int      base   = int( cellIndex * lgStride( slots ) );
+	int      base   = int( cellIndex * lgStride( slots, pc.slotsE ) );
 
 	vec3  camPos = vec3( pc.camX, pc.camY, pc.camZ );
 	int   c;
@@ -102,5 +105,51 @@ void main() {
 		}
 	} else {
 		grid.g[ base ] = 0u;											// no in-range light: empty, the consumer falls back
+	}
+
+	// E2 v2b: the cell's EMISSIVE record - the top-slotsE emitter GROUPS by importance = flux / max( d^2, cs^2, r^2 )
+	// (the group's own radius floors the distance: a cell inside a big tile's extent is lit by all of it). Streams every
+	// group (a few hundred: one per emissive surface) - Q2RTX's per-cluster light list with the cell as the cluster.
+	if ( pc.slotsE > 0u ) {
+		int   eBase  = lgEBase( base, slots );
+		uint  slotsE = min( pc.slotsE, LG_MAX_SLOTS );
+		uint  cntE = 0u, minSlotE = 0u;
+		float minImpE = 1e30;
+		uint  chosenE[ LG_MAX_SLOTS ];
+		float chosenImpE[ LG_MAX_SLOTS ];
+		if ( ( pc.groupLo | pc.groupHi ) != 0u ) {
+			RtEmissiveGroups groups = RtEmissiveGroups( uvec2( pc.groupLo, pc.groupHi ) );
+			for ( uint gi = 0u; gi < pc.nGroups; gi++ ) {
+				float flux = groups.g[ gi ].flux;
+				if ( !( flux > 0.0 ) ) { continue; }							// dark (switched off / gone)
+				vec3  gd = groups.g[ gi ].c - center;
+				float rg = groups.g[ gi ].radius;
+				float d2 = max( dot( gd, gd ), max( cs * cs, rg * rg ) );
+				float imp = flux / d2;
+				if ( cntE < slotsE ) {
+					chosenE[ cntE ] = gi; chosenImpE[ cntE ] = imp; cntE++;
+					if ( cntE == slotsE ) {
+						minImpE = chosenImpE[ 0 ]; minSlotE = 0u;
+						for ( uint k = 1u; k < slotsE; k++ ) { if ( chosenImpE[ k ] < minImpE ) { minImpE = chosenImpE[ k ]; minSlotE = k; } }
+					}
+				} else if ( imp > minImpE ) {
+					chosenE[ minSlotE ] = gi; chosenImpE[ minSlotE ] = imp;
+					minImpE = chosenImpE[ 0 ]; minSlotE = 0u;
+					for ( uint k = 1u; k < slotsE; k++ ) { if ( chosenImpE[ k ] < minImpE ) { minImpE = chosenImpE[ k ]; minSlotE = k; } }
+				}
+			}
+		}
+		if ( cntE > 0u ) {
+			float sumE = 0.0;
+			for ( uint k = 0u; k < cntE; k++ ) { sumE += chosenImpE[ k ]; }
+			grid.g[ eBase ]     = cntE;
+			grid.g[ eBase + 1 ] = floatBitsToUint( sumE );
+			for ( uint k = 0u; k < cntE; k++ ) {
+				grid.g[ eBase + int( LG_HEADER + 2u * k ) ]      = chosenE[ k ];
+				grid.g[ eBase + int( LG_HEADER + 2u * k + 1u ) ] = floatBitsToUint( chosenImpE[ k ] );
+			}
+		} else {
+			grid.g[ eBase ] = 0u;
+		}
 	}
 }

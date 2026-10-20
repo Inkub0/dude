@@ -62,6 +62,7 @@
 //   u_occlusionParms      = ( unused - was the IGN rotation, replaced by the per-fragment R2 sequence; the frame index for it rides u_localParam1.x )
 //   --- EMISSIVE MODE (r_rtEmissiveLighting, docs/rtx-experimental-lighting.md E2) ---
 //   u_texGen0S            = ( emissive table device address lo, hi, r_rtEmissiveIntensity, candidates per pixel (0 = off) )
+//   u_texGen0T.xy         = emitter GROUP buffer device address (v2b: the light grid's emissive record indexes it)
 //   --- r_rtgiCache (the RT irradiance cache, docs/rtx-irradiance-cache.md; rtgi_cache.glsl's shared packing) ---
 //   u_particleRadius.zw   = cache SLOT buffer device address (bit-cast; 0 = no cache)
 //   u_channelMask         = ( accumulation buffer address lo, hi, slot mask, tan( cell angle / 2 ) )
@@ -343,9 +344,25 @@ void main() {
 	uint  emDraws    = ( pdfOne && rtEmissivePresent( emTable ) ) ? uint( u_texGen0S.w + 0.5 ) : 0u;
 	uint  emChosen   = 0u;						// triangle + 1 (0 = the winner is a placed light, or nothing)
 	vec2  emXiChosen = vec2( 0.0 );
+	// v2b: with the light grid live and this cell holding emitter GROUPS, a candidate is a group drawn by the cell's
+	// stored importance (flux / d^2 at the cell: distance-aware), then a triangle inside it by flux (the CDF restricted
+	// to the run), then the solid-angle point - pdf = q_group x p_tri|group x pdfw. Else the global flux CDF (blind).
+	int  lgEB  = ( useGrid && lgp.slotsE > 0u ) ? lgEBase( lgBase, lgp.slots ) : -1;
+	bool emFromGrid = lgEB >= 0 && lgCountE( lgGrid, lgEB ) > 0u;
+	RtEmissiveGroups emGroups = RtEmissiveGroups( uvec2( 0u ) );
+	if ( emFromGrid ) { emGroups = RtEmissiveGroups( uvec2( floatBitsToUint( u_texGen0T.x ), floatBitsToUint( u_texGen0T.y ) ) ); }
 	for ( uint i = 0u; i < emDraws; i++ ) {
 		float pdfTri;
-		uint  ti = rtEmissiveSample( emTable, rnd( rng ), pdfTri );
+		uint  ti;
+		if ( emFromGrid ) {
+			uint gIdx; float qG;
+			if ( !lgDrawGroup( lgGrid, lgEB, rng, gIdx, qG ) ) { continue; }
+			float pIn;
+			ti = rtEmissiveSampleInGroup( emTable, emGroups.g[ gIdx ].firstTri, emGroups.g[ gIdx ].numTris, rnd( rng ), pIn );
+			pdfTri = qG * pIn;
+		} else {
+			ti = rtEmissiveSample( emTable, rnd( rng ), pdfTri );
+		}
 		vec2  xi = vec2( rnd( rng ), rnd( rng ) );
 		vec3  c, ld; float dl, ndl, pdfw;
 		float pHat = 0.0;
@@ -479,6 +496,9 @@ void main() {
 		bp.cacheLookup    = cacheOn && bp.cache.lookup;
 		bp.cacheTail      = cacheOn && bp.cache.tail;	// C6: the hit reads the stored L_out; the update below stores L_out at P
 		bp.grid           = lgp;						// L3: the hit's light loop draws from its cell (lgp built above for the DI RIS)
+		bp.emTable        = emTable.addr;				// E2 v2b: one emitter sample at the hit from ITS cell's groups (the GI side of emissive mode)
+		bp.emGroups       = uvec2( floatBitsToUint( u_texGen0T.x ), floatBitsToUint( u_texGen0T.y ) );
+		bp.emIntensity    = u_texGen0S.z;
 		const vec3 eyeW   = u_modelViewMatrix[3].xyz;
 		vec3 Li; float thit; vec3 bounceDir; vec3 LiCache;
 		const int hit = rtgiTraceBounce( bp, Pw, Nw, eyeW, d, sfrag, Li, thit, bounceDir, LiCache );

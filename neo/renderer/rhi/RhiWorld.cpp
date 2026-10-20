@@ -609,6 +609,9 @@ struct rtLightGridParms_t {
 	int					res;				// cells per cascade axis (r_rtLightGridRes)
 	int					cascades;			// camera-centred cascades (r_rtLightGridCascades)
 	int					slots;				// candidates per cell (r_rtLightGridSlots)
+	int					slotsE;				// E2 v2b: emissive group slots per cell (8 while emissive mode is on, else 0)
+	unsigned long long	groupAddr;			// E2 v2b: the emitter group buffer (0 = none)
+	int					numGroups;
 };
 struct rtLightGridState_t {
 	rhi::BufferHandle	gridBuf = 0;
@@ -7830,6 +7833,9 @@ static void RB_RHI_RtgiPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	parms.color[2] = (float)giNumLights;
 	parms.color[3] = 0.0f;							// no ambient floor at the hit: a pure bounce (only lit surfaces contribute)
 	parms.diffuseModifier[0] = idMath::ClampFloat( 0.0f, 16.0f, r_rtgiEmissive.GetFloat() );	// self-illum glow scale
+	if ( r_rtEmissiveLighting.GetBool() && r_rtEmissiveCandidates.GetInteger() > 0 && R_RtEmissiveTableAddress( NULL, NULL, NULL ) != 0 ) {
+		parms.diffuseModifier[0] = 0.0f;			// emissive mode: the emitters are sampled as lights; glow at a bounce hit would count them twice
+	}
 	parms.diffuseModifier[1] = idMath::ClampFloat( 0.0f, 8.0f, r_rtgiLightScale.GetFloat() );	// diffuse brightness at the hit
 	parms.diffuseModifier[2] = 1.0f;				// confine each light to its Doom projection volume (RR16c-style)
 	parms.diffuseModifier[3] = ( giNumLights > 0 ) ? 1.0f : 0.0f;	// real-lights enable
@@ -8234,6 +8240,11 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 			memcpy( &parms.texGen0S[1], &emHi, sizeof( emHi ) );
 			parms.texGen0S[2] = idMath::ClampFloat( 0.0f, 64.0f, r_rtEmissiveIntensity.GetFloat() );
 			parms.texGen0S[3] = ( emAddr != 0 && emTris > 0 ) ? (float)idMath::ClampInt( 0, 16, r_rtEmissiveCandidates.GetInteger() ) : 0.0f;
+			int emGroups = 0;
+			const unsigned long long grpAddr = ( emAddr != 0 ) ? R_RtEmissiveGroupsAddress( &emGroups ) : 0;
+			const unsigned int grpLo = (unsigned int)( grpAddr & 0xFFFFFFFFull ), grpHi = (unsigned int)( grpAddr >> 32 );
+			memcpy( &parms.texGen0T[0], &grpLo, sizeof( grpLo ) );
+			memcpy( &parms.texGen0T[1], &grpHi, sizeof( grpHi ) );
 			if ( emAddr != 0 && emTris > 0 ) {
 				parms.pbrParms[1] = 0.0f;
 			}
@@ -9590,7 +9601,12 @@ static bool RB_RHI_LightGridBegin( rhi::RHI *r, const viewDef_t *viewDef ) {
 	const int slots    = idMath::ClampInt( 1, 16, r_rtLightGridSlots.GetInteger() );
 	const int res      = idMath::ClampInt( 8, 64, r_rtLightGridRes.GetInteger() );
 	const int cascades = idMath::ClampInt( 1, 4, r_rtLightGridCascades.GetInteger() );
-	const int sizeKey  = slots | ( res << 8 ) | ( cascades << 16 );		// identity of the buffer size (all three are in the gfx-cfg signature)
+	// E2 v2b: emissive mode adds an emissive record (8 group slots) to every cell. r_rtEmissiveLighting is in the gfx-cfg
+	// signature, so the size change idles the device like the others.
+	int emGroups = 0;
+	const unsigned long long emGroupAddr = ( r_rtEmissiveLighting.GetBool() && r_rtEmissiveCandidates.GetInteger() > 0 ) ? R_RtEmissiveGroupsAddress( &emGroups ) : 0;
+	const int slotsE   = r_rtEmissiveLighting.GetBool() ? 8 : 0;
+	const int sizeKey  = slots | ( res << 8 ) | ( cascades << 16 ) | ( slotsE << 24 );		// identity of the buffer size (all in the gfx-cfg signature)
 	if ( g.gridBuf != 0 && g.sizeKey != sizeKey ) {
 		// a size cvar changed: it is in ComputeGfxCfgSignature, so the device idled at this frame's start; DestroyBuffer
 		// defers the free behind the frames in flight regardless
@@ -9600,7 +9616,7 @@ static bool RB_RHI_LightGridBegin( rhi::RHI *r, const viewDef_t *viewDef ) {
 	}
 	if ( g.gridBuf == 0 ) {
 		const long long cells       = (long long)cascades * res * res * res;
-		const long long strideWords = 2 + 2 * (long long)slots;			// header (count, sumImp) + slots * (light, imp)
+		const long long strideWords = 2 + 2 * (long long)slots + ( slotsE > 0 ? 2 + 2 * (long long)slotsE : 0 );	// header (count, sumImp) + slots * (light, imp) [+ the emissive record]
 		const long long bytes       = cells * strideWords * 4;
 		g.gridBuf  = r->CreateBuffer( rhi::BU_STORAGE_DEVICE, (int)bytes, NULL );
 		g.gridAddr = ( g.gridBuf != 0 ) ? r->GetBufferDeviceAddress( g.gridBuf ) : 0;
@@ -9632,6 +9648,9 @@ static bool RB_RHI_LightGridBegin( rhi::RHI *r, const viewDef_t *viewDef ) {
 	gp.res        = res;
 	gp.cascades   = cascades;
 	gp.slots      = slots;
+	gp.slotsE     = slotsE;
+	gp.groupAddr  = emGroupAddr;
+	gp.numGroups  = ( emGroupAddr != 0 ) ? emGroups : 0;
 	g.readyThisView = true;
 	return true;
 }
@@ -9641,7 +9660,7 @@ static void RB_RHI_LightGridFill( rhi::RHI *r, unsigned long long lightAddr, int
 	if ( !g.readyThisView || g.filledThisFrame || g.fillProg == 0 || lightAddr == 0 || numLights <= 0 ) {
 		return;		// filled once per frame; the first consumer that has the light buffer triggers it
 	}
-	struct { unsigned int gridLo, gridHi, lightLo, lightHi, nLights, cascades, res, slots; float cellBase; float camX, camY, camZ; float parallelFlux; } pc;	// light_grid_fill.comp PC
+	struct { unsigned int gridLo, gridHi, lightLo, lightHi, nLights, cascades, res, slots; float cellBase; float camX, camY, camZ; float parallelFlux; unsigned int groupLo, groupHi, nGroups, slotsE; } pc;	// light_grid_fill.comp PC
 	pc.gridLo      = (unsigned int)( g.gridAddr & 0xFFFFFFFFull );
 	pc.gridHi      = (unsigned int)( g.gridAddr >> 32 );
 	pc.lightLo     = (unsigned int)( lightAddr & 0xFFFFFFFFull );
@@ -9655,6 +9674,10 @@ static void RB_RHI_LightGridFill( rhi::RHI *r, unsigned long long lightAddr, int
 	pc.camY        = g.parms.camPos[1];
 	pc.camZ        = g.parms.camPos[2];
 	pc.parallelFlux = 4.0f;		// flux weight for parallel (sun) lights (no 1/d^2): keeps a sun a candidate everywhere (L5 tuning)
+	pc.groupLo     = (unsigned int)( g.parms.groupAddr & 0xFFFFFFFFull );	// E2 v2b: the emitter groups (0 = no emissive record)
+	pc.groupHi     = (unsigned int)( g.parms.groupAddr >> 32 );
+	pc.nGroups     = (unsigned int)g.parms.numGroups;
+	pc.slotsE      = (unsigned int)g.parms.slotsE;
 	rhi::ComputeArgs ca = rhi::ComputeArgs();
 	ca.shader = g.fillProg;
 	ca.pushConstants = &pc;
@@ -9675,7 +9698,7 @@ static void RB_RHI_LightGridFill( rhi::RHI *r, unsigned long long lightAddr, int
 // u_modelViewMatrix[3] (view->world), which every RT pass already has. rtgi_light_grid.glsl lgParmsFromVec4 unpacks it.
 static void RB_RHI_LightGridPack( rhi::RenderParams &parms, const rtLightGridParms_t &gp ) {
 	const unsigned int gridLo = (unsigned int)( gp.gridAddr & 0xFFFFFFFFull ), gridHi = (unsigned int)( gp.gridAddr >> 32 );
-	const unsigned int packed = (unsigned int)gp.res | ( (unsigned int)gp.cascades << 8 ) | ( (unsigned int)gp.slots << 16 );
+	const unsigned int packed = (unsigned int)gp.res | ( (unsigned int)gp.cascades << 8 ) | ( (unsigned int)gp.slots << 16 ) | ( (unsigned int)gp.slotsE << 24 );
 	memcpy( &parms.occlusionParms[0], &gridLo, sizeof( gridLo ) );
 	memcpy( &parms.occlusionParms[1], &gridHi, sizeof( gridHi ) );
 	parms.occlusionParms[2] = gp.cellBase;

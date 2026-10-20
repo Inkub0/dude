@@ -54,6 +54,11 @@ layout(buffer_reference, std430, buffer_reference_align = 4)  buffer RtEmissiveC
 
 const uint RT_EMISSIVE_HEADER_BYTES = 16u;
 
+// E2 v2b: an emitter GROUP (one table surface run; tr_main.cpp R_RtEmissiveUploadGroups): centroid, bounding radius,
+// flux, the run's triangle range. The light grid's cells keep the top groups by flux / d^2.
+struct RtEmissiveGroup { vec3 c; float radius; float flux; uint firstTri; uint numTris; uint pad; };
+layout(buffer_reference, std430, buffer_reference_align = 16) buffer RtEmissiveGroups { RtEmissiveGroup g[]; };
+
 // The table at device address `addr` (uvec2 lo/hi); present() = a table is bound this frame.
 struct RtEmissiveTable {
 	uvec2 addr;
@@ -101,6 +106,26 @@ uint rtEmissiveSample( RtEmissiveTable t, float u, out float pdf ) {
 	}
 	float prev = ( lo > 0u ) ? cdf.c[ lo - 1u ] : 0.0;
 	pdf = max( cdf.c[ lo ] - prev, 0.0 ) / max( t.totalFlux, 1e-6 );
+	return lo;
+}
+
+// Draw a triangle INSIDE a group's contiguous range [first, first + num) in proportion to flux: the global CDF
+// restricted to the range. pdf = the triangle's flux share WITHIN the group.
+uint rtEmissiveSampleInGroup( RtEmissiveTable t, uint first, uint num, float u, out float pdf ) {
+	RtEmissiveCdf cdf = RtEmissiveCdf( rtEmissiveOffsetAddr( t.addr, t.cdfOffset ) );
+	float base  = ( first > 0u ) ? cdf.c[ first - 1u ] : 0.0;
+	float last  = cdf.c[ first + num - 1u ];
+	float total = last - base;
+	pdf = 0.0;
+	if ( !( total > 0.0 ) ) { return first; }
+	float target = base + u * total;
+	uint lo = first, hi = first + num - 1u;
+	while ( lo < hi ) {
+		uint mid = ( lo + hi ) >> 1u;
+		if ( cdf.c[ mid ] <= target ) { lo = mid + 1u; } else { hi = mid; }
+	}
+	float prev = ( lo > 0u ) ? cdf.c[ lo - 1u ] : 0.0;
+	pdf = max( cdf.c[ lo ] - prev, 0.0 ) / total;
 	return lo;
 }
 

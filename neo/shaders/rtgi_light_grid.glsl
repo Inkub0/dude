@@ -17,8 +17,10 @@ layout(buffer_reference, std430, buffer_reference_align = 16) buffer LgGrid { ui
 
 const uint LG_HEADER = 2u;		// uints before the slot pairs: count, sumImp
 
-// per-cell record stride in uints
-uint lgStride( uint slots ) { return LG_HEADER + 2u * slots; }
+// per-cell record stride in uints. E2 v2b: with slotsE > 0 an EMISSIVE record follows the light record - [countE]
+// [sumImpE] then slotsE x { uint group index, float imp bits } (same shape; empty when the mode is off: slotsE 0).
+uint lgStride( uint slots, uint slotsE ) { return LG_HEADER + 2u * slots + ( ( slotsE > 0u ) ? ( LG_HEADER + 2u * slotsE ) : 0u ); }
+int  lgEBase( int base, uint slots ) { return base + int( LG_HEADER + 2u * slots ); }
 
 // cheap PCG (self-contained: the fill seeds its reservoirs, the consume picks a slot)
 uint lgPcg( uint v ) { uint s = v * 747796405u + 2891336453u; uint w = ( ( s >> ( ( s >> 28u ) + 4u ) ) ^ s ) * 277803737u; return ( w >> 22u ) ^ w; }
@@ -71,6 +73,7 @@ struct LgParms {
 	int   res;
 	int   cascades;
 	uint  slots;
+	uint  slotsE;		// E2 v2b: emissive group slots per cell (0 = none)
 };
 
 bool lgPresent( LgParms p ) { return ( p.gridAddr.x | p.gridAddr.y ) != 0u && p.slots > 0u; }
@@ -86,6 +89,7 @@ LgParms lgParmsFromVec4( vec4 v, vec3 camPos ) {
 	p.res       = int( packed & 0xFFu );
 	p.cascades  = int( ( packed >> 8 ) & 0xFu );
 	p.slots     = ( packed >> 16 ) & 0x3Fu;
+	p.slotsE    = ( packed >> 24 ) & 0x3Fu;
 	return p;
 }
 
@@ -94,13 +98,35 @@ int lgCellBase( LgParms p, vec3 world ) {
 	ivec3 cell;
 	int c = lgPickCascade( world, p.camPos, p.cellBase, p.res, p.cascades, cell );
 	if ( c < 0 ) { return -1; }
-	return int( lgCellIndex( c, cell, p.res ) * lgStride( p.slots ) );
+	return int( lgCellIndex( c, cell, p.res ) * lgStride( p.slots, p.slotsE ) );
 }
 
 uint  lgCount( LgGrid grid, int base )            { return grid.g[ base ]; }
 float lgSumImp( LgGrid grid, int base )           { return uintBitsToFloat( grid.g[ base + 1 ] ); }
 uint  lgSlotLight( LgGrid grid, int base, uint s ){ return grid.g[ base + int( LG_HEADER + 2u * s ) ]; }
 float lgSlotImp( LgGrid grid, int base, uint s )  { return uintBitsToFloat( grid.g[ base + int( LG_HEADER + 2u * s + 1u ) ] ); }
+
+// E2 v2b: the cell's emissive record (groups) - same accessors over the E base
+uint  lgCountE( LgGrid grid, int eBase )            { return grid.g[ eBase ]; }
+float lgSumImpE( LgGrid grid, int eBase )           { return uintBitsToFloat( grid.g[ eBase + 1 ] ); }
+uint  lgSlotGroup( LgGrid grid, int eBase, uint s ) { return grid.g[ eBase + int( LG_HEADER + 2u * s ) ]; }
+float lgSlotImpE( LgGrid grid, int eBase, uint s )  { return uintBitsToFloat( grid.g[ eBase + int( LG_HEADER + 2u * s + 1u ) ] ); }
+// draw one GROUP from the cell in proportion to its stored importance; q = its selection pdf. false = none stored.
+bool lgDrawGroup( LgGrid grid, int eBase, inout uint rng, out uint groupIndex, out float q ) {
+	groupIndex = 0u; q = 0.0;
+	uint n = lgCountE( grid, eBase );
+	if ( n == 0u ) { return false; }
+	float sum = lgSumImpE( grid, eBase );
+	if ( !( sum > 0.0 ) ) { return false; }
+	float r   = lgRand( rng ) * sum;
+	float acc = 0.0;
+	for ( uint s = 0u; s < n; s++ ) {
+		float imp = lgSlotImpE( grid, eBase, s );
+		acc += imp;
+		if ( r < acc || s + 1u == n ) { groupIndex = lgSlotGroup( grid, eBase, s ); q = imp / sum; return q > 0.0; }
+	}
+	return false;
+}
 
 // One candidate from the cell, drawn IMPORTANCE-PROPORTIONALLY among its stored lights (the cell holds the top-N by
 // importance; the fill is deterministic, this draw provides the per-pixel variation the denoiser averages). Returns the

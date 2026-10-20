@@ -147,6 +147,10 @@ void main() {
 	bp.skipForwardLights = false;			// RTGI's own pass bounces every light (no forward/DI split here)
 	bp.grid.gridAddr  = uvec2( 0u );		// L3: no light grid in the standalone RTGI pass (it bounces every light, incl. DIFORWARD; the grid excludes those)
 	bp.grid.slots     = 0u;
+	bp.grid.slotsE    = 0u;
+	bp.emTable        = uvec2( 0u );		// E2 v2b: no emitter sample in the standalone pass (no grid here)
+	bp.emGroups       = uvec2( 0u );
+	bp.emIntensity    = 0.0;
 	bp.radius         = u_localParam0.z;
 	bp.emissiveScale  = u_diffuseModifier.x;
 	bp.emissiveClamp  = u_localParam0.w;

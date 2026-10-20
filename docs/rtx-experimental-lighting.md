@@ -225,3 +225,20 @@ flagged any gatherable entity without a group - an entity the build examined and
 frames, a full rebuild each time. Now: additive pre-check first; the build records the model it examined per entity
 slot (`s_rtEmissiveSeenModel`) and the scan only looks at slots whose model changed; scan rebuilds are throttled to
 one per 5 s, state-change rebuilds to one per 2 s.
+
+**E2 v2b built (2026-10-20, branch feat/rtx-emissive-e2): the grid as the cluster list.** Emitter GROUPS (one per
+table surface run: centroid, bounding radius, flux, triangle range; `R_RtEmissiveUploadGroups`, rebuilt on flux /
+mover changes) are streamed by the light-grid fill: every cell keeps an EMISSIVE RECORD - the top 8 groups by
+flux / max( d^2, cs^2, r^2 ) - after its light record (`lgStride( slots, slotsE )`, slotsE in the packed word's bits
+24-29; `r_rtEmissiveLighting` joins the gfx-cfg signature because it re-sizes the grid). The gather's emissive
+candidates come from the cell: a group by stored importance (distance-aware), a triangle inside it by flux (the CDF
+restricted to the run, `rtEmissiveSampleInGroup`), a point by solid angle - pdf = q_group x p_tri|group x pdfw; a
+cell without a record falls back to the global CDF. The bounce hit draws ONE emitter sample the same way from ITS
+cell (rtgi_bounce.glsl, albedo x L x sqrt(cos_e) x N.L / p, one visibility ray, the glow clamp on the sample) - the GI
+side of the mode: walls lit only by emitters now bounce; the standalone RTGI pass gates its glow-at-hit term too.
+
+Test (user): round 2 setup (`r_rtEmissiveLighting 1`, dude_rtx 2, light grid on as at the PT tier). Expect the
+raindrops gone or much reduced at the same candidate count; `r_rtLightGridDebug 2` still works (the light record is
+unchanged); `r_vkGpuTime 2`: lightgrid.fill grows by the group stream (a few hundred groups x 131k cells: expect
+~0.3-0.5 ms), restir.di.gather roughly as v2a. If the picture goes dark or the grid overlay shows every cell empty,
+the stride change is the suspect (both fill and consume use lgStride( slots, slotsE )).
