@@ -453,3 +453,5 @@ generous sampling share for a mostly grey panel; the light itself is right). Cen
 mode 1 checkers them, the probe reports the verdict. Such flares are then hidden in emitter mode like the others.
 Inferred entity entries are not mover-tracked (door frames, lamp housings). The D2 row form remains for fixtures
 without a flare.
+
+**Flare inference validated (user, EnPro entrance, 2026-10-20):** both door frames (`techdr1frame_cop`, `techdr2frame_cop`) come up checkered under their flares. The promoted patch is the whole frame within the 48-unit reach (the threshold read keeps only the bright bar emitting; the generous flux share is the known caveat). E1 complete; E2 next.
