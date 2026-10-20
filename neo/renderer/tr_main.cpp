@@ -2856,7 +2856,7 @@ static const shaderStage_t *R_RtEmissiveStage( const idMaterial *mat, const char
 	if ( mat->HasGui() ) {
 		reason = "gui screen";
 	} else if ( mat->Deform() != DFRM_NONE ) {
-		reason = "deformed (sprite / flare)";								// decoration, not a light
+		reason = ( mat->Deform() == DFRM_FLARE || mat->Deform() == DFRM_SPRITE ) ? "flare / sprite (a light's marker, not a surface)" : "deformed";
 	} else if ( (int)mat->GetSort() == SS_DECAL ) {
 		// a DECAL (textures/decals/*: alphabet signs, markings, dirt) puts its artwork on an additive stage so it stays
 		// readable in the dark - that is legibility, not light (user, 2026-10-20)
@@ -3091,8 +3091,8 @@ static bool R_RtEmissiveIsFlareEntity( const idRenderEntityLocal *def ) {
 	const idRenderModel *model = def->parms.hModel;
 	for ( int sf = 0; sf < model->NumSurfaces(); sf++ ) {
 		const idMaterial *mat = R_RemapShaderBySkin( model->Surface( sf )->shader, def->parms.customSkin, def->parms.customShader );
-		if ( mat == NULL || mat->Deform() != DFRM_SPRITE ) {
-			continue;
+		if ( mat == NULL || ( mat->Deform() != DFRM_SPRITE && mat->Deform() != DFRM_FLARE ) ) {
+			continue;															// textures/sfx/flare is `deform flare`, light glows `deform sprite`
 		}
 		for ( int k = 0; k < mat->GetNumStages(); k++ ) {
 			const shaderStage_t *st = mat->GetStage( k );
@@ -3104,18 +3104,40 @@ static bool R_RtEmissiveIsFlareEntity( const idRenderEntityLocal *def ) {
 	return false;
 }
 
-// Is there a table triangle within `reach` of p?
-static bool R_RtEmissiveNearTable( const idVec3 &p, float reach ) {
-	const float r2 = reach * reach;
+// Distance from a point to a triangle (closest point on the triangle, Ericson 5.1.5)
+static float R_RtPointTriangleDistance( const idVec3 &p, const idVec3 &a, const idVec3 &b, const idVec3 &c ) {
+	const idVec3 ab = b - a, ac = c - a, ap = p - a;
+	const float d1 = ab * ap, d2 = ac * ap;
+	if ( d1 <= 0.0f && d2 <= 0.0f ) { return ap.Length(); }
+	const idVec3 bp = p - b;
+	const float d3 = ab * bp, d4 = ac * bp;
+	if ( d3 >= 0.0f && d4 <= d3 ) { return bp.Length(); }
+	const float vc = d1 * d4 - d3 * d2;
+	if ( vc <= 0.0f && d1 >= 0.0f && d3 <= 0.0f ) { const float v = d1 / ( d1 - d3 ); return ( p - ( a + ab * v ) ).Length(); }
+	const idVec3 cp = p - c;
+	const float d5 = ab * cp, d6 = ac * cp;
+	if ( d6 >= 0.0f && d5 <= d6 ) { return cp.Length(); }
+	const float vb = d5 * d2 - d1 * d6;
+	if ( vb <= 0.0f && d2 >= 0.0f && d6 <= 0.0f ) { const float w = d2 / ( d2 - d6 ); return ( p - ( a + ac * w ) ).Length(); }
+	const float va = d3 * d6 - d5 * d4;
+	if ( va <= 0.0f && ( d4 - d3 ) >= 0.0f && ( d5 - d6 ) >= 0.0f ) { const float w = ( d4 - d3 ) / ( ( d4 - d3 ) + ( d5 - d6 ) ); return ( p - ( b + ( c - b ) * w ) ).Length(); }
+	const float denom = 1.0f / ( va + vb + vc );
+	const float v = vb * denom, w = vc * denom;
+	return ( p - ( a + ab * v + ac * w ) ).Length();
+}
+
+// Distance from p to the nearest table triangle (1e30 when the table is empty)
+static float R_RtEmissiveTableDistance( const idVec3 &p ) {
+	float best = 1e30f;
 	for ( int t = 0; t < s_rtEmissiveTris.Num(); t++ ) {
 		const rtEmissiveTriGPU_t &e = s_rtEmissiveTris[t];
-		const idVec3 c( ( e.p0[0] + e.p1[0] + e.p2[0] ) * ( 1.0f / 3.0f ), ( e.p0[1] + e.p1[1] + e.p2[1] ) * ( 1.0f / 3.0f ), ( e.p0[2] + e.p1[2] + e.p2[2] ) * ( 1.0f / 3.0f ) );
-		if ( ( c - p ).LengthSqr() < r2 ) {
-			return true;
-		}
+		const idVec3 a( e.p0[0], e.p0[1], e.p0[2] ), b( e.p1[0], e.p1[1], e.p1[2] ), c( e.p2[0], e.p2[1], e.p2[2] );
+		const float d = R_RtPointTriangleDistance( p, a, b, c );
+		if ( d < best ) { best = d; }
 	}
-	return false;
+	return best;
 }
+static bool R_RtEmissiveNearTable( const idVec3 &p, float reach ) { return R_RtEmissiveTableDistance( p ) < reach; }
 
 // Flare-inferred emitters (user, 2026-10-20): a fixture whose material has NO glow stage - its "tube" is a white
 // patch in the diffuse map lit by the placed light (EnPro's techdr1frame_cop) - is found through the FLARE sprite
@@ -3136,9 +3158,7 @@ static int R_RtEmissiveInferFromFlares( const idRenderWorldLocal *world, float s
 			continue;
 		}
 		const idVec3 o = flare->parms.origin;
-		if ( R_RtEmissiveNearTable( o, 64.0f ) ) {
-			continue;															// the fixture under it is already an emitter
-		}
+		const float tableDist = R_RtEmissiveTableDistance( o );
 		best_t best; best.tri = NULL; best.mat = NULL; best.diffuse = NULL; best.entity = false; best.dist = RT_EMISSIVE_FLARE_REACH;
 		// candidate surfaces: a lambda over one model (world area: identity; entity: its matrix)
 		auto consider = [&]( const idRenderModel *model, const float *mm, const idDeclSkin *skin, const idMaterial *custom, bool entity ) {
@@ -3174,9 +3194,9 @@ static int R_RtEmissiveInferFromFlares( const idRenderWorldLocal *world, float s
 					continue;
 				}
 				for ( int n = 0; n + 2 < tri->numIndexes; n += 3 ) {
-					idVec3 c = ( tri->verts[ tri->indexes[n] ].xyz + tri->verts[ tri->indexes[n + 1] ].xyz + tri->verts[ tri->indexes[n + 2] ].xyz ) * ( 1.0f / 3.0f );
-					if ( mm != NULL ) { idVec3 w; R_LocalPointToGlobal( mm, c, w ); c = w; }
-					const float d = ( c - o ).Length();
+					idVec3 pa = tri->verts[ tri->indexes[n] ].xyz, pb = tri->verts[ tri->indexes[n + 1] ].xyz, pc = tri->verts[ tri->indexes[n + 2] ].xyz;
+					if ( mm != NULL ) { idVec3 w; R_LocalPointToGlobal( mm, pa, w ); pa = w; R_LocalPointToGlobal( mm, pb, w ); pb = w; R_LocalPointToGlobal( mm, pc, w ); pc = w; }
+					const float d = R_RtPointTriangleDistance( o, pa, pb, pc );		// true distance: a coarse mesh's centroids sit far from the flare
 					if ( d < best.dist ) {
 						best.dist = d; best.tri = tri; best.mat = mat; best.diffuse = diffuse; best.entity = entity;
 						if ( mm != NULL ) { memcpy( best.mm, mm, sizeof( best.mm ) ); } else { memset( best.mm, 0, sizeof( best.mm ) ); best.mm[0] = best.mm[5] = best.mm[10] = best.mm[15] = 1.0f; }
@@ -3196,9 +3216,14 @@ static int R_RtEmissiveInferFromFlares( const idRenderWorldLocal *world, float s
 			R_AxisToModelMatrix( def->parms.axis, def->parms.origin, mm );
 			consider( def->parms.hModel, mm, def->parms.customSkin, def->parms.customShader, true );
 		}
-		if ( best.tri == NULL ) {
+		if ( best.tri == NULL || tableDist <= best.dist ) {
+			// no glow-less surface under it, or a real emitter is nearer: this flare belongs to that emitter (or to nothing)
+			common->Printf( "    flare entity %d at %.0f %.0f %.0f: %s (nearest emitter %.0f units%s)\n", fi, o.x, o.y, o.z,
+				best.tri == NULL ? "no glow-less opaque surface within reach" : va( "'%s' at %.0f units is farther than the emitter", best.mat->GetName(), best.dist ),
+				tableDist < 1e29f ? tableDist : 9999.0f, tableDist < 64.0f ? ": its fixture" : "" );
 			continue;
 		}
+		common->Printf( "    flare entity %d at %.0f %.0f %.0f: INFERRED '%s' at %.0f units\n", fi, o.x, o.y, o.z, best.mat->GetName(), best.dist );
 		// the surface's triangles within reach of the flare become diffuse-glow entries
 		const idImage *img = best.diffuse->texture.image;
 		const float avgLin[3] = { R_RtSrgbToLinear( img->averageColor[0] ), R_RtSrgbToLinear( img->averageColor[1] ), R_RtSrgbToLinear( img->averageColor[2] ) };
@@ -3211,7 +3236,7 @@ static int R_RtEmissiveInferFromFlares( const idRenderWorldLocal *world, float s
 			const idDrawVert &a = best.tri->verts[ best.tri->indexes[n] ], &bv = best.tri->verts[ best.tri->indexes[n + 1] ], &c = best.tri->verts[ best.tri->indexes[n + 2] ];
 			idVec3 p0, p1, p2;
 			R_LocalPointToGlobal( best.mm, a.xyz, p0 ); R_LocalPointToGlobal( best.mm, bv.xyz, p1 ); R_LocalPointToGlobal( best.mm, c.xyz, p2 );
-			if ( ( ( p0 + p1 + p2 ) * ( 1.0f / 3.0f ) - o ).Length() > RT_EMISSIVE_FLARE_REACH ) {
+			if ( R_RtPointTriangleDistance( o, p0, p1, p2 ) > RT_EMISSIVE_FLARE_REACH ) {
 				continue;
 			}
 			const float area = 0.5f * ( ( p1 - p0 ).Cross( p2 - p0 ) ).Length();
@@ -3362,6 +3387,7 @@ static void R_RtEmissiveBuild( const idRenderWorldLocal *world, rhi::RHI *r ) {
 		}
 	}
 
+	if ( r_rtEmissiveFlareInfer.GetBool() ) { common->Printf( "r_rtEmissiveTable: flare inference:\n" ); }
 	const int inferredFixtures = r_rtEmissiveFlareInfer.GetBool() ? R_RtEmissiveInferFromFlares( world, scale, census ) : 0;
 	const int n = s_rtEmissiveTris.Num();
 	if ( n == 0 ) {
