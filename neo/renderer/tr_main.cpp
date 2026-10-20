@@ -3626,7 +3626,7 @@ void R_RtEmissiveProjectLabels( const viewDef_t *viewDef ) {
 	if ( viewDef == NULL || s_rtEmissiveBuf == 0 || s_rtEmissiveLabels.Num() == 0 ) {
 		return;
 	}
-	struct cand_t { float x, y, dist; int label; };
+	struct cand_t { float x, y, dist; idVec3 anchor; int label; };
 	static idList<cand_t> cands;
 	cands.SetNum( 0, false );
 	const idVec3 eye = viewDef->renderView.vieworg;
@@ -3634,22 +3634,39 @@ void R_RtEmissiveProjectLabels( const viewDef_t *viewDef ) {
 	const idRenderWorldLocal *world = viewDef->renderWorld;
 	for ( int i = 0; i < s_rtEmissiveLabels.Num(); i++ ) {
 		const rtEmissiveLabel_t &l = s_rtEmissiveLabels[i];
-		idVec3 c( 0.0f, 0.0f, 0.0f );
+		// the anchor is ON the surface: the centroid of the triangle nearest the surface's mean (the mean itself sits
+		// INSIDE a boxy lamp or a wrapped panel, where the occlusion trace hit the fixture's own shell and dropped the
+		// label - user, EnPro 2026-10-20). Dark (switched-off / gone) surfaces carry no label.
+		idVec3 mean( 0.0f, 0.0f, 0.0f );
+		bool lit = false;
 		for ( int t = 0; t < l.numTris; t++ ) {
 			const rtEmissiveTriGPU_t &e = s_rtEmissiveTris[ l.firstTri + t ];
-			c.x += e.p0[0] + e.p1[0] + e.p2[0];
-			c.y += e.p0[1] + e.p1[1] + e.p2[1];
-			c.z += e.p0[2] + e.p1[2] + e.p2[2];
+			mean.x += e.p0[0] + e.p1[0] + e.p2[0];
+			mean.y += e.p0[1] + e.p1[1] + e.p2[1];
+			mean.z += e.p0[2] + e.p1[2] + e.p2[2];
+			lit = lit || e.flux > 0.0f;
 		}
-		c *= 1.0f / ( 3.0f * l.numTris );
-		const idVec3 toEye = eye - c;
-		const float dist = toEye.Length();
-		if ( dist > 700.0f ) {
+		if ( !lit ) {
 			continue;
 		}
-		const rtEmissiveTriGPU_t &e0 = s_rtEmissiveTris[ l.firstTri ];
+		mean *= 1.0f / ( 3.0f * l.numTris );
+		int   best = 0;
+		float bestD = 1e30f;
+		idVec3 c;
+		for ( int t = 0; t < l.numTris; t++ ) {
+			const rtEmissiveTriGPU_t &e = s_rtEmissiveTris[ l.firstTri + t ];
+			const idVec3 tc( ( e.p0[0] + e.p1[0] + e.p2[0] ) * ( 1.0f / 3.0f ), ( e.p0[1] + e.p1[1] + e.p2[1] ) * ( 1.0f / 3.0f ), ( e.p0[2] + e.p1[2] + e.p2[2] ) * ( 1.0f / 3.0f ) );
+			const float d = ( tc - mean ).LengthSqr();
+			if ( d < bestD ) { bestD = d; best = t; c = tc; }
+		}
+		const idVec3 toEye = eye - c;
+		const float dist = toEye.Length();
+		if ( dist > 1200.0f ) {
+			continue;
+		}
+		const rtEmissiveTriGPU_t &e0 = s_rtEmissiveTris[ l.firstTri + best ];
 		const idVec3 p0( e0.p0[0], e0.p0[1], e0.p0[2] ), p1( e0.p1[0], e0.p1[1], e0.p1[2] ), p2( e0.p2[0], e0.p2[1], e0.p2[2] );
-		const idVec3 n = ( p2 - p0 ).Cross( p1 - p0 );							// the engine's face normal (R_DeriveFacePlanes: d2 x d1)
+		idVec3 n = ( p2 - p0 ).Cross( p1 - p0 );								// the engine's face normal (R_DeriveFacePlanes: d2 x d1)
 		if ( !( e0.emit & RT_EMIT_FLAG_TWOSIDED ) && n * toEye < 0.0f ) {
 			continue;															// back-facing: the overlay cannot show it either
 		}
@@ -3667,6 +3684,7 @@ void R_RtEmissiveProjectLabels( const viewDef_t *viewDef ) {
 		cd.x = ( nx * 0.5f + 0.5f ) * 640.0f;									// the 2D text path's VIRTUAL 640x480 space
 		cd.y = ( 1.0f - ( ny * 0.5f + 0.5f ) ) * 480.0f;
 		cd.dist = dist;
+		cd.anchor = c;
 		cd.label = i;
 		cands.Append( cd );
 	}
@@ -3688,19 +3706,15 @@ void R_RtEmissiveProjectLabels( const viewDef_t *viewDef ) {
 		if ( dup ) {
 			continue;
 		}
-		// occlusion: a CPU trace through the map (world + static props, the GUI-pointing trace) from the eye to a
-		// point 2 units in front of the anchor; anything hit on the way is a wall between us and the emitter
+		// occlusion: a CPU trace through the map (world + static props, the GUI-pointing trace) from the eye toward
+		// the anchor. A hit within 16 units of the anchor is the labelled surface itself (or its fixture's rim) -
+		// still visible; a hit farther away is a wall in between.
 		if ( world != NULL ) {
-			idVec3 c( 0.0f, 0.0f, 0.0f );
-			for ( int t = 0; t < l.numTris; t++ ) {
-				const rtEmissiveTriGPU_t &e = s_rtEmissiveTris[ l.firstTri + t ];
-				c.x += e.p0[0] + e.p1[0] + e.p2[0]; c.y += e.p0[1] + e.p1[1] + e.p2[1]; c.z += e.p0[2] + e.p1[2] + e.p2[2];
-			}
-			c *= 1.0f / ( 3.0f * l.numTris );
-			idVec3 dir = eye - c;
+			idVec3 dir = eye - cands[i].anchor;
 			dir.Normalize();
 			modelTrace_t mt;
-			if ( world->Trace( mt, eye, c + dir * 2.0f, 0.0f, true, false, true ) && mt.fraction < 1.0f ) {
+			if ( world->Trace( mt, eye, cands[i].anchor + dir * 1.0f, 0.0f, true, false, true ) && mt.fraction < 1.0f
+					&& ( mt.point - cands[i].anchor ).LengthSqr() > 16.0f * 16.0f ) {
 				continue;
 			}
 		}
