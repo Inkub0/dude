@@ -2198,6 +2198,12 @@ static void R_AddAmbientDrawsurfs( viewEntity_t *vEntity ) {
 		if ( !shader->IsDrawn() ) {
 			continue;
 		}
+		// emitter mode (docs/rtx-emissive-triangles.md): a fixture's flare SURFACE is not drawn while the fixture itself is
+		// the light (r_rtEmissiveHideFlares / r_rtEmissiveLighting). Per surface: a door frame model carries its flare
+		// polygon in the same mesh, and skipping the whole entity blacked the frame out (user, 2026-10-20).
+		if ( R_RtEmissiveHideEntity( def->index ) && R_RtEmissiveIsFlareMaterial( shader ) ) {
+			continue;
+		}
 
 		// debugging tool to make sure we are have the correct pre-calculated bounds
 		if ( r_checkBounds.GetBool() ) {
@@ -2346,11 +2352,6 @@ void R_AddModelSurfaces( void ) {
 		// the baked cubemap faces (the player body is already suppressed by the
 		// unchanged viewID)
 		if ( tr.takingEnvProbe && vEntity->weaponDepthHack ) {
-			continue;
-		}
-		// emitter mode (docs/rtx-emissive-triangles.md): a fixture's flare sprite is not drawn while the fixture itself is
-		// the light (r_rtEmissiveHideFlares)
-		if ( R_RtEmissiveHideEntity( vEntity->entityDef->index ) ) {
 			continue;
 		}
 

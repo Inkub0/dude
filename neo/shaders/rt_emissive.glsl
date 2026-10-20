@@ -6,7 +6,7 @@
 // debug overlay so the layout never drifts.
 //
 // Buffer layout (device address, std430): header (16 B: uint count, float totalFlux, uint cdfOffsetBytes, float
-// meanFlux), then count x RtEmissiveTri (64 B each), then count floats of CDF (unnormalised running flux sum).
+// meanFlux), then count x RtEmissiveTri (80 B each), then count floats of CDF (unnormalised running flux sum).
 //
 // Needs buffer_reference (the VK prelude enables it) + GL_EXT_buffer_reference_uvec2 in the including shader.
 
@@ -19,6 +19,8 @@ struct RtEmissiveTri {
 	vec3  p2;	float scale;		// material intensity scale (r_rtEmissiveScale x the D2 table)
 	uint  st0, st1, st2;			// per-vertex st, half2 (unpackHalf2x16)
 	uint  tint;						// the stage's constant colour, RGBA8 (unpackUnorm4x8); white when RT_EMIT_ANIMATED; alpha = the DIFFUSEGLOW threshold
+	uint  meanRG, meanB;			// the MEAN linear radiance (glow average x stage colour), halves: a uniform emitter lights with this (0 for DIFFUSEGLOW)
+	uint  pad0, pad1;
 };
 
 const uint RT_EMIT_ANIMATED = 1u << 16;		// stage colour is register-driven: the flux is a snapshot, read the live colour
@@ -27,6 +29,12 @@ const uint RT_EMIT_TWOSIDED = 1u << 18;		// the material creates back sides: its
 const uint RT_EMIT_INLIGHT  = 1u << 19;		// sits inside a placed light's volume (E5 census: that light is "fixtured")
 const uint RT_EMIT_DARK     = 1u << 20;		// the fixture is switched OFF in its current state (skin / parm): zero flux, kept in place
 const uint RT_EMIT_DIFFUSEGLOW = 1u << 21;	// the glow slot is the DIFFUSE map: texels brighter than the threshold (tint alpha) emit (flare-inferred)
+
+// The MEAN radiance of a uniform emitter (E2 lights with this: a tile, a tube, an LED panel as a faint flat panel - the
+// texel pattern would only add variance to a 1-spp sample; the per-pixel glow seen on the surface itself is the forward draw)
+vec3 rtEmissiveMeanRadiance( RtEmissiveTri e ) {
+	return vec3( unpackHalf2x16( e.meanRG ), unpackHalf2x16( e.meanB ).x );
+}
 
 // The emitted colour of a glow texel: a real glow map as is; a DIFFUSEGLOW entry through its threshold (only the
 // bright patch under the flare emits, rescaled to 0..1 above the threshold).

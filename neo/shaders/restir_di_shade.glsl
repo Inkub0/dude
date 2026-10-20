@@ -145,21 +145,33 @@ bool diShadeEmitter( RtEmissiveTable t, uint tri, vec2 xi, in DiSurface s, float
 	vec3 nUn, bary;
 	vec3 Pe = rtEmissiveUniformPoint( e, xi, nUn, bary );
 	vec3 d  = Pe - s.Pw;
-	float d2 = max( dot( d, d ), 4.0 );
-	dl   = sqrt( d2 );
+	float nl = length( nUn );
+	if ( !( nl > 1e-6 ) ) { return false; }
+	// NEAR-FIELD clamp: a point sample's 1/d^2 is unbounded as the receiver nears the triangle (a floor meeting a glowing
+	// wall), and with a flux-proportional (distance-blind) proposal those samples are rare AND huge - the fireflies of the
+	// first round. The irradiance from an area emitter is bounded by that of a disc of the triangle's size, so d^2 is
+	// floored at the triangle's area / pi (|nUn| = 2 x area) and at 2 units.
+	float d2 = max( dot( d, d ), max( 4.0, 0.5 * nl * 0.3183 ) );
+	dl   = sqrt( max( dot( d, d ), 1e-4 ) );
 	ldir = d / dl;
 	ndl  = max( dot( s.Nw, ldir ), 0.0 );
 	if ( !( ndl > 0.0 ) ) { return false; }
-	float nl = length( nUn );
-	if ( !( nl > 1e-6 ) ) { return false; }
 	// the engine's face normal is cross( p2 - p0, p1 - p0 ) = -nUn (R_DeriveFacePlanes); the emitter faces the receiver
 	// when that normal points at it
 	float cosL = dot( -nUn / nl, -ldir );
 	if ( ( e.emit & RT_EMIT_TWOSIDED ) != 0u ) { cosL = abs( cosL ); }
 	if ( !( cosL > 0.0 ) ) { return false; }
-	uint slot = e.emit & 0xFFFFu;
-	vec3 texel = ( slot != 0u ) ? textureLod( u_rtTextures[ nonuniformEXT( slot - 1u ) ], rtEmissiveST( e, bary ), 0.0 ).rgb : vec3( 1.0 );
-	vec3 L = rtEmissiveTexelToRadiance( e, texel ) * ( e.scale * intensity );
+	// a UNIFORM emitter lights with its mean radiance (no texture fetch); a flare-inferred patch reads its diffuse texel
+	// through the threshold (its lit bar is a small part of the frame)
+	vec3 L;
+	if ( ( e.emit & RT_EMIT_DIFFUSEGLOW ) != 0u ) {
+		uint slot = e.emit & 0xFFFFu;
+		vec3 texel = ( slot != 0u ) ? textureLod( u_rtTextures[ nonuniformEXT( slot - 1u ) ], rtEmissiveST( e, bary ), 0.0 ).rgb : vec3( 1.0 );
+		L = rtEmissiveTexelToRadiance( e, texel );
+	} else {
+		L = rtEmissiveMeanRadiance( e );
+	}
+	L *= e.scale * intensity;
 	contrib = L * ( cosL * ndl / d2 );
 	if ( s.applyMode && !targetOnly ) {
 		contrib *= diMaterialResponse( s, ldir, ndl );

@@ -158,3 +158,16 @@ No exact equivalence: `r_rtEmissiveIntensity` is the calibration knob until the 
 4. Flares: gone on emitting fixtures (hidden), present on the rest.
 5. Fixture shot out / door light state change: the emitter light follows (console lines).
 Known for round 1: emitter-lit walls do not bounce yet; the glow at a bounce hit is off (slightly less "glow bleed").
+
+**E2 round 1 (user, Mars City, 2026-10-20) - three findings, fixed:**
+1. *Black door frames.* The flare hide skipped the whole ENTITY; Mars City's door frame models carry the flare
+   polygon in the frame mesh. Now only flare SURFACES are skipped (R_AddAmbientDrawsurfs, `R_RtEmissiveIsFlareMaterial`).
+2. *Fireflies / "raindrops" = the lighting.* The sample weights were ill-conditioned: pHat / (Me p) with a
+   distance-blind flux proposal and a per-point texel read. A sample on a large, mostly dark glow panel (the wall
+   panels, the flare-inferred frames with a diffuse-average flux share) close to the receiver was rare and huge.
+   Fixes: (a) NEAR-FIELD clamp d^2 >= max( 4, area / pi ) (an area emitter cannot exceed a disc of its size);
+   (b) uniform emitters light with their MEAN linear radiance (glow average x stage colour, half floats in the
+   80 B entry; no texture fetch) - the texel pattern is variance, not light; the surface's own glow is the forward
+   draw; (c) the flare-inferred frames get a NOMINAL flux (0.02 x area x scale) so they are drawn rarely and keep
+   the thresholded texel read; (d) default candidates 8. Still distance-blind: E3's grid feed is the proper proposal.
+3. Overlay mode 3 now shows the mean radiance flat (what E2 lights with).

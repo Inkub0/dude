@@ -5,7 +5,8 @@
 //   1 = TEXTURE: a stable tint per glow texture (which surfaces are in the table, and which material each belongs to);
 //   2 = FLUX: the triangle's flux relative to the table's MEAN (u_localParam0.y = 1 / meanFlux), log ramp:
 //       blue = 1/16 of the mean or fainter, green = the mean, red = 4x, white = 16x and above;
-//   3 = EMITTED COLOUR: glow texture at the triangle's st x stage tint x material scale - what an E2 sample returns.
+//   3 = EMITTED COLOUR: the emitter's MEAN radiance (glow average x stage colour x scale, flat - what E2 lights with); a
+//       flare-inferred patch shows its diffuse through the threshold instead.
 //   4 = LIGHT COVERAGE (the E5 hybrid question): green = the triangle sits inside a placed light's volume (that light is
 //       "fixtured" and would be dropped when the emitters light the scene), red = no placed light covers it (this
 //       emitter would be the only light there).
@@ -68,7 +69,7 @@ void main() {
 			e *= clamp( ( lum - th ) / max( 1.0 - th, 1e-3 ), 0.0, 1.0 );
 			fragColor = vec4( e * var_FluxScaleIndex.y, 1.0 );
 		} else {
-			fragColor = vec4( e * var_Tint.rgb * var_FluxScaleIndex.y, 1.0 );
+			fragColor = vec4( var_Tint.rgb * var_FluxScaleIndex.y, 1.0 );			// the MEAN radiance E2 lights with (flat; the vertex colour carries it)
 		}
 	}
 }

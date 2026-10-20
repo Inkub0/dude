@@ -2719,7 +2719,10 @@ struct rtEmissiveTriGPU_t {
 	float			p1[3];	unsigned int	emit;		// bits 0-15 the glow texture's bindless slot + 1 (idImage::rhiHandle), 16-31 RT_EMIT_* flags
 	float			p2[3];	float			scale;		// material intensity scale (r_rtEmissiveScale x the D2 table when it lands)
 	unsigned int	st0, st1, st2;						// per-vertex st as half2 (packHalf2x16 layout: s low, t high)
-	unsigned int	tint;								// the stage's constant colour as RGBA8 (R low byte); white when register-driven
+	unsigned int	tint;								// the stage's constant colour as RGBA8 (R low byte); alpha = the DIFFUSEGLOW threshold
+	unsigned int	meanRG, meanB;						// the emitter's MEAN linear radiance (glow average x stage colour), half floats: E2 lights with
+														// this flat colour (a uniform emitter; the texel pattern is variance, not light); DIFFUSEGLOW = 0
+	unsigned int	pad0, pad1;
 };
 static const int	RT_EMISSIVE_HEADER_BYTES = 16;		// uint count, float totalFlux, uint cdfOffsetBytes, float meanFlux
 static const int	RT_EMISSIVE_MAX_TRIS     = 1 << 18;	// 262144 x 64 B = 16 MB table ceiling (+1 MB CDF); a census overflow is reported
@@ -3030,6 +3033,8 @@ static void R_RtEmissiveAddSurface( const srfTriangles_t *tri, const idMaterial 
 	}
 	const unsigned int emit = ( (unsigned int)img->rhiHandle & 0xFFFFu ) | flags;
 	const unsigned int tint = R_RtPackRGBA8( tintRGB );
+	const unsigned int meanRG = R_RtPackHalf2( avgLin[0] * tintRGB[0], avgLin[1] * tintRGB[1] );
+	const unsigned int meanB  = R_RtPackHalf2( avgLin[2] * tintRGB[2], 0.0f );
 	float tm[6];
 	const bool hasTexMatrix = R_RtEmissiveStageTexMatrix( mat, stage, entityParms, tm );
 	int ci = -1;
@@ -3078,27 +3083,36 @@ static void R_RtEmissiveAddSurface( const srfTriangles_t *tri, const idMaterial 
 			*stOut[k] = R_RtPackHalf2( s0, t0 );
 		}
 		e.tint = tint;
+		e.meanRG = meanRG; e.meanB = meanB; e.pad0 = 0u; e.pad1 = 0u;
 		census[ci].tris++;
 		census[ci].flux += e.flux;
 	}
 }
 
-// A light entity's flare: a model with a sprite-deformed additive material
+// A flare material: flare- or sprite-deformed with an additive stage (textures/sfx/flare is `deform flare`, light
+// glows `deform sprite`). The surface the emitter-mode hide skips.
+bool R_RtEmissiveIsFlareMaterial( const idMaterial *mat ) {
+	if ( mat == NULL || ( mat->Deform() != DFRM_SPRITE && mat->Deform() != DFRM_FLARE ) ) {
+		return false;
+	}
+	for ( int k = 0; k < mat->GetNumStages(); k++ ) {
+		const shaderStage_t *st = mat->GetStage( k );
+		if ( ( st->drawStateBits & GLS_SRCBLEND_BITS ) == GLS_SRCBLEND_ONE && ( st->drawStateBits & GLS_DSTBLEND_BITS ) == GLS_DSTBLEND_ONE ) {
+			return true;
+		}
+	}
+	return false;
+}
+
+// A light entity's flare: a model with a flare surface (a door frame's flare polygon is in the frame mesh itself)
 static bool R_RtEmissiveIsFlareEntity( const idRenderEntityLocal *def ) {
 	if ( def == NULL || def->parms.hModel == NULL ) {
 		return false;
 	}
 	const idRenderModel *model = def->parms.hModel;
 	for ( int sf = 0; sf < model->NumSurfaces(); sf++ ) {
-		const idMaterial *mat = R_RemapShaderBySkin( model->Surface( sf )->shader, def->parms.customSkin, def->parms.customShader );
-		if ( mat == NULL || ( mat->Deform() != DFRM_SPRITE && mat->Deform() != DFRM_FLARE ) ) {
-			continue;															// textures/sfx/flare is `deform flare`, light glows `deform sprite`
-		}
-		for ( int k = 0; k < mat->GetNumStages(); k++ ) {
-			const shaderStage_t *st = mat->GetStage( k );
-			if ( ( st->drawStateBits & GLS_SRCBLEND_BITS ) == GLS_SRCBLEND_ONE && ( st->drawStateBits & GLS_DSTBLEND_BITS ) == GLS_DSTBLEND_ONE ) {
-				return true;
-			}
+		if ( R_RtEmissiveIsFlareMaterial( R_RemapShaderBySkin( model->Surface( sf )->shader, def->parms.customSkin, def->parms.customShader ) ) ) {
+			return true;
 		}
 	}
 	return false;
@@ -3226,8 +3240,9 @@ static int R_RtEmissiveInferFromFlares( const idRenderWorldLocal *world, float s
 		common->Printf( "    flare entity %d at %.0f %.0f %.0f: INFERRED '%s' at %.0f units\n", fi, o.x, o.y, o.z, best.mat->GetName(), best.dist );
 		// the surface's triangles within reach of the flare become diffuse-glow entries
 		const idImage *img = best.diffuse->texture.image;
-		const float avgLin[3] = { R_RtSrgbToLinear( img->averageColor[0] ), R_RtSrgbToLinear( img->averageColor[1] ), R_RtSrgbToLinear( img->averageColor[2] ) };
-		const float lumPerArea = Max( R_RtLuminance( avgLin ), 0.05f ) * scale;
+		// a NOMINAL flux: the diffuse average counts the whole grey frame, but only the bright patch under the threshold
+		// emits, so these entries are drawn rarely (their sampling share is what made the fireflies, 2026-10-20)
+		const float lumPerArea = 0.02f * scale;
 		const unsigned int emit = ( (unsigned int)img->rhiHandle & 0xFFFFu ) | RT_EMIT_FLAG_DIFFUSEGLOW | ( best.entity ? RT_EMIT_FLAG_ENTITY : 0u );
 		float tm[6];
 		const bool hasTexMatrix = R_RtEmissiveStageTexMatrix( best.mat, best.diffuse, NULL, tm );
@@ -3258,6 +3273,7 @@ static int R_RtEmissiveInferFromFlares( const idRenderWorldLocal *world, float s
 				*stOut[k] = R_RtPackHalf2( s0, t0 );
 			}
 			e.tint = 0x00FFFFFFu | ( thresholdByte << 24 );					// white tint, threshold in alpha
+			e.meanRG = 0u; e.meanB = 0u; e.pad0 = 0u; e.pad1 = 0u;			// no mean: the texel through its threshold
 		}
 		const int numTris = s_rtEmissiveTris.Num() - firstTri;
 		if ( numTris == 0 ) {
@@ -3480,9 +3496,12 @@ static void R_RtEmissiveFillDebugVerts( int firstTri, int numTris, idDrawVert *v
 			v.st[1] = R_RtF16toF32( st[k] >> 16 );
 			v.normal.Set( e.flux, e.scale, (float)( firstTri + i ) );
 			v.tangents[0].Set( (float)( e.emit & 0xFFFFu ), (float)( e.emit >> 16 ), 0.0f );
-			v.color[0] = (byte)( e.tint & 0xFFu );
-			v.color[1] = (byte)( ( e.tint >> 8 ) & 0xFFu );
-			v.color[2] = (byte)( ( e.tint >> 16 ) & 0xFFu );
+			if ( e.emit & RT_EMIT_FLAG_DIFFUSEGLOW ) {
+				v.color[0] = v.color[1] = v.color[2] = 255;				// the texel through its threshold (mode 3)
+			} else {
+				const float m[3] = { R_RtF16toF32( e.meanRG & 0xFFFFu ), R_RtF16toF32( e.meanRG >> 16 ), R_RtF16toF32( e.meanB & 0xFFFFu ) };
+				for ( int ch = 0; ch < 3; ch++ ) { v.color[ch] = (byte)( idMath::ClampFloat( 0.0f, 1.0f, m[ch] ) * 255.0f + 0.5f ); }	// the MEAN radiance E2 lights with (mode 3)
+			}
 			v.color[3] = (byte)( ( e.tint >> 24 ) & 0xFFu );		// alpha carries the DIFFUSEGLOW threshold (255 otherwise)
 		}
 	}
