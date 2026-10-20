@@ -5099,10 +5099,13 @@ static void DrawDbgGroup_ReStirDI()
 			"noise, closer to exhaustive (a cell with more lights that matter than slots drops the dimmest), but a bigger grid "
 			"buffer and a dearer gather. Default 9; emissive mode uses its own count (Emissive Lights group). A change "
 			"re-allocates. (r_rtLightGridSlots)" );
+		ImGui::BeginDisabled( r_rtEmissiveLighting.GetBool() );
 		CvarCheckbox( "  Rank by Light Falloff", r_rtLightGridRankLinear, "Rank a cell's candidates by what a light actually "
-			"delivers there (colour x (1 - distance / radius), a Doom light's own falloff) instead of the inverse-square proxy, "
-			"which overrates a light near its rim and lets big ambience lights crowd out a room's own fixtures. "
-			"(r_rtLightGridRankLinear)" );
+			"delivers there (colour x (1 - distance / radius), a Doom light's own falloff) instead of the inverse-square proxy. "
+			"Always OFF while Emissive Mode is on: with the emitter rows in the buffer the inverse-square rank is what keeps "
+			"a room's fixtures in their cells. (r_rtLightGridRankLinear)" );
+		ImGui::EndDisabled();
+		if ( r_rtEmissiveLighting.GetBool() ) { ImGui::SameLine(); ImGui::TextDisabled( "(off in Emissive Mode)" ); }
 		CvarCheckbox( "  Jitter Cell Lookup", r_rtLightGridJitter, "Each pixel (and GI bounce hit) looks its candidates up at a "
 			"position jittered by up to half a cell, so neighbouring pixels read neighbouring cells: a light one cell keeps and "
 			"the next drops becomes per-pixel noise the denoiser averages instead of a cell-shaped step. (r_rtLightGridJitter)" );

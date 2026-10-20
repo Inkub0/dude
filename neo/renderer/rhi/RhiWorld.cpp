@@ -9806,10 +9806,14 @@ static void RB_RHI_LightGridFill( rhi::RHI *r, unsigned long long lightAddr, int
 	pc.camX        = g.parms.camPos[0];
 	pc.camY        = g.parms.camPos[1];
 	pc.camZ        = g.parms.camPos[2];
-	pc.parallelFlux = r_rtLightGridRankLinear.GetBool() ? 1.0f : 4.0f;	// a sun's rank: lum x this (no distance term); 1 = a full-strength light everywhere under the linear rank
 	// bounce-only emitter rows exist only in normal mode with r_rtEmissiveBounce: their 2-slot quota must not waste slots in emissive mode
 	pc.quotaB      = ( !r_rtEmissiveLighting.GetBool() && r_rtEmissiveBounce.GetBool() ) ? 2u : 0u;
-	pc.rankLinear  = r_rtLightGridRankLinear.GetBool() ? 1u : 0u;
+	// RULE (user, 2026-10-20): the linear rank is OFF while emissive mode is on - with the emitter rows in the buffer the
+	// inverse-square proxy is what keeps a room's fixtures in their cells (the linear rank lost them); the checkbox is
+	// greyed out in the menu for the same reason
+	const bool rankLinear = r_rtLightGridRankLinear.GetBool() && !r_rtEmissiveLighting.GetBool();
+	pc.rankLinear  = rankLinear ? 1u : 0u;
+	pc.parallelFlux = rankLinear ? 1.0f : 4.0f;	// a sun's rank: lum x this (no distance term); 1 = a full-strength light everywhere under the linear rank
 	rhi::ComputeArgs ca = rhi::ComputeArgs();
 	ca.shader = g.fillProg;
 	ca.pushConstants = &pc;

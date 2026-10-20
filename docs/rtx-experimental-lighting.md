@@ -470,3 +470,5 @@ shaders receive is the count WRITTEN this frame; r_rtEmissiveMaxRows joins Compu
   r_rtLightGridSlots, which stays 9 for normal mode); in ComputeGfxCfgSignature. Why more candidates in emissive mode:
   two rows per multi-surface fixture, uncovered emitters at r_rtEmissiveReachDefault (300), a row's cull = surface
   bound + reach. r_rtReStirDIDebug 8 (chosen light per pixel) exists now for the next such question.
+- RULE (user, 2026-10-20): "the only thing that seems to help is disabling Rank by Light Falloff" in emissive mode ->
+  r_rtLightGridRankLinear is forced OFF while r_rtEmissiveLighting is on (RB_RHI_LightGridFill), the checkbox greyed.
