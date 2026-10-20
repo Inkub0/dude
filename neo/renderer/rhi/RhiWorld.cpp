@@ -9826,7 +9826,8 @@ static void RB_RHI_LightGridFill( rhi::RHI *r, unsigned long long lightAddr, int
 // u_modelViewMatrix[3] (view->world), which every RT pass already has. rtgi_light_grid.glsl lgParmsFromVec4 unpacks it.
 static void RB_RHI_LightGridPack( rhi::RenderParams &parms, const rtLightGridParms_t &gp ) {
 	const unsigned int gridLo = (unsigned int)( gp.gridAddr & 0xFFFFFFFFull ), gridHi = (unsigned int)( gp.gridAddr >> 32 );
-	const unsigned int packed = (unsigned int)gp.res | ( (unsigned int)gp.cascades << 8 ) | ( (unsigned int)gp.slots << 16 );
+	const unsigned int packed = (unsigned int)gp.res | ( (unsigned int)gp.cascades << 8 ) | ( (unsigned int)gp.slots << 16 )
+	                          | ( r_rtLightGridJitter.GetBool() ? ( 1u << 24 ) : 0u );	// bit 24 = per-pixel half-cell lookup jitter
 	memcpy( &parms.occlusionParms[0], &gridLo, sizeof( gridLo ) );
 	memcpy( &parms.occlusionParms[1], &gridHi, sizeof( gridHi ) );
 	parms.occlusionParms[2] = gp.cellBase;

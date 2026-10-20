@@ -153,3 +153,10 @@ diagnostic cvars once tuned.
 - Our own `rt_hash_grid.glsl` / `rtgi_cache_resolve.comp` for the device-buffer + compute-fill plumbing pattern;
   `RB_RHI_GatherSceneLights` for the light buffer; `rt_light_eval.glsl` `RtLight` / `dudeLightInRange` /
   `dudeLightAtten` for the importance metric; `restir_di.frag` draws loop for the consume site.
+
+## L4' - per-pixel lookup jitter (2026-10-20)
+A cell keeps its top `slots` lights and drops the rest; where the dropped set differs between neighbouring cells the
+lighting stepped at the cell border (visible once emissive mode put ~300 emitter rows into the buffer). r_rtLightGridJitter
+(default 1): the DI gather and the GI bounce look up their cell at a position jittered by up to half the cell size per
+pixel (rtgi_light_grid.glsl lgCellBaseJittered), so a step becomes per-pixel noise the denoiser averages. The fill is
+unchanged (deterministic top-N); the grid stays stable frame to frame.

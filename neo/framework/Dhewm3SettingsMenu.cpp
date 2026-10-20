@@ -5090,10 +5090,14 @@ static void DrawDbgGroup_ReStirDI()
 	if ( r_rtLightGrid.GetBool() ) {
 		ImGui::BeginDisabled( !rtCapable );
 		CvarSliderI( "  Candidates / Cell", r_rtLightGridSlots, 1, 16, "Lights stored per cell. More = less candidate "
-			"noise, closer to exhaustive, but a bigger grid buffer and a dearer fill. Default 16. A change re-allocates. (r_rtLightGridSlots)" );
+			"noise, closer to exhaustive (a cell with more lights that matter than slots drops the dimmest), but a bigger grid "
+			"buffer and a dearer gather. Default 9; emissive mode is happier at 16. A change re-allocates. (r_rtLightGridSlots)" );
+		CvarCheckbox( "  Jitter Cell Lookup", r_rtLightGridJitter, "Each pixel (and GI bounce hit) looks its candidates up at a "
+			"position jittered by up to half a cell, so neighbouring pixels read neighbouring cells: a light one cell keeps and "
+			"the next drops becomes per-pixel noise the denoiser averages instead of a cell-shaped step. (r_rtLightGridJitter)" );
 		CvarSliderF( "  Cell Size", r_rtLightGridCellBase, 8.0f, 128.0f, "%.0f u", "Cascade-0 cell size in world units "
 			"(each further cascade doubles it). Smaller = finer candidate sets near you but the grid re-centres in smaller "
-			"steps as you move. Default 16. (r_rtLightGridCellBase)" );
+			"steps as you move. Default 24. (r_rtLightGridCellBase)" );
 		CvarSliderI( "  Resolution", r_rtLightGridRes, 8, 64, "Cells per axis in each cascade (the grid is res^3 x cascades). "
 			"Higher = finer candidate sets but more cells to fill and store. Default 32. A change re-allocates. (r_rtLightGridRes)" );
 		CvarSliderI( "  Cascades", r_rtLightGridCascades, 1, 4, "Camera-centred cascades (each twice the reach of the last). "

@@ -71,6 +71,7 @@ struct LgParms {
 	int   res;
 	int   cascades;
 	uint  slots;
+	bool  jitter;		// r_rtLightGridJitter: the consumer jitters its lookup by up to half a cell per pixel
 };
 
 bool lgPresent( LgParms p ) { return ( p.gridAddr.x | p.gridAddr.y ) != 0u && p.slots > 0u; }
@@ -86,6 +87,7 @@ LgParms lgParmsFromVec4( vec4 v, vec3 camPos ) {
 	p.res       = int( packed & 0xFFu );
 	p.cascades  = int( ( packed >> 8 ) & 0xFu );
 	p.slots     = ( packed >> 16 ) & 0x3Fu;
+	p.jitter    = ( packed & ( 1u << 24 ) ) != 0u;
 	return p;
 }
 
@@ -95,6 +97,20 @@ int lgCellBase( LgParms p, vec3 world ) {
 	int c = lgPickCascade( world, p.camPos, p.cellBase, p.res, p.cascades, cell );
 	if ( c < 0 ) { return -1; }
 	return int( lgCellIndex( c, cell, p.res ) * lgStride( p.slots ) );
+}
+
+// The cell record base for world point p with the lookup JITTERED by up to half the cell size of p's cascade (three
+// fresh randoms from rng): neighbouring pixels read neighbouring cells, so a light one cell keeps and the next drops
+// becomes per-pixel noise the denoiser averages instead of a cell-shaped step (RTXDI's ReGIR jitter). -1 as lgCellBase.
+int lgCellBaseJittered( LgParms p, vec3 world, inout uint rng ) {
+	if ( !p.jitter ) { return lgCellBase( p, world ); }
+	ivec3 cell;
+	int c = lgPickCascade( world, p.camPos, p.cellBase, p.res, p.cascades, cell );
+	if ( c < 0 ) { return -1; }
+	float cs = p.cellBase * float( 1 << c );
+	vec3  j  = ( vec3( lgRand( rng ), lgRand( rng ), lgRand( rng ) ) - 0.5 ) * cs;
+	int b = lgCellBase( p, world + j );
+	return ( b >= 0 ) ? b : lgCellBase( p, world );			// jittered out of the grid: the exact cell
 }
 
 uint  lgCount( LgGrid grid, int base )            { return grid.g[ base ]; }

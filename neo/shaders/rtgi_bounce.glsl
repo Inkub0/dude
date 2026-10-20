@@ -188,7 +188,11 @@ int rtgiTraceBounce( RtgiBounceParms bp, vec3 Pw, vec3 Nw, vec3 eyeW, float d, v
 		LgGrid lgG    = LgGrid( bp.grid.gridAddr );
 		int    lgBase = -1;
 		uint   lgN    = 0u;
-		if ( lgUse ) { lgBase = lgCellBase( bp.grid, hitWorld ); if ( lgBase >= 0 ) { lgN = lgCount( lgG, lgBase ); } }
+		if ( lgUse ) {
+			uint rj = lgPcg( uint( sfrag.x ) * 7919u + uint( sfrag.y ) * 104729u + uint( bp.sampleFrame ) * 15485863u ) | 1u;
+			lgBase = lgCellBaseJittered( bp.grid, hitWorld, rj );		// r_rtLightGridJitter (as the DI gather)
+			if ( lgBase >= 0 ) { lgN = lgCount( lgG, lgBase ); }
+		}
 		lgUse = lgUse && lgBase >= 0 && lgN > 0u;
 		uint nIter = lgUse ? lgN : bp.nLights;
 		for ( uint ii = 0u; ii < nIter; ii++ ) {

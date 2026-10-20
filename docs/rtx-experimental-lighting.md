@@ -459,3 +459,8 @@ shaders receive is the count WRITTEN this frame; r_rtEmissiveMaxRows joins Compu
   its light, the cells overflowed and rows were evicted at random cells (three identical alcoves: lit / half / dark,
   all three red in mode 5). Now reach = the frustum bounds' radius (a spot's extent, ~0.87 x a point light's half-extent).
   The bounce-only quota is 0 in emissive mode (pc.quotaB). NEXT if blocks persist: r_rtLightGridDebug 2 (white = full).
+- CELL LOOKUP JITTER (2026-10-20, user: "our architecture doesn't care about the number of lights"): in COST it does
+  not (O(slots) per pixel); in QUALITY a cell with more lights that matter than r_rtLightGridSlots (default 9!) drops the
+  dimmest, and a dropped light is a cell-shaped step - the L4 follow-up never landed. RTXDI's answer, now built:
+  r_rtLightGridJitter (default 1) jitters every pixel's (and bounce hit's) lookup by up to half a cell, so the steps
+  become per-pixel noise NRD averages. r_rtLightGridSlots 16 is the other lever for emissive mode.

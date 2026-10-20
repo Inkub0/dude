@@ -293,7 +293,7 @@ void main() {
 	int  lgBase = -1;
 	uint lgN    = 0u;
 	if ( lgPresent( lgp ) ) {
-		lgBase = lgCellBase( lgp, S.Pw );
+		lgBase = lgCellBaseJittered( lgp, S.Pw, rng );		// r_rtLightGridJitter: half-cell per-pixel jitter (cell steps -> noise)
 		if ( lgBase >= 0 ) { lgN = lgCount( lgGrid, lgBase ); }
 	}
 	bool useGrid = lgN > 0u;

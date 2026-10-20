@@ -1081,6 +1081,7 @@ extern idCVar r_rtgiCacheReset;				// RT irradiance cache: the DI gradient resta
 extern idCVar r_rtgiCacheServeError;		// RT irradiance cache: C6 tail serve gate - default 0.33 = by the mean's relative standard error; 0 = by age (N >= SEED_N), the original C6 A/B
 extern idCVar r_rtLightGrid;				// RT light grid (docs/rtx-light-grid.md): per-cell importance-sampled light candidates replace the DI/bounce exhaustive RIS (perf)
 extern idCVar r_rtLightGridSlots;			// RT light grid: candidates stored per cell (reconfiguring: joins ComputeGfxCfgSignature)
+extern idCVar r_rtLightGridJitter;			// RT light grid: per-pixel half-cell jitter of the cell lookup (cell-border steps -> noise)
 extern idCVar r_rtLightGridRes;				// RT light grid: cells per cascade axis (reconfiguring)
 extern idCVar r_rtLightGridCascades;		// RT light grid: camera-centred cascades (reconfiguring)
 extern idCVar r_rtLightGridCellBase;		// RT light grid: cascade-0 cell size in units (per-frame, no realloc)
