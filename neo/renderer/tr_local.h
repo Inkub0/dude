@@ -1089,6 +1089,7 @@ extern idCVar r_rtEmissiveTable;			// RT emissive triangle table (docs/rtx-emiss
 extern idCVar r_rtEmissiveTableDebug;		// RT emissive table debug overlay: 1 per-texture tint, 2 flux, 3 emitted colour
 extern idCVar r_rtEmissiveScale;
 extern idCVar r_rtEmissiveHideFlares;		// emitter mode: hide the flare sprites of fixtures that are table emitters			// RT emissive table: global flux / emitted-colour multiplier (rebuilds the table)
+extern idCVar r_rtEmissiveFlareInfer;		// RT emissive table: promote the diffuse patch under a flare on a glow-less fixture to an emitter
 extern idCVar r_rtReflTemporal;				// RR6: accumulate RT reflections through the SSR temporal pipeline (+ ray jitter) to kill the firefly grid
 extern idCVar r_rtReflJitter;				// RR6: per-frame RT-reflection ray jitter cone scale (needs r_rtReflTemporal)
 extern idCVar r_rtReflBlur;					// RR6b: box-blur the RT reflection before compositing (dissolves the static firefly grid)

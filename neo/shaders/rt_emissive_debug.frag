@@ -49,6 +49,7 @@ void main() {
 	if ( mode == 1 ) {
 		vec3 c = dbgTint( slot );
 		if ( ( flags & ( 1u << 16 ) ) != 0u ) { c = mix( c, vec3( 1.0 ), 0.35 * step( 0.5, fract( gl_FragCoord.x * 0.125 ) ) ); }	// animated colour: striped
+		if ( ( flags & ( 1u << 21 ) ) != 0u ) { c = mix( c, vec3( 0.0 ), 0.5 * step( 0.5, fract( gl_FragCoord.x * 0.0625 ) ) * step( 0.5, fract( gl_FragCoord.y * 0.0625 ) ) ); }	// flare-inferred: checkered
 		fragColor = vec4( c, 1.0 );
 	} else if ( mode == 2 ) {
 		float rel = var_FluxScaleIndex.x * u_localParam0.y;					// flux / meanFlux
@@ -61,6 +62,13 @@ void main() {
 		fragColor = ( ( flags & ( 1u << 19 ) ) != 0u ) ? vec4( 0.1, 0.9, 0.2, 1.0 ) : vec4( 0.95, 0.15, 0.1, 1.0 );
 	} else {
 		vec3 e = ( slot != 0u ) ? textureLod( u_rtTextures[ nonuniformEXT( slot - 1u ) ], var_TexCoord, 0.0 ).rgb : vec3( 1.0 );
-		fragColor = vec4( e * var_Tint.rgb * var_FluxScaleIndex.y, 1.0 );
+		if ( ( flags & ( 1u << 21 ) ) != 0u ) {										// flare-inferred: the diffuse through its threshold
+			float th  = var_Tint.a;
+			float lum = dot( e, vec3( 0.2126, 0.7152, 0.0722 ) );
+			e *= clamp( ( lum - th ) / max( 1.0 - th, 1e-3 ), 0.0, 1.0 );
+			fragColor = vec4( e * var_FluxScaleIndex.y, 1.0 );
+		} else {
+			fragColor = vec4( e * var_Tint.rgb * var_FluxScaleIndex.y, 1.0 );
+		}
 	}
 }

@@ -440,3 +440,16 @@ origin within 64 units of a table triangle is marked; `R_AddModelSurfaces` skips
 The probe reports the mark. A flare is a painted stand-in for glare; once the fixture is the light it is a second,
 fake highlight. Flares of fixtures that are NOT emitters (the EnPro frame above) are kept - they are all that fixture
 has until its D2 row exists.
+
+**Flare-inferred emitters (user's idea, 2026-10-20; supersedes the D2 diffuse-glow row as the DEFAULT path).** The
+flare IS the mapper's marker. `r_rtEmissiveFlareInfer` (default 1): at build, for every flare entity (a sprite-
+deformed additive material) whose origin is not already within 64 units of a table triangle, the nearest opaque /
+perforated surface (world or static entity) within 48 units that has a diffuse map and NO additive stage is found
+(`R_RtEmissiveInferFromFlares`); its triangles within 48 units of the flare become entries whose glow slot is the
+DIFFUSE map, flagged `RT_EMIT_FLAG_DIFFUSEGLOW` with the brightness threshold (0.6) in the tint alpha.
+`rtEmissiveTexelToRadiance` (rt_emissive.glsl; overlay mode 3 does the same) reads the diffuse through the
+threshold, so only the white patch under the flare emits; flux = area x linearised diffuse average x scale (a
+generous sampling share for a mostly grey panel; the light itself is right). Census rows say "(FLARE-INFERRED)",
+mode 1 checkers them, the probe reports the verdict. Such flares are then hidden in emitter mode like the others.
+Inferred entity entries are not mover-tracked (door frames, lamp housings). The D2 row form remains for fixtures
+without a flare.

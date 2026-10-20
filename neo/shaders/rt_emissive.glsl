@@ -15,7 +15,7 @@ struct RtEmissiveTri {
 	vec3  p1;	uint  emit;			// bits 0-15 the glow texture's bindless slot + 1 (0 = none), bits 16-31 RT_EMIT_* flags
 	vec3  p2;	float scale;		// material intensity scale (r_rtEmissiveScale x the D2 table)
 	uint  st0, st1, st2;			// per-vertex st, half2 (unpackHalf2x16)
-	uint  tint;						// the stage's constant colour, RGBA8 (unpackUnorm4x8); white when RT_EMIT_ANIMATED
+	uint  tint;						// the stage's constant colour, RGBA8 (unpackUnorm4x8); white when RT_EMIT_ANIMATED; alpha = the DIFFUSEGLOW threshold
 };
 
 const uint RT_EMIT_ANIMATED = 1u << 16;		// stage colour is register-driven: the flux is a snapshot, read the live colour
@@ -23,6 +23,19 @@ const uint RT_EMIT_ENTITY   = 1u << 17;		// from a static entity model (else wor
 const uint RT_EMIT_TWOSIDED = 1u << 18;		// the material creates back sides: its reversed twin is in the table too
 const uint RT_EMIT_INLIGHT  = 1u << 19;		// sits inside a placed light's volume (E5 census: that light is "fixtured")
 const uint RT_EMIT_DARK     = 1u << 20;		// the fixture is switched OFF in its current state (skin / parm): zero flux, kept in place
+const uint RT_EMIT_DIFFUSEGLOW = 1u << 21;	// the glow slot is the DIFFUSE map: texels brighter than the threshold (tint alpha) emit (flare-inferred)
+
+// The emitted colour of a glow texel: a real glow map as is; a DIFFUSEGLOW entry through its threshold (only the
+// bright patch under the flare emits, rescaled to 0..1 above the threshold).
+vec3 rtEmissiveTexelToRadiance( RtEmissiveTri e, vec3 texel ) {
+	if ( ( e.emit & RT_EMIT_DIFFUSEGLOW ) != 0u ) {
+		float th  = unpackUnorm4x8( e.tint ).a;
+		float lum = dot( texel, vec3( 0.2126, 0.7152, 0.0722 ) );
+		float k   = clamp( ( lum - th ) / max( 1.0 - th, 1e-3 ), 0.0, 1.0 );
+		return texel * k;
+	}
+	return texel * unpackUnorm4x8( e.tint ).rgb;
+}
 
 layout(buffer_reference, std430, buffer_reference_align = 16) buffer RtEmissiveHeader { uint count; float totalFlux; uint cdfOffset; float meanFlux; };
 layout(buffer_reference, std430, buffer_reference_align = 16) buffer RtEmissiveTris   { RtEmissiveTri t[]; };
