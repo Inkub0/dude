@@ -2722,7 +2722,8 @@ struct rtEmissiveTriGPU_t {
 	unsigned int	tint;								// the stage's constant colour as RGBA8 (R low byte); alpha = the DIFFUSEGLOW threshold
 	unsigned int	meanRG, meanB;						// the emitter's MEAN linear radiance (glow average x stage colour), half floats: E2 lights with
 														// this flat colour (a uniform emitter; the texel pattern is variance, not light); DIFFUSEGLOW = 0
-	unsigned int	pad0, pad1;
+	unsigned int	reach;								// E6: float bits - the authored radius of the placed light this emitter sits in (0 = none; the census fills it)
+	unsigned int	pad1;
 };
 static const int	RT_EMISSIVE_HEADER_BYTES = 16;		// uint count, float totalFlux, uint cdfOffsetBytes, float meanFlux
 static const int	RT_EMISSIVE_MAX_TRIS     = 1 << 18;	// 262144 x 64 B = 16 MB table ceiling (+1 MB CDF); a census overflow is reported
@@ -3061,7 +3062,7 @@ static int R_RtEmissiveEmitTriangle( const idVec3 p[3], const float st[3][2], co
 		e.scale = scale;
 		e.st0 = R_RtPackHalf2( a.s, a.t ); e.st1 = R_RtPackHalf2( b.s, b.t ); e.st2 = R_RtPackHalf2( c.s, c.t );
 		e.tint = tint;
-		e.meanRG = meanRG; e.meanB = meanB; e.pad0 = 0u; e.pad1 = 0u;
+		e.meanRG = meanRG; e.meanB = meanB; e.reach = 0u; e.pad1 = 0u;
 		added++;
 	};
 	pv_t v[3];
@@ -3728,9 +3729,11 @@ static bool R_RtEmissiveRegatherGroup( rtEmissiveGroup_t &g, const idRenderEntit
 		return false;
 	}
 	for ( int t = 0; t < g.numTris; t++ ) {
-		const unsigned int inLight = s_rtEmissiveTris[ g.firstTri + t ].emit & RT_EMIT_FLAG_INLIGHT;	// the census flag survives
+		const unsigned int inLight = s_rtEmissiveTris[ g.firstTri + t ].emit & RT_EMIT_FLAG_INLIGHT;	// the census flag + reach survive
+		const unsigned int reach = s_rtEmissiveTris[ g.firstTri + t ].reach;
 		s_rtEmissiveTris[ g.firstTri + t ] = scratch[t];
 		s_rtEmissiveTris[ g.firstTri + t ].emit |= inLight;
+		s_rtEmissiveTris[ g.firstTri + t ].reach = reach;
 	}
 	for ( int v = 0; v < g.numTris * 3; v++ ) {
 		s_rtEmissiveLocalVerts[ g.firstLocalVert + v ] = scratchLocal[v];
@@ -3853,7 +3856,7 @@ static void R_RtEmissiveRefreshMovers( const idRenderWorldLocal *world, rhi::RHI
 static void R_RtEmissiveLightCensus( const idRenderWorldLocal *world, rhi::RHI *r ) {
 	int total = 0, fixtured = 0, ambience = 0, parallel = 0, fogBlend = 0, fixturedAmbientMat = 0, ambienceAmbientMat = 0, trisInLight = 0;
 	const int n = s_rtEmissiveTris.Num();
-	for ( int t = 0; t < n; t++ ) { s_rtEmissiveTris[t].emit &= ~RT_EMIT_FLAG_INLIGHT; }
+	for ( int t = 0; t < n; t++ ) { s_rtEmissiveTris[t].emit &= ~RT_EMIT_FLAG_INLIGHT; s_rtEmissiveTris[t].reach = 0u; }
 	s_rtEmissiveLightFixturedSerial.SetNum( world->lightDefs.Num(), false );
 	for ( int i = 0; i < world->lightDefs.Num(); i++ ) { s_rtEmissiveLightFixturedSerial[i] = 0u; }
 	s_rtEmissiveLightDbg.SetNum( 0, false );
@@ -3889,6 +3892,11 @@ static void R_RtEmissiveLightCensus( const idRenderWorldLocal *world, rhi::RHI *
 			if ( inside ) {
 				hit = true;
 				e.emit |= RT_EMIT_FLAG_INLIGHT;
+				// the authored reach of the light this emitter replaces: a point light's radius, a spot's extent (the
+				// frustum bounds' half-diagonal); the LARGEST of the lights the triangle sits in
+				float radius = ld->parms.pointLight ? ld->parms.lightRadius.Length() : ( lb != NULL ? 0.5f * ( lb->operator[]( 1 ) - lb->operator[]( 0 ) ).Length() : 0.0f );
+				float cur; memcpy( &cur, &e.reach, sizeof( cur ) );
+				if ( radius > cur ) { memcpy( &e.reach, &radius, sizeof( radius ) ); }
 			}
 		}
 		const bool ambMat = ld->lightShader->IsAmbientLight();

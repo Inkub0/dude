@@ -157,7 +157,7 @@ bool diShadeEmitter( RtEmissiveTable t, uint tri, vec2 xi, in DiSurface s, float
 	// Emission profile sqrt( cos_e ) (Q2RTX's "spotlight"): a tube reads directional, a tile stays broad.
 	float cosL = max( -dot( nUnit, ldir ), 0.0 );
 	if ( !( cosL > 0.0 ) ) { return false; }
-	vec3 L = rtEmissiveMeanRadiance( e ) * ( e.scale * intensity );			// a uniform emitter: its mean radiance
+	vec3 L = rtEmissiveMeanRadiance( e ) * ( e.scale * intensity * rtEmissiveReachBoost( e, dl, u_texGen0Q.z, u_texGen0Q.w ) );	// a uniform emitter: its mean radiance, the authored reach
 	contrib = L * ( sqrt( cosL ) * ndl );
 	if ( s.applyMode && !targetOnly ) {
 		contrib *= diMaterialResponse( s, ldir, ndl );

@@ -304,3 +304,15 @@ bounce-hit sample ~1.3 ms of gather, ~0.5 ms per candidate, fill 0.5 ms. Mode 5 
 terminal's monitors: DUDE's GUI fill light classed fixtured (the LED decal in its volume) and dropped - GUI screens
 are not emitters, so fill lights are now KEPT (D1's replacement waits for GUI entries). Labels are off in mode 5.
 The normal-mode bounce A/B must be done at dude_rtx 2 (at the hybrid tier the DI buffer is debug-only).
+
+**E6 reach (user finding, EnPro, 2026-10-20).** With the bounce on, intensity 10 matches Marine HQ, but EnPro's
+hall walls stay dark: a Doom 3 light falls off LINEARLY to an authored radius the mapper set to fill the hall, an area
+emitter with the inverse square. Fix, faithful rather than global: the census records, per emissive triangle, the
+authored radius of the placed light it sits in (`reach`, float bits in the entry; a point light's lightRadius, a
+spot's frustum half-diagonal; the largest when several); past 1/4 of that radius the sample is boosted by
+d / (R/4) so the far field goes ~1/d - the hall fixture lights the hall it was authored for, a small panel stays
+local. `r_rtEmissiveReach` (1 = the authored radius, 0 = pure physics), `r_rtEmissiveReachDefault` (300 units) for
+emitters no light covers. Applied in diShadeEmitter and the bounce-hit sample (`rtEmissiveReachBoost`).
+The user also found that MORE CANDIDATES brighten the far field: the estimator is unbiased, but NRD's firefly /
+fast-history clamps suppress a sparse bright signal, so a far wall lit by rare hits reads darker than its mean -
+more samples densify the signal and the denoiser keeps it. Reach and samples are complementary levers.

@@ -8271,6 +8271,8 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 			memcpy( &parms.texGen0T[1], &grpHi, sizeof( grpHi ) );
 			parms.texGen0Q[0] = (float)emGroups;														// group count: every stored group index is checked against it
 			parms.texGen0Q[1] = (float)emTris;														// triangle count: every stored triangle index likewise
+			parms.texGen0Q[2] = idMath::ClampFloat( 0.0f, 8.0f, r_rtEmissiveReach.GetFloat() );			// E6 reach: multiple of the replaced light's radius
+			parms.texGen0Q[3] = idMath::ClampFloat( 0.0f, 4096.0f, r_rtEmissiveReachDefault.GetFloat() );
 			parms.texGen0T[2] = r_rtEmissiveBounce.GetBool() ? 1.0f : 0.0f;						// emitter sample at the bounce hit
 			parms.texGen0T[3] = idMath::ClampFloat( 0.0f, 64.0f, r_rtEmissiveClamp.GetFloat() );	// per-pixel emitter luminance cap (0 = off)
 			if ( diStream && emAddr != 0 && emTris > 0 ) {

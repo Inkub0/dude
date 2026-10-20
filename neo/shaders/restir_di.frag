@@ -64,6 +64,7 @@
 //   u_texGen0S            = ( emissive table device address lo, hi, r_rtEmissiveIntensity, candidates per pixel (0 = off) )
 //   u_texGen0T.xy         = emitter GROUP buffer device address (v2b: the light grid's emissive record indexes it)
 //   u_texGen0T.z          = emitter sample at the bounce hit (1 / 0);  u_texGen0T.w = per-pixel emitter luminance cap (0 = off)
+//   u_texGen0Q            = ( group count, triangle count, r_rtEmissiveReach, r_rtEmissiveReachDefault )
 //   --- r_rtgiCache (the RT irradiance cache, docs/rtx-irradiance-cache.md; rtgi_cache.glsl's shared packing) ---
 //   u_particleRadius.zw   = cache SLOT buffer device address (bit-cast; 0 = no cache)
 //   u_channelMask         = ( accumulation buffer address lo, hi, slot mask, tan( cell angle / 2 ) )
@@ -541,6 +542,8 @@ void main() {
 		bp.emGroups       = uvec2( floatBitsToUint( u_texGen0T.x ), floatBitsToUint( u_texGen0T.y ) );
 		bp.emIntensity    = ( u_texGen0T.z > 0.5 ) ? u_texGen0S.z : 0.0;	// r_rtEmissiveBounce
 		bp.emNumGroups    = emNumGroups;
+		bp.emReachScale   = u_texGen0Q.z;
+		bp.emReachDefault = u_texGen0Q.w;
 		const vec3 eyeW   = u_modelViewMatrix[3].xyz;
 		vec3 Li; float thit; vec3 bounceDir; vec3 LiCache;
 		const int hit = rtgiTraceBounce( bp, Pw, Nw, eyeW, d, sfrag, Li, thit, bounceDir, LiCache );

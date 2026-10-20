@@ -4901,6 +4901,18 @@ static void DrawDbgGroup_ExperimentalLighting()
 	ImGui::SameLine();
 	if ( ImGui::SmallButton( "reset##rtEmissiveIntensity" ) ) { r_rtEmissiveIntensity.Reset(); }
 	ImGui::EndDisabled();	// r_rtEmissiveLighting (the bounce works in BOTH modes)
+	CvarSliderF( "Emitter Reach", r_rtEmissiveReach, 0.0f, 4.0f, "%.2f", "How far an emitter's light reaches, as a multiple of "
+		"the authored radius of the placed light it replaced. A Doom 3 light falls off linearly out to its radius, an area "
+		"emitter with the inverse square: right beside the fixture, dark on the far wall. Past a quarter of the inherited "
+		"radius the falloff relaxes toward Doom's law, so a hall fixture lights the hall it was authored for. 1 = the "
+		"authored radius, 0 = pure physics. (r_rtEmissiveReach)" );
+	ImGui::SameLine();
+	if ( ImGui::SmallButton( "reset##rtEmissiveReach" ) ) { r_rtEmissiveReach.Reset(); }
+	CvarSliderF( "Reach of uncovered emitters", r_rtEmissiveReachDefault, 0.0f, 2048.0f, "%.0f", "The reach (world units) of an "
+		"emitter that sits inside no placed light - a glow panel in a dark corner has no radius to inherit. 0 = pure physics "
+		"for those. (r_rtEmissiveReachDefault)" );
+	ImGui::SameLine();
+	if ( ImGui::SmallButton( "reset##rtEmissiveReachDefault" ) ) { r_rtEmissiveReachDefault.Reset(); }
 	CvarCheckbox( "Emitters at the GI Bounce", r_rtEmissiveBounce, "The GI bounce hit draws one emitter sample from its grid cell "
 		"(one extra visibility ray per pixel) so the glowing surfaces add real bounce light. Works in BOTH modes: with "
 		"Emissive Mode off the placed lights keep the direct term and the emitters only add to the GI (needs the Emitter "

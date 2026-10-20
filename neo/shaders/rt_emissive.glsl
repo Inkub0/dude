@@ -20,8 +20,22 @@ struct RtEmissiveTri {
 	uint  st0, st1, st2;			// per-vertex st, half2 (unpackHalf2x16)
 	uint  tint;						// the stage's constant colour, RGBA8 (unpackUnorm4x8); white when RT_EMIT_ANIMATED; alpha = the DIFFUSEGLOW threshold
 	uint  meanRG, meanB;			// the MEAN linear radiance (glow average x stage colour), halves: a uniform emitter lights with this (0 for DIFFUSEGLOW)
-	uint  pad0, pad1;
+	uint  reach;					// float bits: the authored radius of the placed light this emitter replaces (0 = none)
+	uint  pad1;
 };
+
+// E6 reach (docs/rtx-experimental-lighting.md): the Doom 3 light this emitter replaced fell off LINEARLY to its
+// authored radius R; the emitter's solid-angle estimate falls off with the inverse square. Past R/4 the sample is
+// boosted by (d / (R/4)) so the far field goes ~1/d - the reach the mapper lit the hall for. scale = r_rtEmissiveReach
+// (0 = pure physics), def = the reach of an emitter no light covers.
+float rtEmissiveReachBoost( RtEmissiveTri e, float d, float scale, float def ) {
+	if ( !( scale > 0.0 ) ) { return 1.0; }
+	float R = uintBitsToFloat( e.reach );
+	if ( !( R > 0.0 ) ) { R = def; }
+	if ( !( R > 0.0 ) ) { return 1.0; }
+	float knee = 0.25 * R * scale;
+	return max( d / knee, 1.0 );
+}
 
 const uint RT_EMIT_ANIMATED = 1u << 16;		// stage colour is register-driven: the flux is a snapshot, read the live colour
 const uint RT_EMIT_ENTITY   = 1u << 17;		// from a static entity model (else worldspawn)

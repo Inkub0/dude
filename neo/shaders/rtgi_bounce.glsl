@@ -52,6 +52,7 @@ struct RtgiBounceParms {
 	uvec2 emGroups;
 	float emIntensity;
 	uint  emNumGroups;		// bounds for a stored group index
+	float emReachScale, emReachDefault;	// E6 reach (rtEmissiveReachBoost)
 	// RT light grid (docs/rtx-light-grid.md L3): when present, the hit's light loop enumerates the HIT cell's candidates
 	// (its top-N lights by importance) instead of every scene light. The grid excludes DIFORWARD lights, matching the
 	// bounce's skipForwardLights set. gridAddr 0 (the standalone RTGI pass, or the grid off) = the full light loop.
@@ -263,7 +264,7 @@ int rtgiTraceBounce( RtgiBounceParms bp, vec3 Pw, vec3 Nw, vec3 eyeW, float d, v
 				}
 				if ( ok && ti >= et.count ) { ok = false; }
 				RtEmissiveTri e;
-				if ( ok ) { e = rtEmissiveFetch( et, ti ); } else { e.flux = 0.0; e.emit = 0u; e.p0 = e.p1 = e.p2 = vec3( 0.0 ); e.scale = 0.0; e.meanRG = 0u; e.meanB = 0u; e.st0 = e.st1 = e.st2 = 0u; e.tint = 0u; e.pad0 = e.pad1 = 0u; }
+				if ( ok ) { e = rtEmissiveFetch( et, ti ); } else { e.flux = 0.0; e.emit = 0u; e.p0 = e.p1 = e.p2 = vec3( 0.0 ); e.scale = 0.0; e.meanRG = 0u; e.meanB = 0u; e.st0 = e.st1 = e.st2 = 0u; e.tint = 0u; e.reach = e.pad1 = 0u; }
 				vec3 Pe, nUnit; float pdfw; bool front;
 				if ( e.flux > 0.0 && rtEmissiveSampleSolidAngle( e, hitWorld, vec2( lgRand( rngE ), lgRand( rngE ) ), Pe, nUnit, pdfw, front )
 						&& ( front || ( e.emit & RT_EMIT_TWOSIDED ) != 0u ) ) {
@@ -274,7 +275,7 @@ int rtgiTraceBounce( RtgiBounceParms bp, vec3 Pw, vec3 Nw, vec3 eyeW, float d, v
 					float ecos = max( -dot( nUnit, edir ), 0.0 );				// nUnit points at the hit (the sampler re-winds)
 					float p = qG * pIn * pdfw;
 					if ( endl > 0.0 && ecos > 0.0 && p > 0.0 ) {
-						vec3 Le = rtEmissiveMeanRadiance( e ) * ( e.scale * bp.emIntensity );
+						vec3 Le = rtEmissiveMeanRadiance( e ) * ( e.scale * bp.emIntensity * rtEmissiveReachBoost( e, edl, bp.emReachScale, bp.emReachDefault ) );
 						vec3 ec = albedo * Le * ( sqrt( ecos ) * endl * bp.lightScale / p );
 						rayQueryEXT erq;
 						rayQueryInitializeEXT( erq, accelerationStructureEXT( bp.tlas ), gl_RayFlagsOpaqueEXT | gl_RayFlagsTerminateOnFirstHitEXT, 0xFDu,

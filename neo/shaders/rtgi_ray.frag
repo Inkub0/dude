@@ -152,6 +152,8 @@ void main() {
 	bp.emGroups       = uvec2( 0u );
 	bp.emIntensity    = 0.0;
 	bp.emNumGroups    = 0u;
+	bp.emReachScale   = 0.0;
+	bp.emReachDefault = 0.0;
 	bp.radius         = u_localParam0.z;
 	bp.emissiveScale  = u_diffuseModifier.x;
 	bp.emissiveClamp  = u_localParam0.w;
