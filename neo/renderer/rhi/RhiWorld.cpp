@@ -6167,7 +6167,7 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 	// With emissive mode OFF and r_rtEmissiveBounce on, the rows are BOUNCEONLY: the DI gather skips them (the placed
 	// lights keep the direct term), the bounce lights its hits with them. Capped at r_rtEmissiveMaxRows per view by
 	// importance at the eye; a row whose reach cannot touch the view (centre farther than reach + REACH) is left out.
-	int nEm = 0, nEmTotal = 0;
+	int nEm = 0, nEmTotal = 0, nEmIndicators = 0, nEmCandidates = 0;
 	if ( r_rtEmissiveLighting.GetBool() || r_rtEmissiveBounce.GetBool() ) {
 		const rtEmissiveRow_t *rows = NULL;
 		int emTris = 0; float emTotal = 0.0f, emMean = 0.0f;
@@ -6189,6 +6189,10 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 			for ( int i = 0; i < nRows && cap > 0; i++ ) {
 				const rtEmissiveRow_t &row = rows[i];
 				if ( row.dark || !( row.flux > 0.0f ) || row.numTris <= 0 || row.firstTri < 0 || row.firstTri + row.numTris > emTris ) { continue; }
+				// an INDICATOR (effective area below the fixture floor: a LED, a button) is not a light: it never enters the
+				// buffer. After the per-fixture split a map has hundreds of them and they crowded the 511-row ceiling out of
+				// the fixtures that light the far end of a corridor (Access Hall, 2026-10-20)
+				if ( row.flux / fluxScale < minArea ) { nEmIndicators++; continue; }
 				float R = ( row.reach > 0.0f ) ? row.reach : reachDef;
 				if ( !( R > 0.0f ) ) { R = Max( row.boundRadius * 4.0f, 64.0f ); }
 				const float radius = R * ( ( reachMul > 0.0f ) ? reachMul : 1.0f );
@@ -6202,6 +6206,7 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 				const float C  = r_rtEmissivePowerMatch.GetBool() ? ( Ca + sP * ( Max( Cm, Ca ) - Ca ) ) : Ca;
 				const float imp = C * intensity * radius * radius / Max( dist * dist, 64.0f * 64.0f );
 				if ( !( imp > 0.0f ) ) { continue; }
+				nEmCandidates++;
 				if ( np < cap ) {
 					pick[ np ] = i; pickImp[ np ] = imp; np++;
 				} else {
@@ -6278,7 +6283,9 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 		const bool mode = r_rtEmissiveLighting.GetBool();
 		const unsigned long long table = mode ? R_RtEmissiveTableAddress( NULL, NULL, NULL ) : 0;
 		if ( mode && ( !lastMode || table != lastTable ) && table != 0 ) {
-			common->Printf( "emissive mode: %d fixtured placed lights dropped in this view, %d placed lights kept, %d emitter rows added (of %d emitting surfaces; cap %d)\n", s_diSkipEmissiveDrop, n, nEm, nEmTotal, r_rtEmissiveMaxRows.GetInteger() );
+			common->Printf( "emissive mode: %d fixtured placed lights dropped in this view, %d placed lights kept, %d emitter rows added (%d fixtures in reach of the view, %d indicators left out, %d emitting surfaces in the map; cap %d)%s\n",
+				s_diSkipEmissiveDrop, n, nEm, nEmCandidates, nEmIndicators, nEmTotal, RT_SCENE_MAX_ROWS - 1 - n - nFog,
+				( nEmCandidates > nEm ) ? " - CAP HIT: the weakest fixtures at the eye are missing" : "" );
 		}
 		lastMode = mode; lastTable = table;
 	}
