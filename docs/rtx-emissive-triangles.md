@@ -392,3 +392,10 @@ same-material duplicates within 14 virtual px dropped, reach 1500. The one cull 
 been reached by this view's portal flow (`portalArea_t::viewCount == tr.viewCount`, stamped before
 R_AddModelSurfaces), so nothing is named through a closed door / from another room. The projection therefore moved
 to the FRONTEND (R_RtEmissiveUpdate, tr.viewDef live) instead of the backend overlay pass.
+
+**Callback models excluded (2026-10-20).** Giant lingering quads labelled `particles/rocketbacklit` /
+`particles/ember_small`: the game's smoke particle system (and FX) draws all its sprites through ONE render entity
+whose model is a plain static model rebuilt every frame by `renderEntity.callback`. Its quads at build time (a rocket
+trail, a burning corpse's embers) were gathered as static emitters and, with no state or matrix change, never left.
+`R_RtEmissiveEntityGatherable`: resident DM_STATIC, not the world model, not the default model, and NO callback -
+shared by the build, the new-entity scan and the refresh (a tracked entity that acquires a callback counts as gone).

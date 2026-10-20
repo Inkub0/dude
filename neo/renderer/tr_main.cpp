@@ -2983,6 +2983,18 @@ static void R_RtEmissiveDebugTint( unsigned int slot, int rgb[3], const char **n
 	*name = names[ ( (int)( hue / 30.0f ) ) % 12 ];
 }
 
+// An entity the table may gather: a resident DM_STATIC model that is NOT produced by a callback. The game's smoke
+// particle system (idSmokeParticles), FX and similar render ALL their quads through one entity whose model is a plain
+// static model rebuilt every frame by renderEntity.callback - its surfaces at build time (a rocket trail, the embers
+// of a burning corpse) were taken as static emitters and lingered forever (user, 2026-10-20).
+static bool R_RtEmissiveEntityGatherable( const idRenderEntityLocal *def ) {
+	if ( def == NULL || def->parms.hModel == NULL || def->parms.callback != NULL ) {
+		return false;
+	}
+	const idRenderModel *model = def->parms.hModel;
+	return !model->IsStaticWorldModel() && model->IsDynamicModel() == DM_STATIC && !model->IsDefaultModel();
+}
+
 // per-material census row for the build report
 struct rtEmissiveCensus_t { const idMaterial *mat; int tris; float flux; bool animated; bool texMatrix; unsigned int slot; };
 
@@ -3130,13 +3142,10 @@ static void R_RtEmissiveBuild( const idRenderWorldLocal *world, rhi::RHI *r ) {
 	// matrix, the SKIN-REMAPPED material (a fixture's on/off state is a skin), the entity's shaderParms (its _color)
 	for ( int i = 0; i < world->entityDefs.Num(); i++ ) {
 		const idRenderEntityLocal *def = world->entityDefs[i];
-		if ( def == NULL || def->parms.hModel == NULL ) {
+		if ( !R_RtEmissiveEntityGatherable( def ) ) {
 			continue;
 		}
 		const idRenderModel *model = def->parms.hModel;
-		if ( model->IsStaticWorldModel() || model->IsDynamicModel() != DM_STATIC ) {
-			continue;
-		}
 		float modelMatrix[16];
 		R_AxisToModelMatrix( def->parms.axis, def->parms.origin, modelMatrix );
 		bool any = false;
@@ -3370,7 +3379,7 @@ static void R_RtEmissiveRefreshMovers( const idRenderWorldLocal *world, rhi::RHI
 			continue;
 		}
 		const idRenderEntityLocal *def = world->entityDefs[ g.entityIndex ];
-		if ( def == NULL || def->parms.hModel != g.model ) {
+		if ( def == NULL || def->parms.hModel != g.model || def->parms.callback != NULL ) {
 			// the entity is GONE (a pickup taken, an item hidden: the game frees its render entity) or its slot now
 			// holds another model: the slice goes dark (zero flux, never sampled, hidden in the overlay). If the same
 			// model returns to the slot (a respawned pickup) the state compare below re-gathers it back on.
@@ -3510,13 +3519,10 @@ static bool R_RtEmissiveNewEntityAppeared( const idRenderWorldLocal *world ) {
 			continue;
 		}
 		const idRenderEntityLocal *def = world->entityDefs[i];
-		if ( def == NULL || def->parms.hModel == NULL ) {
+		if ( !R_RtEmissiveEntityGatherable( def ) ) {
 			continue;
 		}
 		const idRenderModel *model = def->parms.hModel;
-		if ( model->IsStaticWorldModel() || model->IsDynamicModel() != DM_STATIC ) {
-			continue;
-		}
 		for ( int s = 0; s < model->NumSurfaces(); s++ ) {
 			const modelSurface_t *surf = model->Surface( s );
 			if ( surf->geometry == NULL || surf->geometry->verts == NULL || surf->geometry->indexes == NULL ) {
