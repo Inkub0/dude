@@ -4877,7 +4877,9 @@ static void DrawDbgGroup_RTGI()
 
 static void DrawDbgGroup_ExperimentalLighting()
 {
-	// EMISSIVE LIGHTS (docs/rtx-experimental-lighting.md): every knob of the mode in one place, for tuning.
+	// EMISSIVE LIGHTS (docs/rtx-experimental-lighting.md E2 v3): every knob of the mode in one place, for tuning. The
+	// map's self-illuminated surfaces are rows of the scene-light buffer next to the placed lights; the placed lights whose
+	// fixture they are get dropped. Keep this in step with the r_rtEmissive* cvars (RenderSystem_init.cpp).
 	const bool rtCapable = R_SupportsRayTracing();
 	if ( BeginSettingsGroup( "Emissive Lights" ) ) {
 
@@ -4890,18 +4892,29 @@ static void DrawDbgGroup_ExperimentalLighting()
 
 	// ===== Mode =====
 	ImGui::SeparatorText( "Mode" );
-	CvarCheckbox( "EMISSIVE MODE", r_rtEmissiveLighting, "The master switch: the map's self-illuminated surfaces light the "
-		"scene as real area lights - the direct-lighting gather draws sample points on them next to the placed lights, "
-		"with physical falloff, the emitter's real shape and a visibility ray through the real geometry. Implies the "
-		"table below and hides the fixtures' flare sprites. Off = today's picture, bit-identical. (r_rtEmissiveLighting)" );
-	ImGui::BeginDisabled( !r_rtEmissiveLighting.GetBool() );
-	CvarSliderF( "Emitter Intensity", r_rtEmissiveIntensity, 0.0f, 32.0f, "%.2f", "How bright the emitters light the scene "
-		"relative to the placed lights (a multiplier on every emitter's radiance). Placed lights fall off linearly, emitters "
-		"with the inverse square (softened by the reach below), so there is no exact equivalence - tune by eye on a lit "
-		"corridor. (r_rtEmissiveIntensity)" );
+	CvarCheckbox( "EMISSIVE MODE", r_rtEmissiveLighting, "The master switch: every emitting surface of the map (neon tubes, "
+		"light tiles, sterlight patches, LED panels) becomes a light next to the placed lights - sampled on its real shape, "
+		"with physical falloff and a visibility ray through the real geometry - and the placed lights whose fixture it is are "
+		"dropped. Implies the table below and hides the fixtures' flare sprites. Off = today's picture, bit-identical. "
+		"(r_rtEmissiveLighting)" );
+	CvarCheckbox( "Emitters at the GI Bounce", r_rtEmissiveBounce, "The emitting surfaces light the GI bounce's hit points like "
+		"any light. Works in BOTH modes: with Emissive Mode off the placed lights keep the direct term and the emitters only add "
+		"to the GI (needs the Emitter Table on); with it on, walls lit only by emitters bounce. (r_rtEmissiveBounce)" );
+	ImGui::BeginDisabled( !r_rtEmissiveLighting.GetBool() && !r_rtEmissiveBounce.GetBool() );
+
+	// ===== Brightness =====
+	ImGui::SeparatorText( "Brightness" );
+	CvarSliderF( "Emitter Intensity", r_rtEmissiveIntensity, 0.0f, 8.0f, "%.2f", "A trim on every emitter's radiance. With "
+		"the power match below on, 1 reproduces the placed lights' level; without it this scales the authored glow brightness. "
+		"(r_rtEmissiveIntensity)" );
 	ImGui::SameLine();
 	if ( ImGui::SmallButton( "reset##rtEmissiveIntensity" ) ) { r_rtEmissiveIntensity.Reset(); }
-	CvarSliderF( "Fixture Min Effective Area", r_rtEmissiveFixtureMinArea, 0.0f, 256.0f, "%.0f", "The EFFECTIVE emitting area "
+	CvarCheckbox( "Inherit the replaced light's power", r_rtEmissivePowerMatch, "Each fixture's radiance is set from the colour "
+		"and radius of the placed light it replaces and its own area, so a small fixture lights its room as its light did and a "
+		"big panel glows softly. An emitter in no placed light is matched to a light of its own colour at the default reach. "
+		"Off = authored glow brightness x intensity (small fixtures go dark). (r_rtEmissivePowerMatch)" );
+	ImGui::BeginDisabled( !r_rtEmissivePowerMatch.GetBool() );
+	CvarSliderF( "Fixture Min Effective Area", r_rtEmissiveFixtureMinArea, 0.0f, 128.0f, "%.0f", "The EFFECTIVE emitting area "
 		"(lit texels x their brightness x the stage colour, in units^2) a surface needs to count as a light FIXTURE at all: a "
 		"fixture drops the placed light it sits in and inherits (part of) its power; a smaller glow (a computer LED, the "
 		"electric box's red lamp) is an indicator - it never drops a light and lights at its authored brightness only. "
@@ -4917,17 +4930,15 @@ static void DrawDbgGroup_ExperimentalLighting()
 		"may give one emitter (a small patch replacing a big light would otherwise blaze). (r_rtEmissiveMaxRadiance)" );
 	ImGui::SameLine();
 	if ( ImGui::SmallButton( "reset##rtEmissiveMaxRadiance" ) ) { r_rtEmissiveMaxRadiance.Reset(); }
-	CvarCheckbox( "Inherit the replaced light's power", r_rtEmissivePowerMatch, "Each emitter's radiance is set from the colour "
-		"and radius of the placed light it replaces and its own area, so a small fixture lights its room as its light did and "
-		"a big panel glows softly. An emitter in no placed light is matched to a light of its own colour at the default reach. "
-		"With this on, Emitter Intensity is a trim around 1. Off = authored glow brightness x intensity (small fixtures go "
-		"dark). (r_rtEmissivePowerMatch)" );
-	ImGui::EndDisabled();	// r_rtEmissiveLighting (the bounce works in BOTH modes)
+	ImGui::EndDisabled();	// r_rtEmissivePowerMatch
+
+	// ===== Reach =====
+	ImGui::SeparatorText( "Reach" );
 	CvarSliderF( "Emitter Reach", r_rtEmissiveReach, 0.0f, 4.0f, "%.2f", "How far an emitter's light reaches, as a multiple of "
 		"the authored radius of the placed light it replaced. A Doom 3 light falls off linearly out to its radius, an area "
-		"emitter with the inverse square: right beside the fixture, dark on the far wall. Past a quarter of the inherited "
-		"radius the falloff relaxes toward Doom's law, so a hall fixture lights the hall it was authored for. 1 = the "
-		"authored radius, 0 = pure physics. (r_rtEmissiveReach)" );
+		"emitter with the inverse square: right beside the fixture, dark on the far wall. Past a quarter of the reach the "
+		"falloff relaxes toward Doom's law, so a hall fixture lights the hall it was authored for; the light fades out at twice "
+		"the reach. 1 = the authored radius, 0 = pure physics. (r_rtEmissiveReach)" );
 	ImGui::SameLine();
 	if ( ImGui::SmallButton( "reset##rtEmissiveReach" ) ) { r_rtEmissiveReach.Reset(); }
 	CvarSliderF( "Reach of uncovered emitters", r_rtEmissiveReachDefault, 0.0f, 2048.0f, "%.0f", "The reach (world units) of an "
@@ -4935,11 +4946,6 @@ static void DrawDbgGroup_ExperimentalLighting()
 		"for those. (r_rtEmissiveReachDefault)" );
 	ImGui::SameLine();
 	if ( ImGui::SmallButton( "reset##rtEmissiveReachDefault" ) ) { r_rtEmissiveReachDefault.Reset(); }
-	CvarCheckbox( "Emitters at the GI Bounce", r_rtEmissiveBounce, "The glowing surfaces light the GI bounce's hit points like "
-		"any light (they are rows of the scene-light buffer the bounce already walks). Works in BOTH modes: with Emissive "
-		"Mode off the placed lights keep the direct term and the emitters only add to the GI (needs the Emitter Table on); "
-		"with it on, walls lit only by emitters bounce. (r_rtEmissiveBounce)" );
-	ImGui::BeginDisabled( !r_rtEmissiveLighting.GetBool() && !r_rtEmissiveBounce.GetBool() );
 
 	// ===== Sampling =====
 	ImGui::SeparatorText( "Sampling" );
@@ -4951,7 +4957,8 @@ static void DrawDbgGroup_ExperimentalLighting()
 		}
 		AddTooltip( "How many emitting SURFACES a view's scene-light buffer may carry as light rows (the strongest at the eye "
 			"win; the light grid then ranks them per cell against the placed lights, so a row costs the same as a placed "
-			"light). The console census says how many the map has. 0 = no emitter lights. (r_rtEmissiveMaxRows)" );
+			"light). The buffer holds 511 rows in all, placed lights included; the console line 'emissive mode: ...' says how "
+			"many entered. 0 = no emitter lights. (r_rtEmissiveMaxRows)" );
 	}
 	ImGui::EndDisabled();	// r_rtEmissiveLighting || r_rtEmissiveBounce
 
@@ -4961,12 +4968,11 @@ static void DrawDbgGroup_ExperimentalLighting()
 		"glow stages: neon tubes, light tiles, LED panels, lava - world and static props, including the pure light-source "
 		"surfaces that cast no shadow and are not in the ray-tracing scene) into a GPU table with its position, glow "
 		"texture and flux, plus a flux CDF for area-light sampling. Built once per level; the console prints a census "
-		"(triangle counts, the strongest materials). Nothing consumes it unless Emissive Mode is on - use the view below "
-		"to inspect it. GUI / video screens are excluded (they keep the Emissive Surfaces fill lights). (r_rtEmissiveTable)" );
+		"(triangle counts, the strongest materials, fixtured vs ambience placed lights). Use the view below to inspect it. "
+		"GUI / video screens are excluded (they keep the Emissive Surfaces fill lights). (r_rtEmissiveTable)" );
 	ImGui::BeginDisabled( !r_rtEmissiveTable.GetBool() && !r_rtEmissiveLighting.GetBool() );
 	CvarSliderF( "Emissive Scale", r_rtEmissiveScale, 0.0f, 16.0f, "%.2f", "Global multiplier on every emitter's flux and "
-		"emitted colour - the stand-in for the per-material intensity table until it lands. A change rebuilds the table. "
-		"(r_rtEmissiveScale)" );
+		"emitted colour (the stand-in for a per-material intensity table). A change rebuilds the table. (r_rtEmissiveScale)" );
 	ImGui::SameLine();
 	if ( ImGui::SmallButton( "reset##rtEmissiveScale" ) ) { r_rtEmissiveScale.Reset(); }
 	CvarCheckbox( "Infer Fixtures from Flares", r_rtEmissiveFlareInfer, "A fixture whose material has no glow stage (its "
@@ -4988,9 +4994,9 @@ static void DrawDbgGroup_ExperimentalLighting()
 			"'Emitters by texture' tints each glow texture its own colour (striped = a pulsing stage colour, checkered = "
 			"flare-inferred); 'Flux' shows each triangle's power relative to the table's mean (blue faint, green average, red "
 			"4x, white 16x+); 'Emitted colour' is the flat mean radiance the mode lights with; 'Light coverage' green = the "
-			"emitter sits inside a placed light's volume (that light is fixtured), red = no placed light covers it; 'Placed "
-			"lights' draws every placed light as a sphere: red = fixtured (dropped while Emissive Mode is on), green = ambience "
-			"(kept), yellow = parallel, blue = fog / blend. (r_rtEmissiveTableDebug)" );
+			"emitter sits inside a placed light's volume, red = no placed light covers it; 'Placed lights' draws every placed "
+			"light as a sphere: red = fixtured (dropped while Emissive Mode is on), green = ambience (kept), yellow = parallel, "
+			"blue = fog / blend. (r_rtEmissiveTableDebug)" );
 	}
 	ImGui::TextDisabled( "Console: rtEmissiveProbe names the surface under the crosshair and the table's verdict on it." );
 	ImGui::EndDisabled();	// table
