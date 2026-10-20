@@ -36,6 +36,7 @@ If you have questions concerning this license or the applicable additional terms
 #include "framework/KeyInput.h"
 #include "framework/EventLoop.h"
 #include "renderer/RenderSystem.h"
+#include "renderer/tr_local.h"		// DUDE: RT emissive overlay labels (R_RtEmissiveGetScreenLabels)
 #include "ui/DeviceContext.h"
 #include "sound/sound.h"
 
@@ -288,6 +289,52 @@ float SCR_DrawFPS( float y ) {
 	}
 
 	return y + BIGCHAR_HEIGHT + 4;
+}
+
+/*
+==================
+SCR_DrawEmissiveLabels
+
+DUDE (docs/rtx-emissive-triangles.md E1d): the RT emissive table overlay's material names, one per visible
+emissive surface, projected by the renderer into virtual 640x480 space. Drawn on the console's 2D debug pass -
+the FPS counter's path - so they land in the frame BEFORE the screenshot capture (the ImGui layer composites
+after it). Black halo + white text reads over any of the overlay's tints.
+==================
+*/
+static void SCR_DrawEmissiveLabels( void ) {
+	if ( !R_RtEmissiveLabelsWanted() ) {
+		return;
+	}
+	const rtEmissiveScreenLabel_t *labels = NULL;
+	const int n = R_RtEmissiveGetScreenLabels( &labels );
+	idDeviceContext *dc = NULL;
+	int font = -1;
+	const bool ttf = Con_GetDebugFont( &dc, &font );
+	const float scale = 0.1f;
+	if ( ttf ) {
+		dc->SetFont( font );
+	}
+	for ( int i = 0; i < n; i++ ) {
+		const char *text = labels[i].text;
+		if ( ttf ) {
+			const int w = dc->TextWidth( text, scale, 0 ) + 4;
+			const int h = dc->MaxCharHeight( scale ) + 4;
+			const float x = labels[i].x - w * 0.5f, y = labels[i].y - h * 0.5f;
+			static const float ox[4] = { -1.0f, 1.0f, 0.0f, 0.0f }, oy[4] = { 0.0f, 0.0f, -1.0f, 1.0f };
+			for ( int k = 0; k < 4; k++ ) {
+				dc->DrawText( text, scale, idDeviceContext::ALIGN_CENTER, colorBlack, idRectangle( x + ox[k], y + oy[k], w, h ), false );
+			}
+			dc->DrawText( text, scale, idDeviceContext::ALIGN_CENTER, colorWhite, idRectangle( x, y, w, h ), false );
+		} else {
+			const int w = (int)strlen( text ) * SMALLCHAR_WIDTH;
+			const int x = idMath::FtoiFast( labels[i].x ) - w / 2, y = idMath::FtoiFast( labels[i].y ) - SMALLCHAR_HEIGHT / 2;
+			renderSystem->DrawSmallStringExt( x - 1, y, text, colorBlack, true, localConsole.charSetShader );
+			renderSystem->DrawSmallStringExt( x + 1, y, text, colorBlack, true, localConsole.charSetShader );
+			renderSystem->DrawSmallStringExt( x, y - 1, text, colorBlack, true, localConsole.charSetShader );
+			renderSystem->DrawSmallStringExt( x, y + 1, text, colorBlack, true, localConsole.charSetShader );
+			renderSystem->DrawSmallStringExt( x, y, text, colorWhite, true, localConsole.charSetShader );
+		}
+	}
 }
 
 /*
@@ -1291,6 +1338,8 @@ void	idConsoleLocal::Draw( bool forceFullScreen ) {
 	if ( com_showFPS.GetBool() ) {
 		y = SCR_DrawFPS( 0 );
 	}
+
+	SCR_DrawEmissiveLabels();		// DUDE: RT emissive overlay material names (no-op unless r_rtEmissiveTableDebug)
 
 	if ( com_showMemoryUsage.GetBool() ) {
 		y = SCR_DrawMemoryUsage( y );

@@ -423,11 +423,6 @@ void NewFrame()
 	if ( useVulkanBackend && cvarSystem->GetCVarBool( "r_vkDebugHud" ) ) {
 		wantAlwaysOnOverlay = true;
 	}
-	// the RT emissive table overlay's material labels (docs/rtx-emissive-triangles.md E1d) ride the same always-on frame
-	const bool wantEmissiveLabels = useVulkanBackend && R_RtEmissiveLabelsWanted();
-	if ( wantEmissiveLabels ) {
-		wantAlwaysOnOverlay = true;
-	}
 #endif
 
 	// even if all windows are closed, still run a few frames
@@ -479,23 +474,6 @@ void NewFrame()
 #ifdef DHEWM3_VULKAN
 	if ( wantAlwaysOnOverlay ) {
 		rhi::VK_ImGuiDrawDebugHud();
-	}
-	if ( wantEmissiveLabels ) {
-		// one outlined name per visible emissive surface, at its projected centre: black halo + white text reads on
-		// any of the overlay's tints. Background draw list = behind any ImGui window, over the scene.
-		const rtEmissiveScreenLabel_t *labels = NULL;
-		const int n = R_RtEmissiveGetScreenLabels( &labels );
-		ImDrawList *dl = ImGui::GetBackgroundDrawList();
-		const ImU32 halo = IM_COL32( 0, 0, 0, 230 ), ink = IM_COL32( 255, 255, 255, 255 );
-		for ( int i = 0; i < n; i++ ) {
-			const ImVec2 sz = ImGui::CalcTextSize( labels[i].text );
-			const ImVec2 at( labels[i].x - sz.x * 0.5f, labels[i].y - sz.y * 0.5f );
-			dl->AddText( ImVec2( at.x - 1.0f, at.y ), halo, labels[i].text );
-			dl->AddText( ImVec2( at.x + 1.0f, at.y ), halo, labels[i].text );
-			dl->AddText( ImVec2( at.x, at.y - 1.0f ), halo, labels[i].text );
-			dl->AddText( ImVec2( at.x, at.y + 1.0f ), halo, labels[i].text );
-			dl->AddText( at, ink, labels[i].text );
-		}
 	}
 #endif
 

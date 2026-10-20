@@ -3357,7 +3357,7 @@ void R_RtEmissiveProjectLabels( const viewDef_t *viewDef ) {
 	cands.SetNum( 0, false );
 	const idVec3 eye = viewDef->renderView.vieworg;
 	const float *mv = viewDef->worldSpace.modelViewMatrix, *pr = viewDef->projectionMatrix;
-	const float winW = (float)glConfig.winWidth, winH = (float)glConfig.winHeight;
+	const idRenderWorldLocal *world = viewDef->renderWorld;
 	for ( int i = 0; i < s_rtEmissiveLabels.Num(); i++ ) {
 		const rtEmissiveLabel_t &l = s_rtEmissiveLabels[i];
 		idVec3 c( 0.0f, 0.0f, 0.0f );
@@ -3375,7 +3375,7 @@ void R_RtEmissiveProjectLabels( const viewDef_t *viewDef ) {
 		}
 		const rtEmissiveTriGPU_t &e0 = s_rtEmissiveTris[ l.firstTri ];
 		const idVec3 p0( e0.p0[0], e0.p0[1], e0.p0[2] ), p1( e0.p1[0], e0.p1[1], e0.p1[2] ), p2( e0.p2[0], e0.p2[1], e0.p2[2] );
-		const idVec3 n = ( p1 - p0 ).Cross( p2 - p0 );
+		const idVec3 n = ( p2 - p0 ).Cross( p1 - p0 );							// the engine's face normal (R_DeriveFacePlanes: d2 x d1)
 		if ( !( e0.emit & RT_EMIT_FLAG_TWOSIDED ) && n * toEye < 0.0f ) {
 			continue;															// back-facing: the overlay cannot show it either
 		}
@@ -3390,8 +3390,8 @@ void R_RtEmissiveProjectLabels( const viewDef_t *viewDef ) {
 			continue;
 		}
 		cand_t cd;
-		cd.x = ( nx * 0.5f + 0.5f ) * winW;
-		cd.y = ( 1.0f - ( ny * 0.5f + 0.5f ) ) * winH;
+		cd.x = ( nx * 0.5f + 0.5f ) * 640.0f;									// the 2D text path's VIRTUAL 640x480 space
+		cd.y = ( 1.0f - ( ny * 0.5f + 0.5f ) ) * 480.0f;
 		cd.dist = dist;
 		cd.label = i;
 		cands.Append( cd );
@@ -3407,12 +3407,28 @@ void R_RtEmissiveProjectLabels( const viewDef_t *viewDef ) {
 		bool dup = false;
 		for ( int k = 0; k < i && !dup; k++ ) {
 			if ( s_rtEmissiveLabels[ cands[k].label ].mat == l.mat
-					&& idMath::Fabs( cands[k].x - cands[i].x ) < 28.0f && idMath::Fabs( cands[k].y - cands[i].y ) < 28.0f ) {
+					&& idMath::Fabs( cands[k].x - cands[i].x ) < 14.0f && idMath::Fabs( cands[k].y - cands[i].y ) < 14.0f ) {
 				dup = true;
 			}
 		}
 		if ( dup ) {
 			continue;
+		}
+		// occlusion: a CPU trace through the map (world + static props, the GUI-pointing trace) from the eye to a
+		// point 2 units in front of the anchor; anything hit on the way is a wall between us and the emitter
+		if ( world != NULL ) {
+			idVec3 c( 0.0f, 0.0f, 0.0f );
+			for ( int t = 0; t < l.numTris; t++ ) {
+				const rtEmissiveTriGPU_t &e = s_rtEmissiveTris[ l.firstTri + t ];
+				c.x += e.p0[0] + e.p1[0] + e.p2[0]; c.y += e.p0[1] + e.p1[1] + e.p2[1]; c.z += e.p0[2] + e.p1[2] + e.p2[2];
+			}
+			c *= 1.0f / ( 3.0f * l.numTris );
+			idVec3 dir = eye - c;
+			dir.Normalize();
+			modelTrace_t mt;
+			if ( world->Trace( mt, eye, c + dir * 2.0f, 0.0f, true, false, true ) && mt.fraction < 1.0f ) {
+				continue;
+			}
 		}
 		rtEmissiveScreenLabel_t &sl = s_rtEmissiveScreenLabels.Alloc();
 		sl.x = cands[i].x;

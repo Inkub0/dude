@@ -333,9 +333,12 @@ the door test was a wrong target); the console's "mover re-baked" lines name eve
 Merged to local master. E1 + E1e are complete; E2 next (docs/rtx-experimental-lighting.md, the table as a second
 candidate stream through the light grid).
 
-**Overlay labels (added 2026-10-20).** Every mode writes the material name over each painted surface: the overlay
-pass projects one anchor per emissive surface (the mean of its triangle centroids, read from the live table so a
-mover's label follows it) into window pixels - culled behind the camera, off screen, back-facing or beyond 700
-units, nearest 48 kept, same-material duplicates within 28 px dropped - and sys_imgui.cpp draws them in ImGui's
-background draw list (black halo + white text) on the always-on ImGui frame the Vulkan debug HUD uses. The
-"textures/" and "models/mapobjects/" prefixes are stripped. Screenshots now name their emitters directly.
+**Overlay labels (added 2026-10-20, fixed the same day).** Every mode writes the material name over each painted
+surface: the overlay pass projects one anchor per emissive surface (the mean of its triangle centroids, read from
+the live table so a mover's label follows it) into the 2D VIRTUAL 640x480 space - culled behind the camera, off
+screen, back-facing (the engine's face normal, (v3-v1) x (v2-v1); the first cut had the sign flipped, which hid the
+ceiling tiles and showed far-side walls), beyond 700 units, or OCCLUDED (a CPU `idRenderWorld::Trace` from the eye
+to 2 units in front of the anchor, world + static props); nearest 48 kept, same-material duplicates within 14
+virtual px dropped. Console.cpp `SCR_DrawEmissiveLabels` draws them (debug TTF font, black halo + white) on the
+console's 2D pass - the FPS counter's path - because the ImGui layer composites AFTER the screenshot capture and
+its text never reached a screenshot. Prefixes "textures/" and "models/mapobjects/" stripped.
