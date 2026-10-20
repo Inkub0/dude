@@ -2733,6 +2733,14 @@ static float						s_rtEmissiveTotalFlux = 0.0f;
 static idStr						s_rtEmissiveMap;			// the map the table was built for (the once-per-map latch; set even when empty)
 static rhi::BufferHandle			s_rtEmissiveDbgVB = 0, s_rtEmissiveDbgIB = 0;	// lazily built for the debug overlay
 static int							s_rtEmissiveDbgIndexes = 0;
+// E1e movers: every entity-sourced run of the table remembers its entity, its model-space vertices and the model
+// matrix it was baked with, so a func_mover (door, lift, platform) that moves gets its triangles' WORLD positions
+// re-baked and its table slice (+ debug verts) rewritten in place. Area - hence flux and the CDF - is invariant
+// under the rigid move, so only the positions change.
+struct rtEmissiveGroup_t { int entityIndex; const idRenderModel *model; int firstTri, numTris, firstLocalVert; float lastMatrix[16]; };
+static idList<rtEmissiveGroup_t>	s_rtEmissiveGroups;
+static idList<idVec3>				s_rtEmissiveLocalVerts;		// 3 per entity-sourced triangle (model space)
+static int							s_rtEmissiveMovedGroups = 0;	// movers re-baked since the build (census / debugging)
 
 // IEEE half, round-toward-zero (the same conversion RhiWorld.cpp's light buffer uses); packHalf2x16 layout
 static unsigned int R_RtF32toF16( float f ) {
@@ -2961,6 +2969,11 @@ static void R_RtEmissiveAddSurface( const srfTriangles_t *tri, const idMaterial 
 		if ( area < 1e-3f ) {
 			continue;														// degenerate
 		}
+		if ( modelMatrix != NULL ) {										// E1e: the model-space verts, for the mover re-bake
+			s_rtEmissiveLocalVerts.Append( a.xyz );
+			s_rtEmissiveLocalVerts.Append( b.xyz );
+			s_rtEmissiveLocalVerts.Append( c.xyz );
+		}
 		rtEmissiveTriGPU_t &e = s_rtEmissiveTris.Alloc();
 		e.p0[0] = p0.x; e.p0[1] = p0.y; e.p0[2] = p0.z;
 		e.p1[0] = p1.x; e.p1[1] = p1.y; e.p1[2] = p1.z;
@@ -2995,6 +3008,9 @@ static void R_RtEmissiveFree( void ) {
 	s_rtEmissiveBuf = 0;	s_rtEmissiveAddr = 0;	s_rtEmissiveTotalFlux = 0.0f;
 	s_rtEmissiveDbgVB = s_rtEmissiveDbgIB = 0;	s_rtEmissiveDbgIndexes = 0;
 	s_rtEmissiveTris.Clear();
+	s_rtEmissiveGroups.Clear();
+	s_rtEmissiveLocalVerts.Clear();
+	s_rtEmissiveMovedGroups = 0;
 	s_rtEmissiveMap.Clear();
 }
 
@@ -3044,6 +3060,7 @@ static void R_RtEmissiveBuild( const idRenderWorldLocal *world, rhi::RHI *r ) {
 		float modelMatrix[16];
 		R_AxisToModelMatrix( def->parms.axis, def->parms.origin, modelMatrix );
 		bool any = false;
+		const int groupFirstTri = s_rtEmissiveTris.Num(), groupFirstLocal = s_rtEmissiveLocalVerts.Num();
 		for ( int s = 0; s < model->NumSurfaces(); s++ ) {
 			const modelSurface_t *surf = model->Surface( s );
 			if ( surf->geometry == NULL || surf->geometry->verts == NULL || surf->geometry->indexes == NULL ) {
@@ -3062,7 +3079,16 @@ static void R_RtEmissiveBuild( const idRenderWorldLocal *world, rhi::RHI *r ) {
 			entityTris += s_rtEmissiveTris.Num() - before;
 			any = any || ( s_rtEmissiveTris.Num() > before );
 		}
-		if ( any ) { entities++; }
+		if ( any ) {
+			entities++;
+			rtEmissiveGroup_t &g = s_rtEmissiveGroups.Alloc();
+			g.entityIndex = i;
+			g.model = model;
+			g.firstTri = groupFirstTri;
+			g.numTris = s_rtEmissiveTris.Num() - groupFirstTri;
+			g.firstLocalVert = groupFirstLocal;
+			memcpy( g.lastMatrix, modelMatrix, sizeof( g.lastMatrix ) );
+		}
 	}
 
 	const int n = s_rtEmissiveTris.Num();
@@ -3103,7 +3129,7 @@ static void R_RtEmissiveBuild( const idRenderWorldLocal *world, rhi::RHI *r ) {
 	int animatedMats = 0;
 	for ( int i = 0; i < census.Num(); i++ ) { if ( census[i].animated ) { animatedMats++; } }
 	qsort( census.Ptr(), census.Num(), sizeof( rtEmissiveCensus_t ), R_RtCmpEmissiveCensus );
-	common->Printf( "r_rtEmissiveTable: %d emissive triangles (%d world, %d from %d static entities), %d materials (%d register-driven), %d screen surfaces excluded, total flux %.1f (mean %.2f), %d KB, %d ms%s\n",
+	common->Printf( "r_rtEmissiveTable: %d emissive triangles (%d world, %d from %d static entities = mover-tracked groups), %d materials (%d register-driven), %d screen surfaces excluded, total flux %.1f (mean %.2f), %d KB, %d ms%s\n",
 		n, worldTris, entityTris, entities, census.Num(), animatedMats, screens, s_rtEmissiveTotalFlux, meanFlux, bytes >> 10,
 		Sys_Milliseconds() - msStart, overflow ? va( " - TABLE FULL: %d triangles dropped (raise RT_EMISSIVE_MAX_TRIS)", overflow ) : "" );
 	const int show = census.Num() < 12 ? census.Num() : 12;
@@ -3113,6 +3139,118 @@ static void R_RtEmissiveBuild( const idRenderWorldLocal *world, rhi::RHI *r ) {
 		common->Printf( "    %6.1f%%  %6d tris  %-46s view1 %-10s #%02X%02X%02X%s%s\n", 100.0f * census[i].flux / s_rtEmissiveTotalFlux, census[i].tris,
 			census[i].mat->GetName(), hue, rgb[0], rgb[1], rgb[2], census[i].animated ? "  (animated colour)" : "", census[i].texMatrix ? "  (texture matrix baked)" : "" );
 	}
+}
+
+// The debug overlay's vertices for table triangles [firstTri, firstTri + numTris): xyz world, st, normal = (flux,
+// scale, triangle index), tangents[0] = (glow slot, flags, 0), color = the stage tint.
+static void R_RtEmissiveFillDebugVerts( int firstTri, int numTris, idDrawVert *verts ) {
+	memset( verts, 0, numTris * 3 * (int)sizeof( idDrawVert ) );
+	for ( int i = 0; i < numTris; i++ ) {
+		const rtEmissiveTriGPU_t &e = s_rtEmissiveTris[ firstTri + i ];
+		const float *p[3] = { e.p0, e.p1, e.p2 };
+		const unsigned int st[3] = { e.st0, e.st1, e.st2 };
+		for ( int k = 0; k < 3; k++ ) {
+			idDrawVert &v = verts[ i * 3 + k ];
+			v.xyz.Set( p[k][0], p[k][1], p[k][2] );
+			v.st[0] = R_RtF16toF32( st[k] & 0xFFFFu );
+			v.st[1] = R_RtF16toF32( st[k] >> 16 );
+			v.normal.Set( e.flux, e.scale, (float)( firstTri + i ) );
+			v.tangents[0].Set( (float)( e.emit & 0xFFFFu ), (float)( e.emit >> 16 ), 0.0f );
+			v.color[0] = (byte)( e.tint & 0xFFu );
+			v.color[1] = (byte)( ( e.tint >> 8 ) & 0xFFu );
+			v.color[2] = (byte)( ( e.tint >> 16 ) & 0xFFu );
+			v.color[3] = 255;
+		}
+	}
+}
+
+// E1e: once per frame, re-bake the world positions of every entity-sourced run whose entity has MOVED since its
+// last bake (doors, lifts, platforms, rotating props) and rewrite that slice of the table (and of the debug
+// vertices, when built) in place. UpdateBuffer is a memcpy into the host-visible mapping, so a frame already in
+// flight may read a half-updated slice: one emitter a frame off its true position - harmless for lighting (the
+// visibility ray traces the real TLAS), never a crash. A still entity costs a 16-float compare. An entity whose
+// slot was freed or re-used by another model is left where it was (static emitters only enter the table at build).
+static void R_RtEmissiveRefreshMovers( const idRenderWorldLocal *world, rhi::RHI *r ) {
+	static int lastFrame = -1;
+	if ( tr.frameCount == lastFrame || s_rtEmissiveBuf == 0 ) {
+		return;
+	}
+	lastFrame = tr.frameCount;
+	static idList<idDrawVert> dbgScratch;
+	for ( int gi = 0; gi < s_rtEmissiveGroups.Num(); gi++ ) {
+		rtEmissiveGroup_t &g = s_rtEmissiveGroups[gi];
+		if ( g.entityIndex < 0 || g.entityIndex >= world->entityDefs.Num() ) {
+			continue;
+		}
+		const idRenderEntityLocal *def = world->entityDefs[ g.entityIndex ];
+		if ( def == NULL || def->parms.hModel != g.model ) {
+			continue;
+		}
+		float mm[16];
+		R_AxisToModelMatrix( def->parms.axis, def->parms.origin, mm );
+		if ( memcmp( mm, g.lastMatrix, sizeof( mm ) ) == 0 ) {
+			continue;
+		}
+		memcpy( g.lastMatrix, mm, sizeof( mm ) );
+		for ( int t = 0; t < g.numTris; t++ ) {
+			rtEmissiveTriGPU_t &e = s_rtEmissiveTris[ g.firstTri + t ];
+			const idVec3 *lv = &s_rtEmissiveLocalVerts[ g.firstLocalVert + t * 3 ];
+			idVec3 p0, p1, p2;
+			R_LocalPointToGlobal( mm, lv[0], p0 );
+			R_LocalPointToGlobal( mm, lv[1], p1 );
+			R_LocalPointToGlobal( mm, lv[2], p2 );
+			e.p0[0] = p0.x; e.p0[1] = p0.y; e.p0[2] = p0.z;
+			e.p1[0] = p1.x; e.p1[1] = p1.y; e.p1[2] = p1.z;
+			e.p2[0] = p2.x; e.p2[1] = p2.y; e.p2[2] = p2.z;
+		}
+		r->UpdateBuffer( s_rtEmissiveBuf, RT_EMISSIVE_HEADER_BYTES + g.firstTri * (int)sizeof( rtEmissiveTriGPU_t ),
+			g.numTris * (int)sizeof( rtEmissiveTriGPU_t ), &s_rtEmissiveTris[ g.firstTri ] );
+		if ( s_rtEmissiveDbgVB != 0 ) {
+			dbgScratch.SetNum( g.numTris * 3, false );
+			R_RtEmissiveFillDebugVerts( g.firstTri, g.numTris, dbgScratch.Ptr() );
+			r->UpdateBuffer( s_rtEmissiveDbgVB, g.firstTri * 3 * (int)sizeof( idDrawVert ), g.numTris * 3 * (int)sizeof( idDrawVert ), dbgScratch.Ptr() );
+		}
+		s_rtEmissiveMovedGroups++;
+	}
+}
+
+// E5 preparation (docs/rtx-emissive-triangles.md "Hybrid lighting"): classify the map's placed lights against the
+// table - a light with an emissive triangle INSIDE its volume is "fixtured" (its surface is the light: it would be
+// dropped when the emitters light the scene, else that fixture is lit twice), a light with none is "ambience" (the
+// fill / mood washes with no emissive proxy: kept). Census only; the classification signals (geometry here, the
+// ambient-material flag alongside, the per-light override table later) are decided at E5. Point-in-frustum against
+// the light's six global planes (positive side out), with the frustum bounds as the cheap reject.
+static void R_RtEmissiveLightCensus( const idRenderWorldLocal *world ) {
+	int total = 0, fixtured = 0, ambience = 0, parallel = 0, fogBlend = 0, fixturedAmbientMat = 0, ambienceAmbientMat = 0;
+	const int n = s_rtEmissiveTris.Num();
+	for ( int i = 0; i < world->lightDefs.Num(); i++ ) {
+		const idRenderLightLocal *ld = world->lightDefs[i];
+		if ( ld == NULL || ld->lightShader == NULL ) {
+			continue;
+		}
+		total++;
+		if ( ld->parms.parallel ) { parallel++; continue; }
+		if ( ld->lightShader->IsFogLight() || ld->lightShader->IsBlendLight() ) { fogBlend++; continue; }
+		const idBounds *lb = ( ld->frustumTris != NULL ) ? &ld->frustumTris->bounds : NULL;
+		bool hit = false;
+		for ( int t = 0; t < n && !hit; t++ ) {
+			const rtEmissiveTriGPU_t &e = s_rtEmissiveTris[t];
+			const idVec3 c( ( e.p0[0] + e.p1[0] + e.p2[0] ) * ( 1.0f / 3.0f ), ( e.p0[1] + e.p1[1] + e.p2[1] ) * ( 1.0f / 3.0f ), ( e.p0[2] + e.p1[2] + e.p2[2] ) * ( 1.0f / 3.0f ) );
+			if ( lb != NULL && !lb->ContainsPoint( c ) ) {
+				continue;
+			}
+			bool inside = true;
+			for ( int k = 0; k < 6 && inside; k++ ) {
+				inside = ld->frustum[k].Distance( c ) <= 1.0f;				// 1 unit of slack: a tube flush with its own light's face
+			}
+			hit = inside;
+		}
+		const bool ambMat = ld->lightShader->IsAmbientLight();
+		if ( hit ) { fixtured++; if ( ambMat ) { fixturedAmbientMat++; } }
+		else       { ambience++; if ( ambMat ) { ambienceAmbientMat++; } }
+	}
+	common->Printf( "r_rtEmissiveTable: placed lights %d: %d FIXTURED (an emitter inside the volume - dropped when emitters light the scene; %d ambient-material), %d AMBIENCE (no emitter - kept; %d ambient-material), %d parallel + %d fog/blend (kept)\n",
+		total, fixtured, fixturedAmbientMat, ambience, ambienceAmbientMat, parallel, fogBlend );
 }
 
 // Keep the table in step with the live RT scene: build once per map (or when its cvars change), free when off.
@@ -3128,12 +3266,16 @@ static void R_RtEmissiveUpdate( const idRenderWorldLocal *world, rhi::RHI *r ) {
 	}
 	const bool stale = s_rtEmissiveMap.Icmp( world->mapName ) != 0 || r_rtEmissiveTable.IsModified() || r_rtEmissiveScale.IsModified();
 	if ( !stale ) {
+		R_RtEmissiveRefreshMovers( world, r );	// E1e: moved doors / lifts / platforms re-bake their slice
 		return;
 	}
 	r_rtEmissiveTable.ClearModified();
 	r_rtEmissiveScale.ClearModified();
 	R_RtEmissiveFree();
 	R_RtEmissiveBuild( world, r );
+	if ( s_rtEmissiveBuf != 0 ) {
+		R_RtEmissiveLightCensus( world );	// E5 prep: fixtured vs ambience placed lights
+	}
 	s_rtEmissiveMap = world->mapName;		// the latch: an empty map builds nothing but is not retried every frame
 }
 
@@ -3156,24 +3298,9 @@ bool R_RtEmissiveDebugGeometry( unsigned int *vb, unsigned int *ib, int *numInde
 	if ( s_rtEmissiveDbgVB == 0 ) {
 		idDrawVert *verts = (idDrawVert *)Mem_Alloc16( n * 3 * (int)sizeof( idDrawVert ) );
 		glIndex_t  *idx   = (glIndex_t *)Mem_Alloc16( n * 3 * (int)sizeof( glIndex_t ) );
-		memset( verts, 0, n * 3 * (int)sizeof( idDrawVert ) );
-		for ( int i = 0; i < n; i++ ) {
-			const rtEmissiveTriGPU_t &e = s_rtEmissiveTris[i];
-			const float *p[3] = { e.p0, e.p1, e.p2 };
-			const unsigned int st[3] = { e.st0, e.st1, e.st2 };
-			for ( int k = 0; k < 3; k++ ) {
-				idDrawVert &v = verts[ i * 3 + k ];
-				v.xyz.Set( p[k][0], p[k][1], p[k][2] );
-				v.st[0] = R_RtF16toF32( st[k] & 0xFFFFu );
-				v.st[1] = R_RtF16toF32( st[k] >> 16 );
-				v.normal.Set( e.flux, e.scale, (float)i );
-				v.tangents[0].Set( (float)( e.emit & 0xFFFFu ), (float)( e.emit >> 16 ), 0.0f );
-				v.color[0] = (byte)( e.tint & 0xFFu );
-				v.color[1] = (byte)( ( e.tint >> 8 ) & 0xFFu );
-				v.color[2] = (byte)( ( e.tint >> 16 ) & 0xFFu );
-				v.color[3] = 255;
-				idx[ i * 3 + k ] = i * 3 + k;
-			}
+		R_RtEmissiveFillDebugVerts( 0, n, verts );
+		for ( int i = 0; i < n * 3; i++ ) {
+			idx[i] = i;
 		}
 		s_rtEmissiveDbgVB = r->CreateBuffer( rhi::BU_VERTEX, n * 3 * (int)sizeof( idDrawVert ), verts );
 		s_rtEmissiveDbgIB = r->CreateBuffer( rhi::BU_INDEX, n * 3 * (int)sizeof( glIndex_t ), idx );
@@ -3230,7 +3357,7 @@ void R_RtResetSceneState( void ) {
 	s_rtWorldFailedMap = "";
 	// E1 emissive table: handles are stale too; the CPU copy goes with them so the next RT frame rebuilds
 	s_rtEmissiveBuf = 0; s_rtEmissiveAddr = 0; s_rtEmissiveDbgVB = s_rtEmissiveDbgIB = 0; s_rtEmissiveDbgIndexes = 0;
-	s_rtEmissiveTris.Clear(); s_rtEmissiveMap.Clear(); s_rtEmissiveTotalFlux = 0.0f;
+	s_rtEmissiveTris.Clear(); s_rtEmissiveGroups.Clear(); s_rtEmissiveLocalVerts.Clear(); s_rtEmissiveMap.Clear(); s_rtEmissiveTotalFlux = 0.0f;
 }
 
 // DUDE: the six cvars that imply the persistent ray-query scene. r_rtWorld is the explicit

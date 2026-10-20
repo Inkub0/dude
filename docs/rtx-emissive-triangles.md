@@ -289,3 +289,33 @@ Two consequences for E2:
 
 E1 is validated: gather, exclusions, flux ranking, depth-tested overlay, texture-matrix bake. Next: E1e (mover
 transform refresh), then E2.
+
+## E1e - movers (built 2026-10-20, branch feat/rtx-emissive-movers) + the E5 light census
+
+**Movers.** Every entity-sourced run of the table is a `rtEmissiveGroup_t` (entity index, model, table slice, its
+model-space vertices, the model matrix it was baked with). Once per frame (`R_RtEmissiveRefreshMovers`, from
+`R_RtEmissiveUpdate` while the table is current) every group compares its entity's current matrix with the baked one
+(16 floats; a still entity costs that compare) and, on a change, re-bakes its triangles' WORLD positions and
+`UpdateBuffer`s that slice in place - and the debug vertices' slice when the overlay geometry exists. Area, hence
+flux and the CDF, is invariant under the rigid move, so only positions change. `UpdateBuffer` is a memcpy into the
+host-visible mapping, so a frame in flight may read a half-updated slice: one emitter a frame off its true position,
+harmless for lighting (the visibility ray traces the real TLAS). An entity whose slot was freed or re-used by another
+model keeps its last bake. Skin changes (a fixture switching off) and emitters that appear after load (dropped
+props) are NOT tracked - static emitters enter the table at build only.
+
+Test: Mars City, `r_rtEmissiveTable 1`, `r_rtEmissiveTableDebug 1`, open a door whose frame glows
+(`mcitydoorframeglow`, 76 tris, on the door models): the painted strips must travel with the door and stay in place
+when it stops. A lift / platform with a light fixture likewise.
+
+**Animated intensity (decided): option (a).** The flux is a build-time snapshot (time-driven colours at their t = 0
+value, floored at 0.25 luminance); E2 reads the LIVE colour at the sampled st. Only the sampling probability of a
+pulsing light is stale, never its brightness.
+
+**E5 light census (`R_RtEmissiveLightCensus`, printed after the build).** The hybrid's double-counting question: a
+placed light with an emissive triangle INSIDE its volume is FIXTURED (its surface becomes the light - dropped when the
+emitters light the scene, or that fixture is lit twice); a light with no emitter in its volume is AMBIENCE (the fill /
+mood washes with no proxy - kept). Point-in-frustum of every triangle centroid against the light's six global planes
+(1 unit of slack: a tube flush with its own light's face), frustum bounds as the cheap reject. Parallel and fog /
+blend lights are listed as kept. The ambient-material flag is counted alongside as the second signal. The per-light
+override (the D2 table mechanism) and the saturation fallback remain E5's; this census is what E5's drop list is
+built from.
