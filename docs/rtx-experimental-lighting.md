@@ -259,3 +259,14 @@ pixel beside the near end. Q2RTX weighs each light POLYGON per pixel by its proj
   triangle lists, cascades, cap), Emitter Table (table, scale, flare inference, hide flares), Debug (views, probe).
 Perf (open): the 23 ms of v2b wants an r_vkGpuTime 2 breakdown - lightgrid.fill (the group stream, now + the
 triangle walks in the near cascades), restir.di.gather (8 candidates: CDF walks / grid reads / Arvo), the bounce ray.
+
+**E2 v2c perf round (user numbers, EnPro, 2026-10-20).** Mode off 20.8 ms; mode on 32.4 ms: lightgrid.fill 0.40 ->
+11.2 ms (the near-cascade triangle walk over whole-surface groups - a reactor cylinder is 837 triangles - times
+131k cells re-reading the group list), restir.di.gather 6.1 -> 8.7 ms (8 candidates x the mass pass + Arvo). Fixes:
+groups are CHUNKS of <= 16 contiguous triangles (a cell walks <= 8 x 16); the fill streams the chunk list through
+SHARED memory in tiles of 64 (one global read per group per workgroup; the kernel no longer returns early - every
+thread reaches the barriers); candidates default 4 (Q2RTX takes one per pixel from its weighed list). Inference
+tightened: reach 6 units (a fixture's flare sits on it; walls 20 units behind a flare and a barrel's label were
+inferred), bright patch < 30% coverage, the log line says why. Census: EnPro's flux = the reactor cylinders (encyl2
+42%, encyl1 18%), dim_disk 17% (a 16-triangle static disk - check it in mode 1), whiteblock 11%; 585 placed lights:
+365 fixtured / 189 ambience.

@@ -18,6 +18,9 @@
 
 layout( local_size_x = 64 ) in;
 
+shared vec4 sGroupA[ 64 ];		// E2 v2b: a tile of emitter groups ( centroid, radius )
+shared vec2 sGroupB[ 64 ];		// ( flux, - )
+
 layout( push_constant ) uniform PC {
 	uint  gridLo, gridHi;			// grid buffer device address
 	uint  lightLo, lightHi;			// scene-light buffer device address
@@ -35,7 +38,10 @@ layout( push_constant ) uniform PC {
 void main() {
 	uint cellIndex = gl_GlobalInvocationID.x;
 	uint total = pc.cascades * pc.res * pc.res * pc.res;
-	if ( cellIndex >= total ) { return; }
+	// no early return: the emissive stream below is tiled through shared memory with barriers, which every thread of
+	// the workgroup must reach; an out-of-range thread computes a dummy cell and writes nothing
+	const bool cellLive = cellIndex < total;
+	if ( !cellLive ) { cellIndex = total - 1u; }
 
 	LgGrid   grid   = LgGrid( uvec2( pc.gridLo, pc.gridHi ) );
 	RtLights lights = RtLights( uvec2( pc.lightLo, pc.lightHi ) );
@@ -96,7 +102,7 @@ void main() {
 		}
 	}
 
-	if ( count > 0u ) {
+	if ( cellLive && count > 0u ) {
 		float sumStored = 0.0;											// sum over the KEPT lights = the consume's pdf denominator
 		for ( uint k = 0u; k < count; k++ ) { sumStored += chosenImp[ k ]; }
 		grid.g[ base ]     = count;
@@ -105,7 +111,7 @@ void main() {
 			grid.g[ base + int( LG_HEADER + 2u * k ) ]      = chosen[ k ];
 			grid.g[ base + int( LG_HEADER + 2u * k + 1u ) ] = floatBitsToUint( chosenImp[ k ] );
 		}
-	} else {
+	} else if ( cellLive ) {
 		grid.g[ base ] = 0u;											// no in-range light: empty, the consumer falls back
 	}
 
@@ -115,36 +121,51 @@ void main() {
 	if ( pc.slotsE > 0u ) {
 		int   eBase  = lgEBase( base, slots );
 		uint  slotsE = min( pc.slotsE, LG_MAX_SLOTS );
+		uint  slotsG = min( slotsE, 8u );									// groups kept per cell (the triangle walk below expands them to slotsE)
 		uint  cntE = 0u, minSlotE = 0u;
 		float minImpE = 1e30;
 		uint  chosenE[ LG_MAX_SLOTS ];
 		float chosenImpE[ LG_MAX_SLOTS ];
 		if ( ( pc.groupLo | pc.groupHi ) != 0u ) {
 			RtEmissiveGroups groups = RtEmissiveGroups( uvec2( pc.groupLo, pc.groupHi ) );
-			for ( uint gi = 0u; gi < pc.nGroups; gi++ ) {
-				float flux = groups.g[ gi ].flux;
+			// the group list (chunks of <= 16 triangles, a few hundred to a thousand) streamed through SHARED memory in
+			// tiles of 64: one global read per group per WORKGROUP instead of per cell (the 11 ms fill of 2026-10-20)
+			for ( uint tile = 0u; tile < pc.nGroups; tile += 64u ) {
+				uint li = gl_LocalInvocationID.x;
+				uint gl = tile + li;
+				if ( gl < pc.nGroups ) {
+					sGroupA[ li ] = vec4( groups.g[ gl ].c, groups.g[ gl ].radius );
+					sGroupB[ li ] = vec2( groups.g[ gl ].flux, 0.0 );
+				}
+				barrier();
+				uint n = min( 64u, pc.nGroups - tile );
+				for ( uint k = 0u; k < n; k++ ) {
+				uint  gi   = tile + k;
+				float flux = sGroupB[ k ].x;
 				if ( !( flux > 0.0 ) ) { continue; }							// dark (switched off / gone)
-				vec3  gd = groups.g[ gi ].c - center;
-				float rg = groups.g[ gi ].radius;
+				vec3  gd = sGroupA[ k ].xyz - center;
+				float rg = sGroupA[ k ].w;
 				float d2 = max( dot( gd, gd ), max( cs * cs, rg * rg ) );
 				float imp = flux / d2;
-				if ( cntE < slotsE ) {
+				if ( cntE < slotsG ) {
 					chosenE[ cntE ] = gi; chosenImpE[ cntE ] = imp; cntE++;
-					if ( cntE == slotsE ) {
+					if ( cntE == slotsG ) {
 						minImpE = chosenImpE[ 0 ]; minSlotE = 0u;
-						for ( uint k = 1u; k < slotsE; k++ ) { if ( chosenImpE[ k ] < minImpE ) { minImpE = chosenImpE[ k ]; minSlotE = k; } }
+						for ( uint j = 1u; j < slotsG; j++ ) { if ( chosenImpE[ j ] < minImpE ) { minImpE = chosenImpE[ j ]; minSlotE = j; } }
 					}
 				} else if ( imp > minImpE ) {
 					chosenE[ minSlotE ] = gi; chosenImpE[ minSlotE ] = imp;
 					minImpE = chosenImpE[ 0 ]; minSlotE = 0u;
-					for ( uint k = 1u; k < slotsE; k++ ) { if ( chosenImpE[ k ] < minImpE ) { minImpE = chosenImpE[ k ]; minSlotE = k; } }
+					for ( uint j = 1u; j < slotsG; j++ ) { if ( chosenImpE[ j ] < minImpE ) { minImpE = chosenImpE[ j ]; minSlotE = j; } }
 				}
+				}
+				barrier();
 			}
 		}
 		// near cascades (Q2RTX's per-cluster light list): the chosen groups' TRIANGLES, the top-slotsE by flux / d^2 at the
 		// cell centre, replace the group list - the pixel then weighs each by its projected solid angle (restir_di.frag)
 		bool triRecord = false;
-		if ( pc.triMode != 0u && uint( c ) < pc.nearCascades && cntE > 0u && ( pc.tableLo | pc.tableHi ) != 0u ) {
+		if ( cellLive && pc.triMode != 0u && uint( c ) < pc.nearCascades && cntE > 0u && ( pc.tableLo | pc.tableHi ) != 0u ) {
 			RtEmissiveTable  et = rtEmissiveOpen( uvec2( pc.tableLo, pc.tableHi ) );
 			RtEmissiveGroups groups = RtEmissiveGroups( uvec2( pc.groupLo, pc.groupHi ) );
 			uint  chosenT[ LG_MAX_SLOTS ];
@@ -178,7 +199,7 @@ void main() {
 				for ( uint k = 0u; k < cntT; k++ ) { chosenE[ k ] = chosenT[ k ]; chosenImpE[ k ] = chosenImpT[ k ]; }
 			}
 		}
-		if ( cntE > 0u ) {
+		if ( cellLive && cntE > 0u ) {
 			float sumE = 0.0;
 			for ( uint k = 0u; k < cntE; k++ ) { sumE += chosenImpE[ k ]; }
 			grid.g[ eBase ]     = cntE | ( triRecord ? LG_E_TRIS : 0u );
@@ -187,7 +208,7 @@ void main() {
 				grid.g[ eBase + int( LG_HEADER + 2u * k ) ]      = chosenE[ k ];
 				grid.g[ eBase + int( LG_HEADER + 2u * k + 1u ) ] = floatBitsToUint( chosenImpE[ k ] );
 			}
-		} else {
+		} else if ( cellLive ) {
 			grid.g[ eBase ] = 0u;
 		}
 	}

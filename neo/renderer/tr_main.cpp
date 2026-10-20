@@ -3244,7 +3244,9 @@ static int R_RtEmissiveInferFromFlares( const idRenderWorldLocal *world, float s
 		}
 		const idVec3 o = flare->parms.origin;
 		const float tableDist = R_RtEmissiveTableDistance( o );
-		best_t best; best.tri = NULL; best.mat = NULL; best.diffuse = NULL; best.entity = false; best.dist = RT_EMISSIVE_FLARE_REACH;
+		// a fixture's flare sits ON its surface (the door frames: 0-1 units); a wall 20 units behind a flare is not the
+		// fixture (false positives on enwall3 / a barrel's label, 2026-10-20) - the inference reach is short
+		best_t best; best.tri = NULL; best.mat = NULL; best.diffuse = NULL; best.entity = false; best.dist = 6.0f;
 		// candidate surfaces: a lambda over one model (world area: identity; entity: its matrix)
 		auto consider = [&]( const idRenderModel *model, const float *mm, const idDeclSkin *skin, const idMaterial *custom, bool entity ) {
 			for ( int sf = 0; model && sf < model->NumSurfaces(); sf++ ) {
@@ -3308,14 +3310,17 @@ static int R_RtEmissiveInferFromFlares( const idRenderWorldLocal *world, float s
 				tableDist < 1e29f ? tableDist : 9999.0f, tableDist < 64.0f ? ": its fixture" : "" );
 			continue;
 		}
-		common->Printf( "    flare entity %d at %.0f %.0f %.0f: INFERRED '%s' at %.0f units\n", fi, o.x, o.y, o.z, best.mat->GetName(), best.dist );
 		// the surface's triangles within reach of the flare become entries clipped to the DIFFUSE map's bright extents
-		// (the white light bar), lit with the bright texels' mean: a proper small light, no texel read (Q2RTX recipe)
+		// (the white light bar), lit with the bright texels' mean: a proper small light, no texel read (Q2RTX recipe).
+		// The bright patch must be a PATCH (< 30% of the texels): a light-coloured wall or a barrel's label is not a tube.
 		const idImage *img = best.diffuse->texture.image;
-		if ( !img->brightExtents.valid ) {
-			common->Printf( "    flare entity %d: '%s' has no texels above %.0f%% - not inferred\n", fi, best.mat->GetName(), RT_EMISSIVE_DIFFUSE_GLOW_THRESHOLD * 100.0f );
+		if ( !img->brightExtents.valid || img->brightExtents.coverage > 0.3f ) {
+			common->Printf( "    flare entity %d at %.0f %.0f %.0f: '%s' at %.0f units has %s - not inferred\n", fi, o.x, o.y, o.z, best.mat->GetName(), best.dist,
+				img->brightExtents.valid ? va( "%.0f%% of its texels above %.0f%% (a bright material, not a light patch)", img->brightExtents.coverage * 100.0f, RT_EMISSIVE_DIFFUSE_GLOW_THRESHOLD * 100.0f )
+				                         : va( "no texels above %.0f%%", RT_EMISSIVE_DIFFUSE_GLOW_THRESHOLD * 100.0f ) );
 			continue;
 		}
+		common->Printf( "    flare entity %d at %.0f %.0f %.0f: INFERRED '%s' at %.0f units\n", fi, o.x, o.y, o.z, best.mat->GetName(), best.dist );
 		const imageEmissiveExtents_t *ext = &img->brightExtents;
 		const float lumPerArea = R_RtLuminance( ext->mean ) * scale;
 		const unsigned int emit = ( (unsigned int)img->rhiHandle & 0xFFFFu ) | RT_EMIT_FLAG_DIFFUSEGLOW | ( best.entity ? RT_EMIT_FLAG_ENTITY : 0u );
@@ -3575,36 +3580,42 @@ static void R_RtEmissiveFillDebugVerts( int firstTri, int numTris, idDrawVert *v
 // E2 v2b: (re)build the emitter GROUPS from the labels (one per surface run) and upload them. Called after the build
 // and after any in-place change (state: flux; movers: positions). The buffer is created at the label count once.
 static void R_RtEmissiveUploadGroups( rhi::RHI *r ) {
-	const int n = s_rtEmissiveLabels.Num();
-	if ( n == 0 || s_rtEmissiveBuf == 0 ) {
+	if ( s_rtEmissiveLabels.Num() == 0 || s_rtEmissiveBuf == 0 ) {
 		return;
 	}
+	// a group is a CHUNK of at most 16 contiguous triangles of one surface run: a reactor cylinder of 900 triangles
+	// became one group whose triangle walk cost the near-cascade fill 11 ms (2026-10-20); chunks bound the walk to
+	// 8 x 16 per cell and give tighter centroids / radii for the importance
 	static idList<rtEmissiveGroupGPU_t> groups;
-	groups.SetNum( n, false );
-	for ( int i = 0; i < n; i++ ) {
+	groups.SetNum( 0, false );
+	for ( int i = 0; i < s_rtEmissiveLabels.Num(); i++ ) {
 		const rtEmissiveLabel_t &l = s_rtEmissiveLabels[i];
-		rtEmissiveGroupGPU_t &g = groups[i];
-		idVec3 c( 0.0f, 0.0f, 0.0f );
-		float flux = 0.0f;
-		for ( int t = 0; t < l.numTris; t++ ) {
-			const rtEmissiveTriGPU_t &e = s_rtEmissiveTris[ l.firstTri + t ];
-			c.x += e.p0[0] + e.p1[0] + e.p2[0]; c.y += e.p0[1] + e.p1[1] + e.p2[1]; c.z += e.p0[2] + e.p1[2] + e.p2[2];
-			flux += e.flux;
+		for ( int start = 0; start < l.numTris; start += 16 ) {
+			const int cnt = Min( 16, l.numTris - start );
+			rtEmissiveGroupGPU_t &g = groups.Alloc();
+			idVec3 c( 0.0f, 0.0f, 0.0f );
+			float flux = 0.0f;
+			for ( int t = 0; t < cnt; t++ ) {
+				const rtEmissiveTriGPU_t &e = s_rtEmissiveTris[ l.firstTri + start + t ];
+				c.x += e.p0[0] + e.p1[0] + e.p2[0]; c.y += e.p0[1] + e.p1[1] + e.p2[1]; c.z += e.p0[2] + e.p1[2] + e.p2[2];
+				flux += e.flux;
+			}
+			c *= 1.0f / ( 3.0f * cnt );
+			float r2 = 0.0f;
+			for ( int t = 0; t < cnt; t++ ) {
+				const rtEmissiveTriGPU_t &e = s_rtEmissiveTris[ l.firstTri + start + t ];
+				const float *pp[3] = { e.p0, e.p1, e.p2 };
+				for ( int k = 0; k < 3; k++ ) { const float d2 = ( idVec3( pp[k][0], pp[k][1], pp[k][2] ) - c ).LengthSqr(); if ( d2 > r2 ) { r2 = d2; } }
+			}
+			g.c[0] = c.x; g.c[1] = c.y; g.c[2] = c.z;
+			g.radius = idMath::Sqrt( r2 );
+			g.flux = flux;
+			g.firstTri = (unsigned int)( l.firstTri + start );
+			g.numTris = (unsigned int)cnt;
+			g.pad = 0u;
 		}
-		c *= 1.0f / ( 3.0f * l.numTris );
-		float r2 = 0.0f;
-		for ( int t = 0; t < l.numTris; t++ ) {
-			const rtEmissiveTriGPU_t &e = s_rtEmissiveTris[ l.firstTri + t ];
-			const float *pp[3] = { e.p0, e.p1, e.p2 };
-			for ( int k = 0; k < 3; k++ ) { const float d2 = ( idVec3( pp[k][0], pp[k][1], pp[k][2] ) - c ).LengthSqr(); if ( d2 > r2 ) { r2 = d2; } }
-		}
-		g.c[0] = c.x; g.c[1] = c.y; g.c[2] = c.z;
-		g.radius = idMath::Sqrt( r2 );
-		g.flux = flux;
-		g.firstTri = (unsigned int)l.firstTri;
-		g.numTris = (unsigned int)l.numTris;
-		g.pad = 0u;
 	}
+	const int n = groups.Num();
 	const int bytes = n * (int)sizeof( rtEmissiveGroupGPU_t );
 	if ( s_rtEmissiveGroupBuf == 0 || s_rtEmissiveGroupCount != n ) {
 		if ( s_rtEmissiveGroupBuf != 0 ) { r->DestroyBuffer( s_rtEmissiveGroupBuf ); }
