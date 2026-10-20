@@ -5864,6 +5864,7 @@ static unsigned int RB_RHI_LightImageIndex( idImage *img ) {
 static const viewDef_t *	s_sceneLightCacheView  = NULL;
 static int					s_sceneLightCacheFrame = -1;
 static unsigned int			s_sceneLightGen = 0;			// bumped on every refill
+static int					s_diSkipEmissiveDrop = 0;		// E5: fixtured placed lights dropped this view (emissive mode)
 static idList<unsigned int>	s_sceneLightCoveredGen;			// [lightDef index] = generation that included it
 
 // ReSTIR DI forward-light classification (r_rtReStirDIDynamicForward): R6 keeps ONLY the first-person weapon lights
@@ -5929,6 +5930,7 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 	s_sceneFogCount = 0;
 	*outAddr = 0;
 	s_diSkipDark = s_diSkipSuppressed = s_diSkipCapacity = s_diSkipNoShader = s_diSkipFogBlendAmb = 0;
+	s_diSkipEmissiveDrop = 0;
 	if ( viewDef == NULL || viewDef->renderWorld == NULL ) {
 		return 0;
 	}
@@ -6059,6 +6061,14 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 		// flipping paths. DUDE's own fill lights (emissive screens, item glow) are never forced forward. 0 = none (all DI).
 		const bool diFast = r_rtReStirDIDynamicForward.GetBool() && !ld->dudeFillLight
 			&& ( ld->parms.allowLightInViewID != 0 );
+		// E5 (docs/rtx-experimental-lighting.md): emissive mode DROPS a fixtured placed light - its surface is the light now.
+		// Marked DI-covered so the forward path does not draw it either; it leaves every consumer of this buffer (DI, the
+		// bounce, volumetrics, reflections). Ambience washes, suns, weapon lights and lights born after the build stay.
+		if ( R_RtEmissiveLightDropped( i, ld->dudeSerial ) ) {
+			s_sceneLightCoveredGen[ i ] = s_sceneLightGen;
+			s_diSkipEmissiveDrop++;
+			continue;
+		}
 		RtReflLightGPU &L = lights[ n++ ];
 		s_sceneLightCoveredGen[ i ] = diFast ? 0u : s_sceneLightGen;	// Stage D membership: DI covers this lightDef in this view (a weapon light stays forward)
 		L.cull[0] = cullOrg[0]; L.cull[1] = cullOrg[1]; L.cull[2] = cullOrg[2]; L.cull[3] = cullRad;
@@ -9789,7 +9799,11 @@ void RB_RHI_RtEmissiveDebugOverlay( rhi::RHI *r, const viewDef_t *viewDef ) {
 	}
 	rhi::BufferHandle vb = 0, ib = 0;
 	int numIndexes = 0;
-	if ( !R_RtEmissiveDebugGeometry( &vb, &ib, &numIndexes ) || numIndexes <= 0 ) {
+	const bool lightSpheres = r_rtEmissiveTableDebug.GetInteger() == 5;		// mode 5: the placed lights, not the table
+	if ( lightSpheres ? !R_RtEmissiveLightDebugGeometry( &vb, &ib, &numIndexes ) : !R_RtEmissiveDebugGeometry( &vb, &ib, &numIndexes ) ) {
+		return;
+	}
+	if ( numIndexes <= 0 ) {
 		return;
 	}
 	rhi::ShaderHandle prog = r->LoadShader( "rt_emissive_debug" );

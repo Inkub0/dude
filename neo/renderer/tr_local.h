@@ -1134,6 +1134,8 @@ int  R_RtGatherPerforatedBoxes( const idBounds &b, idBounds *out, int maxOut );	
 unsigned long long R_RtEmissiveTableAddress( int *numTris, float *totalFlux, float *meanFlux );
 unsigned long long R_RtEmissiveGroupsAddress( int *count );	// E2 v2b: the emitter groups (one per surface run) the light grid streams; 0 = none
 bool R_RtEmissiveDebugGeometry( unsigned int *vb, unsigned int *ib, int *numIndexes );
+bool R_RtEmissiveLightDebugGeometry( unsigned int *vb, unsigned int *ib, int *numIndexes );	// overlay mode 5: the placed lights as census-coloured spheres
+bool R_RtEmissiveLightDropped( int lightIndex, unsigned int serial );	// E5: a fixtured placed light is dropped while emissive mode is on
 // E1d labels: the frontend projects one label per in-sight emissive SURFACE into the 2D VIRTUAL 640x480 space
 // (R_RtEmissiveProjectLabels, from R_RtEmissiveUpdate); the console's debug-text pass (Console.cpp
 // SCR_DrawEmissiveLabels) draws them every frame while the overlay is on - the FPS counter's 2D path, so screenshots

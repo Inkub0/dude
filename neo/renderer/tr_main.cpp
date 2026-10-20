@@ -2833,6 +2833,15 @@ static idList<const idRenderModel *>	s_rtEmissiveSeenModel;	// per entity index:
 														// examined and found dark must not read as "new" every 90 frames (a rebuild each time:
 														// the hitching of 2026-10-20)
 static int						s_rtEmissiveLastRebuildMs = -100000;	// Sys_Milliseconds of the last build: scan / state rebuilds are throttled
+// E5 (docs/rtx-experimental-lighting.md): the placed lights' classification from the census - per lightDef index the
+// def's creation serial when the light is FIXTURED (an emitter inside its volume: dropped while emissive mode is on),
+// 0 otherwise. A light created after the build (a new serial in a reused slot) is never dropped (D1). Plus the
+// overlay's light list (mode 5: spheres).
+static idList<unsigned int>		s_rtEmissiveLightFixturedSerial;
+struct rtEmissiveLightDbg_t { idVec3 origin; int kind; };	// kind: 0 fixtured (dropped in the mode), 1 ambience (kept), 2 parallel, 3 fog/blend
+static idList<rtEmissiveLightDbg_t>	s_rtEmissiveLightDbg;
+static rhi::BufferHandle		s_rtEmissiveLightDbgVB = 0, s_rtEmissiveLightDbgIB = 0;
+static int						s_rtEmissiveLightDbgIndexes = 0;
 // E2 v2b: the emitter GROUPS the light grid streams (one per table surface run = label: centroid, bounding radius, flux,
 // the run's triangle range). The grid fill keeps the top groups per cell by flux / d^2 (Q2RTX's per-cluster light
 // list, with the grid as the cluster); a pixel draws a group from its cell, a triangle inside it by flux, a point by
@@ -3375,6 +3384,13 @@ static void R_RtEmissiveFree( void ) {
 	s_rtEmissiveScreenLabels.Clear();
 	s_rtEmissiveFlareHidden.Clear();
 	s_rtEmissiveSeenModel.Clear();
+	s_rtEmissiveLightFixturedSerial.Clear();
+	s_rtEmissiveLightDbg.Clear();
+	if ( r != NULL ) {
+		if ( s_rtEmissiveLightDbgVB != 0 ) { r->DestroyBuffer( s_rtEmissiveLightDbgVB ); }
+		if ( s_rtEmissiveLightDbgIB != 0 ) { r->DestroyBuffer( s_rtEmissiveLightDbgIB ); }
+	}
+	s_rtEmissiveLightDbgVB = s_rtEmissiveLightDbgIB = 0;	s_rtEmissiveLightDbgIndexes = 0;
 	s_rtEmissiveFlareCount = 0;
 	s_rtEmissiveMovedGroups = 0;
 	s_rtEmissiveMap.Clear();
@@ -3838,14 +3854,21 @@ static void R_RtEmissiveLightCensus( const idRenderWorldLocal *world, rhi::RHI *
 	int total = 0, fixtured = 0, ambience = 0, parallel = 0, fogBlend = 0, fixturedAmbientMat = 0, ambienceAmbientMat = 0, trisInLight = 0;
 	const int n = s_rtEmissiveTris.Num();
 	for ( int t = 0; t < n; t++ ) { s_rtEmissiveTris[t].emit &= ~RT_EMIT_FLAG_INLIGHT; }
+	s_rtEmissiveLightFixturedSerial.SetNum( world->lightDefs.Num(), false );
+	for ( int i = 0; i < world->lightDefs.Num(); i++ ) { s_rtEmissiveLightFixturedSerial[i] = 0u; }
+	s_rtEmissiveLightDbg.SetNum( 0, false );
+	if ( s_rtEmissiveLightDbgVB != 0 ) { r->DestroyBuffer( s_rtEmissiveLightDbgVB ); s_rtEmissiveLightDbgVB = 0; }
+	if ( s_rtEmissiveLightDbgIB != 0 ) { r->DestroyBuffer( s_rtEmissiveLightDbgIB ); s_rtEmissiveLightDbgIB = 0; }
+	s_rtEmissiveLightDbgIndexes = 0;
 	for ( int i = 0; i < world->lightDefs.Num(); i++ ) {
 		const idRenderLightLocal *ld = world->lightDefs[i];
 		if ( ld == NULL || ld->lightShader == NULL ) {
 			continue;
 		}
 		total++;
-		if ( ld->parms.parallel ) { parallel++; continue; }
-		if ( ld->lightShader->IsFogLight() || ld->lightShader->IsBlendLight() ) { fogBlend++; continue; }
+		rtEmissiveLightDbg_t dbg; dbg.origin = ld->globalLightOrigin; dbg.kind = 1;
+		if ( ld->parms.parallel ) { parallel++; dbg.kind = 2; s_rtEmissiveLightDbg.Append( dbg ); continue; }
+		if ( ld->lightShader->IsFogLight() || ld->lightShader->IsBlendLight() ) { fogBlend++; dbg.kind = 3; s_rtEmissiveLightDbg.Append( dbg ); continue; }
 		const idBounds *lb = ( ld->frustumTris != NULL ) ? &ld->frustumTris->bounds : NULL;
 		bool hit = false;
 		for ( int t = 0; t < n; t++ ) {										// every triangle: the per-triangle flag feeds overlay mode 4
@@ -3864,8 +3887,9 @@ static void R_RtEmissiveLightCensus( const idRenderWorldLocal *world, rhi::RHI *
 			}
 		}
 		const bool ambMat = ld->lightShader->IsAmbientLight();
-		if ( hit ) { fixtured++; if ( ambMat ) { fixturedAmbientMat++; } }
+		if ( hit ) { fixtured++; if ( ambMat ) { fixturedAmbientMat++; } s_rtEmissiveLightFixturedSerial[i] = ld->dudeSerial; dbg.kind = 0; }
 		else       { ambience++; if ( ambMat ) { ambienceAmbientMat++; } }
+		s_rtEmissiveLightDbg.Append( dbg );
 	}
 	for ( int t = 0; t < n; t++ ) { if ( s_rtEmissiveTris[t].emit & RT_EMIT_FLAG_INLIGHT ) { trisInLight++; } }
 	// the flags changed after the upload: rewrite the triangle range (the debug geometry is built lazily, after this)
@@ -4107,6 +4131,59 @@ bool R_RtEmissiveHideEntity( int entityIndex ) {
 		&& entityIndex >= 0 && entityIndex < s_rtEmissiveFlareHidden.Num() && s_rtEmissiveFlareHidden[entityIndex];
 }
 
+// E5: is this placed light dropped by emissive mode? Fixtured (an emitter inside its volume) at the census, the same
+// def (serial), the mode on. Everything else - ambience washes, parallel suns, lights created after the build, the
+// weapon lights - is kept (D1 / D3).
+bool R_RtEmissiveLightDropped( int lightIndex, unsigned int serial ) {
+	return r_rtEmissiveLighting.GetBool() && s_rtEmissiveBuf != 0
+		&& lightIndex >= 0 && lightIndex < s_rtEmissiveLightFixturedSerial.Num()
+		&& s_rtEmissiveLightFixturedSerial[lightIndex] != 0u && s_rtEmissiveLightFixturedSerial[lightIndex] == serial;
+}
+
+// Overlay mode 5: every placed light as a small sphere (icosahedron, 8 units) coloured by its census class - red =
+// fixtured (dropped in emissive mode), green = ambience (kept), yellow = parallel, blue = fog / blend. Built lazily.
+bool R_RtEmissiveLightDebugGeometry( unsigned int *vb, unsigned int *ib, int *numIndexes ) {
+	rhi::RHI *r = rhi::GetRHI();
+	const int n = s_rtEmissiveLightDbg.Num();
+	if ( n == 0 || r == NULL ) {
+		return false;
+	}
+	if ( s_rtEmissiveLightDbgVB == 0 ) {
+		static const float t = 0.8506508f, o = 0.5257311f;
+		static const float ico[12][3] = { { -o, t, 0 }, { o, t, 0 }, { -o, -t, 0 }, { o, -t, 0 }, { 0, -o, t }, { 0, o, t }, { 0, -o, -t }, { 0, o, -t }, { t, 0, -o }, { t, 0, o }, { -t, 0, -o }, { -t, 0, o } };
+		static const int icoTri[20][3] = { {0,11,5},{0,5,1},{0,1,7},{0,7,10},{0,10,11},{1,5,9},{5,11,4},{11,10,2},{10,7,6},{7,1,8},{3,9,4},{3,4,2},{3,2,6},{3,6,8},{3,8,9},{4,9,5},{2,4,11},{6,2,10},{8,6,7},{9,8,1} };
+		static const byte kindColor[4][3] = { { 255, 40, 40 }, { 40, 220, 60 }, { 255, 230, 40 }, { 60, 120, 255 } };
+		idDrawVert *verts = (idDrawVert *)Mem_Alloc16( n * 12 * (int)sizeof( idDrawVert ) );
+		glIndex_t  *idx   = (glIndex_t *)Mem_Alloc16( n * 60 * (int)sizeof( glIndex_t ) );
+		memset( verts, 0, n * 12 * (int)sizeof( idDrawVert ) );
+		for ( int i = 0; i < n; i++ ) {
+			const rtEmissiveLightDbg_t &l = s_rtEmissiveLightDbg[i];
+			for ( int v = 0; v < 12; v++ ) {
+				idDrawVert &dv = verts[ i * 12 + v ];
+				dv.xyz = l.origin + idVec3( ico[v][0], ico[v][1], ico[v][2] ) * 8.0f;
+				dv.normal.Set( 1.0f, 1.0f, (float)i );							// flux 1: never discarded as dark
+				dv.color[0] = kindColor[l.kind][0]; dv.color[1] = kindColor[l.kind][1]; dv.color[2] = kindColor[l.kind][2]; dv.color[3] = 255;
+			}
+			for ( int f = 0; f < 20; f++ ) {
+				for ( int k = 0; k < 3; k++ ) { idx[ i * 60 + f * 3 + k ] = i * 12 + icoTri[f][k]; }
+			}
+		}
+		s_rtEmissiveLightDbgVB = r->CreateBuffer( rhi::BU_VERTEX, n * 12 * (int)sizeof( idDrawVert ), verts );
+		s_rtEmissiveLightDbgIB = r->CreateBuffer( rhi::BU_INDEX, n * 60 * (int)sizeof( glIndex_t ), idx );
+		s_rtEmissiveLightDbgIndexes = n * 60;
+		Mem_Free16( verts );
+		Mem_Free16( idx );
+		if ( s_rtEmissiveLightDbgVB == 0 || s_rtEmissiveLightDbgIB == 0 ) {
+			if ( s_rtEmissiveLightDbgVB != 0 ) { r->DestroyBuffer( s_rtEmissiveLightDbgVB ); }
+			if ( s_rtEmissiveLightDbgIB != 0 ) { r->DestroyBuffer( s_rtEmissiveLightDbgIB ); }
+			s_rtEmissiveLightDbgVB = s_rtEmissiveLightDbgIB = 0; s_rtEmissiveLightDbgIndexes = 0;
+			return false;
+		}
+	}
+	*vb = s_rtEmissiveLightDbgVB; *ib = s_rtEmissiveLightDbgIB; *numIndexes = s_rtEmissiveLightDbgIndexes;
+	return true;
+}
+
 bool R_RtEmissiveLabelsWanted( void ) {
 	return r_rtEmissiveTableDebug.GetInteger() > 0 && s_rtEmissiveBuf != 0 && s_rtEmissiveLabels.Num() > 0;
 }
@@ -4244,6 +4321,7 @@ void R_RtResetSceneState( void ) {
 	// E1 emissive table: handles are stale too; the CPU copy goes with them so the next RT frame rebuilds
 	s_rtEmissiveBuf = 0; s_rtEmissiveAddr = 0; s_rtEmissiveDbgVB = s_rtEmissiveDbgIB = 0; s_rtEmissiveDbgIndexes = 0;
 	s_rtEmissiveTris.Clear(); s_rtEmissiveGroups.Clear(); s_rtEmissiveLocalVerts.Clear(); s_rtEmissiveLabels.Clear(); s_rtEmissiveScreenLabels.Clear(); s_rtEmissiveMap.Clear(); s_rtEmissiveTotalFlux = 0.0f;
+	s_rtEmissiveGroupBuf = 0; s_rtEmissiveGroupAddr = 0; s_rtEmissiveGroupCount = 0; s_rtEmissiveLightDbgVB = s_rtEmissiveLightDbgIB = 0; s_rtEmissiveLightDbgIndexes = 0; s_rtEmissiveLightFixturedSerial.Clear(); s_rtEmissiveLightDbg.Clear();
 }
 
 // DUDE: the six cvars that imply the persistent ray-query scene. r_rtWorld is the explicit

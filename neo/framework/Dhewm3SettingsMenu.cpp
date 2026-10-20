@@ -4960,17 +4960,18 @@ static void DrawDbgGroup_ExperimentalLighting()
 	// ===== Debug =====
 	ImGui::SeparatorText( "Debug" );
 	{
-		int dbg = idMath::ClampInt( 0, 4, r_rtEmissiveTableDebug.GetInteger() );
+		int dbg = idMath::ClampInt( 0, 5, r_rtEmissiveTableDebug.GetInteger() );
 		ImGui::SetNextItemWidth( 240.0f );
-		if ( ImGui::Combo( "Table View##rtEmissiveTableDebug", &dbg, "Off\0Emitters by texture\0Flux (vs mean)\0Emitted colour\0Light coverage (fixtured / alone)\0" ) ) {
+		if ( ImGui::Combo( "Table View##rtEmissiveTableDebug", &dbg, "Off\0Emitters by texture\0Flux (vs mean)\0Emitted colour\0Light coverage (fixtured / alone)\0Placed lights (spheres)\0" ) ) {
 			r_rtEmissiveTableDebug.SetInteger( dbg );
 		}
 		AddTooltip( "Draw the table's triangles over the view, depth-tested against the scene, with their material names. "
 			"'Emitters by texture' tints each glow texture its own colour (striped = a pulsing stage colour, checkered = "
 			"flare-inferred); 'Flux' shows each triangle's power relative to the table's mean (blue faint, green average, red "
 			"4x, white 16x+); 'Emitted colour' is the flat mean radiance the mode lights with; 'Light coverage' green = the "
-			"emitter sits inside a placed light's volume (that light is fixtured), red = no placed light covers it. "
-			"(r_rtEmissiveTableDebug)" );
+			"emitter sits inside a placed light's volume (that light is fixtured), red = no placed light covers it; 'Placed "
+			"lights' draws every placed light as a sphere: red = fixtured (dropped while Emissive Mode is on), green = ambience "
+			"(kept), yellow = parallel, blue = fog / blend. (r_rtEmissiveTableDebug)" );
 	}
 	ImGui::TextDisabled( "Console: rtEmissiveProbe names the surface under the crosshair and the table's verdict on it." );
 	ImGui::EndDisabled();	// table

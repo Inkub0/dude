@@ -61,6 +61,8 @@ void main() {
 		fragColor = vec4( c, 1.0 );
 	} else if ( mode == 4 ) {
 		fragColor = ( ( flags & ( 1u << 19 ) ) != 0u ) ? vec4( 0.1, 0.9, 0.2, 1.0 ) : vec4( 0.95, 0.15, 0.1, 1.0 );
+	} else if ( mode == 5 ) {
+		fragColor = vec4( var_Tint.rgb, 1.0 );											// the placed lights as census-coloured spheres
 	} else {
 		fragColor = vec4( var_Tint.rgb * var_FluxScaleIndex.y, 1.0 );				// the MEAN radiance E2 lights with (flat; the vertex colour carries it; every entry is uniform now)
 	}

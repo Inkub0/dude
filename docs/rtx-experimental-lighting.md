@@ -270,3 +270,16 @@ tightened: reach 6 units (a fixture's flare sits on it; walls 20 units behind a 
 inferred), bright patch < 30% coverage, the log line says why. Census: EnPro's flux = the reactor cylinders (encyl2
 42%, encyl1 18%), dim_disk 17% (a 16-triangle static disk - check it in mode 1), whiteblock 11%; 585 placed lights:
 365 fixtured / 189 ambience.
+
+**E5 built (2026-10-20, branch feat/rtx-emissive-e2): the fixtured lights are dropped.** The user's finding - the
+sparkle sits where a fixture carries BOTH its placed light and its emitter, and intensity 0.4 "kills the frying"
+because the emitters then vanish under the still-present placed lights - made E5 the next step. The census records,
+per lightDef index, the def's creation serial when the light is FIXTURED; `R_RtEmissiveLightDropped( index, serial )`
+is true for exactly those while the mode is on; `RB_RHI_GatherSceneLights` marks such a light DI-covered (the forward
+path does not draw it) and leaves it OUT of the scene-light buffer (DI, the bounce, volumetrics and reflections lose
+it alike). Kept: ambience lights (no emitter in their volume), parallel suns, fog / blend, lights created after the
+build (new serial), the weapon lights. The default intensity is now 1 (the emitters carry the fixtured rooms alone;
+tune on a corridor). Overlay mode 5 draws every placed light as an 8-unit sphere: red = fixtured (dropped), green =
+ambience, yellow = parallel, blue = fog / blend - the check that the drop list is the one the room needs. OPEN:
+cookies / grate patterns go with the dropped light (by design); rooms whose fixture emitter is weak will read darker
+than before until the D2 intensity table exists - that is the E6 calibration.
