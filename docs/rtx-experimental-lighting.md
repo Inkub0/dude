@@ -439,3 +439,14 @@ shaders receive is the count WRITTEN this frame; r_rtEmissiveMaxRows joins Compu
   bounce-only emitter rows competed with the placed lights for the 16 grid slots per cell, emptied cells of their placed
   lights (the DI skips bounce-only rows) and the DI changed cell to cell - cell-shaped blocks. FIX: the fill gives
   BOUNCEONLY rows a quota of 2 slots (1 at 4-7 slots, 0 below), ranked among their kind, behind the lights.
+- BLOCKY SHADOWS IN EMISSIVE MODE (2026-10-20): the same cell-border steps with the emitters as real lights - 300 rows
+  reaching 2 radii put far more candidates into every cell than its 16 slots; each cell kept a different top set and
+  DROPPED the rest. FIX = ReGIR proper in light_grid_fill.comp: an overflowing cell keeps the strongest slotsL - kS
+  deterministically and fills kS = slotsL/4 RESIDUAL slots by importance-sampled draws over the lights it cannot hold
+  (fresh each frame, seed = cell + frame), stored with q = kS x imp / sumRest; the DI weighs such a candidate pHat / q,
+  the bounce 1/q (capped 8). A cell that fits is bit-identical (q = 1). The per-slot float is now q, not imp.
+- CULL AT ONE REACH (2026-10-20, user: "you are reinventing the wheel"): the old emissive surfaces (GUI screens, item
+  glow) were plain fill point lights through the normal path - the shape v3 has. The blocks came from COUNT x REACH: a
+  2 x reach cull sphere gave every cell several times the candidates of the placed lights. An emitter row now occupies
+  the volume of the light it replaced (cull = bound + reach, fade 0.75R..R). The residual slots stay as the net for a
+  cell that still overflows (inert otherwise).

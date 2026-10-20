@@ -6218,7 +6218,10 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 				const float radius = R * ( ( reachMul > 0.0f ) ? reachMul : 1.0f );
 				RtReflLightGPU &L = sorted[ n + nFog + nEm ];
 				memset( &L, 0, sizeof( L ) );
-				L.cull[0] = row.centroid.x; L.cull[1] = row.centroid.y; L.cull[2] = row.centroid.z; L.cull[3] = row.boundRadius + 2.0f * radius;
+				// the row occupies the VOLUME of the light it replaced: cut at ONE reach like a Doom light (the shade fades out
+				// over the last quarter). A 2 x reach sphere put eight times the volume - and several times the candidates - of
+				// the placed lights into every grid cell, which overflowed the cell's slots (the blocky shadows of 2026-10-20).
+				L.cull[0] = row.centroid.x; L.cull[1] = row.centroid.y; L.cull[2] = row.centroid.z; L.cull[3] = row.boundRadius + radius;
 				const idVec3 pos = row.hasLight ? row.lightOrigin : row.centroid;
 				L.pos[0] = pos.x; L.pos[1] = pos.y; L.pos[2] = pos.z;
 				L.proj[3][0] = row.hasLight ? 1.0f : 0.0f;
@@ -9787,7 +9790,7 @@ static void RB_RHI_LightGridFill( rhi::RHI *r, unsigned long long lightAddr, int
 	if ( lightAddr == 0 || numLights <= 0 ) {
 		return;		// no rows this view: the grid is not consumed (the DI pass returned before its gather)
 	}
-	struct { unsigned int gridLo, gridHi, lightLo, lightHi, nLights, cascades, res, slots; float cellBase; float camX, camY, camZ; float parallelFlux; } pc;	// light_grid_fill.comp PC
+	struct { unsigned int gridLo, gridHi, lightLo, lightHi, nLights, cascades, res, slots; float cellBase; float camX, camY, camZ; float parallelFlux; unsigned int frame; } pc;	// light_grid_fill.comp PC
 	pc.gridLo      = (unsigned int)( g.gridAddr & 0xFFFFFFFFull );
 	pc.gridHi      = (unsigned int)( g.gridAddr >> 32 );
 	pc.lightLo     = (unsigned int)( lightAddr & 0xFFFFFFFFull );
@@ -9801,6 +9804,7 @@ static void RB_RHI_LightGridFill( rhi::RHI *r, unsigned long long lightAddr, int
 	pc.camY        = g.parms.camPos[1];
 	pc.camZ        = g.parms.camPos[2];
 	pc.parallelFlux = 4.0f;		// flux weight for parallel (sun) lights (no 1/d^2): keeps a sun a candidate everywhere (L5 tuning)
+	pc.frame       = (unsigned int)tr.frameCount;	// the residual slots' sampling seed (light_grid_fill.comp: a fresh draw each frame)
 	rhi::ComputeArgs ca = rhi::ComputeArgs();
 	ca.shader = g.fillProg;
 	ca.pushConstants = &pc;

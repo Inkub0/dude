@@ -194,6 +194,9 @@ int rtgiTraceBounce( RtgiBounceParms bp, vec3 Pw, vec3 Nw, vec3 eyeW, float d, v
 		for ( uint ii = 0u; ii < nIter; ii++ ) {
 			uint li = lgUse ? lgSlotLight( lgG, lgBase, ii ) : ii;
 			if ( li >= bp.nLights ) { continue; }										// a stale grid slot: never past the buffer
+			// a RESIDUAL grid slot (an overflowing cell's importance-sampled stand-in for the lights it cannot hold) weighs 1/q;
+			// capped at 8 so a rare draw cannot spike the summed bounce (the DI's RIS has its own normalisation)
+			float invQ = lgUse ? min( 1.0 / lgSlotQ( lgG, lgBase, ii ), 8.0 ) : 1.0;
 			if ( gate && !dudeLightInRange( lights, li, hitWorld ) ) { continue; }
 			const uint lflags = lights.l[ li ].flags;
 			if ( ( lflags & DUDE_LIGHT_FOGVOLUME ) != 0u ) { continue; }				// a fog row is not a light
@@ -209,7 +212,7 @@ int rtgiTraceBounce( RtgiBounceParms bp, vec3 Pw, vec3 Nw, vec3 eyeW, float d, v
 				vec3 c;
 				uint seed = rtEmissiveSeed( li, hitWorld, bp.sampleFrame ) ^ ( uint( sfrag.x ) * 7919u + uint( sfrag.y ) * 104729u );
 				if ( !rtEmissiveShadeRow( lights, li, hitWorld, hitN, seed | 1u, c, ldir, dl, ndl ) ) { continue; }
-				contrib = albedo * c * bp.lightScale;
+				contrib = albedo * c * ( bp.lightScale * invQ );
 			} else {
 			dudeLightDir( lights, li, hitWorld, ldir, dl );
 			ndl = max( dot( hitN, ldir ), 0.0 );
@@ -220,7 +223,7 @@ int rtgiTraceBounce( RtgiBounceParms bp, vec3 Pw, vec3 Nw, vec3 eyeW, float d, v
 				? dudeLightAttenTex( lights, li, hitWorld, dl, lflags, gate, false, 0.0 )	// a ray hit has no screen footprint: mip 0 (as before)
 				: vec3( dudeLightAtten( lights, li, hitWorld, dl, lflags, gate, false ) );
 			if ( atten.r + atten.g + atten.b <= 0.0 ) { continue; }
-			contrib = albedo * lights.l[ li ].color * ( atten * ndl * bp.lightScale );
+			contrib = albedo * lights.l[ li ].color * ( atten * ndl * bp.lightScale * invQ );
 			}
 			Li += contrib;
 			if ( !fast ) { LiCache += contrib; }								// a fast light's bounce is never learned

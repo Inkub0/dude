@@ -233,7 +233,7 @@ uint rtEmissiveSeed( uint li, vec3 P, float frame ) {
 // ldir / dl are the SAMPLED point (the visibility ray); the receiver cosine comes from the authored light origin when there is one.
 // Reach (E6): the Doom 3 light this emitter replaced fell off LINEARLY to its radius; a solid-angle estimate falls with the
 // inverse square. Past the knee (radius / 4) the sample is boosted by d / knee so the far field goes ~1/d - the reach the
-// mapper lit the hall for - and fades out between 1.5 and 2 radii (the row's cull sphere) so the cut is soft.
+// mapper lit the hall for - and fades out over the last quarter of the reach (the row's cull sphere, a Doom light's extent).
 // false = cannot reach (culled / dark / behind / below the horizon). Every stored index is checked against the table's
 // count: a row of another table (a stale frame across a rebuild) shades nothing rather than reading off the end.
 bool rtEmissiveShadeRow( RtLights lights, uint li, vec3 P, vec3 N, uint seed, out vec3 contrib, out vec3 ldir, out float dl, out float ndl ) {
@@ -269,7 +269,7 @@ bool rtEmissiveShadeRow( RtLights lights, uint li, vec3 P, vec3 N, uint seed, ou
 	float cosL = max( -dot( nUnit, ldir ), 0.0 );								// nUnit points AT P (the sampler re-winds)
 	if ( !( cosL > 0.0 ) ) { return false; }
 	float boost = ( knee > 0.0 ) ? max( dl / knee, 1.0 ) : 1.0;
-	float fade  = 1.0 - smoothstep( 1.5 * radius, 2.0 * radius, dl );
+	float fade  = 1.0 - smoothstep( 0.75 * radius, radius, dl );				// out at ONE reach: the row's cull sphere, a Doom light's extent
 	vec3  L = rtEmissiveMeanRadiance( e ) * ( e.scale * intensity * boost * fade );
 	contrib = L * ( sqrt( cosL ) * ndl / ( pIn * pdfw ) );						// f / p: the row's irradiance estimate
 	return !( any( isnan( contrib ) ) );
