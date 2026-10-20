@@ -41,6 +41,8 @@ void main() {
 	float raw = texelFetch( u_currentDepth, clamp( ivec2( floor( gl_FragCoord.xy * u_depthTexRecip.xy * vec2( dsz ) ) ), ivec2( 0 ), dsz - 1 ), 0 ).x;
 	if ( gl_FragCoord.z > raw + 2e-5 ) { discard; }
 
+	if ( var_FluxScaleIndex.x <= 0.0 ) { discard; }							// a fixture switched OFF (RT_EMIT_DARK): not an emitter right now
+
 	int  mode  = int( u_localParam0.x + 0.5 );
 	uint slot  = uint( var_SlotFlags.x + 0.5 );
 	uint flags = uint( var_SlotFlags.y + 0.5 ) << 16;

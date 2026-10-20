@@ -360,3 +360,14 @@ an OFF state is excluded ("switched off by its condition"). A glow image that is
 one becomes resident. The user's observation that a fixture keeps a small lit bar with the placed lights off is the
 engine's own design: the glow stage is unconditional self-illumination, the placed light does the lighting; vanilla
 turns a fixture OFF with a skin or a parm7 condition, never by swapping the glow texture.
+
+**Vanilla fixture switching folded in (2026-10-20).** Every tracked entity group remembers the glow STATE it was
+baked with - skin, custom material, the 12 shader parms - next to its model matrix. The per-frame refresh compares
+them; on a change `R_RtEmissiveRegatherGroup` re-gathers the entity with its current state (skin remap, stage
+conditions, tint) into a scratch list: the same triangle count rewrites the slice in place (new glow slot / tint /
+flux + positions), a state that glows nowhere (a light shot out: the `_off` skin) keeps the slice at zero flux with
+`RT_EMIT_FLAG_DARK` (the CDF never draws it; the overlay discards it) and comes back the same way, and a change in
+WHICH surfaces glow queues a full rebuild (rare). Any flux change re-uploads the CDF + header
+(`R_RtEmissiveUploadCdf`). Console lines name the entity on OFF / ON. A scripted `_color` fade re-gathers its entity
+every frame it changes (one entity's surfaces + a 5k-float CDF: negligible); the placed light the game removes with
+the fixture is E5's business (fixtured lights are dropped anyway).

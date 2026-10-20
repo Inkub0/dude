@@ -2726,6 +2726,7 @@ static const int	RT_EMISSIVE_MAX_TRIS     = 1 << 18;	// 262144 x 64 B = 16 MB ta
 #define RT_EMIT_FLAG_ENTITY		( 1u << 17 )			// from a static entity model (else worldspawn)
 #define RT_EMIT_FLAG_TWOSIDED	( 1u << 18 )			// material creates back sides: its reversed twin is in the table too (both faces emit)
 #define RT_EMIT_FLAG_INLIGHT	( 1u << 19 )			// E5 census: the triangle sits inside a placed light's volume (that light is "fixtured")
+#define RT_EMIT_FLAG_DARK		( 1u << 20 )			// the fixture is switched OFF in its current state (skin / parm): zero flux, kept in place
 
 static idList<rtEmissiveTriGPU_t>	s_rtEmissiveTris;			// CPU copy of the table (the debug geometry is built from it)
 static rhi::BufferHandle			s_rtEmissiveBuf = 0;		// header + tris + CDF
@@ -2738,7 +2739,19 @@ static int							s_rtEmissiveDbgIndexes = 0;
 // matrix it was baked with, so a func_mover (door, lift, platform) that moves gets its triangles' WORLD positions
 // re-baked and its table slice (+ debug verts) rewritten in place. Area - hence flux and the CDF - is invariant
 // under the rigid move, so only the positions change.
-struct rtEmissiveGroup_t { int entityIndex; const idRenderModel *model; int firstTri, numTris, firstLocalVert; float lastMatrix[16]; bool reported; };
+struct rtEmissiveGroup_t {
+	int					entityIndex;
+	const idRenderModel *model;
+	int					firstTri, numTris, firstLocalVert;
+	float				lastMatrix[16];
+	bool				reported;
+	// the glow STATE the slice was baked with (vanilla switches a fixture off by a skin swap, a custom material or a
+	// shader parm, e.g. parm7): a change re-gathers the entity in place
+	const idDeclSkin	*skin;
+	const idMaterial	*customShader;
+	float				shaderParms[MAX_ENTITY_SHADER_PARMS];
+	bool				dark;			// the current state glows nowhere: the slice is kept at zero flux (never sampled)
+};
 static idList<rtEmissiveGroup_t>	s_rtEmissiveGroups;
 static idList<idVec3>				s_rtEmissiveLocalVerts;		// 3 per entity-sourced triangle (model space)
 static int							s_rtEmissiveMovedGroups = 0;	// movers re-baked since the build (census / debugging)
@@ -2976,7 +2989,8 @@ struct rtEmissiveCensus_t { const idMaterial *mat; int tris; float flux; bool an
 // Append every triangle of one emissive surface. modelMatrix NULL = the verts are already world space (an _areaN).
 static void R_RtEmissiveAddSurface( const srfTriangles_t *tri, const idMaterial *mat, const shaderStage_t *stage,
 		const float *modelMatrix, const float *entityParms, unsigned int flags, float scale,
-		idList<rtEmissiveCensus_t> &census, int &overflow ) {
+		idList<rtEmissiveCensus_t> &census, int &overflow,
+		idList<rtEmissiveTriGPU_t> &out, idList<idVec3> *localOut ) {
 	float tintRGB[3];
 	const bool constant = R_RtEmissiveStageColor( mat, stage, entityParms, tintRGB );
 	float tintLum = R_RtLuminance( tintRGB );
@@ -3005,7 +3019,7 @@ static void R_RtEmissiveAddSurface( const srfTriangles_t *tri, const idMaterial 
 	if ( ci < 0 ) { rtEmissiveCensus_t c; c.mat = mat; c.tris = 0; c.flux = 0.0f; c.animated = !constant; c.texMatrix = hasTexMatrix; c.slot = (unsigned int)img->rhiHandle & 0xFFFFu; ci = census.Append( c ); }
 
 	for ( int n = 0; n + 2 < tri->numIndexes; n += 3 ) {
-		if ( s_rtEmissiveTris.Num() >= RT_EMISSIVE_MAX_TRIS ) {
+		if ( out.Num() >= RT_EMISSIVE_MAX_TRIS ) {
 			overflow++;
 			continue;
 		}
@@ -3022,12 +3036,12 @@ static void R_RtEmissiveAddSurface( const srfTriangles_t *tri, const idMaterial 
 		if ( area < 1e-3f ) {
 			continue;														// degenerate
 		}
-		if ( modelMatrix != NULL ) {										// E1e: the model-space verts, for the mover re-bake
-			s_rtEmissiveLocalVerts.Append( a.xyz );
-			s_rtEmissiveLocalVerts.Append( b.xyz );
-			s_rtEmissiveLocalVerts.Append( c.xyz );
+		if ( modelMatrix != NULL && localOut != NULL ) {					// E1e: the model-space verts, for the mover re-bake
+			localOut->Append( a.xyz );
+			localOut->Append( b.xyz );
+			localOut->Append( c.xyz );
 		}
-		rtEmissiveTriGPU_t &e = s_rtEmissiveTris.Alloc();
+		rtEmissiveTriGPU_t &e = out.Alloc();
 		e.p0[0] = p0.x; e.p0[1] = p0.y; e.p0[2] = p0.z;
 		e.p1[0] = p1.x; e.p1[1] = p1.y; e.p1[2] = p1.z;
 		e.p2[0] = p2.x; e.p2[1] = p2.y; e.p2[2] = p2.z;
@@ -3107,7 +3121,7 @@ static void R_RtEmissiveBuild( const idRenderWorldLocal *world, rhi::RHI *r ) {
 				continue;
 			}
 			const int before = s_rtEmissiveTris.Num();
-			R_RtEmissiveAddSurface( surf->geometry, surf->shader, stage, NULL, NULL, 0u, scale, census, overflow );
+			R_RtEmissiveAddSurface( surf->geometry, surf->shader, stage, NULL, NULL, 0u, scale, census, overflow, s_rtEmissiveTris, NULL );
 			worldTris += s_rtEmissiveTris.Num() - before;
 			if ( s_rtEmissiveTris.Num() > before ) { rtEmissiveLabel_t l; l.mat = surf->shader; l.firstTri = before; l.numTris = s_rtEmissiveTris.Num() - before; s_rtEmissiveLabels.Append( l ); }
 		}
@@ -3143,7 +3157,7 @@ static void R_RtEmissiveBuild( const idRenderWorldLocal *world, rhi::RHI *r ) {
 				continue;
 			}
 			const int before = s_rtEmissiveTris.Num();
-			R_RtEmissiveAddSurface( surf->geometry, mat, stage, modelMatrix, def->parms.shaderParms, RT_EMIT_FLAG_ENTITY, scale, census, overflow );
+			R_RtEmissiveAddSurface( surf->geometry, mat, stage, modelMatrix, def->parms.shaderParms, RT_EMIT_FLAG_ENTITY, scale, census, overflow, s_rtEmissiveTris, &s_rtEmissiveLocalVerts );
 			entityTris += s_rtEmissiveTris.Num() - before;
 			if ( s_rtEmissiveTris.Num() > before ) { rtEmissiveLabel_t l; l.mat = mat; l.firstTri = before; l.numTris = s_rtEmissiveTris.Num() - before; s_rtEmissiveLabels.Append( l ); }
 			any = any || ( s_rtEmissiveTris.Num() > before );
@@ -3158,6 +3172,10 @@ static void R_RtEmissiveBuild( const idRenderWorldLocal *world, rhi::RHI *r ) {
 			g.firstLocalVert = groupFirstLocal;
 			g.reported = false;
 			memcpy( g.lastMatrix, modelMatrix, sizeof( g.lastMatrix ) );
+			g.skin = def->parms.customSkin;
+			g.customShader = def->parms.customShader;
+			memcpy( g.shaderParms, def->parms.shaderParms, sizeof( g.shaderParms ) );
+			g.dark = false;
 		}
 	}
 
@@ -3240,6 +3258,98 @@ static void R_RtEmissiveFillDebugVerts( int firstTri, int numTris, idDrawVert *v
 	}
 }
 
+// Recompute the flux CDF + header over the CPU table and upload them (after an in-place flux change).
+static void R_RtEmissiveUploadCdf( rhi::RHI *r ) {
+	const int n = s_rtEmissiveTris.Num();
+	if ( n == 0 || s_rtEmissiveBuf == 0 ) {
+		return;
+	}
+	static idList<float> cdf;
+	cdf.SetNum( n, false );
+	double run = 0.0;
+	for ( int i = 0; i < n; i++ ) {
+		run += s_rtEmissiveTris[i].flux;
+		cdf[i] = (float)run;
+	}
+	s_rtEmissiveTotalFlux = (float)run;
+	const float meanFlux = (float)( run / n );
+	const int triBytes = n * (int)sizeof( rtEmissiveTriGPU_t );
+	unsigned int hdr[4];
+	hdr[0] = (unsigned int)n;
+	memcpy( &hdr[1], &s_rtEmissiveTotalFlux, sizeof( float ) );
+	hdr[2] = (unsigned int)( RT_EMISSIVE_HEADER_BYTES + triBytes );
+	memcpy( &hdr[3], &meanFlux, sizeof( float ) );
+	r->UpdateBuffer( s_rtEmissiveBuf, 0, RT_EMISSIVE_HEADER_BYTES, hdr );
+	r->UpdateBuffer( s_rtEmissiveBuf, RT_EMISSIVE_HEADER_BYTES + triBytes, n * (int)sizeof( float ), cdf.Ptr() );
+}
+
+// The vanilla fixture switch folded in: the entity's glow state (skin / custom material / shader parms - a light shot
+// out, a trigger, a parm7 red->green door light) changed since the slice was baked. Re-gather the entity with its
+// CURRENT state: the same surfaces glowing (same triangle count) rewrite the slice in place (new glow slot, tint,
+// flux - and positions, so this doubles as a move); a state that glows NOWHERE keeps the slice at zero flux with
+// RT_EMIT_FLAG_DARK (the CDF never draws it, the overlay hides it) and comes back the same way; any other change
+// (different surfaces glow) is a full rebuild. Returns true when the table changed.
+static bool R_RtEmissiveRegatherGroup( rtEmissiveGroup_t &g, const idRenderEntityLocal *def, rhi::RHI *r ) {
+	static idList<rtEmissiveTriGPU_t> scratch;
+	static idList<idVec3> scratchLocal;
+	static idList<rtEmissiveCensus_t> scratchCensus;
+	scratch.SetNum( 0, false );
+	scratchLocal.SetNum( 0, false );
+	scratchCensus.SetNum( 0, false );
+	const float scale = idMath::ClampFloat( 0.0f, 64.0f, r_rtEmissiveScale.GetFloat() );
+	float modelMatrix[16];
+	R_AxisToModelMatrix( def->parms.axis, def->parms.origin, modelMatrix );
+	int overflow = 0;
+	const idRenderModel *model = def->parms.hModel;
+	for ( int s = 0; s < model->NumSurfaces(); s++ ) {
+		const modelSurface_t *surf = model->Surface( s );
+		if ( surf->geometry == NULL || surf->geometry->verts == NULL || surf->geometry->indexes == NULL ) {
+			continue;
+		}
+		const idMaterial *mat = R_RemapShaderBySkin( surf->shader, def->parms.customSkin, def->parms.customShader );
+		const shaderStage_t *stage = R_RtEmissiveStage( mat, NULL, def->parms.shaderParms );
+		if ( stage == NULL ) {
+			continue;
+		}
+		R_RtEmissiveAddSurface( surf->geometry, mat, stage, modelMatrix, def->parms.shaderParms, RT_EMIT_FLAG_ENTITY, scale, scratchCensus, overflow, scratch, &scratchLocal );
+	}
+	g.skin = def->parms.customSkin;
+	g.customShader = def->parms.customShader;
+	memcpy( g.shaderParms, def->parms.shaderParms, sizeof( g.shaderParms ) );
+	memcpy( g.lastMatrix, modelMatrix, sizeof( g.lastMatrix ) );
+	if ( scratch.Num() == 0 ) {
+		if ( !g.dark ) {														// went DARK: keep the slice, zero flux
+			for ( int t = 0; t < g.numTris; t++ ) {
+				rtEmissiveTriGPU_t &e = s_rtEmissiveTris[ g.firstTri + t ];
+				e.flux = 0.0f;
+				e.emit |= RT_EMIT_FLAG_DARK;
+			}
+			g.dark = true;
+			common->Printf( "r_rtEmissiveTable: entity %d '%s' switched OFF (%d emissive tris kept dark)\n", g.entityIndex, model->Name(), g.numTris );
+			return true;
+		}
+		return false;
+	}
+	if ( scratch.Num() != g.numTris ) {
+		common->Printf( "r_rtEmissiveTable: entity %d '%s' changed which surfaces glow (%d -> %d tris) - rebuilding the table\n", g.entityIndex, model->Name(), g.numTris, scratch.Num() );
+		s_rtEmissiveMap.Clear();												// stale next frame: a full rebuild
+		return false;
+	}
+	for ( int t = 0; t < g.numTris; t++ ) {
+		const unsigned int inLight = s_rtEmissiveTris[ g.firstTri + t ].emit & RT_EMIT_FLAG_INLIGHT;	// the census flag survives
+		s_rtEmissiveTris[ g.firstTri + t ] = scratch[t];
+		s_rtEmissiveTris[ g.firstTri + t ].emit |= inLight;
+	}
+	for ( int v = 0; v < g.numTris * 3; v++ ) {
+		s_rtEmissiveLocalVerts[ g.firstLocalVert + v ] = scratchLocal[v];
+	}
+	if ( g.dark ) {
+		common->Printf( "r_rtEmissiveTable: entity %d '%s' switched ON again\n", g.entityIndex, model->Name() );
+	}
+	g.dark = false;
+	return true;
+}
+
 // E1e: once per frame, re-bake the world positions of every entity-sourced run whose entity has MOVED since its
 // last bake (doors, lifts, platforms, rotating props) and rewrite that slice of the table (and of the debug
 // vertices, when built) in place. UpdateBuffer is a memcpy into the host-visible mapping, so a frame already in
@@ -3253,6 +3363,7 @@ static void R_RtEmissiveRefreshMovers( const idRenderWorldLocal *world, rhi::RHI
 	}
 	lastFrame = tr.frameCount;
 	static idList<idDrawVert> dbgScratch;
+	bool cdfDirty = false;
 	for ( int gi = 0; gi < s_rtEmissiveGroups.Num(); gi++ ) {
 		rtEmissiveGroup_t &g = s_rtEmissiveGroups[gi];
 		if ( g.entityIndex < 0 || g.entityIndex >= world->entityDefs.Num() ) {
@@ -3261,6 +3372,24 @@ static void R_RtEmissiveRefreshMovers( const idRenderWorldLocal *world, rhi::RHI
 		const idRenderEntityLocal *def = world->entityDefs[ g.entityIndex ];
 		if ( def == NULL || def->parms.hModel != g.model ) {
 			continue;
+		}
+		// the glow STATE: skin / custom material / shader parms (parm7 door-light colour, a scripted _color) changed?
+		if ( def->parms.customSkin != g.skin || def->parms.customShader != g.customShader
+				|| memcmp( def->parms.shaderParms, g.shaderParms, sizeof( g.shaderParms ) ) != 0 ) {
+			if ( R_RtEmissiveRegatherGroup( g, def, r ) ) {
+				r->UpdateBuffer( s_rtEmissiveBuf, RT_EMISSIVE_HEADER_BYTES + g.firstTri * (int)sizeof( rtEmissiveTriGPU_t ),
+					g.numTris * (int)sizeof( rtEmissiveTriGPU_t ), &s_rtEmissiveTris[ g.firstTri ] );
+				if ( s_rtEmissiveDbgVB != 0 ) {
+					dbgScratch.SetNum( g.numTris * 3, false );
+					R_RtEmissiveFillDebugVerts( g.firstTri, g.numTris, dbgScratch.Ptr() );
+					r->UpdateBuffer( s_rtEmissiveDbgVB, g.firstTri * 3 * (int)sizeof( idDrawVert ), g.numTris * 3 * (int)sizeof( idDrawVert ), dbgScratch.Ptr() );
+				}
+				cdfDirty = true;
+			}
+			if ( s_rtEmissiveMap.Length() == 0 ) {
+				return;														// a full rebuild is queued: nothing more to patch this frame
+			}
+			continue;														// positions are re-baked by the regather
 		}
 		float mm[16];
 		R_AxisToModelMatrix( def->parms.axis, def->parms.origin, mm );
@@ -3292,6 +3421,9 @@ static void R_RtEmissiveRefreshMovers( const idRenderWorldLocal *world, rhi::RHI
 			r->UpdateBuffer( s_rtEmissiveDbgVB, g.firstTri * 3 * (int)sizeof( idDrawVert ), g.numTris * 3 * (int)sizeof( idDrawVert ), dbgScratch.Ptr() );
 		}
 		s_rtEmissiveMovedGroups++;
+	}
+	if ( cdfDirty ) {
+		R_RtEmissiveUploadCdf( r );												// flux changed somewhere: the sampling CDF follows
 	}
 }
 
