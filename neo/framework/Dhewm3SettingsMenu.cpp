@@ -4901,6 +4901,11 @@ static void DrawDbgGroup_ExperimentalLighting()
 		"corridor. (r_rtEmissiveIntensity)" );
 	ImGui::SameLine();
 	if ( ImGui::SmallButton( "reset##rtEmissiveIntensity" ) ) { r_rtEmissiveIntensity.Reset(); }
+	CvarCheckbox( "Inherit the replaced light's power", r_rtEmissivePowerMatch, "Each emitter's radiance is set from the colour "
+		"and radius of the placed light it replaces and its own area, so a small fixture lights its room as its light did and "
+		"a big panel glows softly. An emitter in no placed light is matched to a light of its own colour at the default reach. "
+		"With this on, Emitter Intensity is a trim around 1. Off = authored glow brightness x intensity (small fixtures go "
+		"dark). (r_rtEmissivePowerMatch)" );
 	ImGui::EndDisabled();	// r_rtEmissiveLighting (the bounce works in BOTH modes)
 	CvarSliderF( "Emitter Reach", r_rtEmissiveReach, 0.0f, 4.0f, "%.2f", "How far an emitter's light reaches, as a multiple of "
 		"the authored radius of the placed light it replaced. A Doom 3 light falls off linearly out to its radius, an area "

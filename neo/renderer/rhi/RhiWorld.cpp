@@ -6187,8 +6187,11 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 				const float radius = R * ( ( reachMul > 0.0f ) ? reachMul : 1.0f );
 				const float dist   = Max( ( row.centroid - viewOrg ).Length() - row.boundRadius, 0.0f );
 				if ( dist > 2.0f * radius + REACH ) { continue; }						// cannot touch anything near the view
-				const float lum = row.meanRadiance.x * 0.2126f + row.meanRadiance.y * 0.7152f + row.meanRadiance.z * 0.0722f;
-				const float imp = lum * intensity * row.area / Max( dist * dist, 64.0f * 64.0f );	// the grid's own ranking at the eye
+				// the pick ranks on the placed lights' scale too (C x radius^2 / d^2): matched = the replaced light's luminance
+				const float meanLum = row.meanRadiance.x * 0.2126f + row.meanRadiance.y * 0.7152f + row.meanRadiance.z * 0.0722f;
+				const float C = ( r_rtEmissivePowerMatch.GetBool() ) ? ( ( row.reach > 0.0f && row.lightLum > 0.0f ) ? row.lightLum : Min( meanLum, 1.0f ) )
+				                                                     : 16.0f * meanLum * row.area / ( R * R );
+				const float imp = C * intensity * radius * radius / Max( dist * dist, 64.0f * 64.0f );
 				if ( !( imp > 0.0f ) ) { continue; }
 				if ( np < cap ) {
 					pick[ np ] = i; pickImp[ np ] = imp; np++;
@@ -6209,10 +6212,28 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 				L.cull[0] = row.centroid.x; L.cull[1] = row.centroid.y; L.cull[2] = row.centroid.z; L.cull[3] = row.boundRadius + 2.0f * radius;
 				L.pos[0] = row.centroid.x; L.pos[1] = row.centroid.y; L.pos[2] = row.centroid.z;
 				L.radius = radius;
-				const float k2 = intensity * row.area / ( radius * radius );
-				L.color[0] = row.meanRadiance.x * k2; L.color[1] = row.meanRadiance.y * k2; L.color[2] = row.meanRadiance.z * k2;
+				// POWER MATCH (r_rtEmissivePowerMatch): the emitter inherits the POWER of the light it replaces. A Doom 3 light of
+				// colour C and radius R delivers C/2 at d = R/2; this row (reach boost 2 at that distance) delivers 8 L A / R^2,
+				// so the radiance that matches is L = C R^2 / (16 A): a tiny decal replacing a big light burns bright, a big
+				// panel glows softly - the fixture's few square units can never stand in for its light at authored radiance
+				// (the "dead" sterlight fixtures of 2026-10-20). An emitter in NO light is matched to a light of its own colour
+				// (C = its mean luminance, <= 1) at the default reach. The row's intensity field = the global intensity x the
+				// match ratio (the shade multiplies the triangle's own mean radiance by it). Capped at 4096 x.
+				const float meanLum = row.meanRadiance.x * 0.2126f + row.meanRadiance.y * 0.7152f + row.meanRadiance.z * 0.0722f;
+				float rowIntensity = intensity;
+				float Ceq;													// the row's colour on the PLACED lights' scale (the grid ranks by lum x radius^2 / d^2)
+				if ( r_rtEmissivePowerMatch.GetBool() && meanLum > 1e-6f && row.area > 1e-3f ) {
+					const float C = ( row.reach > 0.0f && row.lightLum > 0.0f ) ? row.lightLum : Min( meanLum, 1.0f );
+					const float Lmatch = C * R * R / ( 16.0f * row.area );
+					rowIntensity = intensity * Min( Lmatch / meanLum, 4096.0f );
+					Ceq = C * intensity;
+				} else {
+					Ceq = 16.0f * meanLum * intensity * row.area / ( R * R );	// the same law read backwards: what C this radiance equals
+				}
+				const float kc = ( meanLum > 1e-6f ) ? Ceq / meanLum : 0.0f;	// the emitter's own tint at that luminance
+				L.color[0] = row.meanRadiance.x * kc; L.color[1] = row.meanRadiance.y * kc; L.color[2] = row.meanRadiance.z * kc;
 				L.flags = 64u | ( r_rtEmissiveLighting.GetBool() ? 0u : 128u );		// bit6 = emissive row, bit7 = bounce-only (normal mode)
-				L.proj[0][3] = intensity;
+				L.proj[0][3] = rowIntensity;
 				memcpy( &L.proj[1][0], &tLo, sizeof( tLo ) );
 				memcpy( &L.proj[1][1], &tHi, sizeof( tHi ) );
 				const unsigned int first = (unsigned int)row.firstTri, num = (unsigned int)row.numTris;

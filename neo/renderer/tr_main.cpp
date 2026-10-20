@@ -2723,7 +2723,7 @@ struct rtEmissiveTriGPU_t {
 	unsigned int	meanRG, meanB;						// the emitter's MEAN linear radiance (glow average x stage colour), half floats: E2 lights with
 														// this flat colour (a uniform emitter; the texel pattern is variance, not light); DIFFUSEGLOW = 0
 	unsigned int	reach;								// E6: float bits - the authored radius of the placed light this emitter sits in (0 = none; the census fills it)
-	unsigned int	pad1;
+	unsigned int	lightLum;							// E2 v3 power match: float bits - that light's colour luminance (0 = none); the row inherits its POWER
 };
 static const int	RT_EMISSIVE_HEADER_BYTES = 16;		// uint count, float totalFlux, uint cdfOffsetBytes, float meanFlux
 static const int	RT_EMISSIVE_MAX_TRIS     = 1 << 18;	// 262144 x 64 B = 16 MB table ceiling (+1 MB CDF); a census overflow is reported
@@ -3060,7 +3060,7 @@ static int R_RtEmissiveEmitTriangle( const idVec3 p[3], const float st[3][2], co
 		e.scale = scale;
 		e.st0 = R_RtPackHalf2( a.s, a.t ); e.st1 = R_RtPackHalf2( b.s, b.t ); e.st2 = R_RtPackHalf2( c.s, c.t );
 		e.tint = tint;
-		e.meanRG = meanRG; e.meanB = meanB; e.reach = 0u; e.pad1 = 0u;
+		e.meanRG = meanRG; e.meanB = meanB; e.reach = 0u; e.lightLum = 0u;
 		added++;
 	};
 	pv_t v[3];
@@ -3607,7 +3607,7 @@ static void R_RtEmissiveBuildRows( void ) {
 		}
 		rtEmissiveRow_t row;
 		idVec3 c( 0.0f, 0.0f, 0.0f ), mean( 0.0f, 0.0f, 0.0f );
-		float flux = 0.0f, area = 0.0f, reach = 0.0f;
+		float flux = 0.0f, area = 0.0f, reach = 0.0f, lightLum = 0.0f;
 		bool dark = true;
 		for ( int t = 0; t < l.numTris; t++ ) {
 			const rtEmissiveTriGPU_t &e = s_rtEmissiveTris[ l.firstTri + t ];
@@ -3616,14 +3616,15 @@ static void R_RtEmissiveBuildRows( void ) {
 			area += 0.5f * ( ( p1 - p0 ).Cross( p2 - p0 ) ).Length();
 			if ( e.flux > 0.0f ) {
 				dark = false;
-				// the mean linear radiance of this triangle x its material scale, weighted by its flux (the big bright
-				// triangles decide the row's colour)
+				// the mean linear radiance of this triangle (WITHOUT its material scale: the shade applies e.scale itself),
+				// weighted by its flux (the big bright triangles decide the row's colour)
 				const idVec3 m( R_RtF16toF32( e.meanRG & 0xFFFFu ), R_RtF16toF32( e.meanRG >> 16 ), R_RtF16toF32( e.meanB & 0xFFFFu ) );
-				mean += m * ( e.scale * e.flux );
+				mean += m * e.flux;
 				flux += e.flux;
 			}
 			float r; memcpy( &r, &e.reach, sizeof( r ) );
-			if ( r > reach ) { reach = r; }
+			float ll; memcpy( &ll, &e.lightLum, sizeof( ll ) );
+			if ( r > reach ) { reach = r; lightLum = ll; }		// the light with the largest reach decides both
 		}
 		c *= 1.0f / ( 3.0f * l.numTris );
 		float r2 = 0.0f;
@@ -3638,6 +3639,7 @@ static void R_RtEmissiveBuildRows( void ) {
 		row.area = area;
 		row.meanRadiance = ( flux > 0.0f ) ? mean * ( 1.0f / flux ) : idVec3( 0.0f, 0.0f, 0.0f );
 		row.reach = reach;								// 0 = no placed light covers it (the gather applies r_rtEmissiveReachDefault)
+		row.lightLum = lightLum;
 		row.firstTri = l.firstTri;
 		row.numTris = l.numTris;
 		row.dark = dark;
@@ -3732,9 +3734,11 @@ static bool R_RtEmissiveRegatherGroup( rtEmissiveGroup_t &g, const idRenderEntit
 	for ( int t = 0; t < g.numTris; t++ ) {
 		const unsigned int inLight = s_rtEmissiveTris[ g.firstTri + t ].emit & RT_EMIT_FLAG_INLIGHT;	// the census flag + reach survive
 		const unsigned int reach = s_rtEmissiveTris[ g.firstTri + t ].reach;
+		const unsigned int lightLum = s_rtEmissiveTris[ g.firstTri + t ].lightLum;
 		s_rtEmissiveTris[ g.firstTri + t ] = scratch[t];
 		s_rtEmissiveTris[ g.firstTri + t ].emit |= inLight;
 		s_rtEmissiveTris[ g.firstTri + t ].reach = reach;
+		s_rtEmissiveTris[ g.firstTri + t ].lightLum = lightLum;
 	}
 	for ( int v = 0; v < g.numTris * 3; v++ ) {
 		s_rtEmissiveLocalVerts[ g.firstLocalVert + v ] = scratchLocal[v];
@@ -3857,7 +3861,7 @@ static void R_RtEmissiveRefreshMovers( const idRenderWorldLocal *world, rhi::RHI
 static void R_RtEmissiveLightCensus( const idRenderWorldLocal *world, rhi::RHI *r ) {
 	int total = 0, fixtured = 0, ambience = 0, parallel = 0, fogBlend = 0, fixturedAmbientMat = 0, ambienceAmbientMat = 0, trisInLight = 0;
 	const int n = s_rtEmissiveTris.Num();
-	for ( int t = 0; t < n; t++ ) { s_rtEmissiveTris[t].emit &= ~RT_EMIT_FLAG_INLIGHT; s_rtEmissiveTris[t].reach = 0u; }
+	for ( int t = 0; t < n; t++ ) { s_rtEmissiveTris[t].emit &= ~RT_EMIT_FLAG_INLIGHT; s_rtEmissiveTris[t].reach = 0u; s_rtEmissiveTris[t].lightLum = 0u; }
 	s_rtEmissiveLightFixturedSerial.SetNum( world->lightDefs.Num(), false );
 	for ( int i = 0; i < world->lightDefs.Num(); i++ ) { s_rtEmissiveLightFixturedSerial[i] = 0u; }
 	s_rtEmissiveLightDbg.SetNum( 0, false );
@@ -3902,7 +3906,15 @@ static void R_RtEmissiveLightCensus( const idRenderWorldLocal *world, rhi::RHI *
 				// frustum bounds' half-diagonal); the LARGEST of the lights the triangle sits in
 				float radius = ld->parms.pointLight ? ld->parms.lightRadius.Length() : ( lb != NULL ? 0.5f * ( lb->operator[]( 1 ) - lb->operator[]( 0 ) ).Length() : 0.0f );
 				float cur; memcpy( &cur, &e.reach, sizeof( cur ) );
-				if ( radius > cur ) { memcpy( &e.reach, &radius, sizeof( radius ) ); }
+				if ( radius > cur ) {
+					memcpy( &e.reach, &radius, sizeof( radius ) );
+					// E2 v3 power match: the light's colour luminance (its parametric RGB; a light coloured by its material's
+					// stages reads 1) - the row inherits the POWER of the light it replaces, not only its radius
+					const float *sp = ld->parms.shaderParms;
+					float lum = Max( sp[SHADERPARM_RED], 0.0f ) * 0.2126f + Max( sp[SHADERPARM_GREEN], 0.0f ) * 0.7152f + Max( sp[SHADERPARM_BLUE], 0.0f ) * 0.0722f;
+					if ( !( lum > 0.001f ) ) { lum = 1.0f; }
+					memcpy( &e.lightLum, &lum, sizeof( lum ) );
+				}
 			}
 		}
 		const bool ambMat = ld->lightShader->IsAmbientLight();

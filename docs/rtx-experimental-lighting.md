@@ -408,3 +408,9 @@ shaders receive is the count WRITTEN this frame; r_rtEmissiveMaxRows joins Compu
   the view.
 - Open: the within-run triangle pick is by flux (blind to the pixel: a long strip's far end as often as its near end).
   If sparkle on long tubes returns, weigh the run's triangles by solid angle inside rtEmissiveShadeRow (small runs only).
+- POWER MATCH (r_rtEmissivePowerMatch, default 1; built 2026-10-20 after "still those fixtures seem dead"): the census now
+  stores the replaced light's colour luminance next to its radius (rtEmissiveTriGPU_t.lightLum); the gather sets the row's
+  intensity so the emitter delivers what the light did at d = R/2: L = C R^2 / (16 A) (reach boost 2 at that distance).
+  A tiny decal replacing a big light burns bright, a big panel glows softly. Uncovered emitters match a light of their own
+  colour at the default reach. The grid proxy = the replaced light's C (same scale as the placed rows). With it on,
+  r_rtEmissiveIntensity is a TRIM around 1 (the v2 values of 10-25 are no longer meaningful).

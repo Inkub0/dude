@@ -22,7 +22,7 @@ struct RtEmissiveTri {
 	uint  tint;						// the stage's constant colour, RGBA8 (unpackUnorm4x8); white when RT_EMIT_ANIMATED; alpha = the DIFFUSEGLOW threshold
 	uint  meanRG, meanB;			// the MEAN linear radiance (glow average x stage colour), halves: a uniform emitter lights with this (0 for DIFFUSEGLOW)
 	uint  reach;					// float bits: the authored radius of the placed light this emitter replaces (0 = none)
-	uint  pad1;
+	uint  lightLum;					// float bits: that light's colour luminance (E2 v3 power match, read on the CPU; 0 = none)
 };
 
 const uint RT_EMIT_ANIMATED = 1u << 16;		// stage colour is register-driven: the flux is a snapshot, read the live colour
