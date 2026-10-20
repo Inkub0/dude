@@ -384,3 +384,11 @@ light the scene, an emitter surface's visible glow is drawn at its EMITTED radia
 intensity (D2 table x r_rtEmissiveScale) that the table uses - so it blooms and reads as a source rather than a
 pasted square, and the look and the light come from one number. Belongs to E2's apply / E6 calibration (the forward
 additive draw of an emitter surface scaled by its intensity); a dark fixture is untouched. Not built yet.
+
+**Labels: always on top (user, 2026-10-20).** The occlusion trace was unreliable (fixture shells, wrapped panels: a
+wall light lost its name while its twin kept it) and is gone. Rule now: every emitter in the view frustum that FACES
+the camera (area-weighted surface normal; two-sided materials always) is labelled on top of everything, nearest 64,
+same-material duplicates within 14 virtual px dropped, reach 1500. The one cull kept: the emitter's area must have
+been reached by this view's portal flow (`portalArea_t::viewCount == tr.viewCount`, stamped before
+R_AddModelSurfaces), so nothing is named through a closed door / from another room. The projection therefore moved
+to the FRONTEND (R_RtEmissiveUpdate, tr.viewDef live) instead of the backend overlay pass.

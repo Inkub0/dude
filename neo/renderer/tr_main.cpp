@@ -3545,6 +3545,9 @@ static void R_RtEmissiveUpdate( const idRenderWorldLocal *world, rhi::RHI *r ) {
 	const bool stale = s_rtEmissiveMap.Icmp( world->mapName ) != 0 || r_rtEmissiveTable.IsModified() || r_rtEmissiveScale.IsModified();
 	if ( !stale ) {
 		R_RtEmissiveRefreshMovers( world, r );	// E1e: moved doors / lifts / platforms re-bake their slice
+		if ( r_rtEmissiveTableDebug.GetInteger() > 0 ) {
+			R_RtEmissiveProjectLabels( tr.viewDef );	// E1d: the overlay's material names (frontend: the area stamps are current)
+		}
 		// an emissive entity that APPEARED after the build (a dropped item, a respawned pickup, a spawned prop): every 90
 		// frames, scan the entity slots no group tracks for a static model with an emissive surface -> full rebuild
 		if ( ( tr.frameCount % 90 ) == 45 && R_RtEmissiveNewEntityAppeared( world ) ) {
@@ -3626,7 +3629,7 @@ void R_RtEmissiveProjectLabels( const viewDef_t *viewDef ) {
 	if ( viewDef == NULL || s_rtEmissiveBuf == 0 || s_rtEmissiveLabels.Num() == 0 ) {
 		return;
 	}
-	struct cand_t { float x, y, dist; idVec3 anchor; int label; };
+	struct cand_t { float x, y, dist; int label; };
 	static idList<cand_t> cands;
 	cands.SetNum( 0, false );
 	const idVec3 eye = viewDef->renderView.vieworg;
@@ -3634,41 +3637,39 @@ void R_RtEmissiveProjectLabels( const viewDef_t *viewDef ) {
 	const idRenderWorldLocal *world = viewDef->renderWorld;
 	for ( int i = 0; i < s_rtEmissiveLabels.Num(); i++ ) {
 		const rtEmissiveLabel_t &l = s_rtEmissiveLabels[i];
-		// the anchor is ON the surface: the centroid of the triangle nearest the surface's mean (the mean itself sits
-		// INSIDE a boxy lamp or a wrapped panel, where the occlusion trace hit the fixture's own shell and dropped the
-		// label - user, EnPro 2026-10-20). Dark (switched-off / gone) surfaces carry no label.
-		idVec3 mean( 0.0f, 0.0f, 0.0f );
-		bool lit = false;
+		// anchor = the centroid of the triangle nearest the surface's mean (a point ON the surface); facing = the
+		// surface's AREA-WEIGHTED normal (a wrapped fixture faces where most of it faces). Dark (switched-off / gone)
+		// surfaces carry no label. No occlusion trace: an in-sight emitter is ALWAYS labelled, on top of everything
+		// (user, 2026-10-20) - only emitters in areas this view's portal flow never reached are left out.
+		idVec3 mean( 0.0f, 0.0f, 0.0f ), nSum( 0.0f, 0.0f, 0.0f );
+		bool lit = false, twoSided = false;
 		for ( int t = 0; t < l.numTris; t++ ) {
 			const rtEmissiveTriGPU_t &e = s_rtEmissiveTris[ l.firstTri + t ];
-			mean.x += e.p0[0] + e.p1[0] + e.p2[0];
-			mean.y += e.p0[1] + e.p1[1] + e.p2[1];
-			mean.z += e.p0[2] + e.p1[2] + e.p2[2];
+			const idVec3 p0( e.p0[0], e.p0[1], e.p0[2] ), p1( e.p1[0], e.p1[1], e.p1[2] ), p2( e.p2[0], e.p2[1], e.p2[2] );
+			mean += p0 + p1 + p2;
+			nSum += ( p2 - p0 ).Cross( p1 - p0 );								// the engine's face normal (R_DeriveFacePlanes: d2 x d1), |n| = 2 x area
 			lit = lit || e.flux > 0.0f;
+			twoSided = twoSided || ( e.emit & RT_EMIT_FLAG_TWOSIDED ) != 0u;
 		}
 		if ( !lit ) {
 			continue;
 		}
 		mean *= 1.0f / ( 3.0f * l.numTris );
-		int   best = 0;
 		float bestD = 1e30f;
-		idVec3 c;
+		idVec3 c = mean;
 		for ( int t = 0; t < l.numTris; t++ ) {
 			const rtEmissiveTriGPU_t &e = s_rtEmissiveTris[ l.firstTri + t ];
 			const idVec3 tc( ( e.p0[0] + e.p1[0] + e.p2[0] ) * ( 1.0f / 3.0f ), ( e.p0[1] + e.p1[1] + e.p2[1] ) * ( 1.0f / 3.0f ), ( e.p0[2] + e.p1[2] + e.p2[2] ) * ( 1.0f / 3.0f ) );
 			const float d = ( tc - mean ).LengthSqr();
-			if ( d < bestD ) { bestD = d; best = t; c = tc; }
+			if ( d < bestD ) { bestD = d; c = tc; }
 		}
 		const idVec3 toEye = eye - c;
 		const float dist = toEye.Length();
-		if ( dist > 1200.0f ) {
+		if ( dist > 1500.0f ) {
 			continue;
 		}
-		const rtEmissiveTriGPU_t &e0 = s_rtEmissiveTris[ l.firstTri + best ];
-		const idVec3 p0( e0.p0[0], e0.p0[1], e0.p0[2] ), p1( e0.p1[0], e0.p1[1], e0.p1[2] ), p2( e0.p2[0], e0.p2[1], e0.p2[2] );
-		idVec3 n = ( p2 - p0 ).Cross( p1 - p0 );								// the engine's face normal (R_DeriveFacePlanes: d2 x d1)
-		if ( !( e0.emit & RT_EMIT_FLAG_TWOSIDED ) && n * toEye < 0.0f ) {
-			continue;															// back-facing: the overlay cannot show it either
+		if ( !twoSided && nSum * toEye < 0.0f ) {
+			continue;															// facing away: the overlay cannot show it either
 		}
 		float view[4], clip[4];
 		for ( int k = 0; k < 4; k++ ) { view[k] = c[0] * mv[k] + c[1] * mv[k + 4] + c[2] * mv[k + 8] + mv[k + 12]; }
@@ -3680,11 +3681,21 @@ void R_RtEmissiveProjectLabels( const viewDef_t *viewDef ) {
 		if ( nx < -1.0f || nx > 1.0f || ny < -1.0f || ny > 1.0f ) {
 			continue;
 		}
+		// the emitter's AREA must have been reached by this view's portal flow (portalArea_t::viewCount is stamped
+		// before R_AddModelSurfaces, so it is current here in the frontend). The point is nudged off the surface
+		// toward the eye; a point the BSP puts in solid (-1) is not culled.
+		if ( world != NULL ) {
+			idVec3 dir = toEye;
+			dir.Normalize();
+			const int area = world->PointInArea( c + dir * 2.0f );
+			if ( area >= 0 && area < world->NumAreas() && world->portalAreas[area].viewCount != tr.viewCount ) {
+				continue;
+			}
+		}
 		cand_t cd;
 		cd.x = ( nx * 0.5f + 0.5f ) * 640.0f;									// the 2D text path's VIRTUAL 640x480 space
 		cd.y = ( 1.0f - ( ny * 0.5f + 0.5f ) ) * 480.0f;
 		cd.dist = dist;
-		cd.anchor = c;
 		cd.label = i;
 		cands.Append( cd );
 	}
@@ -3694,7 +3705,7 @@ void R_RtEmissiveProjectLabels( const viewDef_t *viewDef ) {
 		while ( j > 0 && cands[j - 1].dist > v.dist ) { cands[j] = cands[j - 1]; j--; }
 		cands[j] = v;
 	}
-	for ( int i = 0; i < cands.Num() && s_rtEmissiveScreenLabels.Num() < 48; i++ ) {
+	for ( int i = 0; i < cands.Num() && s_rtEmissiveScreenLabels.Num() < 64; i++ ) {
 		const rtEmissiveLabel_t &l = s_rtEmissiveLabels[ cands[i].label ];
 		bool dup = false;
 		for ( int k = 0; k < i && !dup; k++ ) {
@@ -3705,18 +3716,6 @@ void R_RtEmissiveProjectLabels( const viewDef_t *viewDef ) {
 		}
 		if ( dup ) {
 			continue;
-		}
-		// occlusion: a CPU trace through the map (world + static props, the GUI-pointing trace) from the eye toward
-		// the anchor. A hit within 16 units of the anchor is the labelled surface itself (or its fixture's rim) -
-		// still visible; a hit farther away is a wall in between.
-		if ( world != NULL ) {
-			idVec3 dir = eye - cands[i].anchor;
-			dir.Normalize();
-			modelTrace_t mt;
-			if ( world->Trace( mt, eye, cands[i].anchor + dir * 1.0f, 0.0f, true, false, true ) && mt.fraction < 1.0f
-					&& ( mt.point - cands[i].anchor ).LengthSqr() > 16.0f * 16.0f ) {
-				continue;
-			}
 		}
 		rtEmissiveScreenLabel_t &sl = s_rtEmissiveScreenLabels.Alloc();
 		sl.x = cands[i].x;

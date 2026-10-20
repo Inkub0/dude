@@ -1124,9 +1124,10 @@ int  R_RtGatherPerforatedBoxes( const idBounds &b, idBounds *out, int maxOut );	
 // (one idDrawVert per table vertex + an index list) for r_rtEmissiveTableDebug.
 unsigned long long R_RtEmissiveTableAddress( int *numTris, float *totalFlux, float *meanFlux );
 bool R_RtEmissiveDebugGeometry( unsigned int *vb, unsigned int *ib, int *numIndexes );
-// E1d labels: the overlay pass projects one label per emissive SURFACE into the 2D VIRTUAL 640x480 space
-// (R_RtEmissiveProjectLabels, RhiWorld.cpp calls it); the console's debug-text pass (Console.cpp SCR_DrawEmissiveLabels)
-// draws them every frame while the overlay is on - the same 2D path as the FPS counter, so screenshots include them.
+// E1d labels: the frontend projects one label per in-sight emissive SURFACE into the 2D VIRTUAL 640x480 space
+// (R_RtEmissiveProjectLabels, from R_RtEmissiveUpdate); the console's debug-text pass (Console.cpp
+// SCR_DrawEmissiveLabels) draws them every frame while the overlay is on - the FPS counter's 2D path, so screenshots
+// include them. Always on top: no occlusion test, only facing + the view's portal-reached areas.
 struct rtEmissiveScreenLabel_t { float x, y; char text[80]; };
 void R_RtEmissiveProjectLabels( const struct viewDef_s *viewDef );
 bool R_RtEmissiveLabelsWanted( void );
