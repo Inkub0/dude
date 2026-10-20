@@ -171,3 +171,39 @@ Known for round 1: emitter-lit walls do not bounce yet; the glow at a bounce hit
    draw; (c) the flare-inferred frames get a NOMINAL flux (0.02 x area x scale) so they are drawn rarely and keep
    the thresholded texel read; (d) default candidates 8. Still distance-blind: E3's grid feed is the proper proposal.
 3. Overlay mode 3 now shows the mean radiance flat (what E2 lights with).
+
+## Q2RTX read (2026-10-20, github.com/NVIDIA/Q2RTX, GPLv2; src/refresh/vkpt) - what to port for E2 v2
+
+Q2RTX = polygon lights from emissive textures, no placed lights: the same mode. Its sampler is the cure for round 1:
+1. **Lights are built over the EMISSIVE PART of the texture only** (bsp_mesh.c `collect_one_light_poly`): at image
+   load the extents (min/max texel) of the pixels with any emission and their mean colour are recorded
+   (textures.c; `entire_texture_emissive` when the whole map glows); at mesh build each surface is clipped, per
+   texture repetition, against that rectangle in texture space, mapped back to the surface plane and fan-
+   triangulated. A wall panel with two LEDs becomes two small bright polygons with the LEDs' mean colour - the
+   flux-proportional proposal then matches the real emission and the per-point texel read disappears. This is the
+   structural fix for the sparse-emitter spikes (our wall panels, LED decals, the flare-inferred door frames).
+2. **Per-pixel importance over a short candidate list, then SOLID-ANGLE sampling** (light_lists.h): the candidate
+   list is the BSP cluster's precomputed light list (PVS-based: lights that can reach the cluster), at most 8 brute-
+   forced per pixel (partitioned at random when longer); importance m = spherical-triangle area (projected solid
+   angle, hemisphere + back-face culled) x luminance (x a Phong lobe share x a learned visibility factor); the pick is
+   proportional to m, then the triangle is sampled UNIFORMLY IN SOLID ANGLE (Arvo 1995, `sample_projected_triangle`,
+   pdfw = 1 / solid angle). The per-sample value is colour x solid angle x sqrt(cos_e) / (m / mass) ~ mass: no 1/d^2
+   blow-up at all - the proposal is proportional to the integrand estimate for every candidate, so the estimate is
+   nearly constant. Our round-1 spikes came from a distance-blind flux proposal + area sampling; both go.
+3. **Learned visibility** (`pt_light_stats`): per cluster x light x surface orientation, counts of shadowed / unshadowed
+   rays from the previous frame scale the importance (floor 0.1) - "Adaptive Shadow Testing" (Ward 1994). Our light
+   grid's L4 feedback idea, confirmed in production.
+4. Dynamic (sphere / spot) lights are sampled uniformly as a separate stream and MIS-combined with the polygon stream
+   by luminance (one shadow ray for whichever wins); sphere irradiance capped (solid angle 0.02) at bounces.
+
+**Port plan (E2 v2):**
+- v2a (CPU + shader): emissive extents + bright-texel mean at image load (Image_load.cpp, beside averageColor); the
+  table build clips each emissive triangle to the extents per repetition (Sutherland-Hodgman in st, barycentric map
+  back) and fan-triangulates - every entry becomes a UNIFORM emitter with the bright mean (the flare-inferred frames
+  too: their bar is the extents of the diffuse above the threshold, no texel read any more); Arvo solid-angle
+  sampling with importance = spherical area x luminance over the pixel's candidates.
+- v2b (the proposal): the light grid feeds emissive candidates per cell - a compact emitter-GROUP array (one per
+  table surface run: centroid, radius, flux) streamed by the fill, top-K groups per cell by flux / d^2; per pixel a
+  triangle inside each group by flux (the global CDF restricted to the group's contiguous range), importance x
+  solid angle x luminance over the K, pick, Arvo. Q2RTX's cluster list with the grid as the cluster.
+- v2c: learned visibility per cell x emitter x orientation (L4).
