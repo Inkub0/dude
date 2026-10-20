@@ -351,3 +351,12 @@ self-illuminated material the gather REJECTED and why (gui screen / deformed / d
 or reflection texgen / glow image not resident / no image), so a lit fixture that is not painted can be looked up by
 name - e.g. the tube over the Mars City entrance door, unpainted in the same screenshot, is the first case to read
 off that list.
+
+**Conditional stages + late-resident glow images (2026-10-20).** Two-state fixtures (`textures/base_door/doorlight`:
+`if ( parm7 == 0 )` red stage / `if ( parm7 == 1 )` green stage; broken-light skins) are gathered through the stage
+condition evaluated with the surface's own parms at time 0, so the stage actually drawn is the one in the table and
+an OFF state is excluded ("switched off by its condition"). A glow image that is not yet on the GPU at build time
+(loaded on its first draw) is remembered; every 90 frames the live path checks the list and rebuilds the table once
+one becomes resident. The user's observation that a fixture keeps a small lit bar with the placed lights off is the
+engine's own design: the glow stage is unconditional self-illumination, the placed light does the lighting; vanilla
+turns a fixture OFF with a skin or a parm7 condition, never by swapping the glow texture.

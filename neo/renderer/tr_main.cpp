@@ -2805,13 +2805,25 @@ static bool R_RtEmissiveIsScreen( const idMaterial *mat ) {
 // render-to-texture (dynamic) stage, a generated image (_scratch & co.) or a missing (defaulted) image is NOT a
 // table emitter - the GUI/video screens keep the legacy fill lights, and such images never went through the
 // averaging path (averageColor is the white default).
-static const shaderStage_t *R_RtEmissiveStage( const idMaterial *mat, const char **why = NULL ) {
+static idList<const idImage *>	s_rtEmissiveNotResident;	// glow images that were not on the GPU at build time: a later residency rebuilds
+
+static const shaderStage_t *R_RtEmissiveStage( const idMaterial *mat, const char **why = NULL, const float *entityParms = NULL ) {
 	const char *reason = "";
 	if ( why ) { *why = ""; }
 	if ( mat == NULL ) {
 		return NULL;
 	}
 	const int n = mat->GetNumStages();
+	// stage CONDITIONS (`if ( parm7 == 0 )`: a door light's red / green state, a fixture's on / off) evaluated with the
+	// surface's own parms at time 0, so the stage that is actually drawn is the one gathered
+	static const float defaultParms[MAX_ENTITY_SHADER_PARMS] = { 1.0f, 1.0f, 1.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f };
+	float *regs = NULL;
+	if ( mat->GetNumRegisters() > 0 ) {
+		regs = (float *)_alloca16( mat->GetNumRegisters() * (int)sizeof( float ) );
+		viewDef_t probeView;
+		memset( &probeView, 0, sizeof( probeView ) );
+		mat->EvaluateRegisters( regs, entityParms != NULL ? entityParms : defaultParms, &probeView, NULL );
+	}
 	bool anyAdditive = false;
 	for ( int i = 0; i < n; i++ ) {
 		const shaderStage_t *st = mat->GetStage( i );
@@ -2851,6 +2863,10 @@ static const shaderStage_t *R_RtEmissiveStage( const idMaterial *mat, const char
 		if ( !additive ) {
 			continue;
 		}
+		if ( regs != NULL && st->conditionRegister >= 0 && st->conditionRegister < mat->GetNumRegisters() && regs[ st->conditionRegister ] == 0.0f ) {
+			reason = "additive stage switched off by its condition (parm7 state)";
+			continue;														// the OFF state of a two-state fixture
+		}
 		if ( st->texture.cinematic != NULL || st->texture.dynamic != DI_STATIC ) {
 			if ( why ) { *why = "video / render-to-texture screen"; }
 			return NULL;													// a screen: fill-light territory, not a table emitter
@@ -2860,7 +2876,7 @@ static const shaderStage_t *R_RtEmissiveStage( const idMaterial *mat, const char
 		if ( img == NULL || img->rhiHandle == 0 || img->generatorFunction != NULL || img->defaulted
 				|| img->type == TT_CUBIC || st->texture.texgen != TG_EXPLICIT ) {
 			if ( img == NULL || img->defaulted )           { reason = "additive stage has no image"; }
-			else if ( img->rhiHandle == 0 )                { reason = "glow image not resident on the GPU"; }
+			else if ( img->rhiHandle == 0 )                { reason = "glow image not resident on the GPU (rebuilds when it is)"; if ( s_rtEmissiveNotResident.FindIndex( img ) < 0 ) { s_rtEmissiveNotResident.Append( img ); } }
 			else if ( img->generatorFunction != NULL )     { reason = "generated image"; }
 			else                                           { reason = "cube map / reflection texgen (glass)"; }
 			continue;
@@ -3064,6 +3080,7 @@ static void R_RtEmissiveBuild( const idRenderWorldLocal *world, rhi::RHI *r ) {
 	const float scale = idMath::ClampFloat( 0.0f, 64.0f, r_rtEmissiveScale.GetFloat() );
 	idList<rtEmissiveCensus_t> census;
 	int overflow = 0, worldTris = 0, entityTris = 0, entities = 0, screens = 0;
+	s_rtEmissiveNotResident.Clear();
 	struct excl_t { const idMaterial *mat; const char *why; };
 	idList<excl_t> excluded;													// self-illuminated materials the gather rejected, with the reason
 	auto noteExcluded = [&]( const idMaterial *m, const char *why ) {
@@ -3120,7 +3137,7 @@ static void R_RtEmissiveBuild( const idRenderWorldLocal *world, rhi::RHI *r ) {
 				screens++;
 			}
 			const char *why = "";
-			const shaderStage_t *stage = R_RtEmissiveStage( mat, &why );
+			const shaderStage_t *stage = R_RtEmissiveStage( mat, &why, def->parms.shaderParms );
 			if ( stage == NULL ) {
 				noteExcluded( mat, why );
 				continue;
@@ -3338,6 +3355,17 @@ static void R_RtEmissiveUpdate( const idRenderWorldLocal *world, rhi::RHI *r ) {
 	const bool stale = s_rtEmissiveMap.Icmp( world->mapName ) != 0 || r_rtEmissiveTable.IsModified() || r_rtEmissiveScale.IsModified();
 	if ( !stale ) {
 		R_RtEmissiveRefreshMovers( world, r );	// E1e: moved doors / lifts / platforms re-bake their slice
+		// a glow image that was not on the GPU at build time (loaded on its first draw) joins by a rebuild once it is:
+		// checked every 90 frames, a handful of pointer reads
+		if ( s_rtEmissiveNotResident.Num() > 0 && ( tr.frameCount % 90 ) == 0 ) {
+			for ( int i = 0; i < s_rtEmissiveNotResident.Num(); i++ ) {
+				if ( s_rtEmissiveNotResident[i]->rhiHandle != 0 ) {
+					common->Printf( "r_rtEmissiveTable: glow image '%s' is now resident - rebuilding the table\n", s_rtEmissiveNotResident[i]->imgName.c_str() );
+					s_rtEmissiveMap.Clear();			// stale next frame
+					break;
+				}
+			}
+		}
 		return;
 	}
 	r_rtEmissiveTable.ClearModified();
