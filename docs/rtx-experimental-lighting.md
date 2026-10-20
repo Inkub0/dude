@@ -435,3 +435,7 @@ shaders receive is the count WRITTEN this frame; r_rtEmissiveMaxRows joins Compu
   Inherited power ramps 0 -> 1 from the min to r_rtEmissiveFixtureFullArea (64): Lrow = authored + s x (matched -
   authored). The grid proxy follows the same ramp. DEFERRED: several lit patches on one texture are one rect with low
   coverage (the energy is right via the mean; a connected-components split of the glow map would place the samples).
+- BLOCKY DI SHADOWS IN NORMAL MODE (2026-10-20): with the table on and r_rtEmissiveBounce on (both default), the ~300
+  bounce-only emitter rows competed with the placed lights for the 16 grid slots per cell, emptied cells of their placed
+  lights (the DI skips bounce-only rows) and the DI changed cell to cell - cell-shaped blocks. FIX: the fill gives
+  BOUNCEONLY rows a quota of 2 slots (1 at 4-7 slots, 0 below), ranked among their kind, behind the lights.
