@@ -6180,7 +6180,9 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 			const float reachDef  = idMath::ClampFloat( 0.0f, 4096.0f, r_rtEmissiveReachDefault.GetFloat() );
 			const int   cap       = Min( idMath::ClampInt( 0, RT_EMIT_MAX_ROWS, r_rtEmissiveMaxRows.GetInteger() ), RT_SCENE_MAX_ROWS - 1 - n - nFog );	// every row + 1 must stay below 512 (fp16 side channel)
 			const float minArea   = Max( 0.0f, r_rtEmissiveFixtureMinArea.GetFloat() );
+			const float fullArea  = Max( minArea + 1e-3f, r_rtEmissiveFixtureFullArea.GetFloat() );
 			const float maxL      = Max( 1.0f, r_rtEmissiveMaxRadiance.GetFloat() );
+			const float fluxScale = Max( idMath::ClampFloat( 0.0f, 64.0f, r_rtEmissiveScale.GetFloat() ), 1e-3f );
 			static int   pick[ RT_EMIT_MAX_ROWS ];
 			static float pickImp[ RT_EMIT_MAX_ROWS ];
 			int np = 0;
@@ -6194,8 +6196,10 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 				if ( dist > 2.0f * radius + REACH ) { continue; }						// cannot touch anything near the view
 				// the pick ranks on the placed lights' scale too (C x radius^2 / d^2): matched = the replaced light's luminance
 				const float meanLum = row.meanRadiance.x * 0.2126f + row.meanRadiance.y * 0.7152f + row.meanRadiance.z * 0.0722f;
-				const float C = ( r_rtEmissivePowerMatch.GetBool() && row.area >= minArea ) ? ( ( row.reach > 0.0f && row.lightLum > 0.0f ) ? row.lightLum : Min( meanLum, 1.0f ) )
-				                                                                            : 16.0f * meanLum * row.area / ( R * R );
+				const float sP = idMath::ClampFloat( 0.0f, 1.0f, ( row.flux / fluxScale - minArea ) / ( fullArea - minArea ) );
+				const float Cm = ( row.reach > 0.0f && row.lightLum > 0.0f ) ? row.lightLum : Min( meanLum, 1.0f );
+				const float Ca = 16.0f * meanLum * row.area / ( R * R );
+				const float C  = r_rtEmissivePowerMatch.GetBool() ? ( Ca + sP * ( Max( Cm, Ca ) - Ca ) ) : Ca;
 				const float imp = C * intensity * radius * radius / Max( dist * dist, 64.0f * 64.0f );
 				if ( !( imp > 0.0f ) ) { continue; }
 				if ( np < cap ) {
@@ -6229,14 +6233,19 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 				const float meanLum = row.meanRadiance.x * 0.2126f + row.meanRadiance.y * 0.7152f + row.meanRadiance.z * 0.0722f;
 				float rowIntensity = intensity;
 				float Ceq;													// the row's colour on the PLACED lights' scale (the grid ranks by lum x radius^2 / d^2)
-				// an INDICATOR (area below r_rtEmissiveFixtureMinArea: a computer LED, an electric-box lamp) never inherits a
-				// light's power - it glows at its authored radiance and lights almost nothing (LEDs as bright as neons, 2026-10-20);
-				// the matched radiance is capped at r_rtEmissiveMaxRadiance (a sanity ceiling for a small patch in a big light)
-				if ( r_rtEmissivePowerMatch.GetBool() && meanLum > 1e-6f && row.area >= Max( minArea, 1e-3f ) ) {
+				// How much of the light's power the emitter may inherit follows its EFFECTIVE emitting area = flux / scale =
+				// lit area x glow brightness x stage colour (user, 2026-10-20): 0 below r_rtEmissiveFixtureMinArea (an
+				// INDICATOR - a 2 x 2 red LED, the electric box's lamp - glows at its authored radiance and lights almost
+				// nothing), 1 from r_rtEmissiveFixtureFullArea up (a white 8 x 8 patch, a tube), a linear ramp between. The
+				// matched radiance is capped at r_rtEmissiveMaxRadiance (a sanity ceiling for a small patch in a big light).
+				const float effArea = row.flux / fluxScale;
+				const float s       = idMath::ClampFloat( 0.0f, 1.0f, ( effArea - minArea ) / ( fullArea - minArea ) );
+				if ( r_rtEmissivePowerMatch.GetBool() && meanLum > 1e-6f && s > 0.0f && row.area > 1e-3f ) {
 					const float C = ( row.reach > 0.0f && row.lightLum > 0.0f ) ? row.lightLum : Min( meanLum, 1.0f );
 					const float Lmatch = Min( C * R * R / ( 16.0f * row.area ), maxL );
-					rowIntensity = intensity * ( Lmatch / meanLum );
-					Ceq = 16.0f * Lmatch * intensity * row.area / ( R * R );		// = C x intensity unless the cap bit
+					const float Lrow   = meanLum + s * ( Max( Lmatch, meanLum ) - meanLum );	// authored -> matched along the ramp
+					rowIntensity = intensity * ( Lrow / meanLum );
+					Ceq = 16.0f * Lrow * intensity * row.area / ( R * R );
 				} else {
 					Ceq = 16.0f * meanLum * intensity * row.area / ( R * R );	// the same law read backwards: what C this radiance equals
 				}

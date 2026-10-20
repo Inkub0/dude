@@ -4901,12 +4901,18 @@ static void DrawDbgGroup_ExperimentalLighting()
 		"corridor. (r_rtEmissiveIntensity)" );
 	ImGui::SameLine();
 	if ( ImGui::SmallButton( "reset##rtEmissiveIntensity" ) ) { r_rtEmissiveIntensity.Reset(); }
-	CvarSliderF( "Fixture Min Area", r_rtEmissiveFixtureMinArea, 0.0f, 512.0f, "%.0f", "The emitting area (units^2) a surface needs "
-		"to count as a light FIXTURE: a fixture drops the placed light it sits in and inherits its power; a smaller glow (a "
-		"computer LED, an electric-box lamp) is an indicator - it never drops a light and lights at its authored brightness "
-		"only. 64 = an 8 x 8 patch. Rebuilds the census (toggle the table). (r_rtEmissiveFixtureMinArea)" );
+	CvarSliderF( "Fixture Min Effective Area", r_rtEmissiveFixtureMinArea, 0.0f, 256.0f, "%.0f", "The EFFECTIVE emitting area "
+		"(lit texels x their brightness x the stage colour, in units^2) a surface needs to count as a light FIXTURE at all: a "
+		"fixture drops the placed light it sits in and inherits (part of) its power; a smaller glow (a computer LED, the "
+		"electric box's red lamp) is an indicator - it never drops a light and lights at its authored brightness only. "
+		"Rebuilds the census. (r_rtEmissiveFixtureMinArea)" );
 	ImGui::SameLine();
 	if ( ImGui::SmallButton( "reset##rtEmissiveFixtureMinArea" ) ) { r_rtEmissiveFixtureMinArea.Reset(); }
+	CvarSliderF( "Fixture Full-power Area", r_rtEmissiveFixtureFullArea, 1.0f, 512.0f, "%.0f", "The effective emitting area at "
+		"which an emitter inherits its light's FULL power (a white 8 x 8 patch, a tube). Between the minimum and this the "
+		"inherited share ramps up, so a dim or tiny glow stands in for only a fraction of its light. (r_rtEmissiveFixtureFullArea)" );
+	ImGui::SameLine();
+	if ( ImGui::SmallButton( "reset##rtEmissiveFixtureFullArea" ) ) { r_rtEmissiveFixtureFullArea.Reset(); }
 	CvarSliderF( "Max Matched Radiance", r_rtEmissiveMaxRadiance, 1.0f, 512.0f, "%.0f", "The brightest radiance the power match "
 		"may give one emitter (a small patch replacing a big light would otherwise blaze). (r_rtEmissiveMaxRadiance)" );
 	ImGui::SameLine();

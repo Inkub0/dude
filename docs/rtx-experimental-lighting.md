@@ -429,3 +429,9 @@ shaders receive is the count WRITTEN this frame; r_rtEmissiveMaxRows joins Compu
   caps the matched radiance. Open: the gather's 7.85 ms (an emitter candidate costs a CDF search + Arvo + a 80 B fetch;
   a cheap target for emitter rows, or fewer slots for them, is the lever if it matters); the orange wall lamp at the
   right of the Access room reads dimmer than normal mode (ask which fixture / check its pairing).
+- EFFECTIVE AREA (2026-10-20, "it's an electric box, supposed to be a dim red LED"): the whole-surface geometric area let
+  the box pair as a fixture and the match normalised its dim glow up to a neon. The measure is the run's FLUX / scale =
+  lit area x glow luminance x stage colour ("effective emitting area"). Census pairing: >= r_rtEmissiveFixtureMinArea (8).
+  Inherited power ramps 0 -> 1 from the min to r_rtEmissiveFixtureFullArea (64): Lrow = authored + s x (matched -
+  authored). The grid proxy follows the same ramp. DEFERRED: several lit patches on one texture are one rect with low
+  coverage (the energy is right via the mean; a connected-components split of the glow map would place the samples).

@@ -3872,21 +3872,20 @@ static void R_RtEmissiveLightCensus( const idRenderWorldLocal *world, rhi::RHI *
 	for ( int t = 0; t < n; t++ ) { s_rtEmissiveTris[t].emit &= ~RT_EMIT_FLAG_INLIGHT; s_rtEmissiveTris[t].reach = 0u; s_rtEmissiveTris[t].lightLum = 0u; }
 	s_rtEmissiveTriLightOrigin.SetNum( n, false );
 	for ( int t = 0; t < n; t++ ) { s_rtEmissiveTriLightOrigin[t].Zero(); }
-	// the emitting AREA of each triangle's whole surface run: a FIXTURE has area (a tube, a tile, a sterlight patch), an
-	// INDICATOR (a 2 x 2 computer LED, an electric-box lamp) does not - it must neither drop the room light it happens to
-	// sit in nor inherit that light's power (LEDs as bright as neons, user 2026-10-20). r_rtEmissiveFixtureMinArea.
+	// the EFFECTIVE emitting area of each triangle's whole surface run = its flux / the global scale = geometric area x the
+	// mean luminance of its glow texels x the stage colour: "lit area x brightness" (user, 2026-10-20). A FIXTURE has it
+	// (a tube, a tile, a white sterlight patch); an INDICATOR (a 2 x 2 red computer LED, the electric box's lamp on a big
+	// mostly-dark surface) does not - it must neither drop the room light it happens to sit in nor inherit that light's
+	// power. The whole-surface geometric area was wrong for exactly the electric box. r_rtEmissiveFixtureMinArea.
 	static idList<float> runArea;
 	runArea.SetNum( n, false );
 	for ( int t = 0; t < n; t++ ) { runArea[t] = 0.0f; }
+	const float fluxScale = Max( idMath::ClampFloat( 0.0f, 64.0f, r_rtEmissiveScale.GetFloat() ), 1e-3f );
 	for ( int li = 0; li < s_rtEmissiveLabels.Num(); li++ ) {
 		const rtEmissiveLabel_t &l = s_rtEmissiveLabels[li];
 		if ( l.firstTri < 0 || l.numTris <= 0 || l.firstTri + l.numTris > n ) { continue; }
 		float a = 0.0f;
-		for ( int t = 0; t < l.numTris; t++ ) {
-			const rtEmissiveTriGPU_t &e = s_rtEmissiveTris[ l.firstTri + t ];
-			const idVec3 p0( e.p0[0], e.p0[1], e.p0[2] ), p1( e.p1[0], e.p1[1], e.p1[2] ), p2( e.p2[0], e.p2[1], e.p2[2] );
-			a += 0.5f * ( ( p1 - p0 ).Cross( p2 - p0 ) ).Length();
-		}
+		for ( int t = 0; t < l.numTris; t++ ) { a += s_rtEmissiveTris[ l.firstTri + t ].flux / fluxScale; }
 		for ( int t = 0; t < l.numTris; t++ ) { runArea[ l.firstTri + t ] = a; }
 	}
 	const float fixtureMinArea = Max( 0.0f, r_rtEmissiveFixtureMinArea.GetFloat() );
@@ -3956,7 +3955,7 @@ static void R_RtEmissiveLightCensus( const idRenderWorldLocal *world, rhi::RHI *
 	for ( int t = 0; t < n; t++ ) { if ( s_rtEmissiveTris[t].emit & RT_EMIT_FLAG_INLIGHT ) { trisInLight++; } }
 	// the flags changed after the upload: rewrite the triangle range (the debug geometry is built lazily, after this)
 	r->UpdateBuffer( s_rtEmissiveBuf, RT_EMISSIVE_HEADER_BYTES, n * (int)sizeof( rtEmissiveTriGPU_t ), s_rtEmissiveTris.Ptr() );
-	common->Printf( "r_rtEmissiveTable: placed lights %d: %d FIXTURED (an emitter of >= %.0f units^2 near the origin - dropped when emitters light the scene; %d ambient-material), %d AMBIENCE (no emitter - kept; %d ambient-material), %d parallel + %d fog/blend (kept); %d of %d emissive triangles sit inside a placed light (%d indicator triangles below the fixture area: never a fixture), %d in none (overlay mode 4)\n",
+	common->Printf( "r_rtEmissiveTable: placed lights %d: %d FIXTURED (an emitter of >= %.0f effective units^2 (lit area x brightness) near the origin - dropped when emitters light the scene; %d ambient-material), %d AMBIENCE (no emitter - kept; %d ambient-material), %d parallel + %d fog/blend (kept); %d of %d emissive triangles sit inside a placed light (%d indicator triangles below the fixture area: never a fixture), %d in none (overlay mode 4)\n",
 		total, fixtured, fixtureMinArea, fixturedAmbientMat, ambience, ambienceAmbientMat, parallel, fogBlend, trisInLight, n, indicatorsInLight, n - trisInLight );
 }
 
