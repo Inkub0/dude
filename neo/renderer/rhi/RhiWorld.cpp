@@ -10176,6 +10176,9 @@ void RB_RHI_ReStirDIDebugOverlay( rhi::RHI *r, const viewDef_t *viewDef ) {
 	} else if ( dbgMode == 7 ) {									// R3a: which pixels the gather boosted this frame (white)
 		srcImg = r->GetRenderTargetImage4( rhiReStirDIRT );
 		viewMode = 4;
+	} else if ( dbgMode == 8 ) {									// E2 v3: the chosen light ROW per pixel as a colour (black = none)
+		srcImg = r->GetRenderTargetImage4( rhiReStirDIRT );
+		viewMode = 5;
 	} else {
 		srcImg = ( dbgMode >= 2 && denoised ) ? r->GetRtgiOutputImage() : r->GetRenderTargetImage( rhiReStirDIRT );
 	}

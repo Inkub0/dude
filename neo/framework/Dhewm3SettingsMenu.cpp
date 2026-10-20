@@ -5050,10 +5050,10 @@ static void DrawDbgGroup_ReStirDI()
 	// ===== Debug View: the DI buffer blitted over the scene =====
 	ImGui::SeparatorText( "Debug View" );
 	{
-		int dbg = idMath::ClampInt( 0, 7, r_rtReStirDIDebug.GetInteger() );
+		int dbg = idMath::ClampInt( 0, 8, r_rtReStirDIDebug.GetInteger() );
 		ImGui::SetNextItemWidth( 240.0f );
 		if ( ImGui::Combo( "View##restirDiDebug", &dbg, "Off (lights the scene / hidden)\0Raw 1-spp gather\0NRD-denoised\0"
-				"NRD validation overlay\0History length\0Gradient confidence\0Raw gradient\0Disocclusion boost\0" ) ) {
+				"NRD validation overlay\0History length\0Gradient confidence\0Raw gradient\0Disocclusion boost\0Chosen light per pixel\0" ) ) {
 			r_rtReStirDIDebug.SetInteger( dbg );
 		}
 		AddTooltip( "Blit the DI buffer / a diagnostic over the finished frame ('Light the Scene with DI' is suppressed "
@@ -5065,7 +5065,8 @@ static void DrawDbgGroup_ReStirDI()
 			"'Gradient confidence' = what the gradient feeds NRD (white = trust history, dark = a lighting change here); "
 			"'Raw gradient' = red |change| / green magnitude; 'Disocclusion boost' = which pixels got the R3a boost and "
 			"why (red = short history at the previous position, green = no previous pixel is this surface, blue = "
-			"hysteresis / entered the screen). (r_rtReStirDIDebug)" );
+			"hysteresis / entered the screen); 'Chosen light per pixel' = each light-buffer row (placed light or emitter row) in "
+			"its own colour, black = no light reached the pixel. (r_rtReStirDIDebug)" );
 	}
 
 	// ===== Sampling: how the scene lights are picked =====

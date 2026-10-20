@@ -64,6 +64,15 @@ void main() {
 		fragColor = vec4( c, 1.0 );
 		return;
 	}
+	if ( mode == 5 ) {												// E2 v3: the CHOSEN LIGHT ROW per pixel (att3.w, floored) as a hashed colour; black = no light reached
+		ivec2 ssz = textureSize( u_src, 0 );
+		uint row = uint( floor( texelFetch( u_src, clamp( ivec2( floor( uv * vec2( ssz ) ) ), ivec2( 0 ), ssz - 1 ), 0 ).w + 0.1 ) );
+		if ( row == 0u ) { fragColor = vec4( 0.0, 0.0, 0.0, 1.0 ); return; }
+		uint h = row * 2654435761u;
+		vec3 c = vec3( float( ( h >> 8u ) & 255u ), float( ( h >> 16u ) & 255u ), float( ( h >> 24u ) & 255u ) ) / 255.0;
+		fragColor = vec4( 0.25 + 0.75 * c, 1.0 );
+		return;
+	}
 	if ( mode == 2 ) {												// accumulated history frames -> grey ramp
 		float frames = texture( u_src, uv ).a;
 		float ramp = clamp( frames / max( u_localParam1.x, 1.0 ), 0.0, 1.0 );
