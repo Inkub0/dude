@@ -6254,7 +6254,8 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 				}
 				const float kc = ( meanLum > 1e-6f ) ? Ceq / meanLum : 0.0f;	// the emitter's own tint at that luminance
 				L.color[0] = row.meanRadiance.x * kc; L.color[1] = row.meanRadiance.y * kc; L.color[2] = row.meanRadiance.z * kc;
-				L.flags = 64u | ( r_rtEmissiveLighting.GetBool() ? 0u : 128u );		// bit6 = emissive row, bit7 = bounce-only (normal mode)
+				L.flags = 64u | ( r_rtEmissiveLighting.GetBool() ? 0u : 128u )		// bit6 = emissive row, bit7 = bounce-only (normal mode)
+				        | ( row.noShadows ? 4u : 0u );									// bit2 = the replaced light cast no shadows: no visibility ray (a tube behind its cover)
 				L.proj[0][3] = rowIntensity;
 				memcpy( &L.proj[1][0], &tLo, sizeof( tLo ) );
 				memcpy( &L.proj[1][1], &tHi, sizeof( tHi ) );

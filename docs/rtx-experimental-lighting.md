@@ -485,3 +485,8 @@ shaders receive is the count WRITTEN this frame; r_rtEmissiveMaxRows joins Compu
   each cluster is contiguous (the GPU samples a contiguous range), one label = one row per cluster. World runs only
   (entity slices keep their gather order for the re-gather). Console: "N world material runs split into separate
   fixtures: F emitters from R runs". Rows per view may now exceed the 511 - placed cap: the strongest at the eye win.
+- ACCESS HALL (2026-10-20, new test map): floor-edge 45-degree tubes go DARK when they become fixtures (their placed
+  lights dropped, the rows deliver nothing). Built: rows inherit the replaced light's noShadows (flag 4: no visibility
+  ray - a tube behind its cover); rtEmissiveProbe now prints the nearest table triangle (emits toward the eye?), its ROW
+  (area, effective area vs min/full, mean lum, centroid) and the pairing (reach, lum, origin + on the EMITTING side?,
+  noShadows). Next probe on those tubes decides: back-facing winding vs blocked ray vs origin behind the emitter.

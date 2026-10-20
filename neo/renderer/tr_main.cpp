@@ -2840,6 +2840,7 @@ static int						s_rtEmissiveLastRebuildMs = -100000;	// Sys_Milliseconds of the 
 // overlay's light list (mode 5: spheres).
 static idList<unsigned int>		s_rtEmissiveLightFixturedSerial;
 static idList<idVec3>			s_rtEmissiveTriLightOrigin;		// E2 v3: per table triangle, the ORIGIN of the placed light it replaces (census; valid where lightLum > 0)
+static idList<bool>				s_rtEmissiveTriLightNoShadows;	// E2 v3: ... and whether that light cast NO shadows (the row inherits it: no visibility ray)
 struct rtEmissiveLightDbg_t { idVec3 origin; int kind; };	// kind: 0 fixtured (dropped in the mode), 1 ambience (kept), 2 parallel, 3 fog/blend
 static idList<rtEmissiveLightDbg_t>	s_rtEmissiveLightDbg;
 static rhi::BufferHandle		s_rtEmissiveLightDbgVB = 0, s_rtEmissiveLightDbgIB = 0;
@@ -3385,6 +3386,7 @@ static void R_RtEmissiveFree( void ) {
 	s_rtEmissiveSeenModel.Clear();
 	s_rtEmissiveLightFixturedSerial.Clear();
 	s_rtEmissiveTriLightOrigin.Clear();
+	s_rtEmissiveTriLightNoShadows.Clear();
 	s_rtEmissiveLightDbg.Clear();
 	if ( r != NULL ) {
 		if ( s_rtEmissiveLightDbgVB != 0 ) { r->DestroyBuffer( s_rtEmissiveLightDbgVB ); }
@@ -3705,6 +3707,7 @@ static void R_RtEmissiveBuildRows( void ) {
 		idVec3 c( 0.0f, 0.0f, 0.0f ), mean( 0.0f, 0.0f, 0.0f );
 		float flux = 0.0f, area = 0.0f, reach = 0.0f, lightLum = 0.0f;
 		idVec3 lightOrigin( 0.0f, 0.0f, 0.0f );
+		bool noShadows = false;
 		bool dark = true;
 		for ( int t = 0; t < l.numTris; t++ ) {
 			const rtEmissiveTriGPU_t &e = s_rtEmissiveTris[ l.firstTri + t ];
@@ -3724,6 +3727,7 @@ static void R_RtEmissiveBuildRows( void ) {
 			if ( r > reach ) {										// the light with the largest reach decides all three
 				reach = r; lightLum = ll;
 				lightOrigin = ( l.firstTri + t < s_rtEmissiveTriLightOrigin.Num() ) ? s_rtEmissiveTriLightOrigin[ l.firstTri + t ] : idVec3( 0.0f, 0.0f, 0.0f );
+				noShadows = ( l.firstTri + t < s_rtEmissiveTriLightNoShadows.Num() ) ? s_rtEmissiveTriLightNoShadows[ l.firstTri + t ] : false;
 			}
 		}
 		c *= 1.0f / ( 3.0f * l.numTris );
@@ -3742,6 +3746,7 @@ static void R_RtEmissiveBuildRows( void ) {
 		row.lightLum = lightLum;
 		row.lightOrigin = lightOrigin;
 		row.hasLight = reach > 0.0f && lightLum > 0.0f;
+		row.noShadows = row.hasLight && noShadows;
 		row.firstTri = l.firstTri;
 		row.numTris = l.numTris;
 		row.dark = dark;
@@ -3965,7 +3970,8 @@ static void R_RtEmissiveLightCensus( const idRenderWorldLocal *world, rhi::RHI *
 	const int n = s_rtEmissiveTris.Num();
 	for ( int t = 0; t < n; t++ ) { s_rtEmissiveTris[t].emit &= ~RT_EMIT_FLAG_INLIGHT; s_rtEmissiveTris[t].reach = 0u; s_rtEmissiveTris[t].lightLum = 0u; }
 	s_rtEmissiveTriLightOrigin.SetNum( n, false );
-	for ( int t = 0; t < n; t++ ) { s_rtEmissiveTriLightOrigin[t].Zero(); }
+	s_rtEmissiveTriLightNoShadows.SetNum( n, false );
+	for ( int t = 0; t < n; t++ ) { s_rtEmissiveTriLightOrigin[t].Zero(); s_rtEmissiveTriLightNoShadows[t] = false; }
 	// the EFFECTIVE emitting area of each triangle's whole surface run = its flux / the global scale = geometric area x the
 	// mean luminance of its glow texels x the stage colour: "lit area x brightness" (user, 2026-10-20). A FIXTURE has it
 	// (a tube, a tile, a white sterlight patch); an INDICATOR (a 2 x 2 red computer LED, the electric box's lamp on a big
@@ -4041,6 +4047,7 @@ static void R_RtEmissiveLightCensus( const idRenderWorldLocal *world, rhi::RHI *
 					if ( !( lum > 0.001f ) ) { lum = 1.0f; }
 					memcpy( &e.lightLum, &lum, sizeof( lum ) );
 					s_rtEmissiveTriLightOrigin[t] = ld->globalLightOrigin;		// the mapper's light position: the receiver cosine + SH direction come from here
+					s_rtEmissiveTriLightNoShadows[t] = ld->parms.noShadows;		// a light the mapper flagged shadowless (a tube behind its cover): the row traces no visibility ray either
 				}
 			}
 		}
@@ -4432,6 +4439,49 @@ void R_RtEmissiveProbe_f( const idCmdArgs &args ) {
 		for ( int i = 0; i < s_rtEmissiveLabels.Num(); i++ ) { if ( s_rtEmissiveLabels[i].mat == mat ) { inTable += s_rtEmissiveLabels[i].numTris; } }
 		common->Printf( "  verdict: EMITTER (glow image '%s'); %d triangles of this material are in the table%s\n", stage->texture.image->imgName.c_str(), inTable,
 			inTable == 0 ? " - NONE: the surface's entity was not gathered (see 'gatherable' above) or the table predates it" : "" );
+		// E2 v3: the ROW the nearest table triangle of this material belongs to - what the gather turns into a light
+		{
+			int bestT = -1; float bestD = 1e30f;
+			for ( int li = 0; li < s_rtEmissiveLabels.Num(); li++ ) {
+				const rtEmissiveLabel_t &l = s_rtEmissiveLabels[li];
+				if ( l.mat != mat ) { continue; }
+				for ( int t = l.firstTri; t < l.firstTri + l.numTris && t < s_rtEmissiveTris.Num(); t++ ) {
+					const rtEmissiveTriGPU_t &e = s_rtEmissiveTris[t];
+					const idVec3 a( e.p0[0], e.p0[1], e.p0[2] ), b( e.p1[0], e.p1[1], e.p1[2] ), c( e.p2[0], e.p2[1], e.p2[2] );
+					const float d = R_RtPointTriangleDistance( mt.point, a, b, c );
+					if ( d < bestD ) { bestD = d; bestT = t; }
+				}
+			}
+			if ( bestT >= 0 ) {
+				const rtEmissiveTriGPU_t &e = s_rtEmissiveTris[bestT];
+				const idVec3 a( e.p0[0], e.p0[1], e.p0[2] ), b( e.p1[0], e.p1[1], e.p1[2] ), c( e.p2[0], e.p2[1], e.p2[2] );
+				// the EMITTING side (rt_emissive.glsl: a receiver P is in front when dot( cross( p1 - p0, p2 - p0 ), p0 - P ) > 0)
+				const idVec3 g = ( b - a ).Cross( c - a );
+				const bool eyeFront = g * ( a - eye ) > 0.0f;
+				int rowIdx = -1;
+				for ( int ri = 0; ri < s_rtEmissiveRows.Num(); ri++ ) { if ( bestT >= s_rtEmissiveRows[ri].firstTri && bestT < s_rtEmissiveRows[ri].firstTri + s_rtEmissiveRows[ri].numTris ) { rowIdx = ri; break; } }
+				common->Printf( "  nearest table triangle %d (%.1f units from the hit): flux %.3f, emits TOWARD the eye: %s%s\n", bestT, bestD, e.flux,
+					eyeFront ? "yes" : "NO (its back faces you - a one-sided emitter lights nothing on this side)", ( e.emit & RT_EMIT_FLAG_TWOSIDED ) ? " [two-sided]" : "" );
+				if ( rowIdx >= 0 ) {
+					const rtEmissiveRow_t &row = s_rtEmissiveRows[rowIdx];
+					const float sc = Max( idMath::ClampFloat( 0.0f, 64.0f, r_rtEmissiveScale.GetFloat() ), 1e-3f );
+					const float meanLum = row.meanRadiance.x * 0.2126f + row.meanRadiance.y * 0.7152f + row.meanRadiance.z * 0.0722f;
+					common->Printf( "  ROW %d: %d triangles, area %.0f units^2, effective %.0f (min %.0f / full %.0f), mean lum %.2f, bound %.0f, centroid %.0f %.0f %.0f%s\n",
+						rowIdx, row.numTris, row.area, row.flux / sc, r_rtEmissiveFixtureMinArea.GetFloat(), r_rtEmissiveFixtureFullArea.GetFloat(), meanLum, row.boundRadius,
+						row.centroid.x, row.centroid.y, row.centroid.z, row.dark ? " DARK" : "" );
+					if ( row.hasLight ) {
+						const bool originFront = g * ( a - row.lightOrigin ) > 0.0f;
+						common->Printf( "    paired with a placed light: reach %.0f, colour lum %.2f, origin %.0f %.0f %.0f (%.0f units from the hit; on the EMITTING side: %s), noShadows %s\n",
+							row.reach, row.lightLum, row.lightOrigin.x, row.lightOrigin.y, row.lightOrigin.z, ( row.lightOrigin - mt.point ).Length(),
+							originFront ? "yes" : "NO - the receiver cosine is taken against an origin BEHIND the emitter", row.noShadows ? "yes (no visibility ray)" : "no" );
+					} else {
+						common->Printf( "    paired with NO placed light: default reach %.0f, matched to a light of its own colour\n", r_rtEmissiveReachDefault.GetFloat() );
+					}
+				} else {
+					common->Printf( "  (no row holds this triangle - the rows predate the table or the surface is dark)\n" );
+				}
+			}
+		}
 	} else if ( why[0] != '\0' ) {
 		common->Printf( "  verdict: NOT an emitter - %s\n", why );
 	} else if ( [&]() { for ( int i = 0; i < s_rtEmissiveLabels.Num(); i++ ) { if ( s_rtEmissiveLabels[i].mat == mat ) { return true; } } return false; }() ) {
@@ -4484,7 +4534,7 @@ void R_RtResetSceneState( void ) {
 	// E1 emissive table: handles are stale too; the CPU copy goes with them so the next RT frame rebuilds
 	s_rtEmissiveBuf = 0; s_rtEmissiveAddr = 0; s_rtEmissiveDbgVB = s_rtEmissiveDbgIB = 0; s_rtEmissiveDbgIndexes = 0;
 	s_rtEmissiveTris.Clear(); s_rtEmissiveGroups.Clear(); s_rtEmissiveLocalVerts.Clear(); s_rtEmissiveLabels.Clear(); s_rtEmissiveScreenLabels.Clear(); s_rtEmissiveMap.Clear(); s_rtEmissiveTotalFlux = 0.0f;
-	s_rtEmissiveRows.Clear(); s_rtEmissiveLightDbgVB = s_rtEmissiveLightDbgIB = 0; s_rtEmissiveLightDbgIndexes = 0; s_rtEmissiveLightFixturedSerial.Clear(); s_rtEmissiveTriLightOrigin.Clear(); s_rtEmissiveLightDbg.Clear();
+	s_rtEmissiveRows.Clear(); s_rtEmissiveLightDbgVB = s_rtEmissiveLightDbgIB = 0; s_rtEmissiveLightDbgIndexes = 0; s_rtEmissiveLightFixturedSerial.Clear(); s_rtEmissiveTriLightOrigin.Clear(); s_rtEmissiveTriLightNoShadows.Clear(); s_rtEmissiveLightDbg.Clear();
 }
 
 // DUDE: the six cvars that imply the persistent ray-query scene. r_rtWorld is the explicit
