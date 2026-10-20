@@ -3371,6 +3371,27 @@ static void R_RtEmissiveRefreshMovers( const idRenderWorldLocal *world, rhi::RHI
 		}
 		const idRenderEntityLocal *def = world->entityDefs[ g.entityIndex ];
 		if ( def == NULL || def->parms.hModel != g.model ) {
+			// the entity is GONE (a pickup taken, an item hidden: the game frees its render entity) or its slot now
+			// holds another model: the slice goes dark (zero flux, never sampled, hidden in the overlay). If the same
+			// model returns to the slot (a respawned pickup) the state compare below re-gathers it back on.
+			if ( !g.dark ) {
+				for ( int t = 0; t < g.numTris; t++ ) {
+					rtEmissiveTriGPU_t &e = s_rtEmissiveTris[ g.firstTri + t ];
+					e.flux = 0.0f;
+					e.emit |= RT_EMIT_FLAG_DARK;
+				}
+				g.dark = true;
+				g.skin = NULL; g.customShader = NULL; memset( g.shaderParms, 0, sizeof( g.shaderParms ) );	// any returning state differs
+				r->UpdateBuffer( s_rtEmissiveBuf, RT_EMISSIVE_HEADER_BYTES + g.firstTri * (int)sizeof( rtEmissiveTriGPU_t ),
+					g.numTris * (int)sizeof( rtEmissiveTriGPU_t ), &s_rtEmissiveTris[ g.firstTri ] );
+				if ( s_rtEmissiveDbgVB != 0 ) {
+					dbgScratch.SetNum( g.numTris * 3, false );
+					R_RtEmissiveFillDebugVerts( g.firstTri, g.numTris, dbgScratch.Ptr() );
+					r->UpdateBuffer( s_rtEmissiveDbgVB, g.firstTri * 3 * (int)sizeof( idDrawVert ), g.numTris * 3 * (int)sizeof( idDrawVert ), dbgScratch.Ptr() );
+				}
+				cdfDirty = true;
+				common->Printf( "r_rtEmissiveTable: entity %d '%s' is gone (%d emissive tris kept dark)\n", g.entityIndex, g.model->Name(), g.numTris );
+			}
 			continue;
 		}
 		// the glow STATE: skin / custom material / shader parms (parm7 door-light colour, a scripted _color) changed?
@@ -3473,6 +3494,43 @@ static void R_RtEmissiveLightCensus( const idRenderWorldLocal *world, rhi::RHI *
 		total, fixtured, fixturedAmbientMat, ambience, ambienceAmbientMat, parallel, fogBlend, trisInLight, n, n - trisInLight );
 }
 
+// True when an entity slot NO group tracks holds a static model with an emissive surface (it appeared after the
+// build). Tracked slots are skipped (their state compare handles them). A few hundred entities x their surfaces;
+// the stage test evaluates material registers, so this runs only every 90 frames.
+static bool R_RtEmissiveNewEntityAppeared( const idRenderWorldLocal *world ) {
+	static idList<bool> tracked;
+	tracked.SetNum( world->entityDefs.Num(), false );
+	for ( int i = 0; i < tracked.Num(); i++ ) { tracked[i] = false; }
+	for ( int gi = 0; gi < s_rtEmissiveGroups.Num(); gi++ ) {
+		const int ei = s_rtEmissiveGroups[gi].entityIndex;
+		if ( ei >= 0 && ei < tracked.Num() ) { tracked[ei] = true; }
+	}
+	for ( int i = 0; i < world->entityDefs.Num(); i++ ) {
+		if ( tracked[i] ) {
+			continue;
+		}
+		const idRenderEntityLocal *def = world->entityDefs[i];
+		if ( def == NULL || def->parms.hModel == NULL ) {
+			continue;
+		}
+		const idRenderModel *model = def->parms.hModel;
+		if ( model->IsStaticWorldModel() || model->IsDynamicModel() != DM_STATIC ) {
+			continue;
+		}
+		for ( int s = 0; s < model->NumSurfaces(); s++ ) {
+			const modelSurface_t *surf = model->Surface( s );
+			if ( surf->geometry == NULL || surf->geometry->verts == NULL || surf->geometry->indexes == NULL ) {
+				continue;
+			}
+			const idMaterial *mat = R_RemapShaderBySkin( surf->shader, def->parms.customSkin, def->parms.customShader );
+			if ( R_RtEmissiveStage( mat, NULL, def->parms.shaderParms ) != NULL ) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
 // Keep the table in step with the live RT scene: build once per map (or when its cvars change), free when off.
 // Called from R_RtWorldUpdate while the persistent scene is live for `world`.
 static void R_RtEmissiveUpdate( const idRenderWorldLocal *world, rhi::RHI *r ) {
@@ -3487,6 +3545,13 @@ static void R_RtEmissiveUpdate( const idRenderWorldLocal *world, rhi::RHI *r ) {
 	const bool stale = s_rtEmissiveMap.Icmp( world->mapName ) != 0 || r_rtEmissiveTable.IsModified() || r_rtEmissiveScale.IsModified();
 	if ( !stale ) {
 		R_RtEmissiveRefreshMovers( world, r );	// E1e: moved doors / lifts / platforms re-bake their slice
+		// an emissive entity that APPEARED after the build (a dropped item, a respawned pickup, a spawned prop): every 90
+		// frames, scan the entity slots no group tracks for a static model with an emissive surface -> full rebuild
+		if ( ( tr.frameCount % 90 ) == 45 && R_RtEmissiveNewEntityAppeared( world ) ) {
+			common->Printf( "r_rtEmissiveTable: a new emissive entity appeared - rebuilding the table\n" );
+			s_rtEmissiveMap.Clear();
+			return;
+		}
 		// a glow image that was not on the GPU at build time (loaded on its first draw) joins by a rebuild once it is:
 		// checked every 90 frames, a handful of pointer reads
 		if ( s_rtEmissiveNotResident.Num() > 0 && ( tr.frameCount % 90 ) == 0 ) {

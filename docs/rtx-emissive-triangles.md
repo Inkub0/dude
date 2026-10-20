@@ -371,3 +371,16 @@ WHICH surfaces glow queues a full rebuild (rare). Any flux change re-uploads the
 (`R_RtEmissiveUploadCdf`). Console lines name the entity on OFF / ON. A scripted `_color` fade re-gathers its entity
 every frame it changes (one entity's surfaces + a 5k-float CDF: negligible); the placed light the game removes with
 the fixture is E5's business (fixtured lights are dropped anyway).
+
+**Freed entities + late arrivals (2026-10-20).** A pickup taken (the game frees its render entity: the armor-shard
+`_fx` emitters lingered), an item hidden, or a slot re-used by another model darkens the group's slice (zero flux,
+`RT_EMIT_FLAG_DARK`); the same model returning to the slot (a respawn) re-gathers it on through the state compare.
+Every 90 frames `R_RtEmissiveNewEntityAppeared` scans the untracked entity slots for a static model with an emissive
+surface (a dropped / spawned item) and queues a full rebuild when one exists.
+
+**D5 (user, 2026-10-20) - the visible glow must read as a light.** The "ugly square": a fixture's glow stage drawn
+by the forward path as a flat, unlit rectangle (plainest with the placed lights off). Decided: once the emitters
+light the scene, an emitter surface's visible glow is drawn at its EMITTED radiance - the same per-material
+intensity (D2 table x r_rtEmissiveScale) that the table uses - so it blooms and reads as a source rather than a
+pasted square, and the look and the light come from one number. Belongs to E2's apply / E6 calibration (the forward
+additive draw of an emitter surface scaled by its intensity); a dark fixture is untouched. Not built yet.
