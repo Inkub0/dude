@@ -2839,6 +2839,7 @@ static int						s_rtEmissiveLastRebuildMs = -100000;	// Sys_Milliseconds of the 
 // 0 otherwise. A light created after the build (a new serial in a reused slot) is never dropped (D1). Plus the
 // overlay's light list (mode 5: spheres).
 static idList<unsigned int>		s_rtEmissiveLightFixturedSerial;
+static idList<idVec3>			s_rtEmissiveTriLightOrigin;		// E2 v3: per table triangle, the ORIGIN of the placed light it replaces (census; valid where lightLum > 0)
 struct rtEmissiveLightDbg_t { idVec3 origin; int kind; };	// kind: 0 fixtured (dropped in the mode), 1 ambience (kept), 2 parallel, 3 fog/blend
 static idList<rtEmissiveLightDbg_t>	s_rtEmissiveLightDbg;
 static rhi::BufferHandle		s_rtEmissiveLightDbgVB = 0, s_rtEmissiveLightDbgIB = 0;
@@ -3383,6 +3384,7 @@ static void R_RtEmissiveFree( void ) {
 	s_rtEmissiveFlareHidden.Clear();
 	s_rtEmissiveSeenModel.Clear();
 	s_rtEmissiveLightFixturedSerial.Clear();
+	s_rtEmissiveTriLightOrigin.Clear();
 	s_rtEmissiveLightDbg.Clear();
 	if ( r != NULL ) {
 		if ( s_rtEmissiveLightDbgVB != 0 ) { r->DestroyBuffer( s_rtEmissiveLightDbgVB ); }
@@ -3608,6 +3610,7 @@ static void R_RtEmissiveBuildRows( void ) {
 		rtEmissiveRow_t row;
 		idVec3 c( 0.0f, 0.0f, 0.0f ), mean( 0.0f, 0.0f, 0.0f );
 		float flux = 0.0f, area = 0.0f, reach = 0.0f, lightLum = 0.0f;
+		idVec3 lightOrigin( 0.0f, 0.0f, 0.0f );
 		bool dark = true;
 		for ( int t = 0; t < l.numTris; t++ ) {
 			const rtEmissiveTriGPU_t &e = s_rtEmissiveTris[ l.firstTri + t ];
@@ -3624,7 +3627,10 @@ static void R_RtEmissiveBuildRows( void ) {
 			}
 			float r; memcpy( &r, &e.reach, sizeof( r ) );
 			float ll; memcpy( &ll, &e.lightLum, sizeof( ll ) );
-			if ( r > reach ) { reach = r; lightLum = ll; }		// the light with the largest reach decides both
+			if ( r > reach ) {										// the light with the largest reach decides all three
+				reach = r; lightLum = ll;
+				lightOrigin = ( l.firstTri + t < s_rtEmissiveTriLightOrigin.Num() ) ? s_rtEmissiveTriLightOrigin[ l.firstTri + t ] : idVec3( 0.0f, 0.0f, 0.0f );
+			}
 		}
 		c *= 1.0f / ( 3.0f * l.numTris );
 		float r2 = 0.0f;
@@ -3640,6 +3646,8 @@ static void R_RtEmissiveBuildRows( void ) {
 		row.meanRadiance = ( flux > 0.0f ) ? mean * ( 1.0f / flux ) : idVec3( 0.0f, 0.0f, 0.0f );
 		row.reach = reach;								// 0 = no placed light covers it (the gather applies r_rtEmissiveReachDefault)
 		row.lightLum = lightLum;
+		row.lightOrigin = lightOrigin;
+		row.hasLight = reach > 0.0f && lightLum > 0.0f;
 		row.firstTri = l.firstTri;
 		row.numTris = l.numTris;
 		row.dark = dark;
@@ -3862,6 +3870,8 @@ static void R_RtEmissiveLightCensus( const idRenderWorldLocal *world, rhi::RHI *
 	int total = 0, fixtured = 0, ambience = 0, parallel = 0, fogBlend = 0, fixturedAmbientMat = 0, ambienceAmbientMat = 0, trisInLight = 0;
 	const int n = s_rtEmissiveTris.Num();
 	for ( int t = 0; t < n; t++ ) { s_rtEmissiveTris[t].emit &= ~RT_EMIT_FLAG_INLIGHT; s_rtEmissiveTris[t].reach = 0u; s_rtEmissiveTris[t].lightLum = 0u; }
+	s_rtEmissiveTriLightOrigin.SetNum( n, false );
+	for ( int t = 0; t < n; t++ ) { s_rtEmissiveTriLightOrigin[t].Zero(); }
 	s_rtEmissiveLightFixturedSerial.SetNum( world->lightDefs.Num(), false );
 	for ( int i = 0; i < world->lightDefs.Num(); i++ ) { s_rtEmissiveLightFixturedSerial[i] = 0u; }
 	s_rtEmissiveLightDbg.SetNum( 0, false );
@@ -3914,6 +3924,7 @@ static void R_RtEmissiveLightCensus( const idRenderWorldLocal *world, rhi::RHI *
 					float lum = Max( sp[SHADERPARM_RED], 0.0f ) * 0.2126f + Max( sp[SHADERPARM_GREEN], 0.0f ) * 0.7152f + Max( sp[SHADERPARM_BLUE], 0.0f ) * 0.0722f;
 					if ( !( lum > 0.001f ) ) { lum = 1.0f; }
 					memcpy( &e.lightLum, &lum, sizeof( lum ) );
+					s_rtEmissiveTriLightOrigin[t] = ld->globalLightOrigin;		// the mapper's light position: the receiver cosine + SH direction come from here
 				}
 			}
 		}
@@ -4354,7 +4365,7 @@ void R_RtResetSceneState( void ) {
 	// E1 emissive table: handles are stale too; the CPU copy goes with them so the next RT frame rebuilds
 	s_rtEmissiveBuf = 0; s_rtEmissiveAddr = 0; s_rtEmissiveDbgVB = s_rtEmissiveDbgIB = 0; s_rtEmissiveDbgIndexes = 0;
 	s_rtEmissiveTris.Clear(); s_rtEmissiveGroups.Clear(); s_rtEmissiveLocalVerts.Clear(); s_rtEmissiveLabels.Clear(); s_rtEmissiveScreenLabels.Clear(); s_rtEmissiveMap.Clear(); s_rtEmissiveTotalFlux = 0.0f;
-	s_rtEmissiveRows.Clear(); s_rtEmissiveLightDbgVB = s_rtEmissiveLightDbgIB = 0; s_rtEmissiveLightDbgIndexes = 0; s_rtEmissiveLightFixturedSerial.Clear(); s_rtEmissiveLightDbg.Clear();
+	s_rtEmissiveRows.Clear(); s_rtEmissiveLightDbgVB = s_rtEmissiveLightDbgIB = 0; s_rtEmissiveLightDbgIndexes = 0; s_rtEmissiveLightFixturedSerial.Clear(); s_rtEmissiveTriLightOrigin.Clear(); s_rtEmissiveLightDbg.Clear();
 }
 
 // DUDE: the six cvars that imply the persistent ray-query scene. r_rtWorld is the explicit

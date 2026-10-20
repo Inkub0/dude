@@ -414,3 +414,10 @@ shaders receive is the count WRITTEN this frame; r_rtEmissiveMaxRows joins Compu
   A tiny decal replacing a big light burns bright, a big panel glows softly. Uncovered emitters match a light of their own
   colour at the default reach. The grid proxy = the replaced light's C (same scale as the placed rows). With it on,
   r_rtEmissiveIntensity is a TRIM around 1 (the v2 values of 10-25 are no longer meaningful).
+- AUTHORED ORIGIN (built 2026-10-20 after "light at a nearly 90 degree angle makes surfaces darker"): a flush ceiling
+  strip lights the wall under it at a grazing angle (receiver cosine ~0.08) where the mapper's placed light sat 20-40
+  units out in the corridor (cosine ~0.3+). The census stores each triangle's light ORIGIN; a paired row's pos = that
+  origin and projF.x = 1: rtEmissiveShadeRow cosines the receiver against it and the gather's SH direction points at it
+  (the forward path's geometry), while the sampled surface point still drives the energy, the solid angle and the
+  visibility ray. Uncovered rows keep the sampled point for both (the "centre" direction of v3's first build was wrong
+  for long tubes: in the wall's plane, it zeroed the apply's cosine re-resolve).

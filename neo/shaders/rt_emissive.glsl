@@ -230,6 +230,7 @@ uint rtEmissiveSeed( uint li, vec3 P, float frame ) {
 // flux (the CDF restricted to the run), one point on it uniform in solid angle (Arvo), value f / p = radiance x emission
 // profile x N.L x (solid angle / flux share). Unbiased for the row's total, so the DI reservoir can hold an emitter row
 // next to a placed light with pdf 1 exactly like any other candidate. ldir / dl = the SAMPLED point (the visibility ray).
+// ldir / dl are the SAMPLED point (the visibility ray); the receiver cosine comes from the authored light origin when there is one.
 // Reach (E6): the Doom 3 light this emitter replaced fell off LINEARLY to its radius; a solid-angle estimate falls with the
 // inverse square. Past the knee (radius / 4) the sample is boosted by d / knee so the far field goes ~1/d - the reach the
 // mapper lit the hall for - and fades out between 1.5 and 2 radii (the row's cull sphere) so the cut is soft.
@@ -259,7 +260,11 @@ bool rtEmissiveShadeRow( RtLights lights, uint li, vec3 P, vec3 N, uint seed, ou
 	dl   = length( d );
 	if ( !( dl > 1e-3 ) || !( pdfw > 0.0 ) ) { return false; }
 	ldir = d / dl;
-	ndl  = max( dot( N, ldir ), 0.0 );
+	// the receiver cosine: against the replaced light's AUTHORED ORIGIN (projF.x: pos = that origin) when the census paired
+	// one - a flush ceiling strip lights the wall under it at a grazing angle, the mapper's light sat out in the room and
+	// lit that wall; the forward path cosined against that origin, so does this. Else the sampled point.
+	vec3 ndir = ( lights.l[ li ].projF.x > 0.5 ) ? normalize( lights.l[ li ].pos - P ) : ldir;
+	ndl  = max( dot( N, ndir ), 0.0 );
 	if ( !( ndl > 0.0 ) ) { return false; }
 	float cosL = max( -dot( nUnit, ldir ), 0.0 );								// nUnit points AT P (the sampler re-winds)
 	if ( !( cosL > 0.0 ) ) { return false; }
