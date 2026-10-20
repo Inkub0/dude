@@ -267,3 +267,25 @@ baked)" in the census), so a sample reads the texel the forward path draws - the
 where the game shows a lit screen. If the terminal is still black after this, the remaining suspects are an entity
 `_color` of 0 on its parms (then the game would show it black too - it does not) or a glow texture that is genuinely
 black where the geometry's st lands (a mis-authored add map).
+
+## Third round (user, Marine HQ, 2026-10-20) - E1 VALIDATED
+
+The census tints resolved the comm terminal: the big "blue screen" is `textures/base_light/sterlightdecal` (azure
+#4474B9, 124 tris map-wide) - a nonsolid, alpha-tested LIGHT DECAL laid over the terminal bezel, whose `_add` map is
+black except for a few LED spots. Mode 3 shows exactly those spots (the small green and orange dots on the dark
+terminal), so the sample is CORRECT; the decal quad merely paints over the monitors in modes 1/2 because the overlay
+has no depth between its own triangles. The monitors themselves (the "COMMUNICATIONS" GUIs) are GUI surfaces,
+excluded BY DESIGN (D1: GUI screens keep the r_emissiveSurfaces fill lights; their content is a live render, there is
+no texture to sample). The user's reading ("the Doom 3 screens GUI") is right.
+
+Two consequences for E2:
+- **Sparse emitters.** A decal / panel whose add map is mostly black (sterlightdecal, mcitya12_2, mcityc29) gets a
+  uniform point on a large quad, so most samples land on black texels: correct in expectation, but high variance for
+  its (small) flux share. Mitigation if it shows as noise: build the triangle's flux from the add map's luminance over
+  the triangle's st footprint (not the whole-image average), or sub-divide bright regions; defer until E2 shows it.
+- **GUI screens as emitters** (optional, later): the fill-light path already derives a per-screen average colour from
+  the GUI render (tr_light.cpp emissiveReq tint); a GUI surface could enter the table with a flat colour entry
+  (emit slot 0 = "use tint") instead of a texture. Not needed for E2's first cut.
+
+E1 is validated: gather, exclusions, flux ranking, depth-tested overlay, texture-matrix bake. Next: E1e (mover
+transform refresh), then E2.
