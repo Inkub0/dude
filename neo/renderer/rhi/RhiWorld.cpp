@@ -6141,14 +6141,16 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 	}
 	// E5: say how many fixtured placed lights this view drops whenever that changes (the proof the drop is live)
 	{
-		static int lastDropped = -1;
-		const int dropped = r_rtEmissiveLighting.GetBool() ? s_diSkipEmissiveDrop : 0;
-		if ( dropped != lastDropped ) {
-			lastDropped = dropped;
-			if ( r_rtEmissiveLighting.GetBool() ) {
-				common->Printf( "emissive mode: %d fixtured placed lights dropped in this view, %d placed lights kept\n", dropped, n );
-			}
+		// once when the mode comes on and once per table rebuild - not on every change of the in-view count (that
+		// spammed a line every time a light entered or left the view, 2026-10-20)
+		static bool lastMode = false;
+		static unsigned long long lastTable = 0;
+		const bool mode = r_rtEmissiveLighting.GetBool();
+		const unsigned long long table = mode ? R_RtEmissiveTableAddress( NULL, NULL, NULL ) : 0;
+		if ( mode && ( !lastMode || table != lastTable ) && table != 0 ) {
+			common->Printf( "emissive mode: %d fixtured placed lights dropped in this view, %d placed lights kept\n", s_diSkipEmissiveDrop, n );
 		}
+		lastMode = mode; lastTable = table;
 	}
 	if ( n == 0 ) {
 		return 0;
