@@ -15,6 +15,7 @@ SAMPLER_BINDING(2) uniform sampler2D u_diffuseAlbedo; // RTGI (docs/rtx-rtgi.md 
 SAMPLER_BINDING(4) uniform sampler2D u_diffuseAlbedo2;// ReSTIR DI: the SECOND live diffuse stage of a crossfade (its colour in u_specularParms.rgb); summed into out_Albedo so a death-fade blends as vanilla draws it
 SAMPLER_BINDING(3) uniform sampler2D u_specularMask;  // ReSTIR DI (docs/rtx-restir-di.md Stage D): the surface's specular map, luminance -> out_Material.b
 SAMPLER_BINDING(10) uniform sampler2D u_occlusionMap; // ReSTIR DI material parity: the surface's baked occlusion map (R), -> out_Material.a; gated by u_occlusionParms.x
+SAMPLER_BINDING(11) uniform sampler2D u_parallaxMap;  // DUDE parallax height map (R = height); u_parallaxParms.x gates it. The PT tier reads THIS G-buffer, so POM must shift the UVs here, not just in the forward pass (docs/parallax.md)
 
 VARY(0) in vec2 var_TexBump;
 VARY(1) in vec3 var_T;
@@ -27,6 +28,7 @@ VARY(4) in vec2 var_TexCoverage;
 VARY(7) in vec4 var_CurClip;
 VARY(8) in vec4 var_PrevClip;
 VARY(10) in vec4 var_Color;			// vertex-colour term (interaction.vert's var_Color), albedo prepass only
+VARY(11) in vec3 var_TexViewVec;	// parallax: tangent-space view vector
 
 layout(location = 0) out vec4 fragColor;
 layout(location = 1) out vec4 out_Material;   // SSR: (roughness, metalness, spec-map luminance [DI apply only, else 0], baked occlusion [DI apply only, else 1])
@@ -44,7 +46,40 @@ void main() {
 	}
 
 	// RXGB (DXT5nm) swizzle: x lives in alpha (matches interaction.frag / ambientlight.frag)
-	vec4 bump = texture( u_bumpMap, var_TexBump );
+	// DUDE parallax occlusion mapping in the G-buffer (docs/parallax.md): march the height field along the tangent-space
+	// view ray and shift the surface UVs before the normal / albedo / specular / occlusion fetches, so the relief the
+	// forward pass shows also reaches the ray-traced tier that lights from this buffer. Opaque world surfaces only
+	// (the CPU binds u_parallaxMap and sets u_parallaxParms.x there); no self-shadow term here - that is a lighting
+	// effect the forward pass owns. Fragment-only, no depth moved (the sealed depth and DEPTHFUNC_EQUAL are untouched).
+	vec2 uvBump = var_TexBump;
+	vec2 uvCoverage = var_TexCoverage;
+	if ( u_parallaxParms.x > 0.5 ) {
+		vec3  viewTS = normalize( var_TexViewVec );
+		float depth  = u_parallaxParms.y;
+		float nSteps = mix( u_parallaxParms.w, u_parallaxParms.z, clamp( abs( viewTS.z ), 0.0, 1.0 ) );
+		float layerDepth = 1.0 / nSteps;
+		vec2  dPx = dFdx( var_TexBump );
+		vec2  dPy = dFdy( var_TexBump );
+		vec2  P = ( viewTS.xy / max( abs( viewTS.z ), 0.1 ) ) * depth;
+		vec2  deltaUV = P * layerDepth;
+		float curLayer = 0.0;
+		vec2  curUV = var_TexBump;
+		float curDepthVal = 1.0 - textureGrad( u_parallaxMap, curUV, dPx, dPy ).r;
+		for ( int i = 0; i < 32; i++ ) {
+			if ( curLayer >= curDepthVal ) { break; }
+			curUV -= deltaUV;
+			curDepthVal = 1.0 - textureGrad( u_parallaxMap, curUV, dPx, dPy ).r;
+			curLayer += layerDepth;
+		}
+		vec2  prevUV = curUV + deltaUV;
+		float after  = curDepthVal - curLayer;
+		float before = ( 1.0 - textureGrad( u_parallaxMap, prevUV, dPx, dPy ).r ) - ( curLayer - layerDepth );
+		float w = after / ( after - before );
+		vec2  off = ( mix( curUV, prevUV, w ) - var_TexBump ) + P * 0.5;	// mid-height bias, as interaction.frag
+		uvBump += off;
+		uvCoverage += off;
+	}
+	vec4 bump = texture( u_bumpMap, uvBump );
 	bump.x = bump.a;
 	vec3 tn = bump.xyz * 2.0 - 1.0;
 
@@ -59,14 +94,14 @@ void main() {
 	// .b = the specular map's luminance (ReSTIR DI Stage D: the deferred DI shade masks its GGX lobe with it, as
 	// interaction.frag masks with spec * specMap). Sampled with the diffuse UV (var_TexCoverage), only on the
 	// 4-MRT albedo prepass (u_localParam0.y) - black otherwise, and nothing else reads .b.
-	float specLum = ( u_localParam0.y > 0.5 ) ? dot( texture( u_specularMask, var_TexCoverage ).rgb, vec3( 0.2126, 0.7152, 0.0722 ) ) : 0.0;
+	float specLum = ( u_localParam0.y > 0.5 ) ? dot( texture( u_specularMask, uvCoverage ).rgb, vec3( 0.2126, 0.7152, 0.0722 ) ) : 0.0;
 	// .a = the baked occlusion map (docs/occlusion-maps.md), sampled with the diffuse UV as interaction.frag does; 1 =
 	// none. The DI apply scales its lighting by it exactly as the forward direct diffuse is (r_occlusionMapScale * Direct).
 	// A Phase D PBR sidecar (docs/pbr-materials.md sec. 7) on unit 10 supplies both: its AO channel here, and its
 	// per-texel roughness/metalness in place of the table scalars (u_ormParms.y), matching interaction.frag.
 	// u_ormParms.w: r_pbrDebugView wants the AO in .a whatever the albedo prepass does
 	bool wantOccl = ( u_localParam0.y > 0.5 && u_occlusionParms.x > 0.5 ) || u_ormParms.w > 0.5;
-	vec4 unit10 = ( u_ormParms.y > 0.5 || wantOccl ) ? texture( u_occlusionMap, var_TexCoverage ) : vec4( 1.0 );
+	vec4 unit10 = ( u_ormParms.y > 0.5 || wantOccl ) ? texture( u_occlusionMap, uvCoverage ) : vec4( 1.0 );
 	float occl = wantOccl ? dudeUnit10Ao( unit10 ) : 1.0;
 	vec2 roughMetal = ( u_ormParms.y > 0.5 ) ? dudeUnit10RoughMetal( unit10 ) : u_pbrParms.yx;
 	out_Material = vec4( roughMetal, specLum, occl );
@@ -118,6 +153,6 @@ void main() {
 	vec3 vcA = var_Color.rgb * u_vertexColorModulate.rgb + u_vertexColorAdd.rgb;
 	vec3 vcB = var_Color.rgb * u_vertexColorModulate2.rgb + u_vertexColorAdd2.rgb;
 	out_Albedo = ( u_localParam0.y > 0.5 )
-		? vec4( texture( u_diffuseAlbedo, var_TexCoverage ).rgb * u_diffuseModifier.rgb * vcA
-		      + texture( u_diffuseAlbedo2, var_TexCoverage ).rgb * u_specularParms.rgb * vcB, u_localParam0.w ) : vec4( 0.0 );
+		? vec4( texture( u_diffuseAlbedo, uvCoverage ).rgb * u_diffuseModifier.rgb * vcA
+		      + texture( u_diffuseAlbedo2, uvCoverage ).rgb * u_specularParms.rgb * vcB, u_localParam0.w ) : vec4( 0.0 );
 }

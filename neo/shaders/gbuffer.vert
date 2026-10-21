@@ -50,6 +50,9 @@ VARY(9) out vec3 var_PrevDelta;
 // interaction.vert's var_Color (modulate / inverse-modulate / ignore via u_vertexColorModulate/Add), so the
 // albedo attachment carries what the forward diffuse term multiplies by. Only read on the 4-MRT albedo prepass.
 VARY(10) out vec4 var_Color;
+// DUDE parallax in the G-buffer (docs/parallax.md): the tangent-space view vector, so gbuffer.frag can march the height
+// map and shift the surface UVs - the PT tier reads the G-buffer, so without this parallax relief never reaches DI / RT.
+VARY(11) out vec3 var_TexViewVec;
 
 void main() {
 	vec4 st = vec4( attr_TexCoord, 0.0, 1.0 );
@@ -71,6 +74,9 @@ void main() {
 	var_T = mv * attr_Tangent;
 	var_B = mv * attr_Bitangent;
 	var_N = mv * nLit;
+	// the view ray in tangent space (as interaction.vert): u_localViewOrigin is the eye in this surface's local space
+	vec3 toView = u_localViewOrigin.xyz - attr_Position.xyz;
+	var_TexViewVec = vec3( dot( attr_Tangent, toView ), dot( attr_Bitangent, toView ), dot( nLit, toView ) );
 
 	var_ModelPos = attr_Position.xyz;
 	var_ModelNormal = vec4( attr_Normal, attr_Color.a );
