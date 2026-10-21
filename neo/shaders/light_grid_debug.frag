@@ -65,6 +65,7 @@ void main() {
 	if ( n == 0u ) { fragColor = vec4( 0.0, 0.0, 0.0, 1.0 ); return; }				// empty cell (no in-range light): black
 
 	if ( mode == 2 ) {
+		if ( lgOverflow( grid, base ) ) { fragColor = vec4( 1.0, 0.1, 0.1, 1.0 ); return; }	// RED: the cell dropped lights (raise the candidates / shrink the cell)
 		float ramp = clamp( float( n ) / max( float( p.slots ), 1.0 ), 0.0, 1.0 );
 		fragColor = vec4( vec3( ramp ), 1.0 );
 	} else if ( mode == 3 ) {

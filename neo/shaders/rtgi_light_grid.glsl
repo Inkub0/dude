@@ -7,7 +7,7 @@
 // Grid: `cascades` cascades, each `res^3` cells, cascade c cell size = cellBase * 2^c, centred on the camera (snapped to
 // the cell size so cells do not swim). A world point picks the smallest cascade whose box contains it, then a cell.
 //
-// Cell record (flat uint buffer `g[]`, stride LG_HEADER + 2*slots uints): [0] count (lights stored, 0 = empty), [1]
+// Cell record (flat uint buffer `g[]`, stride LG_HEADER + 2*slots uints): [0] count (lights stored, 0 = empty; bit 31 = OVERFLOW: the cell had more in-range lights than slots and dropped some - lgOverflow), [1]
 // sumImp (float bits: the cell's total in-range importance, the consume pdf denominator), then per slot { uint light
 // index, float imp bits }. A cold / empty cell has count 0 -> the consumer falls back to its old path (never wrong).
 //
@@ -113,7 +113,8 @@ int lgCellBaseJittered( LgParms p, vec3 world, inout uint rng ) {
 	return ( b >= 0 ) ? b : lgCellBase( p, world );			// jittered out of the grid: the exact cell
 }
 
-uint  lgCount( LgGrid grid, int base )            { return grid.g[ base ]; }
+uint  lgCount( LgGrid grid, int base )            { return grid.g[ base ] & 0x7FFFFFFFu; }	// bit 31 = overflow flag (lgOverflow), masked off here
+bool  lgOverflow( LgGrid grid, int base )         { return ( grid.g[ base ] & 0x80000000u ) != 0u; }	// the cell dropped in-range lights (more than slots)
 float lgSumImp( LgGrid grid, int base )           { return uintBitsToFloat( grid.g[ base + 1 ] ); }
 uint  lgSlotLight( LgGrid grid, int base, uint s ){ return grid.g[ base + int( LG_HEADER + 2u * s ) ]; }
 float lgSlotImp( LgGrid grid, int base, uint s )  { return uintBitsToFloat( grid.g[ base + int( LG_HEADER + 2u * s + 1u ) ] ); }

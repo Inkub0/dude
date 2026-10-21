@@ -51,6 +51,7 @@ void main() {
 	uint  count   = 0u;				// kept so far (up to slotsL)
 	uint  minSlot = 0u;				// the weakest kept slot, for replacement once full
 	float minImp  = 1e30;
+	bool  overflowed = false;		// a candidate arrived after the cell was full: some light is DROPPED (debug view red)
 	// E2 v3: a BOUNCEONLY emitter row (normal mode + r_rtEmissiveBounce) is a candidate for the GI bounce only - the DI
 	// shade skips it - so it must never DISPLACE a placed light: it gets its own small quota of the slots (2 of 16), ranked
 	// among its kind. Ranking the 300 emitter rows of a map against the placed lights for the same slots emptied whole
@@ -123,11 +124,14 @@ void main() {
 				minImp = chosenImp[ 0 ]; minSlot = 0u;
 				for ( uint k = 1u; k < slotsL; k++ ) { if ( chosenImp[ k ] < minImp ) { minImp = chosenImp[ k ]; minSlot = k; } }
 			}
-		} else if ( imp > minImp ) {									// stronger than the weakest kept: replace it, re-find the weakest
-			chosen[ minSlot ] = li;
-			chosenImp[ minSlot ] = imp;
-			minImp = chosenImp[ 0 ]; minSlot = 0u;
-			for ( uint k = 1u; k < slotsL; k++ ) { if ( chosenImp[ k ] < minImp ) { minImp = chosenImp[ k ]; minSlot = k; } }
+		} else {														// the cell is already full: this candidate costs a drop
+			overflowed = true;
+			if ( imp > minImp ) {										// stronger than the weakest kept: replace it, re-find the weakest
+				chosen[ minSlot ] = li;
+				chosenImp[ minSlot ] = imp;
+				minImp = chosenImp[ 0 ]; minSlot = 0u;
+				for ( uint k = 1u; k < slotsL; k++ ) { if ( chosenImp[ k ] < minImp ) { minImp = chosenImp[ k ]; minSlot = k; } }
+			}
 		}
 	}
 	// the bounce-only rows ride behind the lights in the same record (their quota never exceeds the free slots)
@@ -136,7 +140,7 @@ void main() {
 	if ( cellLive && count > 0u ) {
 		float sumStored = 0.0;											// sum over the KEPT lights = the consume's pdf denominator
 		for ( uint k = 0u; k < count; k++ ) { sumStored += chosenImp[ k ]; }
-		grid.g[ base ]     = count;
+		grid.g[ base ]     = count | ( overflowed ? 0x80000000u : 0u );	// bit 31 = OVERFLOW: more in-range lights than slots (debug view 2 red)
 		grid.g[ base + 1 ] = floatBitsToUint( sumStored );
 		for ( uint k = 0u; k < count; k++ ) {
 			grid.g[ base + int( LG_HEADER + 2u * k ) ]      = chosen[ k ];
