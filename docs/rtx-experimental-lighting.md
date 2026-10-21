@@ -550,3 +550,10 @@ Workflow: Emissive Mode on -> Bake defaults -> Physical on -> walk the map with 
   the pick (R_RtEmissivePickFixture / PickMaterial) now uses the emitter TABLE at the hit POINT - the nearest emitter
   row within 24 units - and returns that ROW's material (row.mat, new field), walking the ray past collision / flare /
   non-emitter hits (up to 8). mt.material is no longer trusted.
+- "LIGHTS LOST / BLINK WHILE EDITING" (user, 2026-10-21, landing bay = bundled fixtures): NOT the per-view cap (~4000).
+  It is the LIGHT GRID per-cell top-N: a cell in a dense bundle holds more fixtures than r_rtEmissiveGridSlots, so the
+  weak ones are never sampled (missing); editing a fixture changes its grid importance (flux), which evicts a neighbour
+  from the kept set (blink). Mitigation: r_rtEmissiveGridSlots default 9 -> 16 (up to 32); smaller r_rtLightGridCellBase
+  also helps (fewer lights per cell). PROPER FIX (not done): temporal accumulation of the overflow is unbiased only with
+  a 1/f weight that spikes and fries (the reverted residual slots); a biased deterministic rotation (weight 1) is stable
+  but under-counts the rotating weak lights - acceptable for eye-tuning, a candidate if 16/32 is not enough.
