@@ -4219,7 +4219,7 @@ static void R_RtEmissiveLightCensus( const idRenderWorldLocal *world, rhi::RHI *
 			}
 			if ( inside ) {
 				e.emit |= RT_EMIT_FLAG_INLIGHT;
-				if ( runArea[t] < fixtureMinArea ) { indicatorsInLight++; continue; }	// an indicator: lit BY this light, not its fixture
+				if ( runArea[t] < fixtureMinArea || ( e.emit & RT_EMIT_FLAG_INDICATOR ) ) { indicatorsInLight++; continue; }	// an indicator (small, or flagged in emitters.cfg): lit BY this light, not its fixture - never drop the light
 				// FIXTURED = an emitter near the light's ORIGIN (a fixture's glow sits where its light is placed), not
 				// anywhere in its volume: a wide spot whose volume merely contained some other glow panel was dropped
 				// while its own glow-less housing had nothing to replace it (the Marine Command downlights, 2026-10-20)

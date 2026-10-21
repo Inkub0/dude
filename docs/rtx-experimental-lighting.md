@@ -525,3 +525,9 @@ Workflow: Emissive Mode on -> Bake defaults -> Physical on -> walk the map with 
   window like the PBR editor (D3_ImGuiWin_EmitterEditor bit; Com_DrawEmitterEditor / Com_OpenEmitterEditor). Open it
   from the group's "Open Emitter Editor" button, or bind the `editEmitter` command to a key (e.g. `bind m editEmitter`)
   to open it on the material under the crosshair. The group keeps only the launcher + "Bake defaults".
+- HANGAR LIGHTS GO BLACK ON EDIT (user, 2026-10-21): flagging a shared light material as INDICATOR (emitters.cfg /
+  editor) dropped every placed light of that material (the census marked them fixtured on geometry alone) while the
+  indicator rows are kept OUT of the light buffer - no emitter, no placed light. FIX: the census treats an emitter
+  flagged RT_EMIT_FLAG_INDICATOR exactly like a sub-area indicator - it never makes its placed light fixtured, so the
+  light stays. The low-radiance case already self-corrects (flux -> effArea below the floor -> light kept). LESSON: the
+  drop and the "is this a light row" test must use the SAME indicator rule, or a fixture goes black twice over.
