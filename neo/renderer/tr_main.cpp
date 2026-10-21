@@ -2878,12 +2878,16 @@ static void R_RtEmissiveMatTableLoad( void ) {
 	void *buf = NULL;
 	const int len = fileSystem->ReadFile( RT_EMISSIVE_TABLE_FILE, &buf, NULL );
 	if ( len <= 0 || buf == NULL ) { return; }
-	idLexer lex( (const char *)buf, len, RT_EMISSIVE_TABLE_FILE, LEXFL_NOSTRINGCONCAT | LEXFL_NOSTRINGESCAPECHARS | LEXFL_ALLOWPATHNAMES );
+	// tolerant: a malformed or legacy line (e.g. the old '#' comments) must not abort the load or spam errors
+	idLexer lex( (const char *)buf, len, RT_EMISSIVE_TABLE_FILE, LEXFL_NOSTRINGCONCAT | LEXFL_NOSTRINGESCAPECHARS | LEXFL_ALLOWPATHNAMES | LEXFL_NOFATALERRORS | LEXFL_NOWARNINGS );
 	idToken tok;
 	while ( lex.ReadToken( &tok ) ) {
+		// skip a comment line: '//' is consumed by the lexer already; a stray '#' (legacy save) is read as a token
+		if ( tok.Length() > 0 && tok[0] == '#' ) { lex.SkipRestOfLine(); continue; }
 		rtEmissiveMatEntry_t e;
 		e.name = tok;
-		e.scale = lex.ParseFloat();
+		if ( !lex.ReadToken( &tok ) || !tok.IsNumeric() ) { lex.SkipRestOfLine(); continue; }	// name not followed by a number: skip the line
+		e.scale = atof( tok.c_str() );
 		e.tint[0] = lex.ParseFloat(); e.tint[1] = lex.ParseFloat(); e.tint[2] = lex.ParseFloat();
 		e.profile = idMath::ClampInt( 0, 2, lex.ParseInt() );
 		e.twoSided = lex.ParseInt() != 0;
@@ -2896,8 +2900,8 @@ static void R_RtEmissiveMatTableLoad( void ) {
 
 static void R_RtEmissiveMatTableSave( void ) {
 	idStr out;
-	out += "# DUDE emitter table (docs/rtx-experimental-lighting.md): per material - radiance scale on the glow's mean, tint r g b,\n";
-	out += "# profile (0 sqrt(cos) 1 Lambert 2 uniform), twoSided, indicator. Written by rtEmissiveBakeTable / the emitter editor.\n";
+	out += "// DUDE emitter table (docs/rtx-experimental-lighting.md): per material - radiance scale on the glow's mean, tint r g b,\n";
+	out += "// profile (0 sqrt(cos) 1 Lambert 2 uniform), twoSided, indicator. Written by rtEmissiveBakeTable / the emitter editor.\n";
 	for ( int i = 0; i < s_rtEmissiveMatTable.Num(); i++ ) {
 		const rtEmissiveMatEntry_t &e = s_rtEmissiveMatTable[i];
 		out += va( "\"%s\" %.4f  %.3f %.3f %.3f  %d %d %d\n", e.name.c_str(), e.scale, e.tint[0], e.tint[1], e.tint[2], e.profile, e.twoSided ? 1 : 0, e.indicator ? 1 : 0 );
