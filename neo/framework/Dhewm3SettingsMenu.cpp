@@ -7085,23 +7085,48 @@ static int					emEditProfile = 0;
 static bool					emEditTwoSided = false, emEditIndicator = false, emEditHasEntry = false;
 static int					emEditRows = 0, emEditFixtures = 0;
 static float				emEditMatched = 1.0f;
+static int					emEditScope = 0;			// 0 = this material (all its fixtures), 1 = THIS light (one fixture override)
+static unsigned long long	emEditFixtureId = 0;		// the picked fixture's stable id (0 = none: the light scope is unavailable)
+static idVec3				emEditFixturePos( 0.0f, 0.0f, 0.0f );
 
-static void EmitterEditor_LoadFrom( const idMaterial *mat )
+// fill the sliders from the table for the current scope (material entry, or the light override; falling back to the
+// material entry, then the power match, so an override starts where the material left off)
+static void EmitterEditor_LoadScope( void )
 {
-	emEditMat = mat;
-	if ( mat == NULL ) {
-		return;
+	if ( emEditScope == 1 && emEditFixtureId != 0 ) {
+		emEditHasEntry = R_RtEmissiveLightTableGet( emEditFixtureId, &emEditScale, emEditTint, &emEditProfile, &emEditTwoSided, &emEditIndicator );
+		if ( emEditHasEntry ) { return; }
+	} else {
+		emEditHasEntry = ( emEditMat != NULL ) && R_RtEmissiveMatTableGet( emEditMat, &emEditScale, emEditTint, &emEditProfile, &emEditTwoSided, &emEditIndicator );
+		if ( emEditHasEntry ) { return; }
 	}
-	emEditMatched = R_RtEmissiveMatMatchedScale( mat, &emEditRows, &emEditFixtures );
-	emEditHasEntry = R_RtEmissiveMatTableGet( mat, &emEditScale, emEditTint, &emEditProfile, &emEditTwoSided, &emEditIndicator );
-	if ( !emEditHasEntry ) {
-		// no entry yet: start the controls at the power match's values (what the row uses now)
+	// no entry for this scope: inherit the material entry if there is one, else the power match
+	float ms; float mt[3]; int mp; bool mtw, mind;
+	if ( emEditMat != NULL && R_RtEmissiveMatTableGet( emEditMat, &ms, mt, &mp, &mtw, &mind ) ) {
+		emEditScale = ms; emEditTint[0] = mt[0]; emEditTint[1] = mt[1]; emEditTint[2] = mt[2]; emEditProfile = mp; emEditTwoSided = mtw; emEditIndicator = mind;
+	} else {
 		emEditScale = emEditMatched;
 		emEditTint[0] = emEditTint[1] = emEditTint[2] = 1.0f;
 		emEditProfile = 0;
 		emEditTwoSided = false;
 		emEditIndicator = ( emEditFixtures == 0 && emEditRows > 0 );
 	}
+	emEditHasEntry = false;
+}
+
+static void EmitterEditor_LoadFrom( const idMaterial *mat )
+{
+	emEditMat = mat;
+	emEditFixtureId = 0;
+	emEditFixturePos.Zero();
+	if ( mat == NULL ) {
+		return;
+	}
+	emEditMatched = R_RtEmissiveMatMatchedScale( mat, &emEditRows, &emEditFixtures );
+	// also resolve the specific fixture under the crosshair, for the per-light scope (same trace; may differ from mat's pick)
+	const idMaterial *fm = NULL;
+	emEditFixtureId = R_RtEmissivePickFixture( &fm, &emEditFixturePos );
+	EmitterEditor_LoadScope();
 }
 
 // called by the editEmitter command once it has traced a material (NULL = open empty)
@@ -7121,10 +7146,10 @@ void Com_DrawEmitterEditor()
 		if ( !r_rtEmissiveTable.GetBool() ) {
 			ImGui::TextColored( ImVec4( 1.0f, 0.7f, 0.3f, 1.0f ), "r_rtEmissiveTable is 0 - enable the Emitter Table (Emissive Lights) to build the table." );
 		}
-		ImGui::TextDisabled( "%d material entries in emitters.cfg (save path)", R_RtEmissiveMatTableNum() );
+		ImGui::TextDisabled( "%d material entries, %d light overrides in emitters.cfg (save path)", R_RtEmissiveMatTableNum(), R_RtEmissiveLightTableNum() );
 		ImGui::Separator();
 
-		if ( ImGui::Button( "Pick material under crosshair" ) ) {
+		if ( ImGui::Button( "Pick under crosshair" ) ) {
 			const idMaterial *m = R_RtEmissivePickMaterial();
 			if ( m != NULL ) {
 				EmitterEditor_LoadFrom( m );
@@ -7138,7 +7163,22 @@ void Com_DrawEmitterEditor()
 			ImGui::TextWrapped( "Aim at an emitting surface and press the button above, or bind \"editEmitter\" to a key (e.g. `bind m editEmitter`) to load the material under the crosshair." );
 		} else {
 			ImGui::TextColored( ImVec4( 0.6f, 0.8f, 1.0f, 1.0f ), "%s", emEditMat->GetName() );
-			ImGui::TextDisabled( "%d rows in this map, %d fixtures; power match would use x%.2f; %s", emEditRows, emEditFixtures, emEditMatched, emEditHasEntry ? "HAS an entry" : "no entry yet" );
+			ImGui::TextDisabled( "%d rows in this map, %d fixtures; power match would use x%.2f", emEditRows, emEditFixtures, emEditMatched );
+
+			// scope: tune the material (every fixture) or just this one light (an override on top), for a fixture reused as a
+			// floodlight here and a small ceiling light there
+			int prevScope = emEditScope;
+			ImGui::RadioButton( "This material (all)", &emEditScope, 0 );
+			ImGui::SameLine();
+			ImGui::BeginDisabled( emEditFixtureId == 0 );
+			ImGui::RadioButton( "This light (override)", &emEditScope, 1 );
+			ImGui::EndDisabled();
+			if ( emEditScope != prevScope ) { EmitterEditor_LoadScope(); }		// switching scope reloads the sliders from that table
+			if ( emEditScope == 1 ) {
+				ImGui::TextDisabled( "fixture %016llx at %.0f %.0f %.0f  %s", emEditFixtureId, emEditFixturePos.x, emEditFixturePos.y, emEditFixturePos.z, emEditHasEntry ? "HAS an override" : "no override (inheriting)" );
+			} else {
+				ImGui::TextDisabled( "%s", emEditHasEntry ? "HAS a material entry" : "no material entry (power match)" );
+			}
 			ImGui::Separator();
 
 			ImGui::SliderFloat( "Radiance x", &emEditScale, 0.0f, 64.0f, "%.2f", ImGuiSliderFlags_Logarithmic );
@@ -7152,15 +7192,19 @@ void Com_DrawEmitterEditor()
 
 			ImGui::Separator();
 			if ( ImGui::Button( "Apply (live)" ) ) {
-				R_RtEmissiveMatTableSet( emEditMat, emEditScale, emEditTint, emEditProfile, emEditTwoSided, emEditIndicator );
+				if ( emEditScope == 1 && emEditFixtureId != 0 ) {
+					R_RtEmissiveLightTableSet( emEditFixtureId, emEditScale, emEditTint, emEditProfile, emEditTwoSided, emEditIndicator );
+				} else {
+					R_RtEmissiveMatTableSet( emEditMat, emEditScale, emEditTint, emEditProfile, emEditTwoSided, emEditIndicator );
+				}
 				emEditHasEntry = true;
 			}
-			AddTooltip( "Write the entry into the in-memory table and rebuild the emitter table (live next frame). Save writes emitters.cfg." );
+			AddTooltip( "Write the entry into the in-memory table and rebuild the emitter table (live next frame). 'This light' overrides just the picked fixture; 'This material' moves every fixture of it. Save writes emitters.cfg." );
 			ImGui::SameLine();
 			if ( emEditHasEntry && ImGui::Button( "Remove entry" ) ) {
-				R_RtEmissiveMatTableRemove( emEditMat );
-				emEditHasEntry = false;
-				emEditScale = emEditMatched;
+				if ( emEditScope == 1 && emEditFixtureId != 0 ) { R_RtEmissiveLightTableRemove( emEditFixtureId ); }
+				else { R_RtEmissiveMatTableRemove( emEditMat ); }
+				EmitterEditor_LoadScope();
 			}
 			ImGui::SameLine();
 			if ( ImGui::Button( "Re-pick" ) ) {

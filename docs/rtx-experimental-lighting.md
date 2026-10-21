@@ -531,3 +531,12 @@ Workflow: Emissive Mode on -> Bake defaults -> Physical on -> walk the map with 
   flagged RT_EMIT_FLAG_INDICATOR exactly like a sub-area indicator - it never makes its placed light fixtured, so the
   light stays. The low-radiance case already self-corrects (flux -> effArea below the floor -> light kept). LESSON: the
   drop and the "is this a light row" test must use the SAME indicator rule, or a fixture goes black twice over.
+- PER-FIXTURE (LIGHT ID) OVERRIDE (user, 2026-10-21: "same fixture used as a floodlight or a small ceiling light"): a
+  second table in emitters.cfg, keyed by a stable fixture id = FNV hash of the paired light's origin (or the cluster
+  centroid for an uncovered emitter), quantised to 1 unit so it survives reloads. Line: `light <idhex> scale r g b
+  profile two ind`. Resolution: the material entry (or power match) is the base; R_RtEmissiveApplyLightOverrides rewrites
+  the overridden cluster's TRIANGLES after the census (scale/tint REPLACE the material's, profile/indicator set), so the
+  gather and shader see it with no further plumbing. row.fixtureId + row.tableEntry (either source pins the radiance).
+  Editor: a "This material (all) / This light (override)" radio; "Pick under crosshair" captures both the material and
+  the fixture id (R_RtEmissivePickFixture). Two-sided override is best-effort (back geometry only exists if the material
+  is two-sided). Open: the apply pass rebuilds the whole table per edit (fine for a small table).

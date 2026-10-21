@@ -2861,6 +2861,26 @@ static idList<rtEmissiveRow_t>	s_rtEmissiveRows;
 //   "textures/base_light/striplight3" 4.2  1 1 1  0  0  0     (name scale r g b profile twoSided indicator; # comments)
 struct rtEmissiveMatEntry_t { idStr name; float scale; float tint[3]; int profile; bool twoSided; bool indicator; };
 static idList<rtEmissiveMatEntry_t>	s_rtEmissiveMatTable;
+// The per-LIGHT override (user, 2026-10-21): the same fixture material is used as a floodlight here and a small ceiling
+// light there, so a material entry is the base and a per-fixture override tunes one instance. Keyed by a stable id
+// from the fixture's world position (the paired placed light's origin, or the cluster centroid for an uncovered emitter),
+// so it survives map reloads. emitters.cfg line: "light <idhex> scale r g b profile twoSided indicator  // material @ pos".
+struct rtEmissiveLightEntry_t { unsigned long long id; float scale; float tint[3]; int profile; bool twoSided; bool indicator; };
+static idList<rtEmissiveLightEntry_t>	s_rtEmissiveLightTable;
+
+// A stable 64-bit id for a fixture at world position p: quantised to a 1-unit grid so float noise across loads collides
+// to the same key, hashed. Two distinct fixtures at the same spot (unheard of) would share one - acceptable.
+static unsigned long long R_RtEmissiveFixtureId( const idVec3 &p ) {
+	const long long qx = (long long)idMath::Rint( p.x ) + 0x400000, qy = (long long)idMath::Rint( p.y ) + 0x400000, qz = (long long)idMath::Rint( p.z ) + 0x400000;
+	unsigned long long h = 1469598103934665603ull;							// FNV-1a over the three quantised coords
+	const unsigned long long parts[3] = { (unsigned long long)qx, (unsigned long long)qy, (unsigned long long)qz };
+	for ( int i = 0; i < 3; i++ ) { h ^= parts[i]; h *= 1099511628211ull; }
+	return h ? h : 1ull;
+}
+static const rtEmissiveLightEntry_t *R_RtEmissiveLightTableFind( unsigned long long id ) {
+	for ( int i = 0; i < s_rtEmissiveLightTable.Num(); i++ ) { if ( s_rtEmissiveLightTable[i].id == id ) { return &s_rtEmissiveLightTable[i]; } }
+	return NULL;
+}
 static bool							s_rtEmissiveMatTableLoaded = false;
 static const char *					RT_EMISSIVE_TABLE_FILE = "emitters.cfg";
 
@@ -2874,6 +2894,8 @@ static const rtEmissiveMatEntry_t *R_RtEmissiveMatTableFind( const idMaterial *m
 
 static void R_RtEmissiveMatTableLoad( void ) {
 	s_rtEmissiveMatTable.Clear();
+	s_rtEmissiveLightTable.Clear();
+	s_rtEmissiveLightTable.Clear();
 	s_rtEmissiveMatTableLoaded = true;
 	void *buf = NULL;
 	const int len = fileSystem->ReadFile( RT_EMISSIVE_TABLE_FILE, &buf, NULL );
@@ -2884,6 +2906,18 @@ static void R_RtEmissiveMatTableLoad( void ) {
 	while ( lex.ReadToken( &tok ) ) {
 		// skip a comment line: '//' is consumed by the lexer already; a stray '#' (legacy save) is read as a token
 		if ( tok.Length() > 0 && tok[0] == '#' ) { lex.SkipRestOfLine(); continue; }
+		if ( tok.Icmp( "light" ) == 0 ) {										// a per-fixture override: light <idhex> scale r g b profile two ind
+			if ( !lex.ReadToken( &tok ) ) { continue; }
+			rtEmissiveLightEntry_t e;
+			e.id = (unsigned long long)strtoull( tok.c_str(), NULL, 16 );
+			e.scale = lex.ParseFloat();
+			e.tint[0] = lex.ParseFloat(); e.tint[1] = lex.ParseFloat(); e.tint[2] = lex.ParseFloat();
+			e.profile = idMath::ClampInt( 0, 2, lex.ParseInt() );
+			e.twoSided = lex.ParseInt() != 0;
+			e.indicator = lex.ParseInt() != 0;
+			if ( e.id != 0 ) { s_rtEmissiveLightTable.Append( e ); }
+			continue;
+		}
 		rtEmissiveMatEntry_t e;
 		e.name = tok;
 		if ( !lex.ReadToken( &tok ) || !tok.IsNumeric() ) { lex.SkipRestOfLine(); continue; }	// name not followed by a number: skip the line
@@ -2895,7 +2929,7 @@ static void R_RtEmissiveMatTableLoad( void ) {
 		if ( e.name.Length() > 0 ) { s_rtEmissiveMatTable.Append( e ); }
 	}
 	fileSystem->FreeFile( buf );
-	common->Printf( "r_rtEmissiveTable: %s: %d material entries\n", RT_EMISSIVE_TABLE_FILE, s_rtEmissiveMatTable.Num() );
+	common->Printf( "r_rtEmissiveTable: %s: %d material entries, %d light overrides\n", RT_EMISSIVE_TABLE_FILE, s_rtEmissiveMatTable.Num(), s_rtEmissiveLightTable.Num() );
 }
 
 static void R_RtEmissiveMatTableSave( void ) {
@@ -2906,8 +2940,15 @@ static void R_RtEmissiveMatTableSave( void ) {
 		const rtEmissiveMatEntry_t &e = s_rtEmissiveMatTable[i];
 		out += va( "\"%s\" %.4f  %.3f %.3f %.3f  %d %d %d\n", e.name.c_str(), e.scale, e.tint[0], e.tint[1], e.tint[2], e.profile, e.twoSided ? 1 : 0, e.indicator ? 1 : 0 );
 	}
+	if ( s_rtEmissiveLightTable.Num() > 0 ) {
+		out += "// per-fixture overrides (same material, different use): light <idhex> scale r g b profile twoSided indicator\n";
+		for ( int i = 0; i < s_rtEmissiveLightTable.Num(); i++ ) {
+			const rtEmissiveLightEntry_t &e = s_rtEmissiveLightTable[i];
+			out += va( "light %016llx %.4f  %.3f %.3f %.3f  %d %d %d\n", e.id, e.scale, e.tint[0], e.tint[1], e.tint[2], e.profile, e.twoSided ? 1 : 0, e.indicator ? 1 : 0 );
+		}
+	}
 	fileSystem->WriteFile( RT_EMISSIVE_TABLE_FILE, out.c_str(), out.Length(), "fs_savepath" );
-	common->Printf( "r_rtEmissiveTable: wrote %d entries to %s\n", s_rtEmissiveMatTable.Num(), RT_EMISSIVE_TABLE_FILE );
+	common->Printf( "r_rtEmissiveTable: wrote %d material entries + %d light overrides to %s\n", s_rtEmissiveMatTable.Num(), s_rtEmissiveLightTable.Num(), RT_EMISSIVE_TABLE_FILE );
 }
 
 extern idCVar r_hdrEyeAdaptation;
@@ -2941,6 +2982,32 @@ void R_RtEmissiveMatTableRemove( const idMaterial *mat ) {
 }
 void R_RtEmissiveMatTableSave_f( const idCmdArgs &args ) { R_RtEmissiveMatTableSave(); }
 void R_RtEmissiveMatTableReload_f( const idCmdArgs &args ) { R_RtEmissiveMatTableLoad(); s_rtEmissiveMap.Clear(); }
+
+// --- per-fixture (light id) overrides: the same accessors keyed by the stable fixture id ---
+int R_RtEmissiveLightTableNum( void ) { return s_rtEmissiveLightTable.Num(); }
+bool R_RtEmissiveLightTableGet( unsigned long long id, float *scale, float *tint, int *profile, bool *twoSided, bool *indicator ) {
+	const rtEmissiveLightEntry_t *e = R_RtEmissiveLightTableFind( id );
+	if ( e == NULL ) { return false; }
+	if ( scale ) { *scale = e->scale; }
+	if ( tint ) { tint[0] = e->tint[0]; tint[1] = e->tint[1]; tint[2] = e->tint[2]; }
+	if ( profile ) { *profile = e->profile; }
+	if ( twoSided ) { *twoSided = e->twoSided; }
+	if ( indicator ) { *indicator = e->indicator; }
+	return true;
+}
+void R_RtEmissiveLightTableSet( unsigned long long id, float scale, const float *tint, int profile, bool twoSided, bool indicator ) {
+	if ( id == 0 ) { return; }
+	rtEmissiveLightEntry_t *e = const_cast<rtEmissiveLightEntry_t *>( R_RtEmissiveLightTableFind( id ) );
+	if ( e == NULL ) { e = &s_rtEmissiveLightTable.Alloc(); e->id = id; }
+	e->scale = scale; e->tint[0] = tint[0]; e->tint[1] = tint[1]; e->tint[2] = tint[2];
+	e->profile = idMath::ClampInt( 0, 2, profile ); e->twoSided = twoSided; e->indicator = indicator;
+	s_rtEmissiveMap.Clear();
+}
+void R_RtEmissiveLightTableRemove( unsigned long long id ) {
+	for ( int i = 0; i < s_rtEmissiveLightTable.Num(); i++ ) {
+		if ( s_rtEmissiveLightTable[i].id == id ) { s_rtEmissiveLightTable.RemoveIndex( i ); s_rtEmissiveMap.Clear(); return; }
+	}
+}
 
 // The POWER MATCH as one formula (the gather and the bake share it): the radiance multiplier on the row's mean radiance
 // that makes the fixture deliver at R/2 what the placed light it replaced did there (L = C R^2 / (16 A), reach boost 2 at
@@ -2977,6 +3044,47 @@ const idMaterial *R_RtEmissivePickMaterial( void ) {
 		start = mt.point + dir * 0.5f;
 	}
 	return NULL;
+}
+
+static float R_RtPointTriangleDistance( const idVec3 &p, const idVec3 &a, const idVec3 &b, const idVec3 &c );	// defined below (flare inference)
+
+// The editor's pick for a per-fixture override: the id of the emitter CLUSTER (row) under the crosshair. Traces (through
+// flares) to a surface, finds the nearest table triangle, then the row that holds it, and returns that row's fixture id
+// (the paired light origin, or the cluster centroid). matOut / posOut report the material and the fixture position. 0 = miss.
+unsigned long long R_RtEmissivePickFixture( const idMaterial **matOut, idVec3 *posOut ) {
+	if ( matOut ) { *matOut = NULL; }
+	if ( posOut ) { posOut->Zero(); }
+	idRenderWorldLocal *world = tr.primaryWorld;
+	if ( world == NULL || world->mapName.Length() == 0 || s_rtEmissiveRows.Num() == 0 ) { return 0; }
+	const idVec3 dir = tr.primaryRenderView.viewaxis[0];
+	idVec3 start = tr.primaryRenderView.vieworg;
+	for ( int hit = 0; hit < 6; hit++ ) {
+		modelTrace_t mt;
+		if ( !world->Trace( mt, start, start + dir * 4096.0f, 0.0f, false, true, false ) || mt.material == NULL ) { return 0; }
+		if ( R_RtEmissiveIsFlareMaterial( mt.material ) ) { start = mt.point + dir * 0.5f; continue; }
+		// the nearest table triangle of THIS material to the hit, then the row holding it
+		int bestT = -1; float bestD = 1e30f;
+		for ( int ri = 0; ri < s_rtEmissiveRows.Num(); ri++ ) {
+			const rtEmissiveRow_t &row = s_rtEmissiveRows[ri];
+			for ( int t = row.firstTri; t < row.firstTri + row.numTris && t < s_rtEmissiveTris.Num(); t++ ) {
+				const rtEmissiveTriGPU_t &e = s_rtEmissiveTris[t];
+				const idVec3 a( e.p0[0], e.p0[1], e.p0[2] ), b( e.p1[0], e.p1[1], e.p1[2] ), c( e.p2[0], e.p2[1], e.p2[2] );
+				const float d = R_RtPointTriangleDistance( mt.point, a, b, c );
+				if ( d < bestD ) { bestD = d; bestT = t; }
+			}
+		}
+		if ( bestT < 0 || bestD > 24.0f ) { return 0; }						// nothing emissive near the hit
+		for ( int ri = 0; ri < s_rtEmissiveRows.Num(); ri++ ) {
+			const rtEmissiveRow_t &row = s_rtEmissiveRows[ri];
+			if ( bestT >= row.firstTri && bestT < row.firstTri + row.numTris ) {
+				if ( matOut ) { *matOut = mt.material; }
+				if ( posOut ) { *posOut = row.hasLight ? row.lightOrigin : row.centroid; }
+				return row.fixtureId;
+			}
+		}
+		return 0;
+	}
+	return 0;
 }
 
 // The power match's multiplier for a MATERIAL: the area-weighted average over its fixture rows (what the bake writes;
@@ -3939,7 +4047,9 @@ static void R_RtEmissiveBuildRows( void ) {
 		row.lightLum = lightLum;
 		row.lightOrigin = lightOrigin;
 		row.hasLight = reach > 0.0f && lightLum > 0.0f;
-		row.tableEntry = R_RtEmissiveMatTableFind( l.mat ) != NULL;
+		row.fixtureId = R_RtEmissiveFixtureId( ( reach > 0.0f && lightLum > 0.0f ) ? lightOrigin : c );
+		// an entry (material) OR a per-fixture override pins the radiance (baked into the triangles): skip the power match
+		row.tableEntry = ( R_RtEmissiveMatTableFind( l.mat ) != NULL ) || ( R_RtEmissiveLightTableFind( row.fixtureId ) != NULL );
 		row.indicator = ( s_rtEmissiveTris[ l.firstTri ].emit & RT_EMIT_FLAG_INDICATOR ) != 0u;
 		row.noShadows = row.hasLight && noShadows;
 		row.firstTri = l.firstTri;
@@ -4160,6 +4270,47 @@ static void R_RtEmissiveRefreshMovers( const idRenderWorldLocal *world, rhi::RHI
 // fill / mood washes with no emissive proxy: kept). Census only; the classification signals (geometry here, the
 // ambient-material flag alongside, the per-light override table later) are decided at E5. Point-in-frustum against
 // the light's six global planes (positive side out), with the frustum bounds as the cheap reject.
+// E2 v3 per-fixture overrides: rewrite each overridden cluster's triangles so the override's radiance / tint / profile /
+// indicator REPLACE the material base for that one fixture. Keyed by the fixture id (the paired light's origin, filled by
+// the census into s_rtEmissiveTriLightOrigin; the cluster centroid for an uncovered emitter). Runs after the census, so
+// the fixture positions are known; the census then re-uploads the whole triangle range. Flux changes here, so the CDF is
+// rebuilt by the caller (R_RtEmissiveBuild / R_RtEmissiveUpdate already call R_RtEmissiveUploadCdf after the census).
+static void R_RtEmissiveApplyLightOverrides( void ) {
+	if ( s_rtEmissiveLightTable.Num() == 0 ) { return; }
+	int applied = 0;
+	for ( int li = 0; li < s_rtEmissiveLabels.Num(); li++ ) {
+		const rtEmissiveLabel_t &l = s_rtEmissiveLabels[li];
+		if ( l.numTris <= 0 || l.firstTri < 0 || l.firstTri + l.numTris > s_rtEmissiveTris.Num() ) { continue; }
+		// the cluster's fixture position: the paired light origin (census) if any, else the centroid
+		idVec3 pos = ( l.firstTri < s_rtEmissiveTriLightOrigin.Num() ) ? s_rtEmissiveTriLightOrigin[ l.firstTri ] : idVec3( 0.0f, 0.0f, 0.0f );
+		if ( pos.LengthSqr() < 1e-6f ) {
+			idVec3 c( 0.0f, 0.0f, 0.0f );
+			for ( int t = 0; t < l.numTris; t++ ) { const rtEmissiveTriGPU_t &e = s_rtEmissiveTris[ l.firstTri + t ]; c += idVec3( e.p0[0] + e.p1[0] + e.p2[0], e.p0[1] + e.p1[1] + e.p2[1], e.p0[2] + e.p1[2] + e.p2[2] ); }
+			pos = c * ( 1.0f / ( 3.0f * l.numTris ) );
+		}
+		const rtEmissiveLightEntry_t *ov = R_RtEmissiveLightTableFind( R_RtEmissiveFixtureId( pos ) );
+		if ( ov == NULL ) { continue; }
+		// the material base already baked into these triangles (so the override REPLACES, not stacks)
+		float matScale = 1.0f, matTint[3] = { 1.0f, 1.0f, 1.0f };
+		if ( const rtEmissiveMatEntry_t *me = R_RtEmissiveMatTableFind( l.mat ) ) { matScale = me->scale; matTint[0] = me->tint[0]; matTint[1] = me->tint[1]; matTint[2] = me->tint[2]; }
+		const float sRatio = ov->scale / Max( matScale, 1e-4f );
+		const float tRatio[3] = { ov->tint[0] / Max( matTint[0], 1e-4f ), ov->tint[1] / Max( matTint[1], 1e-4f ), ov->tint[2] / Max( matTint[2], 1e-4f ) };
+		const float matTintLum = Max( R_RtLuminance( matTint ), 1e-4f ), ovTintLum = R_RtLuminance( ov->tint );
+		for ( int t = 0; t < l.numTris; t++ ) {
+			rtEmissiveTriGPU_t &e = s_rtEmissiveTris[ l.firstTri + t ];
+			e.scale *= sRatio;
+			e.flux  *= sRatio * ( ovTintLum / matTintLum );
+			const float mr = R_RtF16toF32( e.meanRG & 0xFFFFu ) * tRatio[0], mg = R_RtF16toF32( e.meanRG >> 16 ) * tRatio[1], mb = R_RtF16toF32( e.meanB & 0xFFFFu ) * tRatio[2];
+			e.meanRG = R_RtPackHalf2( mr, mg ); e.meanB = R_RtPackHalf2( mb, 0.0f );
+			e.emit = ( e.emit & ~( 3u << RT_EMIT_FLAG_PROFILE_SHIFT ) ) | ( (unsigned int)ov->profile << RT_EMIT_FLAG_PROFILE_SHIFT );
+			if ( ov->indicator ) { e.emit |= RT_EMIT_FLAG_INDICATOR; } else { e.emit &= ~RT_EMIT_FLAG_INDICATOR; }
+			if ( ov->twoSided ) { e.emit |= RT_EMIT_FLAG_TWOSIDED; }	// best-effort: back-face geometry is only added at build when the MATERIAL is two-sided
+		}
+		applied++;
+	}
+	if ( applied > 0 ) { common->Printf( "r_rtEmissiveTable: %d per-fixture overrides applied\n", applied ); }
+}
+
 static void R_RtEmissiveLightCensus( const idRenderWorldLocal *world, rhi::RHI *r ) {
 	int total = 0, fixtured = 0, ambience = 0, parallel = 0, fogBlend = 0, fixturedAmbientMat = 0, ambienceAmbientMat = 0, trisInLight = 0;
 	const int n = s_rtEmissiveTris.Num();
@@ -4263,6 +4414,7 @@ static void R_RtEmissiveLightCensus( const idRenderWorldLocal *world, rhi::RHI *
 		s_rtEmissiveLightDbg.Append( dbg );
 	}
 	for ( int t = 0; t < n; t++ ) { if ( s_rtEmissiveTris[t].emit & RT_EMIT_FLAG_INLIGHT ) { trisInLight++; } }
+	R_RtEmissiveApplyLightOverrides();	// per-fixture (light id) overrides, keyed by the paired light's origin (set just above)
 	// the flags changed after the upload: rewrite the triangle range (the debug geometry is built lazily, after this)
 	r->UpdateBuffer( s_rtEmissiveBuf, RT_EMISSIVE_HEADER_BYTES, n * (int)sizeof( rtEmissiveTriGPU_t ), s_rtEmissiveTris.Ptr() );
 	common->Printf( "r_rtEmissiveTable: placed lights %d: %d FIXTURED (an emitter of >= %.0f effective units^2 (lit area x brightness) near the origin - dropped when emitters light the scene; %d ambient-material), %d AMBIENCE (no emitter - kept; %d ambient-material), %d parallel + %d fog/blend (kept); %d of %d emissive triangles sit inside a placed light (%d indicator triangles below the fixture area: never a fixture), %d in none (overlay mode 4)\n",
