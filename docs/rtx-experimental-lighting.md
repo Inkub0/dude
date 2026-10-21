@@ -540,3 +540,8 @@ Workflow: Emissive Mode on -> Bake defaults -> Physical on -> walk the map with 
   Editor: a "This material (all) / This light (override)" radio; "Pick under crosshair" captures both the material and
   the fixture id (R_RtEmissivePickFixture). Two-sided override is best-effort (back geometry only exists if the material
   is two-sided). Open: the apply pass rebuilds the whole table per edit (fine for a small table).
+- OVERRIDE ID = CENTROID, not light origin (user, 2026-10-21: landing bay, lights bundled): the fixture id keyed off the
+  paired light's origin collided when several placed lights share one spot - every emitter lit by that bundle got the
+  same id, so one override hit them all. Now the id is the emitter surface's own CENTROID (unique per fixture), quantised
+  to 0.1 unit (deterministic centroid -> stable key). MIGRATION: any `light <id>` lines saved before this no longer match
+  (old = origin+1-unit); re-create those overrides.

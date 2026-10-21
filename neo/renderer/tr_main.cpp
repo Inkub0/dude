@@ -2868,10 +2868,12 @@ static idList<rtEmissiveMatEntry_t>	s_rtEmissiveMatTable;
 struct rtEmissiveLightEntry_t { unsigned long long id; float scale; float tint[3]; int profile; bool twoSided; bool indicator; };
 static idList<rtEmissiveLightEntry_t>	s_rtEmissiveLightTable;
 
-// A stable 64-bit id for a fixture at world position p: quantised to a 1-unit grid so float noise across loads collides
-// to the same key, hashed. Two distinct fixtures at the same spot (unheard of) would share one - acceptable.
+// A stable 64-bit id for a fixture at world position p (its emitter surface's CENTROID): quantised to a 0.1-unit grid -
+// the centroid is computed identically every load (same triangles, same split), so the key is stable, and 0.1 keeps even
+// tightly-packed fixtures distinct. Keyed by the CENTROID, not the paired light's origin: several placed lights bundled
+// at one spot (the Mars City landing bay) share an origin, so an origin key collided every fixture lit by that bundle.
 static unsigned long long R_RtEmissiveFixtureId( const idVec3 &p ) {
-	const long long qx = (long long)idMath::Rint( p.x ) + 0x400000, qy = (long long)idMath::Rint( p.y ) + 0x400000, qz = (long long)idMath::Rint( p.z ) + 0x400000;
+	const long long qx = (long long)idMath::Rint( p.x * 10.0f ) + 0x4000000, qy = (long long)idMath::Rint( p.y * 10.0f ) + 0x4000000, qz = (long long)idMath::Rint( p.z * 10.0f ) + 0x4000000;
 	unsigned long long h = 1469598103934665603ull;							// FNV-1a over the three quantised coords
 	const unsigned long long parts[3] = { (unsigned long long)qx, (unsigned long long)qy, (unsigned long long)qz };
 	for ( int i = 0; i < 3; i++ ) { h ^= parts[i]; h *= 1099511628211ull; }
@@ -3078,7 +3080,7 @@ unsigned long long R_RtEmissivePickFixture( const idMaterial **matOut, idVec3 *p
 			const rtEmissiveRow_t &row = s_rtEmissiveRows[ri];
 			if ( bestT >= row.firstTri && bestT < row.firstTri + row.numTris ) {
 				if ( matOut ) { *matOut = mt.material; }
-				if ( posOut ) { *posOut = row.hasLight ? row.lightOrigin : row.centroid; }
+				if ( posOut ) { *posOut = row.centroid; }
 				return row.fixtureId;
 			}
 		}
@@ -4047,7 +4049,7 @@ static void R_RtEmissiveBuildRows( void ) {
 		row.lightLum = lightLum;
 		row.lightOrigin = lightOrigin;
 		row.hasLight = reach > 0.0f && lightLum > 0.0f;
-		row.fixtureId = R_RtEmissiveFixtureId( ( reach > 0.0f && lightLum > 0.0f ) ? lightOrigin : c );
+		row.fixtureId = R_RtEmissiveFixtureId( c );	// the emitter surface's own centroid (unique per fixture, unlike a shared light origin)
 		// an entry (material) OR a per-fixture override pins the radiance (baked into the triangles): skip the power match
 		row.tableEntry = ( R_RtEmissiveMatTableFind( l.mat ) != NULL ) || ( R_RtEmissiveLightTableFind( row.fixtureId ) != NULL );
 		row.indicator = ( s_rtEmissiveTris[ l.firstTri ].emit & RT_EMIT_FLAG_INDICATOR ) != 0u;
@@ -4281,14 +4283,11 @@ static void R_RtEmissiveApplyLightOverrides( void ) {
 	for ( int li = 0; li < s_rtEmissiveLabels.Num(); li++ ) {
 		const rtEmissiveLabel_t &l = s_rtEmissiveLabels[li];
 		if ( l.numTris <= 0 || l.firstTri < 0 || l.firstTri + l.numTris > s_rtEmissiveTris.Num() ) { continue; }
-		// the cluster's fixture position: the paired light origin (census) if any, else the centroid
-		idVec3 pos = ( l.firstTri < s_rtEmissiveTriLightOrigin.Num() ) ? s_rtEmissiveTriLightOrigin[ l.firstTri ] : idVec3( 0.0f, 0.0f, 0.0f );
-		if ( pos.LengthSqr() < 1e-6f ) {
-			idVec3 c( 0.0f, 0.0f, 0.0f );
-			for ( int t = 0; t < l.numTris; t++ ) { const rtEmissiveTriGPU_t &e = s_rtEmissiveTris[ l.firstTri + t ]; c += idVec3( e.p0[0] + e.p1[0] + e.p2[0], e.p0[1] + e.p1[1] + e.p2[1], e.p0[2] + e.p1[2] + e.p2[2] ); }
-			pos = c * ( 1.0f / ( 3.0f * l.numTris ) );
-		}
-		const rtEmissiveLightEntry_t *ov = R_RtEmissiveLightTableFind( R_RtEmissiveFixtureId( pos ) );
+		// the cluster's fixture id = its CENTROID (same formula as BuildRows, so the keys match)
+		idVec3 c( 0.0f, 0.0f, 0.0f );
+		for ( int t = 0; t < l.numTris; t++ ) { const rtEmissiveTriGPU_t &e = s_rtEmissiveTris[ l.firstTri + t ]; c += idVec3( e.p0[0] + e.p1[0] + e.p2[0], e.p0[1] + e.p1[1] + e.p2[1], e.p0[2] + e.p1[2] + e.p2[2] ); }
+		c *= 1.0f / ( 3.0f * l.numTris );
+		const rtEmissiveLightEntry_t *ov = R_RtEmissiveLightTableFind( R_RtEmissiveFixtureId( c ) );
 		if ( ov == NULL ) { continue; }
 		// the material base already baked into these triangles (so the override REPLACES, not stacks)
 		float matScale = 1.0f, matTint[3] = { 1.0f, 1.0f, 1.0f };
