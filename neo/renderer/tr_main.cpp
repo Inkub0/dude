@@ -4036,7 +4036,18 @@ static void R_RtEmissiveLightCensus( const idRenderWorldLocal *world, rhi::RHI *
 				// triangle sits in. NOT lightRadius.Length() - that is the box DIAGONAL, twice the half-extent: a row claiming
 				// it flooded eight times the volume of its light with candidates and the grid cells overflowed - rows were
 				// evicted at random cells and alcoves lost their light (2026-10-20)
-				float radius = ( lb != NULL ) ? lb->GetRadius( lb->GetCenter() ) : ( ld->parms.pointLight ? Max( ld->parms.lightRadius.x, Max( ld->parms.lightRadius.y, ld->parms.lightRadius.z ) ) : 0.0f );
+				// ... measured FROM THE EMITTER: the farthest corner of the light's volume from this triangle. The bounds' own
+				// radius is centred halfway down a ceiling spot's cone, so it reached only half the drop to the floor: the row
+				// faded out above the tiles and the floor picked the kiosk's fill light alone (Marine Command Access, 2026-10-21)
+				float radius = 0.0f;
+				if ( lb != NULL ) {
+					for ( int k = 0; k < 8; k++ ) {
+						const idVec3 corner( ( k & 1 ) ? ( *lb )[1].x : ( *lb )[0].x, ( k & 2 ) ? ( *lb )[1].y : ( *lb )[0].y, ( k & 4 ) ? ( *lb )[1].z : ( *lb )[0].z );
+						radius = Max( radius, ( corner - c ).Length() );
+					}
+				} else if ( ld->parms.pointLight ) {
+					radius = ld->parms.lightRadius.Length();
+				}
 				float cur; memcpy( &cur, &e.reach, sizeof( cur ) );
 				if ( radius > cur ) {
 					memcpy( &e.reach, &radius, sizeof( radius ) );

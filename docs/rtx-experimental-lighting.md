@@ -501,3 +501,7 @@ shaders receive is the count WRITTEN this frame; r_rtEmissiveMaxRows joins Compu
   dimmer (fade 0.75R..R vs Doom's linear tail), and uncovered emitters carry the 300-unit default. Levers: the knee
   (R/4 -> R/8 flattens the near field), the match reference distance, r_rtEmissiveReachDefault. Also open: ceramic floor
   grooves vs tops under a placed fill light (hybrid comparison still pending).
+- FLOOR UNDER CEILING SPOTS (2026-10-21, "Chosen light" view: the whole floor picked the kiosk fill): a row's reach was
+  the light's bounds RADIUS, centred halfway down a spot's cone - half the drop to the floor; the row faded out above the
+  tiles. Reach is now the farthest corner of the light's bounds FROM THE EMITTING TRIANGLE (a point light's box: the
+  half-diagonal as before; a ceiling spot: the full drop). Mode 8 is the tool for "what lights this surface".
