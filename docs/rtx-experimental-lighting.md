@@ -493,3 +493,11 @@ shaders receive is the count WRITTEN this frame; r_rtEmissiveMaxRows joins Compu
 - ROW CEILING 4096 (user, 2026-10-20 "widen more up to 4096"): the DI gather MRT's att3 (SH1 + chosen row id) and its
   side copy are RGBA32F now (IF_RGBA32F, pass class 15 for the copy target); RT_EMIT_MAX_ROWS 4096, r_rtEmissiveMaxRows
   default 4096; the per-view pick is a partial sort (std::nth_element) when over the cap. Cost: +8 B/px at gather res.
+- 2026-10-21 STATUS: "it all looks reasonably good now". GPU (Access Hall, 1080p): normal 16.35 ms / emissive 16.45 ms;
+  gather 7.50 / 7.61, fill 0.63 / 0.63, sidecopy 0.16 / 0.17 - emissive mode is FREE per pixel. r_rtLightGridRankLinear
+  default 0 (a diagnosis knob; hurt in emissive mode, untested in normal). OPEN for the next pass: light-level CONTRAST
+  between areas is exaggerated in emissive mode. Hypothesis: the match equates the fixture to its light at R/2 only;
+  nearer, the solid-angle estimate (inverse square until the knee R/4) is brighter than Doom's linear law, farther it is
+  dimmer (fade 0.75R..R vs Doom's linear tail), and uncovered emitters carry the 300-unit default. Levers: the knee
+  (R/4 -> R/8 flattens the near field), the match reference distance, r_rtEmissiveReachDefault. Also open: ceramic floor
+  grooves vs tops under a placed fill light (hybrid comparison still pending).
