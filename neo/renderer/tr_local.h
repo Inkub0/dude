@@ -1145,7 +1145,7 @@ unsigned long long R_RtEmissiveTableAddress( int *numTris, float *totalFlux, flo
 // of the scene-light buffer (centroid, bounding radius, flux, flux-weighted mean linear radiance x material scale, total
 // area, the inherited reach of the placed light it replaces (0 = none), its triangle range in the table). dark = every
 // triangle at zero flux (switched off / gone): never a row.
-struct rtEmissiveRow_t { idVec3 centroid; float boundRadius; float flux; float area; idVec3 meanRadiance; float reach; float lightLum; idVec3 lightOrigin; unsigned long long fixtureId; bool hasLight; bool noShadows; bool tableEntry; bool indicator; int firstTri, numTris; bool dark; };
+struct rtEmissiveRow_t { const idMaterial *mat; idVec3 centroid; float boundRadius; float flux; float area; idVec3 meanRadiance; float reach; float lightLum; idVec3 lightOrigin; unsigned long long fixtureId; bool hasLight; bool noShadows; bool tableEntry; bool indicator; int firstTri, numTris; bool dark; };
 int R_RtEmissiveRows( const rtEmissiveRow_t **rows );		// the rows (0 = no table)
 float R_RtEmissiveMatchedScale( const rtEmissiveRow_t &row );
 // the HDR eye adaptation runs when the user asked for it OR physical emissive mode asks for it (r_rtEmissiveAutoExposure)

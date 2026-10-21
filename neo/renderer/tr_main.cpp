@@ -3035,17 +3035,9 @@ float R_RtEmissiveMatchedScale( const rtEmissiveRow_t &row ) {
 
 // The emitter editor's pick: the material under the crosshair, looking through flare sprites (as the probe does).
 const idMaterial *R_RtEmissivePickMaterial( void ) {
-	idRenderWorldLocal *world = tr.primaryWorld;
-	if ( world == NULL || world->mapName.Length() == 0 ) { return NULL; }
-	const idVec3 dir = tr.primaryRenderView.viewaxis[0];
-	idVec3 start = tr.primaryRenderView.vieworg;
-	for ( int hit = 0; hit < 6; hit++ ) {
-		modelTrace_t mt;
-		if ( !world->Trace( mt, start, start + dir * 4096.0f, 0.0f, false, true, false ) || mt.material == NULL ) { return NULL; }
-		if ( !R_RtEmissiveIsFlareMaterial( mt.material ) ) { return mt.material; }
-		start = mt.point + dir * 0.5f;
-	}
-	return NULL;
+	const idMaterial *mat = NULL;
+	R_RtEmissivePickFixture( &mat, NULL );		// the emitter row under the crosshair carries the real material (not the collision brush)
+	return mat;
 }
 
 static float R_RtPointTriangleDistance( const idVec3 &p, const idVec3 &a, const idVec3 &b, const idVec3 &c );	// defined below (flare inference)
@@ -3060,11 +3052,13 @@ unsigned long long R_RtEmissivePickFixture( const idMaterial **matOut, idVec3 *p
 	if ( world == NULL || world->mapName.Length() == 0 || s_rtEmissiveRows.Num() == 0 ) { return 0; }
 	const idVec3 dir = tr.primaryRenderView.viewaxis[0];
 	idVec3 start = tr.primaryRenderView.vieworg;
-	for ( int hit = 0; hit < 6; hit++ ) {
+	// Trace to a world POINT. The trace prefers collision surfaces (a model with clip geometry returns
+	// textures/common/collision), so mt.material is unreliable: we use the emitter TABLE at the hit point instead,
+	// walking the ray past flares and any non-drawn / collision hit until it lands near an emitter triangle.
+	for ( int hit = 0; hit < 8; hit++ ) {
 		modelTrace_t mt;
-		if ( !world->Trace( mt, start, start + dir * 4096.0f, 0.0f, false, true, false ) || mt.material == NULL ) { return 0; }
-		if ( R_RtEmissiveIsFlareMaterial( mt.material ) ) { start = mt.point + dir * 0.5f; continue; }
-		// the nearest table triangle of THIS material to the hit, then the row holding it
+		if ( !world->Trace( mt, start, start + dir * 4096.0f, 0.0f, false, true, false ) ) { return 0; }
+		// the nearest table triangle to the hit point, then the row holding it
 		int bestT = -1; float bestD = 1e30f;
 		for ( int ri = 0; ri < s_rtEmissiveRows.Num(); ri++ ) {
 			const rtEmissiveRow_t &row = s_rtEmissiveRows[ri];
@@ -3075,16 +3069,18 @@ unsigned long long R_RtEmissivePickFixture( const idMaterial **matOut, idVec3 *p
 				if ( d < bestD ) { bestD = d; bestT = t; }
 			}
 		}
-		if ( bestT < 0 || bestD > 24.0f ) { return 0; }						// nothing emissive near the hit
-		for ( int ri = 0; ri < s_rtEmissiveRows.Num(); ri++ ) {
-			const rtEmissiveRow_t &row = s_rtEmissiveRows[ri];
-			if ( bestT >= row.firstTri && bestT < row.firstTri + row.numTris ) {
-				if ( matOut ) { *matOut = mt.material; }
-				if ( posOut ) { *posOut = row.centroid; }
-				return row.fixtureId;
+		if ( bestT >= 0 && bestD <= 24.0f ) {
+			for ( int ri = 0; ri < s_rtEmissiveRows.Num(); ri++ ) {
+				const rtEmissiveRow_t &row = s_rtEmissiveRows[ri];
+				if ( bestT >= row.firstTri && bestT < row.firstTri + row.numTris ) {
+					if ( matOut ) { *matOut = row.mat; }	// the EMITTER's material, never the collision brush
+					if ( posOut ) { *posOut = row.centroid; }
+					return row.fixtureId;
+				}
 			}
 		}
-		return 0;
+		// the hit was a collision brush / non-emitter / flare in front of the fixture: step past it and trace again
+		start = mt.point + dir * 0.5f;
 	}
 	return 0;
 }
@@ -4054,6 +4050,7 @@ static void R_RtEmissiveBuildRows( void ) {
 		row.tableEntry = ( R_RtEmissiveMatTableFind( l.mat ) != NULL ) || ( R_RtEmissiveLightTableFind( row.fixtureId ) != NULL );
 		row.indicator = ( s_rtEmissiveTris[ l.firstTri ].emit & RT_EMIT_FLAG_INDICATOR ) != 0u;
 		row.noShadows = row.hasLight && noShadows;
+		row.mat = l.mat;
 		row.firstTri = l.firstTri;
 		row.numTris = l.numTris;
 		row.dark = dark;

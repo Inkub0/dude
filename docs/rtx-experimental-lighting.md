@@ -545,3 +545,8 @@ Workflow: Emissive Mode on -> Bake defaults -> Physical on -> walk the map with 
   same id, so one override hit them all. Now the id is the emitter surface's own CENTROID (unique per fixture), quantised
   to 0.1 unit (deterministic centroid -> stable key). MIGRATION: any `light <id>` lines saved before this no longer match
   (old = origin+1-unit); re-create those overrides.
+- PICK HIT textures/common/collision (user, 2026-10-21): world->Trace prefers COLLISION surfaces (a model with clip
+  geometry traces only against them), so the editor pick got the collision brush's material, not the fixture's. FIX:
+  the pick (R_RtEmissivePickFixture / PickMaterial) now uses the emitter TABLE at the hit POINT - the nearest emitter
+  row within 24 units - and returns that ROW's material (row.mat, new field), walking the ray past collision / flare /
+  non-emitter hits (up to 8). mt.material is no longer trusted.
