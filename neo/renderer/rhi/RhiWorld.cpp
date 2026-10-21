@@ -6185,6 +6185,15 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 			const float fluxScale = Max( idMath::ClampFloat( 0.0f, 64.0f, r_rtEmissiveScale.GetFloat() ), 1e-3f );
 			const bool  physical  = r_rtEmissivePhysical.GetBool();
 			const float cullE     = Max( r_rtEmissiveCullIrradiance.GetFloat(), 1e-5f );
+			// how far a row may sit from the camera and still enter the buffer. A tight camera-distance cutoff switched
+			// distant fixtures OFF and blinked them as the player moved among lights (user, 2026-10-21). Use the LIGHT
+			// GRID's own extent: a fixture the grid can place in a cell must be in the buffer, or near surfaces go dark.
+			// Beyond the grid, far surfaces light exhaustively over the buffer, so gridExtent + a row's reach is the bound.
+			float gridExtent = 8192.0f;												// the grid off: a generous fixed range
+			if ( rhiRtLightGrid.readyThisView && rhiRtLightGrid.parms.cascades > 0 ) {
+				const rtLightGridParms_t &gpx = rhiRtLightGrid.parms;
+				gridExtent = gpx.cellBase * (float)( 1 << ( gpx.cascades - 1 ) ) * ( (float)gpx.res * 0.5f );	// half-extent of the coarsest cascade
+			}
 			static int   pick[ RT_EMIT_MAX_ROWS ];
 			static float pickImp[ RT_EMIT_MAX_ROWS ];
 			int np = 0;
@@ -6199,7 +6208,7 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 				if ( !( R > 0.0f ) ) { R = Max( row.boundRadius * 4.0f, 64.0f ); }
 				const float radius = R * ( ( reachMul > 0.0f ) ? reachMul : 1.0f );
 				const float dist   = Max( ( row.centroid - viewOrg ).Length() - row.boundRadius, 0.0f );
-				if ( dist > 2.0f * radius + REACH ) { continue; }						// cannot touch anything near the view
+				if ( dist > gridExtent + radius ) { continue; }							// beyond the light grid's reach: a far surface there lights exhaustively, not from a near cell
 				// the pick ranks on the placed lights' scale too (C x radius^2 / d^2): matched = the replaced light's luminance
 				const float meanLum = row.meanRadiance.x * 0.2126f + row.meanRadiance.y * 0.7152f + row.meanRadiance.z * 0.0722f;
 				const float LrowP = meanLum * ( row.tableEntry ? 1.0f : R_RtEmissiveMatchedScale( row ) ) * intensity;

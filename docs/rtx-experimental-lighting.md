@@ -563,3 +563,11 @@ Workflow: Emissive Mode on -> Bake defaults -> Physical on -> walk the map with 
   force-loads every candidate glow texture at build (ActuallyLoadImage(true,false); frontend context; idempotent), so all
   emissive glows are resident from map load (user: VRAM is plentiful, GPU upload is the low-latency path). The load also
   computes the bright extents + averageColor the mean radiance reads. s_rtEmissiveNotResident is now a rare safety net.
+- DISTANT LIGHTS SWITCH OFF / BLINK WHILE MOVING (user, 2026-10-21, circling among lights): the per-view emitter cull
+  dropped any row whose centroid was > 2*radius + 2048 (~2648) from the CAMERA, so distant fixtures popped on/off as the
+  player moved across that line. FIX: the cutoff is now the LIGHT GRID's own half-extent + the row's reach (so a fixture
+  the grid can place in a cell is never culled). CONFIG LEVER (the user's hunch): the grid extent = r_rtLightGridCellBase
+  x 2^(cascades-1) x res/2 ~ 3072 at defaults; raise r_rtLightGridCellBase (24->48 doubles it to ~6144) or cascades to
+  keep more distant lights, at more grid fill cost. The cull is REQUIRED (the grid fill iterates every buffer row per
+  cell); beyond the grid a far surface lights exhaustively. If the edge pop is still visible on a huge map, a fade band
+  at the boundary is the next step.
