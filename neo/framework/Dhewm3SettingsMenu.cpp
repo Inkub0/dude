@@ -4959,7 +4959,7 @@ static void DrawDbgGroup_ExperimentalLighting()
 	ImGui::SeparatorText( "Emitter Editor" );
 	ImGui::TextDisabled( "%d material entries in emitters.cfg (save path)", R_RtEmissiveMatTableNum() );
 	if ( ImGui::Button( "Open Emitter Editor" ) ) {
-		Com_OpenEmitterEditor( R_RtEmissivePickMaterial() );
+		Com_OpenEmitterEditor( NULL );
 	}
 	AddTooltip( "A separate window to tune a material's emitter: radiance, tint, emission profile, two-sided, indicator - like the "
 		"PBR editor. Aim at a fixture first and it loads that material; or bind the key in-game (e.g. `bind m editEmitter`) to open "
@@ -7114,27 +7114,28 @@ static void EmitterEditor_LoadScope( void )
 	emEditHasEntry = false;
 }
 
-static void EmitterEditor_LoadFrom( const idMaterial *mat )
+// Pick the emitter fixture under the crosshair in ONE trace: R_RtEmissivePickFixture returns the row's material AND its
+// stable fixture id (it reads the emitter table, so it is never fooled by a collision brush). Loads the sliders from the
+// current scope. Returns false when no emitter is under the crosshair.
+static bool EmitterEditor_Pick( void )
 {
-	emEditMat = mat;
-	emEditFixtureId = 0;
-	emEditFixturePos.Zero();
-	if ( mat == NULL ) {
-		return;
-	}
-	emEditMatched = R_RtEmissiveMatMatchedScale( mat, &emEditRows, &emEditFixtures );
-	// also resolve the specific fixture under the crosshair, for the per-light scope (same trace; may differ from mat's pick)
 	const idMaterial *fm = NULL;
+	emEditFixturePos.Zero();
 	emEditFixtureId = R_RtEmissivePickFixture( &fm, &emEditFixturePos );
+	emEditMat = fm;
+	if ( fm == NULL ) {
+		return false;
+	}
+	emEditMatched = R_RtEmissiveMatMatchedScale( fm, &emEditRows, &emEditFixtures );
 	EmitterEditor_LoadScope();
+	return true;
 }
 
-// called by the editEmitter command once it has traced a material (NULL = open empty)
-void Com_OpenEmitterEditor( const idMaterial *mat )
+// the editEmitter command / the launcher: pick under the crosshair (single trace) and open the window. The mat parameter
+// is legacy and ignored - the pick happens here so there is only one trace per open.
+void Com_OpenEmitterEditor( const idMaterial * )
 {
-	if ( mat != NULL ) {
-		EmitterEditor_LoadFrom( mat );
-	}
+	EmitterEditor_Pick();
 	D3::ImGuiHooks::OpenWindow( D3::ImGuiHooks::D3_ImGuiWin_EmitterEditor );
 }
 
@@ -7150,12 +7151,7 @@ void Com_DrawEmitterEditor()
 		ImGui::Separator();
 
 		if ( ImGui::Button( "Pick under crosshair" ) ) {
-			const idMaterial *m = R_RtEmissivePickMaterial();
-			if ( m != NULL ) {
-				EmitterEditor_LoadFrom( m );
-			} else {
-				D3::ImGuiHooks::ShowWarningOverlay( "No emitting surface under the crosshair" );
-			}
+			if ( !EmitterEditor_Pick() ) { D3::ImGuiHooks::ShowWarningOverlay( "No emitting surface under the crosshair" ); }
 		}
 		AddTooltip( "Aim at a fixture and press (or bind `editEmitter` to a key, e.g. `bind m editEmitter`). Flare sprites are looked through." );
 
@@ -7208,12 +7204,7 @@ void Com_DrawEmitterEditor()
 			}
 			ImGui::SameLine();
 			if ( ImGui::Button( "Re-pick" ) ) {
-				const idMaterial *m = R_RtEmissivePickMaterial();
-				if ( m != NULL ) {
-					EmitterEditor_LoadFrom( m );
-				} else {
-					D3::ImGuiHooks::ShowWarningOverlay( "No emitting surface under the crosshair" );
-				}
+				if ( !EmitterEditor_Pick() ) { D3::ImGuiHooks::ShowWarningOverlay( "No emitting surface under the crosshair" ); }
 			}
 		}
 
@@ -7233,11 +7224,7 @@ void Com_DrawEmitterEditor()
 
 void Com_EditEmitter_f( const idCmdArgs &args )
 {
-	const idMaterial *m = R_RtEmissivePickMaterial();
-	if ( m == NULL ) {
-		common->Printf( "editEmitter: no emitting surface under the crosshair (aim at one and retry)\n" );
-	}
-	Com_OpenEmitterEditor( m );
+	Com_OpenEmitterEditor( NULL );	// opens the window and picks the crosshair fixture (one trace)
 }
 
 #else // IMGUI_DISABLE - just a stub function
