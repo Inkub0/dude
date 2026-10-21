@@ -521,3 +521,7 @@ the placed lights' non-physical look. Built:
 - r_rtEmissiveAutoExposure (1): R_HdrEyeAdaptationWanted() = r_hdrEyeAdaptation || (emissive && physical && this) - the
   existing eye adaptation with its own knobs (user's choice over a second mechanism).
 Workflow: Emissive Mode on -> Bake defaults -> Physical on -> walk the map with the editor; the probe prints the entry.
+- EMITTER EDITOR = STANDALONE WINDOW (user, 2026-10-21): moved out of the Emissive Lights group into its own ImGui
+  window like the PBR editor (D3_ImGuiWin_EmitterEditor bit; Com_DrawEmitterEditor / Com_OpenEmitterEditor). Open it
+  from the group's "Open Emitter Editor" button, or bind the `editEmitter` command to a key (e.g. `bind m editEmitter`)
+  to open it on the material under the crosshair. The group keeps only the launcher + "Bake defaults".

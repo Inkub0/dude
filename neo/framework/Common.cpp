@@ -73,6 +73,7 @@ If you have questions concerning this license or the applicable additional terms
 extern void Com_Dhewm3Settings_f( const idCmdArgs &args );
 // DUDE: in-game PBR material editor, also implemented in Dhewm3SettingsMenu.cpp
 extern void Com_EditPbrMaterial_f( const idCmdArgs &args );
+extern void Com_EditEmitter_f( const idCmdArgs &args );
 // DUDE: apply an enhancement quality preset by index (drives the classic quality
 // selector); implemented in Dhewm3SettingsMenu.cpp
 extern void Com_DudePreset_f( const idCmdArgs &args );
@@ -2629,6 +2630,7 @@ void idCommonLocal::InitCommands( void ) {
 	cmdSystem->AddCommand( "dhewm3Settings", Com_Dhewm3Settings_f, CMD_FL_SYSTEM, "alias of dudeSettings (legacy name)" );
 
 	cmdSystem->AddCommand( "editPbrMaterial", Com_EditPbrMaterial_f, CMD_FL_SYSTEM, "opens the in-game PBR material editor for the surface under the crosshair (docs/pbr-materials.md); bind it to a key" );
+	cmdSystem->AddCommand( "editEmitter", Com_EditEmitter_f, CMD_FL_SYSTEM, "opens the in-game emitter editor for the emitting material under the crosshair (docs/rtx-experimental-lighting.md, emitters.cfg); bind it to a key, e.g. bind m editEmitter" );
 
 	cmdSystem->AddCommand( "dudePreset", Com_DudePreset_f, CMD_FL_SYSTEM, "applies a DUDE enhancement quality raster preset by index (0 = Potato .. 5 = Nightmare); ray tracing is the separate dude_rtx axis; drives the in-game quality selector" );
 

@@ -34,6 +34,11 @@ extern idCVar com_interpolate;
 
 extern bool R_GetModeInfo( int *width, int *height, int mode );
 
+// the Emissive Lights group (inside the anonymous namespace below) opens the standalone emitter editor window
+// (Com_OpenEmitterEditor / Com_DrawEmitterEditor, defined after the namespace). Global linkage: the editEmitter command.
+class idMaterial;
+void Com_OpenEmitterEditor( const idMaterial *mat );
+
 namespace {
 
 const char* GetLocalizedString( const char* id, const char* fallback )
@@ -4952,52 +4957,17 @@ static void DrawDbgGroup_ExperimentalLighting()
 
 	// ===== Emitter Editor (emitters.cfg) =====
 	ImGui::SeparatorText( "Emitter Editor" );
-	{
-		static const idMaterial *edMat = NULL;
-		static float edScale = 1.0f, edTint[3] = { 1.0f, 1.0f, 1.0f };
-		static int   edProfile = 0;
-		static bool  edTwoSided = false, edIndicator = false, edHasEntry = false;
-		static int   edRows = 0, edFixtures = 0;
-		static float edMatched = 1.0f;
-		ImGui::TextDisabled( "%d material entries in emitters.cfg (save path)", R_RtEmissiveMatTableNum() );
-		if ( ImGui::Button( "Pick material under crosshair" ) ) {
-			edMat = R_RtEmissivePickMaterial();
-			if ( edMat != NULL ) {
-				edMatched = R_RtEmissiveMatMatchedScale( edMat, &edRows, &edFixtures );
-				edHasEntry = R_RtEmissiveMatTableGet( edMat, &edScale, edTint, &edProfile, &edTwoSided, &edIndicator );
-				if ( !edHasEntry ) { edScale = edMatched; edTint[0] = edTint[1] = edTint[2] = 1.0f; edProfile = 0; edTwoSided = false; edIndicator = ( edFixtures == 0 && edRows > 0 ); }
-			}
-		}
-		AddTooltip( "Aim at a fixture, open this menu, press: the surface's material becomes the edited entry (flare sprites are "
-			"looked through). Without an entry the controls start at the power match's values." );
-		if ( edMat == NULL ) {
-			ImGui::TextDisabled( "no material picked" );
-		} else {
-			ImGui::Text( "%s", edMat->GetName() );
-			ImGui::TextDisabled( "%d rows in this map, %d fixtures; power match would use x%.2f; %s", edRows, edFixtures, edMatched, edHasEntry ? "HAS an entry" : "no entry yet" );
-			ImGui::SetNextItemWidth( 240.0f );
-			ImGui::SliderFloat( "Radiance x##edScale", &edScale, 0.0f, 64.0f, "%.2f", ImGuiSliderFlags_Logarithmic );
-			AddTooltip( "Multiplier on the glow texture's mean radiance (x the stage colour). 1 = the authored glow as painted." );
-			ImGui::SetNextItemWidth( 240.0f );
-			ImGui::ColorEdit3( "Tint##edTint", edTint, ImGuiColorEditFlags_Float );
-			ImGui::SetNextItemWidth( 240.0f );
-			ImGui::Combo( "Emission profile##edProfile", &edProfile, "sqrt(cos) - a bare tube\0Lambert - a diffuser\0uniform - a globe\0" );
-			ImGui::Checkbox( "Two-sided##edTwo", &edTwoSided );
-			ImGui::SameLine();
-			ImGui::Checkbox( "Indicator (never a light)##edInd", &edIndicator );
-			if ( ImGui::Button( "Apply##edApply" ) ) { R_RtEmissiveMatTableSet( edMat, edScale, edTint, edProfile, edTwoSided, edIndicator ); edHasEntry = true; }
-			AddTooltip( "Write the entry into the in-memory table and rebuild the emitter table (live next frame). Save writes emitters.cfg." );
-			ImGui::SameLine();
-			if ( edHasEntry && ImGui::Button( "Remove entry##edRemove" ) ) { R_RtEmissiveMatTableRemove( edMat ); edHasEntry = false; edScale = edMatched; }
-		}
-		if ( ImGui::Button( "Save emitters.cfg##edSave" ) ) { cmdSystem->BufferCommandText( CMD_EXEC_APPEND, "rtEmissiveSaveTable\n" ); }
-		ImGui::SameLine();
-		if ( ImGui::Button( "Bake defaults##edBake" ) ) { cmdSystem->BufferCommandText( CMD_EXEC_APPEND, "rtEmissiveBakeTable\n" ); }
-		AddTooltip( "Add an entry for every emitting material of this map that has none, with the power match's multiplier - the "
-			"starting point for editing. Existing entries are kept. Writes emitters.cfg." );
-		ImGui::SameLine();
-		if ( ImGui::Button( "Reload##edReload" ) ) { cmdSystem->BufferCommandText( CMD_EXEC_APPEND, "rtEmissiveReloadTable\n" ); }
+	ImGui::TextDisabled( "%d material entries in emitters.cfg (save path)", R_RtEmissiveMatTableNum() );
+	if ( ImGui::Button( "Open Emitter Editor" ) ) {
+		Com_OpenEmitterEditor( R_RtEmissivePickMaterial() );
 	}
+	AddTooltip( "A separate window to tune a material's emitter: radiance, tint, emission profile, two-sided, indicator - like the "
+		"PBR editor. Aim at a fixture first and it loads that material; or bind the key in-game (e.g. `bind m editEmitter`) to open "
+		"it on whatever you are looking at." );
+	ImGui::SameLine();
+	if ( ImGui::Button( "Bake defaults##edBake" ) ) { cmdSystem->BufferCommandText( CMD_EXEC_APPEND, "rtEmissiveBakeTable\n" ); }
+	AddTooltip( "Add an entry for every emitting material of this map that has none, with the power match's multiplier - the "
+		"starting point for editing. Existing entries are kept. Writes emitters.cfg." );
 
 	// ===== Reach =====
 	ImGui::SeparatorText( "Reach (compatibility layer)" );
@@ -7105,6 +7075,127 @@ void Com_EditPbrMaterial_f( const idCmdArgs &args )
 	Com_OpenPbrMaterialEditor( m );
 }
 
+// ======================= Emitter editor (emitters.cfg, docs/rtx-experimental-lighting.md) =======================
+// A standalone ImGui window, like the PBR material editor: pick the emitting material under the crosshair (through flare
+// sprites), edit its radiance / tint / emission profile / two-sided / indicator, Apply live (rebuilds the table), Save /
+// Bake / Reload emitters.cfg. Bind `editEmitter` to a key to open it on whatever you are aiming at.
+static const idMaterial *	emEditMat = NULL;
+static float				emEditScale = 1.0f, emEditTint[3] = { 1.0f, 1.0f, 1.0f };
+static int					emEditProfile = 0;
+static bool					emEditTwoSided = false, emEditIndicator = false, emEditHasEntry = false;
+static int					emEditRows = 0, emEditFixtures = 0;
+static float				emEditMatched = 1.0f;
+
+static void EmitterEditor_LoadFrom( const idMaterial *mat )
+{
+	emEditMat = mat;
+	if ( mat == NULL ) {
+		return;
+	}
+	emEditMatched = R_RtEmissiveMatMatchedScale( mat, &emEditRows, &emEditFixtures );
+	emEditHasEntry = R_RtEmissiveMatTableGet( mat, &emEditScale, emEditTint, &emEditProfile, &emEditTwoSided, &emEditIndicator );
+	if ( !emEditHasEntry ) {
+		// no entry yet: start the controls at the power match's values (what the row uses now)
+		emEditScale = emEditMatched;
+		emEditTint[0] = emEditTint[1] = emEditTint[2] = 1.0f;
+		emEditProfile = 0;
+		emEditTwoSided = false;
+		emEditIndicator = ( emEditFixtures == 0 && emEditRows > 0 );
+	}
+}
+
+// called by the editEmitter command once it has traced a material (NULL = open empty)
+void Com_OpenEmitterEditor( const idMaterial *mat )
+{
+	if ( mat != NULL ) {
+		EmitterEditor_LoadFrom( mat );
+	}
+	D3::ImGuiHooks::OpenWindow( D3::ImGuiHooks::D3_ImGuiWin_EmitterEditor );
+}
+
+void Com_DrawEmitterEditor()
+{
+	bool show = true;
+	ImGui::SetNextWindowSize( ImVec2( 460.0f, 0.0f ), ImGuiCond_FirstUseEver );
+	if ( ImGui::Begin( "Emitter Editor", &show ) ) {
+		if ( !r_rtEmissiveTable.GetBool() ) {
+			ImGui::TextColored( ImVec4( 1.0f, 0.7f, 0.3f, 1.0f ), "r_rtEmissiveTable is 0 - enable the Emitter Table (Emissive Lights) to build the table." );
+		}
+		ImGui::TextDisabled( "%d material entries in emitters.cfg (save path)", R_RtEmissiveMatTableNum() );
+		ImGui::Separator();
+
+		if ( ImGui::Button( "Pick material under crosshair" ) ) {
+			const idMaterial *m = R_RtEmissivePickMaterial();
+			if ( m != NULL ) {
+				EmitterEditor_LoadFrom( m );
+			} else {
+				D3::ImGuiHooks::ShowWarningOverlay( "No emitting surface under the crosshair" );
+			}
+		}
+		AddTooltip( "Aim at a fixture and press (or bind `editEmitter` to a key, e.g. `bind m editEmitter`). Flare sprites are looked through." );
+
+		if ( emEditMat == NULL ) {
+			ImGui::TextWrapped( "Aim at an emitting surface and press the button above, or bind \"editEmitter\" to a key (e.g. `bind m editEmitter`) to load the material under the crosshair." );
+		} else {
+			ImGui::TextColored( ImVec4( 0.6f, 0.8f, 1.0f, 1.0f ), "%s", emEditMat->GetName() );
+			ImGui::TextDisabled( "%d rows in this map, %d fixtures; power match would use x%.2f; %s", emEditRows, emEditFixtures, emEditMatched, emEditHasEntry ? "HAS an entry" : "no entry yet" );
+			ImGui::Separator();
+
+			ImGui::SliderFloat( "Radiance x", &emEditScale, 0.0f, 64.0f, "%.2f", ImGuiSliderFlags_Logarithmic );
+			AddTooltip( "Multiplier on the glow texture's mean radiance (x the stage colour). 1 = the authored glow as painted." );
+			ImGui::ColorEdit3( "Tint", emEditTint, ImGuiColorEditFlags_Float );
+			ImGui::Combo( "Emission profile", &emEditProfile, "sqrt(cos) - a bare tube\0Lambert - a diffuser / panel\0uniform - a globe / bulb\0" );
+			ImGui::Checkbox( "Two-sided", &emEditTwoSided );
+			ImGui::SameLine();
+			ImGui::Checkbox( "Indicator (never a light)", &emEditIndicator );
+			AddTooltip( "An indicator (a LED, a button) is kept out of the light buffer whatever its area: it glows but lights nothing." );
+
+			ImGui::Separator();
+			if ( ImGui::Button( "Apply (live)" ) ) {
+				R_RtEmissiveMatTableSet( emEditMat, emEditScale, emEditTint, emEditProfile, emEditTwoSided, emEditIndicator );
+				emEditHasEntry = true;
+			}
+			AddTooltip( "Write the entry into the in-memory table and rebuild the emitter table (live next frame). Save writes emitters.cfg." );
+			ImGui::SameLine();
+			if ( emEditHasEntry && ImGui::Button( "Remove entry" ) ) {
+				R_RtEmissiveMatTableRemove( emEditMat );
+				emEditHasEntry = false;
+				emEditScale = emEditMatched;
+			}
+			ImGui::SameLine();
+			if ( ImGui::Button( "Re-pick" ) ) {
+				const idMaterial *m = R_RtEmissivePickMaterial();
+				if ( m != NULL ) {
+					EmitterEditor_LoadFrom( m );
+				} else {
+					D3::ImGuiHooks::ShowWarningOverlay( "No emitting surface under the crosshair" );
+				}
+			}
+		}
+
+		ImGui::Separator();
+		if ( ImGui::Button( "Save emitters.cfg" ) ) { cmdSystem->BufferCommandText( CMD_EXEC_APPEND, "rtEmissiveSaveTable\n" ); }
+		ImGui::SameLine();
+		if ( ImGui::Button( "Bake defaults" ) ) { cmdSystem->BufferCommandText( CMD_EXEC_APPEND, "rtEmissiveBakeTable\n" ); }
+		AddTooltip( "Add an entry for every emitting material of this map that has none, with the power match's multiplier (the starting point). Existing entries are kept. Writes emitters.cfg." );
+		ImGui::SameLine();
+		if ( ImGui::Button( "Reload" ) ) { cmdSystem->BufferCommandText( CMD_EXEC_APPEND, "rtEmissiveReloadTable\n" ); }
+	}
+	ImGui::End();
+	if ( !show ) {
+		D3::ImGuiHooks::CloseWindow( D3::ImGuiHooks::D3_ImGuiWin_EmitterEditor );
+	}
+}
+
+void Com_EditEmitter_f( const idCmdArgs &args )
+{
+	const idMaterial *m = R_RtEmissivePickMaterial();
+	if ( m == NULL ) {
+		common->Printf( "editEmitter: no emitting surface under the crosshair (aim at one and retry)\n" );
+	}
+	Com_OpenEmitterEditor( m );
+}
+
 #else // IMGUI_DISABLE - just a stub function
 
 #include "Common.h"
@@ -7117,6 +7208,11 @@ void Com_Dhewm3Settings_f( const idCmdArgs &args )
 void Com_EditPbrMaterial_f( const idCmdArgs &args )
 {
 	common->Warning( "Dear ImGui is disabled in this build, so the PBR material editor is not available!" );
+}
+
+void Com_EditEmitter_f( const idCmdArgs &args )
+{
+	common->Warning( "Dear ImGui is disabled in this build, so the emitter editor is not available!" );
 }
 
 // DUDE: the enhancement presets live in the ImGui section; without it there is no
