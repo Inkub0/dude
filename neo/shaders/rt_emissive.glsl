@@ -238,7 +238,7 @@ uint rtEmissiveSeed( uint li, vec3 P, float frame ) {
 // mapper lit the hall for - and fades out over the last quarter of the reach (the row's cull sphere, a Doom light's extent).
 // false = cannot reach (culled / dark / behind / below the horizon). Every stored index is checked against the table's
 // count: a row of another table (a stale frame across a rebuild) shades nothing rather than reading off the end.
-bool rtEmissiveShadeRow( RtLights lights, uint li, vec3 P, vec3 N, uint seed, out vec3 contrib, out vec3 ldir, out float dl, out float ndl ) {
+bool rtEmissiveShadeRow( RtLights lights, uint li, vec3 P, vec3 N, uint seed, uint samples, out vec3 contrib, out vec3 ldir, out float dl, out float ndl ) {
 	contrib = vec3( 0.0 );	ldir = vec3( 0.0, 0.0, 1.0 );	dl = 0.0;	ndl = 0.0;
 	uvec2 tAddr     = uvec2( floatBitsToUint( lights.l[ li ].projT.x ), floatBitsToUint( lights.l[ li ].projT.y ) );
 	uint  first     = floatBitsToUint( lights.l[ li ].projQ.x );
@@ -246,39 +246,55 @@ bool rtEmissiveShadeRow( RtLights lights, uint li, vec3 P, vec3 N, uint seed, ou
 	float knee      = lights.l[ li ].projQ.z;
 	float intensity = lights.l[ li ].projS.w;
 	float radius    = lights.l[ li ].radius;
+	bool  noFade    = lights.l[ li ].projQ.w > 0.5;		// physical rows: no reach fade
 	RtEmissiveTable t = rtEmissiveOpen( tAddr );
 	if ( !rtEmissivePresent( t ) || num == 0u || first >= t.count || num > t.count - first ) { return false; }
-	uint  rng = seed;
-	float pIn;
-	uint  ti = rtEmissiveSampleInGroup( t, first, num, rtEmissiveRand( rng ), pIn );
-	if ( ti < first || ti >= first + num || !( pIn > 0.0 ) ) { return false; }
-	RtEmissiveTri e = rtEmissiveFetch( t, ti );
-	if ( !( e.flux > 0.0 ) ) { return false; }										// dark (switched off / gone)
-	vec3 Pe, nUnit; float pdfw; bool front;
-	vec2 xi = vec2( rtEmissiveRand( rng ), rtEmissiveRand( rng ) );
-	if ( !rtEmissiveSampleSolidAngle( e, P, xi, Pe, nUnit, pdfw, front ) ) { return false; }
-	if ( !front && ( e.emit & RT_EMIT_TWOSIDED ) == 0u ) { return false; }		// a one-sided emitter seen from its back
-	vec3 d = Pe - P;
-	dl   = length( d );
-	if ( !( dl > 1e-3 ) || !( pdfw > 0.0 ) ) { return false; }
-	ldir = d / dl;
-	// the receiver cosine: against the replaced light's AUTHORED ORIGIN (projF.x: pos = that origin) when the census paired
-	// one - a flush ceiling strip lights the wall under it at a grazing angle, the mapper's light sat out in the room and
-	// lit that wall; the forward path cosined against that origin, so does this. Else the sampled point.
-	vec3 ndir = ( lights.l[ li ].projF.x > 0.5 ) ? normalize( lights.l[ li ].pos - P ) : ldir;
-	ndl  = max( dot( N, ndir ), 0.0 );
+	// the receiver cosine + the visibility ray: toward the replaced light's AUTHORED ORIGIN (projF.x: pos = that origin)
+	// when the census paired one - a flush ceiling strip lights the wall under it at a grazing angle, the mapper's light
+	// sat out in the room and lit that wall - else toward the emitter's centroid (pos). ONE direction for the ray and the
+	// SH, while the RADIANCE below is area-sampled; keeping them separate is what lets the apply's bump re-resolve cancel.
+	vec3 cd = lights.l[ li ].pos - P;
+	dl   = length( cd );
+	if ( !( dl > 1e-3 ) ) { return false; }
+	ldir = cd / dl;
+	ndl  = max( dot( N, ldir ), 0.0 );
 	if ( !( ndl > 0.0 ) ) { return false; }
-	float cosL = max( -dot( nUnit, ldir ), 0.0 );								// nUnit points AT P (the sampler re-winds)
-	if ( !( cosL > 0.0 ) ) { return false; }
-	float boost = ( knee > 0.0 ) ? max( dl / knee, 1.0 ) : 1.0;
-	// out at ONE reach (the row's cull sphere, a Doom light's extent); physical rows (projF.y) cut where the irradiance is negligible instead
-	float fade  = ( lights.l[ li ].projQ.w > 0.5 ) ? 1.0 : 1.0 - smoothstep( 0.75 * radius, radius, dl );
-	vec3  L = rtEmissiveMeanRadiance( e ) * ( e.scale * intensity * boost * fade );
-	// the emission profile (emitters.cfg): 0 = sqrt(cos) (Q2RTX's "spotlight": a tube reads directional), 1 = Lambert (a diffuser), 2 = uniform
-	uint  prof = ( e.emit >> RT_EMIT_PROFILE_SHIFT ) & 3u;
-	float emit = ( prof == 1u ) ? cosL : ( prof == 2u ) ? 1.0 : sqrt( cosL );
-	contrib = L * ( emit * ndl / ( pIn * pdfw ) );								// f / p: the row's irradiance estimate
+	// AVERAGE the emitter's outgoing radiance toward P over `samples` area samples (Arvo). A single sample of a small or
+	// distant emitter is too noisy - it is rarely the reservoir winner and the denoiser clamps the sparse spikes, so the
+	// fixture reads far dimmer than the placed light it replaced (user, 2026-10-21, grid ruled out). N samples smooth the
+	// radiance; a placed light needs only 1 (a point), so this is the emitter's own cost. 0 successful samples = the
+	// emitter cannot reach P this shade.
+	uint  ns  = max( samples, 1u );
+	uint  rng = seed;
+	vec3  Lsum = vec3( 0.0 );
+	uint  got  = 0u;
+	for ( uint sIdx = 0u; sIdx < ns; sIdx++ ) {
+		float pIn;
+		uint  ti = rtEmissiveSampleInGroup( t, first, num, rtEmissiveRand( rng ), pIn );
+		if ( ti < first || ti >= first + num || !( pIn > 0.0 ) ) { continue; }
+		RtEmissiveTri e = rtEmissiveFetch( t, ti );
+		if ( !( e.flux > 0.0 ) ) { continue; }
+		vec3 Pe, nUnit; float pdfw; bool front;
+		vec2 xi = vec2( rtEmissiveRand( rng ), rtEmissiveRand( rng ) );
+		if ( !rtEmissiveSampleSolidAngle( e, P, xi, Pe, nUnit, pdfw, front ) ) { continue; }
+		if ( !front && ( e.emit & RT_EMIT_TWOSIDED ) == 0u ) { continue; }
+		vec3  sd = Pe - P;
+		float sl = length( sd );
+		if ( !( sl > 1e-3 ) || !( pdfw > 0.0 ) ) { continue; }
+		float cosL = max( -dot( nUnit, sd / sl ), 0.0 );						// nUnit points AT P (the sampler re-winds)
+		if ( !( cosL > 0.0 ) ) { continue; }
+		uint  prof = ( e.emit >> RT_EMIT_PROFILE_SHIFT ) & 3u;
+		float emit = ( prof == 1u ) ? cosL : ( prof == 2u ) ? 1.0 : sqrt( cosL );	// emission profile (emitters.cfg)
+		float boost = ( knee > 0.0 ) ? max( sl / knee, 1.0 ) : 1.0;
+		float fade  = noFade ? 1.0 : 1.0 - smoothstep( 0.75 * radius, radius, sl );
+		vec3  L = rtEmissiveMeanRadiance( e ) * ( e.scale * intensity * boost * fade );
+		Lsum += L * ( emit / ( pIn * pdfw ) );									// one Arvo estimate of the outgoing radiance toward P
+		got++;
+	}
+	if ( got == 0u ) { return false; }
+	contrib = ( Lsum * ( 1.0 / float( ns ) ) ) * ndl;							// averaged radiance x receiver cosine (centroid)
 	return !( any( isnan( contrib ) ) );
 }
+
 
 #endif // RT_EMISSIVE_GLSL

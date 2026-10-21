@@ -571,3 +571,10 @@ Workflow: Emissive Mode on -> Bake defaults -> Physical on -> walk the map with 
   keep more distant lights, at more grid fill cost. The cull is REQUIRED (the grid fill iterates every buffer row per
   cell); beyond the grid a far surface lights exhaustively. If the edge pop is still visible on a huge map, a fade band
   at the boundary is the next step.
+- FAR EMITTERS READ DIM vs the placed light (user, 2026-10-21; emissive OFF correct, grid OFF no help, reach no help):
+  the emitter is UNDER-SAMPLED. A placed light is a point the reservoir picks reliably; an area emitter spreads its
+  energy, so at distance one Arvo sample is rarely the winner and NRD clamps the sparse spikes -> far dimmer. FIX:
+  rtEmissiveShadeRow now AVERAGES r_rtEmissiveSamples (default 4) area samples of the emitter's outgoing radiance toward
+  P; ndl / ldir / SH stay the centroid's (bump re-resolve still cancels), only the radiance is smoothed. Carried in the
+  DI pass's free u_texGen0S.x; the bounce uses 1. A placed light still costs 1 sample (the emitter's own cost). LESSON:
+  the far-field area-light problem is sampling variance + the denoiser clamp, not falloff or culling.

@@ -212,7 +212,7 @@ int rtgiTraceBounce( RtgiBounceParms bp, vec3 Pw, vec3 Nw, vec3 eyeW, float d, v
 				// shadow ray like every other light here.
 				vec3 c;
 				uint seed = rtEmissiveSeed( li, hitWorld, bp.sampleFrame ) ^ ( uint( sfrag.x ) * 7919u + uint( sfrag.y ) * 104729u );
-				if ( !rtEmissiveShadeRow( lights, li, hitWorld, hitN, seed | 1u, c, ldir, dl, ndl ) ) { continue; }
+				if ( !rtEmissiveShadeRow( lights, li, hitWorld, hitN, seed | 1u, 1u, c, ldir, dl, ndl ) ) { continue; }
 				contrib = albedo * c * bp.lightScale;
 			} else {
 			dudeLightDir( lights, li, hitWorld, ldir, dl );

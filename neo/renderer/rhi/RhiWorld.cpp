@@ -8338,6 +8338,7 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	parms.localParam0[2] = (float)idMath::ClampInt( 0, 128, r_rtReStirDICandidates.GetInteger() );	// M candidates (0 = every light, exhaustive RIS)
 	parms.localParam0[3] = diHitScale;									// NRD hit-distance A = 0.5 * this
 	parms.localParam1[0] = (float)( tr.frameCount & 0xFFFF );			// RNG decorrelation per frame
+	parms.texGen0S[0] = (float)idMath::ClampInt( 1, 16, r_rtEmissiveSamples.GetInteger() );	// emitter area samples averaged per shade (far-field, restir_di_shade.glsl)
 	parms.localParam1[2] = cbParity;									// checkerboard parity (0 = off)
 	// gather runs at rw x rh: gl_FragCoord -> [0,1] uv is 1/rw, -> the full-res depth tc carries the (w/rw)
 	// stretch (mirrors RB_RHI_RtgiPass). At scale 1 + no checkerboard: 1/w, 1/uploadW (unchanged).

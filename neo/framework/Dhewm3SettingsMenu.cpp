@@ -4986,6 +4986,10 @@ static void DrawDbgGroup_ExperimentalLighting()
 
 	// ===== Sampling =====
 	ImGui::SeparatorText( "Sampling" );
+	CvarSliderI( "Emitter Samples / pixel", r_rtEmissiveSamples, 1, 16, "Area-light samples averaged per emitter per pixel. A "
+		"placed light is a point the reservoir picks reliably; an emitter spreads its energy, so at distance a single sample is "
+		"rarely the winner and the denoiser clamps the sparse spikes - the fixture reads far dimmer than the placed light it "
+		"replaced. More = the emitter survives the denoiser at range, dearer gather. (r_rtEmissiveSamples)" );
 	CvarSliderI( "Grid Candidates / Cell (emissive)", r_rtEmissiveGridSlots, 1, 32, "Light-grid candidates per cell while the "
 		"emitters light the scene (the larger of this and the grid's own count). Emissive mode puts more lights in range of a "
 		"cell than the placed lights did - a fixture with two emitting surfaces is two rows, an uncovered emitter reaches the "
