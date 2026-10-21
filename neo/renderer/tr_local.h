@@ -1095,6 +1095,9 @@ extern idCVar r_rtEmissiveIntensity;		// emissive mode: radiance multiplier of e
 extern idCVar r_rtEmissiveMaxRows;
 extern idCVar r_rtEmissiveGridSlots;		// emissive mode: light-grid candidates per cell (the larger of this and r_rtLightGridSlots)		// emissive mode: emitter rows (surfaces) a view's scene-light buffer may carry
 extern idCVar r_rtEmissivePowerMatch;
+extern idCVar r_rtEmissivePhysical;		// emissive mode: physical emitters - inverse square, no reach, cull where the contribution is negligible
+extern idCVar r_rtEmissiveCullIrradiance;	// physical: the irradiance below which an emitter's row stops (its cull radius)
+extern idCVar r_rtEmissiveAutoExposure;	// physical: drive the HDR eye adaptation while emissive mode is on
 extern idCVar r_rtEmissiveFixtureMinArea;	// emissive mode: the EFFECTIVE emitting area (lit area x brightness) below which a surface is an indicator (LED), never a fixture
 extern idCVar r_rtEmissiveFixtureFullArea;	// emissive mode: the effective emitting area at which an emitter inherits its light's FULL power (ramps from the min)
 extern idCVar r_rtEmissiveMaxRadiance;	// emissive mode: cap on the radiance the power match may give one emitter	// emissive mode: an emitter inherits the POWER of the placed light it replaces (radiance from its radius / colour / area)
@@ -1142,8 +1145,21 @@ unsigned long long R_RtEmissiveTableAddress( int *numTris, float *totalFlux, flo
 // of the scene-light buffer (centroid, bounding radius, flux, flux-weighted mean linear radiance x material scale, total
 // area, the inherited reach of the placed light it replaces (0 = none), its triangle range in the table). dark = every
 // triangle at zero flux (switched off / gone): never a row.
-struct rtEmissiveRow_t { idVec3 centroid; float boundRadius; float flux; float area; idVec3 meanRadiance; float reach; float lightLum; idVec3 lightOrigin; bool hasLight; bool noShadows; int firstTri, numTris; bool dark; };
+struct rtEmissiveRow_t { idVec3 centroid; float boundRadius; float flux; float area; idVec3 meanRadiance; float reach; float lightLum; idVec3 lightOrigin; bool hasLight; bool noShadows; bool tableEntry; bool indicator; int firstTri, numTris; bool dark; };
 int R_RtEmissiveRows( const rtEmissiveRow_t **rows );		// the rows (0 = no table)
+float R_RtEmissiveMatchedScale( const rtEmissiveRow_t &row );
+// the HDR eye adaptation runs when the user asked for it OR physical emissive mode asks for it (r_rtEmissiveAutoExposure)
+bool R_HdrEyeAdaptationWanted( void );	// the power match's radiance multiplier on the row's mean (1 = authored)
+// emitters.cfg, the per-material emitter table (E2 physical; the editor's data)
+int  R_RtEmissiveMatTableNum( void );
+bool R_RtEmissiveMatTableGet( const idMaterial *mat, float *scale, float *tint, int *profile, bool *twoSided, bool *indicator );
+void R_RtEmissiveMatTableSet( const idMaterial *mat, float scale, const float *tint, int profile, bool twoSided, bool indicator );
+void R_RtEmissiveMatTableRemove( const idMaterial *mat );
+void R_RtEmissiveMatTableSave_f( const idCmdArgs &args );
+void R_RtEmissiveMatTableReload_f( const idCmdArgs &args );
+void R_RtEmissiveBakeTable_f( const idCmdArgs &args );
+const idMaterial *R_RtEmissivePickMaterial( void );		// the editor's pick: the material under the crosshair (through flares)
+float R_RtEmissiveMatMatchedScale( const idMaterial *mat, int *rowsOut, int *fixturesOut );	// the power match's multiplier for a material (area-weighted over its rows)
 bool R_RtEmissiveDebugGeometry( unsigned int *vb, unsigned int *ib, int *numIndexes );
 bool R_RtEmissiveLightDebugGeometry( unsigned int *vb, unsigned int *ib, int *numIndexes );	// overlay mode 5: the placed lights as census-coloured spheres
 bool R_RtEmissiveLightDropped( int lightIndex, unsigned int serial );	// E5: a fixtured placed light is dropped while emissive mode is on

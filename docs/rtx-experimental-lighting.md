@@ -505,3 +505,19 @@ shaders receive is the count WRITTEN this frame; r_rtEmissiveMaxRows joins Compu
   the light's bounds RADIUS, centred halfway down a spot's cone - half the drop to the floor; the row faded out above the
   tiles. Reach is now the farthest corner of the light's bounds FROM THE EMITTING TRIANGLE (a point light's box: the
   half-diagonal as before; a ceiling spot: the full drop). Mode 8 is the tool for "what lights this surface".
+
+## E2 physical - life-like emitters + the emitter editor (2026-10-21, branch feat/rtx-emissive-physical)
+User goal: real-life illumination; the compatibility layer (reach / knee / fade / power match at R/2) only reproduces
+the placed lights' non-physical look. Built:
+- r_rtEmissivePhysical (0): no reach, no boost, no fade; a row's cull radius = sqrt( L A / r_rtEmissiveCullIrradiance )
+  (0.003), the grid proxy 16 L A / d^2 (projQ.w = 1 tells the shade: no fade).
+- emitters.cfg (save path): the per-MATERIAL table - "name scale r g b profile twoSided indicator". A material with an
+  entry lights at its AUTHORED radiance x scale x tint (no power match) in BOTH modes; profile 0 sqrt(cos) / 1 Lambert
+  / 2 uniform rides RT_EMIT flag bits 22-23; indicator = never a row. Commands: rtEmissiveBakeTable (seed every
+  emitting material without an entry with the power match's area-weighted multiplier; indicator materials flagged),
+  rtEmissiveSaveTable, rtEmissiveReloadTable. R_RtEmissiveMatchedScale is the ONE power-match formula (gather + bake).
+- The editor (ImGui "Emissive Lights" > "Emitter Editor"): pick the material under the crosshair (through flares), edit
+  radiance x / tint / profile / two-sided / indicator, Apply (live: table rebuild), Remove, Save, Bake defaults, Reload.
+- r_rtEmissiveAutoExposure (1): R_HdrEyeAdaptationWanted() = r_hdrEyeAdaptation || (emissive && physical && this) - the
+  existing eye adaptation with its own knobs (user's choice over a second mechanism).
+Workflow: Emissive Mode on -> Bake defaults -> Physical on -> walk the map with the editor; the probe prints the entry.

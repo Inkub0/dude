@@ -4932,8 +4932,75 @@ static void DrawDbgGroup_ExperimentalLighting()
 	if ( ImGui::SmallButton( "reset##rtEmissiveMaxRadiance" ) ) { r_rtEmissiveMaxRadiance.Reset(); }
 	ImGui::EndDisabled();	// r_rtEmissivePowerMatch
 
+	// ===== Physical =====
+	ImGui::SeparatorText( "Physical" );
+	CvarCheckbox( "Physical Emitters", r_rtEmissivePhysical, "A fixture lights with its radiance and the inverse square only: no "
+		"reach, no boost, no fade at a radius - its row ends where its contribution drops below the cull threshold. The radiance "
+		"comes from the emitter table (emitters.cfg, the editor below; 'Bake defaults' seeds it from the power match) or, for a "
+		"material without an entry, from the power match. Off = the compatibility layer below (the placed lights' look). "
+		"(r_rtEmissivePhysical)" );
+	ImGui::BeginDisabled( !r_rtEmissivePhysical.GetBool() );
+	CvarSliderF( "Cull Irradiance", r_rtEmissiveCullIrradiance, 0.0005f, 0.05f, "%.4f", "The irradiance (radiance x area / "
+		"distance^2) below which an emitter no longer counts: sets each row's cull radius. Lower = farther reach, more candidates "
+		"per grid cell. (r_rtEmissiveCullIrradiance)" );
+	ImGui::SameLine();
+	if ( ImGui::SmallButton( "reset##rtEmissiveCullIrradiance" ) ) { r_rtEmissiveCullIrradiance.Reset(); }
+	CvarCheckbox( "Auto Exposure (eye adaptation)", r_rtEmissiveAutoExposure, "Run the HDR eye adaptation while physical "
+		"emitters light the scene - its own range / speed / key / metering knobs (HDR section) apply. Physical light has far more "
+		"dynamic range than the placed lights the maps were lit for. (r_rtEmissiveAutoExposure)" );
+	ImGui::EndDisabled();	// physical
+
+	// ===== Emitter Editor (emitters.cfg) =====
+	ImGui::SeparatorText( "Emitter Editor" );
+	{
+		static const idMaterial *edMat = NULL;
+		static float edScale = 1.0f, edTint[3] = { 1.0f, 1.0f, 1.0f };
+		static int   edProfile = 0;
+		static bool  edTwoSided = false, edIndicator = false, edHasEntry = false;
+		static int   edRows = 0, edFixtures = 0;
+		static float edMatched = 1.0f;
+		ImGui::TextDisabled( "%d material entries in emitters.cfg (save path)", R_RtEmissiveMatTableNum() );
+		if ( ImGui::Button( "Pick material under crosshair" ) ) {
+			edMat = R_RtEmissivePickMaterial();
+			if ( edMat != NULL ) {
+				edMatched = R_RtEmissiveMatMatchedScale( edMat, &edRows, &edFixtures );
+				edHasEntry = R_RtEmissiveMatTableGet( edMat, &edScale, edTint, &edProfile, &edTwoSided, &edIndicator );
+				if ( !edHasEntry ) { edScale = edMatched; edTint[0] = edTint[1] = edTint[2] = 1.0f; edProfile = 0; edTwoSided = false; edIndicator = ( edFixtures == 0 && edRows > 0 ); }
+			}
+		}
+		AddTooltip( "Aim at a fixture, open this menu, press: the surface's material becomes the edited entry (flare sprites are "
+			"looked through). Without an entry the controls start at the power match's values." );
+		if ( edMat == NULL ) {
+			ImGui::TextDisabled( "no material picked" );
+		} else {
+			ImGui::Text( "%s", edMat->GetName() );
+			ImGui::TextDisabled( "%d rows in this map, %d fixtures; power match would use x%.2f; %s", edRows, edFixtures, edMatched, edHasEntry ? "HAS an entry" : "no entry yet" );
+			ImGui::SetNextItemWidth( 240.0f );
+			ImGui::SliderFloat( "Radiance x##edScale", &edScale, 0.0f, 64.0f, "%.2f", ImGuiSliderFlags_Logarithmic );
+			AddTooltip( "Multiplier on the glow texture's mean radiance (x the stage colour). 1 = the authored glow as painted." );
+			ImGui::SetNextItemWidth( 240.0f );
+			ImGui::ColorEdit3( "Tint##edTint", edTint, ImGuiColorEditFlags_Float );
+			ImGui::SetNextItemWidth( 240.0f );
+			ImGui::Combo( "Emission profile##edProfile", &edProfile, "sqrt(cos) - a bare tube\0Lambert - a diffuser\0uniform - a globe\0" );
+			ImGui::Checkbox( "Two-sided##edTwo", &edTwoSided );
+			ImGui::SameLine();
+			ImGui::Checkbox( "Indicator (never a light)##edInd", &edIndicator );
+			if ( ImGui::Button( "Apply##edApply" ) ) { R_RtEmissiveMatTableSet( edMat, edScale, edTint, edProfile, edTwoSided, edIndicator ); edHasEntry = true; }
+			AddTooltip( "Write the entry into the in-memory table and rebuild the emitter table (live next frame). Save writes emitters.cfg." );
+			ImGui::SameLine();
+			if ( edHasEntry && ImGui::Button( "Remove entry##edRemove" ) ) { R_RtEmissiveMatTableRemove( edMat ); edHasEntry = false; edScale = edMatched; }
+		}
+		if ( ImGui::Button( "Save emitters.cfg##edSave" ) ) { cmdSystem->BufferCommandText( CMD_EXEC_APPEND, "rtEmissiveSaveTable\n" ); }
+		ImGui::SameLine();
+		if ( ImGui::Button( "Bake defaults##edBake" ) ) { cmdSystem->BufferCommandText( CMD_EXEC_APPEND, "rtEmissiveBakeTable\n" ); }
+		AddTooltip( "Add an entry for every emitting material of this map that has none, with the power match's multiplier - the "
+			"starting point for editing. Existing entries are kept. Writes emitters.cfg." );
+		ImGui::SameLine();
+		if ( ImGui::Button( "Reload##edReload" ) ) { cmdSystem->BufferCommandText( CMD_EXEC_APPEND, "rtEmissiveReloadTable\n" ); }
+	}
+
 	// ===== Reach =====
-	ImGui::SeparatorText( "Reach" );
+	ImGui::SeparatorText( "Reach (compatibility layer)" );
 	CvarSliderF( "Emitter Reach", r_rtEmissiveReach, 0.0f, 4.0f, "%.2f", "How far an emitter's light reaches, as a multiple of "
 		"the authored radius of the placed light it replaced. A Doom 3 light falls off linearly out to its radius, an area "
 		"emitter with the inverse square: right beside the fixture, dark on the far wall. Past a quarter of the reach the "

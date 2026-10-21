@@ -2735,6 +2735,8 @@ static const float	RT_EMISSIVE_DIFFUSE_GLOW_THRESHOLD = 0.6f;	// diffuse texels 
 #define RT_EMIT_FLAG_INLIGHT	( 1u << 19 )			// E5 census: the triangle sits inside a placed light's volume (that light is "fixtured")
 #define RT_EMIT_FLAG_DARK		( 1u << 20 )			// the fixture is switched OFF in its current state (skin / parm): zero flux, kept in place
 #define RT_EMIT_FLAG_DIFFUSEGLOW ( 1u << 21 )		// the glow slot is the DIFFUSE map: texels brighter than the threshold (tint alpha / 255) emit
+#define RT_EMIT_FLAG_PROFILE_SHIFT 22					// bits 22-23: the emission profile (emitters.cfg): 0 = sqrt(cos) (Q2RTX), 1 = Lambert cos, 2 = uniform
+#define RT_EMIT_FLAG_INDICATOR	( 1u << 24 )			// emitters.cfg: the material is an INDICATOR (a LED, a button) whatever its area - never a light row
 
 static idList<rtEmissiveTriGPU_t>	s_rtEmissiveTris;			// CPU copy of the table (the debug geometry is built from it)
 static rhi::BufferHandle			s_rtEmissiveBuf = 0;		// header + tris + CDF
@@ -2851,6 +2853,186 @@ static int						s_rtEmissiveLightDbgIndexes = 0;
 // treat an emitter exactly like a placed light. CPU only (no GPU group buffer): rebuilt whenever flux (a fixture's
 // state) or positions (movers) change. The row's triangles are sampled on the GPU straight from the table.
 static idList<rtEmissiveRow_t>	s_rtEmissiveRows;
+
+// E2 physical (docs/rtx-experimental-lighting.md "physical"): the per-MATERIAL emitter table, emitters.cfg in the save
+// path - the authored emitter parameters the editor writes: radiance scale on the glow's mean, a tint, the emission
+// profile, two-sided, indicator. A material with an entry lights at its AUTHORED radiance x scale (no power match); the
+// bake command freezes the power match's values into entries as the starting point. One line per material:
+//   "textures/base_light/striplight3" 4.2  1 1 1  0  0  0     (name scale r g b profile twoSided indicator; # comments)
+struct rtEmissiveMatEntry_t { idStr name; float scale; float tint[3]; int profile; bool twoSided; bool indicator; };
+static idList<rtEmissiveMatEntry_t>	s_rtEmissiveMatTable;
+static bool							s_rtEmissiveMatTableLoaded = false;
+static const char *					RT_EMISSIVE_TABLE_FILE = "emitters.cfg";
+
+static const rtEmissiveMatEntry_t *R_RtEmissiveMatTableFind( const idMaterial *mat ) {
+	if ( mat == NULL ) { return NULL; }
+	for ( int i = 0; i < s_rtEmissiveMatTable.Num(); i++ ) {
+		if ( s_rtEmissiveMatTable[i].name.Icmp( mat->GetName() ) == 0 ) { return &s_rtEmissiveMatTable[i]; }
+	}
+	return NULL;
+}
+
+static void R_RtEmissiveMatTableLoad( void ) {
+	s_rtEmissiveMatTable.Clear();
+	s_rtEmissiveMatTableLoaded = true;
+	void *buf = NULL;
+	const int len = fileSystem->ReadFile( RT_EMISSIVE_TABLE_FILE, &buf, NULL );
+	if ( len <= 0 || buf == NULL ) { return; }
+	idLexer lex( (const char *)buf, len, RT_EMISSIVE_TABLE_FILE, LEXFL_NOSTRINGCONCAT | LEXFL_NOSTRINGESCAPECHARS | LEXFL_ALLOWPATHNAMES );
+	idToken tok;
+	while ( lex.ReadToken( &tok ) ) {
+		rtEmissiveMatEntry_t e;
+		e.name = tok;
+		e.scale = lex.ParseFloat();
+		e.tint[0] = lex.ParseFloat(); e.tint[1] = lex.ParseFloat(); e.tint[2] = lex.ParseFloat();
+		e.profile = idMath::ClampInt( 0, 2, lex.ParseInt() );
+		e.twoSided = lex.ParseInt() != 0;
+		e.indicator = lex.ParseInt() != 0;
+		if ( e.name.Length() > 0 ) { s_rtEmissiveMatTable.Append( e ); }
+	}
+	fileSystem->FreeFile( buf );
+	common->Printf( "r_rtEmissiveTable: %s: %d material entries\n", RT_EMISSIVE_TABLE_FILE, s_rtEmissiveMatTable.Num() );
+}
+
+static void R_RtEmissiveMatTableSave( void ) {
+	idStr out;
+	out += "# DUDE emitter table (docs/rtx-experimental-lighting.md): per material - radiance scale on the glow's mean, tint r g b,\n";
+	out += "# profile (0 sqrt(cos) 1 Lambert 2 uniform), twoSided, indicator. Written by rtEmissiveBakeTable / the emitter editor.\n";
+	for ( int i = 0; i < s_rtEmissiveMatTable.Num(); i++ ) {
+		const rtEmissiveMatEntry_t &e = s_rtEmissiveMatTable[i];
+		out += va( "\"%s\" %.4f  %.3f %.3f %.3f  %d %d %d\n", e.name.c_str(), e.scale, e.tint[0], e.tint[1], e.tint[2], e.profile, e.twoSided ? 1 : 0, e.indicator ? 1 : 0 );
+	}
+	fileSystem->WriteFile( RT_EMISSIVE_TABLE_FILE, out.c_str(), out.Length(), "fs_savepath" );
+	common->Printf( "r_rtEmissiveTable: wrote %d entries to %s\n", s_rtEmissiveMatTable.Num(), RT_EMISSIVE_TABLE_FILE );
+}
+
+extern idCVar r_hdrEyeAdaptation;
+bool R_HdrEyeAdaptationWanted( void ) { return r_hdrEyeAdaptation.GetBool() || ( r_rtEmissiveLighting.GetBool() && r_rtEmissivePhysical.GetBool() && r_rtEmissiveAutoExposure.GetBool() ); }
+
+int R_RtEmissiveMatTableNum( void ) { return s_rtEmissiveMatTable.Num(); }
+bool R_RtEmissiveMatTableGet( const idMaterial *mat, float *scale, float *tint, int *profile, bool *twoSided, bool *indicator ) {
+	const rtEmissiveMatEntry_t *e = R_RtEmissiveMatTableFind( mat );
+	if ( e == NULL ) { return false; }
+	if ( scale ) { *scale = e->scale; }
+	if ( tint ) { tint[0] = e->tint[0]; tint[1] = e->tint[1]; tint[2] = e->tint[2]; }
+	if ( profile ) { *profile = e->profile; }
+	if ( twoSided ) { *twoSided = e->twoSided; }
+	if ( indicator ) { *indicator = e->indicator; }
+	return true;
+}
+// The editor's write: set / replace the material's entry (in memory; R_RtEmissiveMatTableSave_f writes the file) and
+// mark the table for a rebuild so the change is live next frame.
+void R_RtEmissiveMatTableSet( const idMaterial *mat, float scale, const float *tint, int profile, bool twoSided, bool indicator ) {
+	if ( mat == NULL ) { return; }
+	rtEmissiveMatEntry_t *e = const_cast<rtEmissiveMatEntry_t *>( R_RtEmissiveMatTableFind( mat ) );
+	if ( e == NULL ) { e = &s_rtEmissiveMatTable.Alloc(); e->name = mat->GetName(); }
+	e->scale = scale; e->tint[0] = tint[0]; e->tint[1] = tint[1]; e->tint[2] = tint[2];
+	e->profile = idMath::ClampInt( 0, 2, profile ); e->twoSided = twoSided; e->indicator = indicator;
+	s_rtEmissiveMap.Clear();									// stale: the next update rebuilds the table with the entry applied
+}
+void R_RtEmissiveMatTableRemove( const idMaterial *mat ) {
+	for ( int i = 0; i < s_rtEmissiveMatTable.Num(); i++ ) {
+		if ( s_rtEmissiveMatTable[i].name.Icmp( mat->GetName() ) == 0 ) { s_rtEmissiveMatTable.RemoveIndex( i ); s_rtEmissiveMap.Clear(); return; }
+	}
+}
+void R_RtEmissiveMatTableSave_f( const idCmdArgs &args ) { R_RtEmissiveMatTableSave(); }
+void R_RtEmissiveMatTableReload_f( const idCmdArgs &args ) { R_RtEmissiveMatTableLoad(); s_rtEmissiveMap.Clear(); }
+
+// The POWER MATCH as one formula (the gather and the bake share it): the radiance multiplier on the row's mean radiance
+// that makes the fixture deliver at R/2 what the placed light it replaced did there (L = C R^2 / (16 A), reach boost 2 at
+// that distance), ramped by the effective emitting area between r_rtEmissiveFixtureMinArea (0: an indicator) and
+// r_rtEmissiveFixtureFullArea (1), capped at r_rtEmissiveMaxRadiance. 1 = the authored radiance. An emitter in NO
+// placed light is matched to a light of its own colour at r_rtEmissiveReachDefault.
+float R_RtEmissiveMatchedScale( const rtEmissiveRow_t &row ) {
+	const float fluxScale = Max( idMath::ClampFloat( 0.0f, 64.0f, r_rtEmissiveScale.GetFloat() ), 1e-3f );
+	const float minArea   = Max( 0.0f, r_rtEmissiveFixtureMinArea.GetFloat() );
+	const float fullArea  = Max( minArea + 1e-3f, r_rtEmissiveFixtureFullArea.GetFloat() );
+	const float maxL      = Max( 1.0f, r_rtEmissiveMaxRadiance.GetFloat() );
+	const float meanLum   = row.meanRadiance.x * 0.2126f + row.meanRadiance.y * 0.7152f + row.meanRadiance.z * 0.0722f;
+	if ( !r_rtEmissivePowerMatch.GetBool() || !( meanLum > 1e-6f ) || !( row.area > 1e-3f ) ) { return 1.0f; }
+	float R = ( row.reach > 0.0f ) ? row.reach : idMath::ClampFloat( 0.0f, 4096.0f, r_rtEmissiveReachDefault.GetFloat() );
+	if ( !( R > 0.0f ) ) { R = Max( row.boundRadius * 4.0f, 64.0f ); }
+	const float s = idMath::ClampFloat( 0.0f, 1.0f, ( row.flux / fluxScale - minArea ) / ( fullArea - minArea ) );
+	if ( !( s > 0.0f ) ) { return 1.0f; }
+	const float C = ( row.reach > 0.0f && row.lightLum > 0.0f ) ? row.lightLum : Min( meanLum, 1.0f );
+	const float Lmatch = Min( C * R * R / ( 16.0f * row.area ), maxL );
+	const float Lrow   = meanLum + s * ( Max( Lmatch, meanLum ) - meanLum );
+	return Lrow / meanLum;
+}
+
+// The emitter editor's pick: the material under the crosshair, looking through flare sprites (as the probe does).
+const idMaterial *R_RtEmissivePickMaterial( void ) {
+	idRenderWorldLocal *world = tr.primaryWorld;
+	if ( world == NULL || world->mapName.Length() == 0 ) { return NULL; }
+	const idVec3 dir = tr.primaryRenderView.viewaxis[0];
+	idVec3 start = tr.primaryRenderView.vieworg;
+	for ( int hit = 0; hit < 6; hit++ ) {
+		modelTrace_t mt;
+		if ( !world->Trace( mt, start, start + dir * 4096.0f, 0.0f, false, true, false ) || mt.material == NULL ) { return NULL; }
+		if ( !R_RtEmissiveIsFlareMaterial( mt.material ) ) { return mt.material; }
+		start = mt.point + dir * 0.5f;
+	}
+	return NULL;
+}
+
+// The power match's multiplier for a MATERIAL: the area-weighted average over its fixture rows (what the bake writes;
+// the editor's starting value for a material without an entry). 1 when it has no fixture rows.
+float R_RtEmissiveMatMatchedScale( const idMaterial *mat, int *rowsOut, int *fixturesOut ) {
+	const float fluxScale = Max( idMath::ClampFloat( 0.0f, 64.0f, r_rtEmissiveScale.GetFloat() ), 1e-3f );
+	const float minArea   = Max( 0.0f, r_rtEmissiveFixtureMinArea.GetFloat() );
+	double sumW = 0.0, sumScale = 0.0; int rows = 0, fixtures = 0;
+	for ( int li = 0; li < s_rtEmissiveLabels.Num(); li++ ) {
+		const rtEmissiveLabel_t &l = s_rtEmissiveLabels[li];
+		if ( l.mat != mat ) { continue; }
+		for ( int ri = 0; ri < s_rtEmissiveRows.Num(); ri++ ) {
+			const rtEmissiveRow_t &row = s_rtEmissiveRows[ri];
+			if ( row.firstTri != l.firstTri ) { continue; }
+			rows++;
+			if ( row.dark || row.area <= 0.0f || row.flux / fluxScale < minArea ) { continue; }
+			fixtures++; sumW += row.area; sumScale += row.area * R_RtEmissiveMatchedScale( row );
+		}
+	}
+	if ( rowsOut ) { *rowsOut = rows; }
+	if ( fixturesOut ) { *fixturesOut = fixtures; }
+	return ( sumW > 0.0 ) ? (float)( sumScale / sumW ) : 1.0f;
+}
+
+// rtEmissiveBakeTable: freeze the power match into emitters.cfg as the editor's starting point - for every emitting
+// material WITHOUT an entry, the area-weighted matched multiplier over its rows (an indicator material - every row below
+// the fixture floor - gets indicator 1). Existing entries are never touched.
+void R_RtEmissiveBakeTable_f( const idCmdArgs &args ) {
+	if ( s_rtEmissiveRows.Num() == 0 ) { common->Printf( "rtEmissiveBakeTable: no emitter table built (r_rtEmissiveTable 1 and a map)\n" ); return; }
+	const float fluxScale = Max( idMath::ClampFloat( 0.0f, 64.0f, r_rtEmissiveScale.GetFloat() ), 1e-3f );
+	const float minArea   = Max( 0.0f, r_rtEmissiveFixtureMinArea.GetFloat() );
+	int added = 0;
+	for ( int li = 0; li < s_rtEmissiveLabels.Num(); li++ ) {
+		const idMaterial *mat = s_rtEmissiveLabels[li].mat;
+		if ( mat == NULL || R_RtEmissiveMatTableFind( mat ) != NULL ) { continue; }
+		double sumW = 0.0, sumScale = 0.0; int fixtures = 0, rowsOfMat = 0; bool twoSided = false;
+		for ( int lj = 0; lj < s_rtEmissiveLabels.Num(); lj++ ) {
+			const rtEmissiveLabel_t &l = s_rtEmissiveLabels[lj];
+			if ( l.mat != mat ) { continue; }
+			for ( int ri = 0; ri < s_rtEmissiveRows.Num(); ri++ ) {
+				const rtEmissiveRow_t &row = s_rtEmissiveRows[ri];
+				if ( row.firstTri != l.firstTri ) { continue; }
+				rowsOfMat++;
+				if ( row.dark || row.area <= 0.0f ) { continue; }
+				if ( row.flux / fluxScale >= minArea ) { fixtures++; sumW += row.area; sumScale += row.area * R_RtEmissiveMatchedScale( row ); }
+				if ( row.numTris > 0 && ( s_rtEmissiveTris[ row.firstTri ].emit & RT_EMIT_FLAG_TWOSIDED ) ) { twoSided = true; }
+			}
+		}
+		if ( rowsOfMat == 0 ) { continue; }
+		rtEmissiveMatEntry_t &e = s_rtEmissiveMatTable.Alloc();
+		e.name = mat->GetName();
+		e.scale = ( sumW > 0.0 ) ? (float)( sumScale / sumW ) : 1.0f;
+		e.tint[0] = e.tint[1] = e.tint[2] = 1.0f;
+		e.profile = 0; e.twoSided = twoSided; e.indicator = ( fixtures == 0 );
+		added++;
+	}
+	common->Printf( "rtEmissiveBakeTable: %d materials added (%d entries now)\n", added, s_rtEmissiveMatTable.Num() );
+	R_RtEmissiveMatTableSave();
+	s_rtEmissiveMap.Clear();									// rebuild: the entries now drive the radiance
+}
 
 static const shaderStage_t *R_RtEmissiveStage( const idMaterial *mat, const char **why = NULL, const float *entityParms = NULL ) {
 	const char *reason = "";
@@ -3118,6 +3300,12 @@ static void R_RtEmissiveAddSurface( const srfTriangles_t *tri, const idMaterial 
 		idList<rtEmissiveTriGPU_t> &out, idList<idVec3> *localOut ) {
 	float tintRGB[3];
 	const bool constant = R_RtEmissiveStageColor( mat, stage, entityParms, tintRGB );
+	// emitters.cfg: the material's authored entry - radiance scale, tint, profile, two-sided, indicator (E2 physical)
+	if ( const rtEmissiveMatEntry_t *te = R_RtEmissiveMatTableFind( mat ) ) {
+		scale *= Max( te->scale, 0.0f );
+		tintRGB[0] *= te->tint[0]; tintRGB[1] *= te->tint[1]; tintRGB[2] *= te->tint[2];
+		flags |= ( (unsigned int)te->profile << RT_EMIT_FLAG_PROFILE_SHIFT ) | ( te->twoSided ? RT_EMIT_FLAG_TWOSIDED : 0u ) | ( te->indicator ? RT_EMIT_FLAG_INDICATOR : 0u );
+	}
 	float tintLum = R_RtLuminance( tintRGB );
 	if ( !constant ) {
 		flags |= RT_EMIT_FLAG_ANIMATED;
@@ -3497,6 +3685,7 @@ static int R_RtEmissiveSplitWorldRuns( int firstLabel ) {
 
 static void R_RtEmissiveBuild( const idRenderWorldLocal *world, rhi::RHI *r ) {
 	const int msStart = Sys_Milliseconds();
+	if ( !s_rtEmissiveMatTableLoaded ) { R_RtEmissiveMatTableLoad(); }	// emitters.cfg once per session (rtEmissiveReloadTable re-reads)
 	const float scale = idMath::ClampFloat( 0.0f, 64.0f, r_rtEmissiveScale.GetFloat() );
 	idList<rtEmissiveCensus_t> census;
 	int overflow = 0, worldTris = 0, entityTris = 0, entities = 0, screens = 0;
@@ -3746,6 +3935,8 @@ static void R_RtEmissiveBuildRows( void ) {
 		row.lightLum = lightLum;
 		row.lightOrigin = lightOrigin;
 		row.hasLight = reach > 0.0f && lightLum > 0.0f;
+		row.tableEntry = R_RtEmissiveMatTableFind( l.mat ) != NULL;
+		row.indicator = ( s_rtEmissiveTris[ l.firstTri ].emit & RT_EMIT_FLAG_INDICATOR ) != 0u;
 		row.noShadows = row.hasLight && noShadows;
 		row.firstTri = l.firstTri;
 		row.numTris = l.numTris;
@@ -4473,8 +4664,14 @@ void R_RtEmissiveProbe_f( const idCmdArgs &args ) {
 				for ( int ri = 0; ri < s_rtEmissiveRows.Num(); ri++ ) { if ( bestT >= s_rtEmissiveRows[ri].firstTri && bestT < s_rtEmissiveRows[ri].firstTri + s_rtEmissiveRows[ri].numTris ) { rowIdx = ri; break; } }
 				common->Printf( "  nearest table triangle %d (%.1f units from the hit): flux %.3f, emits TOWARD the eye: %s%s\n", bestT, bestD, e.flux,
 					eyeFront ? "yes" : "NO (its back faces you - a one-sided emitter lights nothing on this side)", ( e.emit & RT_EMIT_FLAG_TWOSIDED ) ? " [two-sided]" : "" );
+				if ( const rtEmissiveMatEntry_t *te = R_RtEmissiveMatTableFind( mat ) ) {
+					common->Printf( "  emitters.cfg entry: scale %.3f, tint %.2f %.2f %.2f, profile %d, twoSided %d, indicator %d (authored radiance x scale; no power match)\n", te->scale, te->tint[0], te->tint[1], te->tint[2], te->profile, te->twoSided ? 1 : 0, te->indicator ? 1 : 0 );
+				} else {
+					common->Printf( "  emitters.cfg: no entry (the power match sets the radiance; rtEmissiveBakeTable freezes it)\n" );
+				}
 				if ( rowIdx >= 0 ) {
 					const rtEmissiveRow_t &row = s_rtEmissiveRows[rowIdx];
+					common->Printf( "  radiance multiplier on the glow mean: %.2f (%s)\n", row.tableEntry ? 1.0f : R_RtEmissiveMatchedScale( row ), row.tableEntry ? "table entry" : "power match" );
 					const float sc = Max( idMath::ClampFloat( 0.0f, 64.0f, r_rtEmissiveScale.GetFloat() ), 1e-3f );
 					const float meanLum = row.meanRadiance.x * 0.2126f + row.meanRadiance.y * 0.7152f + row.meanRadiance.z * 0.0722f;
 					common->Printf( "  ROW %d: %d triangles, area %.0f units^2, effective %.0f (min %.0f / full %.0f), mean lum %.2f, bound %.0f, centroid %.0f %.0f %.0f%s\n",

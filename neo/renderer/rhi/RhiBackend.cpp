@@ -1064,7 +1064,7 @@ static bool RB_RHI_HdrResolveSmaaFused( rhi::RHI *r, int w, int h ) {
 	}
 	// Eye adaptation (B1) and bloom (Phase C) are wired into the plain resolve only; fall through to
 	// it so their samplers are bound. SMAA still applies there (unfused, via RB_RHI_HdrSmaa).
-	if ( r_hdrEyeAdaptation.GetBool() || r_hdrBloom.GetFloat() > 0.0f ) {
+	if ( R_HdrEyeAdaptationWanted() || r_hdrBloom.GetFloat() > 0.0f ) {
 		return false;
 	}
 	rhi::ShaderHandle prog = r->LoadShader( "hdrresolve_smaa" );

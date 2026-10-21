@@ -6182,8 +6182,9 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 			const int   cap       = Min( idMath::ClampInt( 0, RT_EMIT_MAX_ROWS, r_rtEmissiveMaxRows.GetInteger() ), RT_SCENE_MAX_ROWS - n - nFog );
 			const float minArea   = Max( 0.0f, r_rtEmissiveFixtureMinArea.GetFloat() );
 			const float fullArea  = Max( minArea + 1e-3f, r_rtEmissiveFixtureFullArea.GetFloat() );
-			const float maxL      = Max( 1.0f, r_rtEmissiveMaxRadiance.GetFloat() );
 			const float fluxScale = Max( idMath::ClampFloat( 0.0f, 64.0f, r_rtEmissiveScale.GetFloat() ), 1e-3f );
+			const bool  physical  = r_rtEmissivePhysical.GetBool();
+			const float cullE     = Max( r_rtEmissiveCullIrradiance.GetFloat(), 1e-5f );
 			static int   pick[ RT_EMIT_MAX_ROWS ];
 			static float pickImp[ RT_EMIT_MAX_ROWS ];
 			int np = 0;
@@ -6193,7 +6194,7 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 				// an INDICATOR (effective area below the fixture floor: a LED, a button) is not a light: it never enters the
 				// buffer. After the per-fixture split a map has hundreds of them and they crowded the 511-row ceiling out of
 				// the fixtures that light the far end of a corridor (Access Hall, 2026-10-20)
-				if ( row.flux / fluxScale < minArea ) { nEmIndicators++; continue; }
+				if ( row.indicator || ( !row.tableEntry && row.flux / fluxScale < minArea ) ) { nEmIndicators++; continue; }
 				float R = ( row.reach > 0.0f ) ? row.reach : reachDef;
 				if ( !( R > 0.0f ) ) { R = Max( row.boundRadius * 4.0f, 64.0f ); }
 				const float radius = R * ( ( reachMul > 0.0f ) ? reachMul : 1.0f );
@@ -6201,11 +6202,8 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 				if ( dist > 2.0f * radius + REACH ) { continue; }						// cannot touch anything near the view
 				// the pick ranks on the placed lights' scale too (C x radius^2 / d^2): matched = the replaced light's luminance
 				const float meanLum = row.meanRadiance.x * 0.2126f + row.meanRadiance.y * 0.7152f + row.meanRadiance.z * 0.0722f;
-				const float sP = idMath::ClampFloat( 0.0f, 1.0f, ( row.flux / fluxScale - minArea ) / ( fullArea - minArea ) );
-				const float Cm = ( row.reach > 0.0f && row.lightLum > 0.0f ) ? row.lightLum : Min( meanLum, 1.0f );
-				const float Ca = 16.0f * meanLum * row.area / ( R * R );
-				const float C  = r_rtEmissivePowerMatch.GetBool() ? ( Ca + sP * ( Max( Cm, Ca ) - Ca ) ) : Ca;
-				const float imp = C * intensity * radius * radius / Max( dist * dist, 64.0f * 64.0f );
+				const float LrowP = meanLum * ( row.tableEntry ? 1.0f : R_RtEmissiveMatchedScale( row ) ) * intensity;
+				const float imp = 16.0f * LrowP * row.area / Max( dist * dist, 64.0f * 64.0f );	// 16 L A / d^2: the placed lights' proxy scale
 				if ( !( imp > 0.0f ) ) { continue; }
 				nEmCandidates++;
 				if ( np < RT_EMIT_MAX_ROWS ) { pick[ np ] = i; pickImp[ np ] = imp; np++; }
@@ -6233,11 +6231,9 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 				// the row occupies the VOLUME of the light it replaced: cut at ONE reach like a Doom light (the shade fades out
 				// over the last quarter). A 2 x reach sphere put eight times the volume - and several times the candidates - of
 				// the placed lights into every grid cell, which overflowed the cell's slots (the blocky shadows of 2026-10-20).
-				L.cull[0] = row.centroid.x; L.cull[1] = row.centroid.y; L.cull[2] = row.centroid.z; L.cull[3] = row.boundRadius + radius;
 				const idVec3 pos = row.hasLight ? row.lightOrigin : row.centroid;
 				L.pos[0] = pos.x; L.pos[1] = pos.y; L.pos[2] = pos.z;
 				L.proj[3][0] = row.hasLight ? 1.0f : 0.0f;
-				L.radius = radius;
 				// POWER MATCH (r_rtEmissivePowerMatch): the emitter inherits the POWER of the light it replaces. A Doom 3 light of
 				// colour C and radius R delivers C/2 at d = R/2; this row (reach boost 2 at that distance) delivers 8 L A / R^2,
 				// so the radiance that matches is L = C R^2 / (16 A): a tiny decal replacing a big light burns bright, a big
@@ -6246,24 +6242,24 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 				// (C = its mean luminance, <= 1) at the default reach. The row's intensity field = the global intensity x the
 				// match ratio (the shade multiplies the triangle's own mean radiance by it). Capped at 4096 x.
 				const float meanLum = row.meanRadiance.x * 0.2126f + row.meanRadiance.y * 0.7152f + row.meanRadiance.z * 0.0722f;
-				float rowIntensity = intensity;
+				// The row's radiance multiplier on its glow mean: an emitters.cfg entry = the AUTHORED radiance (its scale is
+				// already in the triangles' scale field), else the power match - how much of the replaced light's power the
+				// emitter inherits, ramped by its effective emitting area (R_RtEmissiveMatchedScale, shared with the bake)
+				const float rowScale    = row.tableEntry ? 1.0f : R_RtEmissiveMatchedScale( row );
+				const float rowIntensity = intensity * rowScale;
+				const float Lrow        = meanLum * rowScale * intensity;		// the row's luminance as lit
 				float Ceq;													// the row's colour on the PLACED lights' scale (the grid ranks by lum x radius^2 / d^2)
-				// How much of the light's power the emitter may inherit follows its EFFECTIVE emitting area = flux / scale =
-				// lit area x glow brightness x stage colour (user, 2026-10-20): 0 below r_rtEmissiveFixtureMinArea (an
-				// INDICATOR - a 2 x 2 red LED, the electric box's lamp - glows at its authored radiance and lights almost
-				// nothing), 1 from r_rtEmissiveFixtureFullArea up (a white 8 x 8 patch, a tube), a linear ramp between. The
-				// matched radiance is capped at r_rtEmissiveMaxRadiance (a sanity ceiling for a small patch in a big light).
-				const float effArea = row.flux / fluxScale;
-				const float s       = idMath::ClampFloat( 0.0f, 1.0f, ( effArea - minArea ) / ( fullArea - minArea ) );
-				if ( r_rtEmissivePowerMatch.GetBool() && meanLum > 1e-6f && s > 0.0f && row.area > 1e-3f ) {
-					const float C = ( row.reach > 0.0f && row.lightLum > 0.0f ) ? row.lightLum : Min( meanLum, 1.0f );
-					const float Lmatch = Min( C * R * R / ( 16.0f * row.area ), maxL );
-					const float Lrow   = meanLum + s * ( Max( Lmatch, meanLum ) - meanLum );	// authored -> matched along the ramp
-					rowIntensity = intensity * ( Lrow / meanLum );
-					Ceq = 16.0f * Lrow * intensity * row.area / ( R * R );
-				} else {
-					Ceq = 16.0f * meanLum * intensity * row.area / ( R * R );	// the same law read backwards: what C this radiance equals
+				float radiusRow = radius, knee = ( reachMul > 0.0f ) ? 0.25f * radius : 0.0f;
+				bool  noFade = false;
+				if ( physical ) {
+					// PHYSICAL (r_rtEmissivePhysical): no reach, no boost, no fade - the row ends where its irradiance L A / d^2 drops
+					// below r_rtEmissiveCullIrradiance; the grid proxy then reads 16 L A / d^2, the placed lights' own scale
+					radiusRow = idMath::ClampFloat( 32.0f, 4096.0f, idMath::Sqrt( Max( Lrow * row.area, 0.0f ) / cullE ) );
+					knee = 0.0f; noFade = true;
 				}
+				Ceq = 16.0f * Lrow * row.area / ( radiusRow * radiusRow );
+				L.cull[0] = row.centroid.x; L.cull[1] = row.centroid.y; L.cull[2] = row.centroid.z; L.cull[3] = row.boundRadius + radiusRow;
+				L.radius = radiusRow;
 				const float kc = ( meanLum > 1e-6f ) ? Ceq / meanLum : 0.0f;	// the emitter's own tint at that luminance
 				L.color[0] = row.meanRadiance.x * kc; L.color[1] = row.meanRadiance.y * kc; L.color[2] = row.meanRadiance.z * kc;
 				L.flags = 64u | ( r_rtEmissiveLighting.GetBool() ? 0u : 128u )		// bit6 = emissive row, bit7 = bounce-only (normal mode)
@@ -6274,7 +6270,8 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 				const unsigned int first = (unsigned int)row.firstTri, num = (unsigned int)row.numTris;
 				memcpy( &L.proj[2][0], &first, sizeof( first ) );
 				memcpy( &L.proj[2][1], &num, sizeof( num ) );
-				L.proj[2][2] = ( reachMul > 0.0f ) ? 0.25f * radius : 0.0f;			// the reach-boost knee (rt_emissive.glsl)
+				L.proj[2][2] = knee;												// the reach-boost knee (rt_emissive.glsl; 0 = none)
+				L.proj[2][3] = noFade ? 1.0f : 0.0f;								// physical: no fade at the radius (a hard, negligible cut)
 				L.pad0 = 0u;
 				L.pad1 = (unsigned int)pick[k] + 1u;
 				nEm++;
@@ -10575,7 +10572,7 @@ time; measured before the resolve's own SetFrameTarget(0).
 ===================
 */
 rhi::ImageHandle RB_RHI_EyeAdaptExposure( rhi::RHI *r, rhi::ImageHandle sceneImg ) {
-	if ( !r_hdrEyeAdaptation.GetBool() || r_hdrTonemap.GetInteger() < 1 || sceneImg == 0 ) {
+	if ( !R_HdrEyeAdaptationWanted() || r_hdrTonemap.GetInteger() < 1 || sceneImg == 0 ) {
 		return 0;
 	}
 	// Cinematics never adapt: the director lit and graded each shot, and an auto-exposure that

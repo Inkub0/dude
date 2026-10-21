@@ -31,6 +31,8 @@ const uint RT_EMIT_TWOSIDED = 1u << 18;		// the material creates back sides: its
 const uint RT_EMIT_INLIGHT  = 1u << 19;		// sits inside a placed light's volume (E5 census: that light is "fixtured")
 const uint RT_EMIT_DARK     = 1u << 20;		// the fixture is switched OFF in its current state (skin / parm): zero flux, kept in place
 const uint RT_EMIT_DIFFUSEGLOW = 1u << 21;	// the glow slot is the DIFFUSE map: texels brighter than the threshold (tint alpha) emit (flare-inferred)
+const uint RT_EMIT_PROFILE_SHIFT = 22u;		// bits 22-23 (emitters.cfg): the emission profile - 0 sqrt(cos) (Q2RTX), 1 Lambert cos, 2 uniform
+const uint RT_EMIT_INDICATOR   = 1u << 24;	// emitters.cfg: an indicator material (never a row; the CPU keeps it out)
 
 // The MEAN radiance of a uniform emitter (E2 lights with this: a tile, a tube, an LED panel as a faint flat panel - the
 // texel pattern would only add variance to a 1-spp sample; the per-pixel glow seen on the surface itself is the forward draw)
@@ -269,9 +271,13 @@ bool rtEmissiveShadeRow( RtLights lights, uint li, vec3 P, vec3 N, uint seed, ou
 	float cosL = max( -dot( nUnit, ldir ), 0.0 );								// nUnit points AT P (the sampler re-winds)
 	if ( !( cosL > 0.0 ) ) { return false; }
 	float boost = ( knee > 0.0 ) ? max( dl / knee, 1.0 ) : 1.0;
-	float fade  = 1.0 - smoothstep( 0.75 * radius, radius, dl );				// out at ONE reach: the row's cull sphere, a Doom light's extent
+	// out at ONE reach (the row's cull sphere, a Doom light's extent); physical rows (projF.y) cut where the irradiance is negligible instead
+	float fade  = ( lights.l[ li ].projQ.w > 0.5 ) ? 1.0 : 1.0 - smoothstep( 0.75 * radius, radius, dl );
 	vec3  L = rtEmissiveMeanRadiance( e ) * ( e.scale * intensity * boost * fade );
-	contrib = L * ( sqrt( cosL ) * ndl / ( pIn * pdfw ) );						// f / p: the row's irradiance estimate
+	// the emission profile (emitters.cfg): 0 = sqrt(cos) (Q2RTX's "spotlight": a tube reads directional), 1 = Lambert (a diffuser), 2 = uniform
+	uint  prof = ( e.emit >> RT_EMIT_PROFILE_SHIFT ) & 3u;
+	float emit = ( prof == 1u ) ? cosL : ( prof == 2u ) ? 1.0 : sqrt( cosL );
+	contrib = L * ( emit * ndl / ( pIn * pdfw ) );								// f / p: the row's irradiance estimate
 	return !( any( isnan( contrib ) ) );
 }
 
