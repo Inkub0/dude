@@ -557,3 +557,9 @@ Workflow: Emissive Mode on -> Bake defaults -> Physical on -> walk the map with 
   also helps (fewer lights per cell). PROPER FIX (not done): temporal accumulation of the overflow is unbiased only with
   a 1/f weight that spikes and fries (the reverted residual slots); a biased deterministic rotation (weight 1) is stable
   but under-counts the rotating weak lights - acceptable for eye-tuning, a candidate if 16/32 is not enough.
+- "LIGHTS TURN ON AFTER I LOOK AT THEM" (user, 2026-10-21): NOT the importance calc (the grid was not red). Glow
+  textures upload LAZILY (first draw), so a fixture not yet seen has rhiHandle 0 and R_RtEmissiveStage skipped it; the
+  periodic residency rebuild (every 90 frames) added it ~1.5 s after it was first drawn - the pop-in. FIX: R_RtEmissiveStage
+  force-loads every candidate glow texture at build (ActuallyLoadImage(true,false); frontend context; idempotent), so all
+  emissive glows are resident from map load (user: VRAM is plentiful, GPU upload is the low-latency path). The load also
+  computes the bright extents + averageColor the mean radiance reads. s_rtEmissiveNotResident is now a rare safety net.

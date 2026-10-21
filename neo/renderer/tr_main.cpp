@@ -3209,6 +3209,15 @@ static const shaderStage_t *R_RtEmissiveStage( const idMaterial *mat, const char
 			return NULL;													// a screen: fill-light territory, not a table emitter
 		}
 		const idImage *img = st->texture.image;
+		// DUDE: glow textures upload LAZILY (on a surface's first draw), so a fixture the player has not looked at yet has
+		// rhiHandle 0 and is skipped here - the light then "turns on" a second or two later when the periodic residency
+		// rebuild catches it (user, 2026-10-21). Force every candidate glow texture RESIDENT at build (VRAM is plentiful,
+		// GPU upload is the low-latency path): no pop-in, and the load also computes the bright extents + averageColor the
+		// mean radiance reads. Idempotent: an already-resident image is a no-op. Frontend context (R_RenderView -> here).
+		if ( img != NULL && img->rhiHandle == 0 && img->generatorFunction == NULL && !img->defaulted
+				&& img->type != TT_CUBIC && st->texture.texgen == TG_EXPLICIT ) {
+			const_cast<idImage *>( img )->ActuallyLoadImage( true, false );
+		}
 		// an environment reflection (glass: texgen reflect + cubeMap) or any other generated texgen is not emission
 		if ( img == NULL || img->rhiHandle == 0 || img->generatorFunction != NULL || img->defaulted
 				|| img->type == TT_CUBIC || st->texture.texgen != TG_EXPLICIT ) {
