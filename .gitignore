@@ -44,6 +44,10 @@
 !/d3xp/fx/
 /d3xp/fx/*
 !/d3xp/fx/*.fx
+# DUDE def overrides (e.g. lost-soul fire light), mirrors base/def
+!/d3xp/def/
+/d3xp/def/*
+!/d3xp/def/*.def
 /d3le/
 savegames/
 /base/generated/

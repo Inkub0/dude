@@ -1,0 +1,215 @@
+/***********************************************************************
+
+	monster_demon_sentry.def
+
+***********************************************************************/
+
+export fred {
+	options		-prefix SENTRY1_ -scale .7 -keep L1toe L2toe R1toe R2toe barrel Lelbow Lknee Relbow Rknee eject flash light -parent light Head1 -parent flash Hips -parent eject Hips -parent barrel Hips -parent R1_upleg Hips -parent R2_upleg Hips -parent L1_upleg Hips -parent L2_upleg Hips -parent Loneck Hips -sourcedir models/monsters/sentry/animation/cycles -destdir models/md5/monsters/sentry
+
+	
+	mesh		sentry_mesh.mb -dest sentry
+
+	anim		initial.ma 
+	anim		alert.ma
+	anim		walk1.ma
+	anim		walk1_beam.ma
+	anim		unfold.ma
+	anim 		fold.ma
+	anim 		folded.ma
+	anim		walk1_pain.ma
+	anim		stand_death.ma
+	anim 		idle_stand1.ma
+	anim 		is_2_alert.ma
+	anim 		death_getup_on3.ma
+	anim		walk_on3.ma
+	anim		range_attackstart.ma
+	anim		range_attack4.ma -dest range_attack1
+	anim		range_attackend.ma
+	anim		strafe_lft.ma
+	anim		strafe_rt.ma
+	anim		talk_primary.ma
+	anim		turn_left.ma
+	anim		turn_right.ma
+
+	addoptions	-prefix ref_ 
+
+	anim		wall_release.ma -rotate 90 -range 1 120
+	anim		wall_release_blank.ma -rotate 90 -range 1 150 -dest wall_release_dummy
+	anim		wall_release.ma -rotate 90 -range 1 1 -dest wall_release_idle
+}
+
+model monster_demon_sentry {
+	mesh							models/md5/monsters/sentry/sentry.md5mesh
+	skin							skins/models/monsters/brownsentry.skin
+
+	channel torso					( *Loneck )
+	channel legs					( *Hips origin -*Loneck )
+	
+	anim af_pose					models/md5/monsters/sentry/initial.md5anim
+	anim initial					models/md5/monsters/sentry/initial.md5anim
+	anim folded						models/md5/monsters/sentry/folded.md5anim {
+		ai_no_turn
+		frame 1							disableWalkIK
+	}
+	anim unfold						models/md5/monsters/sentry/unfold.md5anim {
+		ai_no_turn
+		frame 1							disableWalkIK
+		frame 79						enableWalkIK
+	}
+
+	anim idle						models/md5/monsters/sentry/idle_stand1.md5anim
+	anim stand						models/md5/monsters/sentry/idle_stand1.md5anim
+	anim alert_idle					models/md5/monsters/sentry/alert.md5anim
+	anim walk						models/md5/monsters/sentry/walk1.md5anim
+	anim range_attack				models/md5/monsters/sentry/range_attackstart.md5anim
+	anim range_attack_loop1			models/md5/monsters/sentry/range_attack1.md5anim {
+		frame 1							launch_missile barrel
+	}
+	anim range_attack_end			models/md5/monsters/sentry/range_attackend.md5anim
+	anim run						models/md5/monsters/sentry/walk1.md5anim
+	anim pain						models/md5/monsters/sentry/walk1_pain.md5anim
+	anim head_pain					models/md5/monsters/sentry/walk1_pain.md5anim
+	anim getupon3     				models/md5/monsters/sentry/death_getup_on3.md5anim
+	anim walkon3					models/md5/monsters/sentry/walk_on3.md5anim
+	anim sight						models/md5/monsters/sentry/unfold.md5anim {
+		ai_no_turn
+		frame 1							disableWalkIK
+		frame 79						enableWalkIK
+	}
+
+	anim wall_release				models/md5/monsters/sentry/wall_release.md5anim {
+		ai_no_turn
+		frame 1							disableWalkIK
+		frame 129						enableWalkIK
+	}
+
+	anim strafe_left				models/md5/monsters/sentry/strafe_lft.md5anim
+	anim strafe_right				models/md5/monsters/sentry/strafe_rt.md5anim
+}
+
+entityDef monster_demon_sentry {
+	"inherit"						"monster_default"
+	"scriptobject"					"monster_demon_sentry"
+	"model"							"monster_demon_sentry"
+	"ragdoll"						"char_sentry"
+	"size"							"48 48 48"
+	"use_aas"						"aas48"
+	"team"							"1"
+	"rank"							"1"
+	"health"						"185"
+	"anim"							"folded"
+	"on_activate"					"unfold"
+	"bleed"							"0"
+	"def_projectile"				"projectile_plasmatracer"
+	"attack_cone"					"70"
+	"attack_accuracy"				"0"
+	"smoke_weapon"					"cgsmoke.smoke"
+	"mass"							"250"
+	"burnaway"						"0.50"
+	"smoke_burnParticleSystem"			"burn_imp.prt-hips"
+	"smoke_wound_metal"				"bulletricochet.prt"
+
+	"ik_numLegs"					"4"
+	"ik_footSize"					"0"
+	"ik_minWaistFloorDist"			"20"
+	"ik_waist"						"Hips"
+	"ik_hip1"						"L1_upleg"
+	"ik_hip2"						"R1_upleg"
+	"ik_hip3"						"L2_upleg"
+	"ik_hip4"						"R2_upleg"
+	"ik_knee1"						"L1_midleg"
+	"ik_knee2"						"R1_midleg"
+	"ik_knee3"						"L2_midleg"
+	"ik_knee4"						"R2_midleg"
+	"ik_ankle1"						"L1_loleg"
+	"ik_ankle2"						"R1_loleg"
+	"ik_ankle3"						"L2_loleg"
+	"ik_ankle4"						"R2_loleg"
+	"ik_dir1"						"Lelbow"
+	"ik_dir2"						"Relbow"
+	"ik_dir3"						"Lknee"
+	"ik_dir4"						"Rknee"
+	"ik_foot1"						"L1toe"
+	"ik_foot2"						"R1toe"
+	"ik_foot3"						"L2toe"
+	"ik_foot4"						"R2toe"
+
+	"damage_zone head"				"*Loneck"
+	"damage_zone chest"				"*Hips -*R1_upleg -*L1_upleg -*R2_upleg -*L2_upleg -*Loneck"
+	"damage_zone left_arm"			"*L1_upleg"
+	"damage_zone right_arm"			"*R1_upleg"
+	"damage_zone legs"				"*L2_upleg *R2_upleg"
+	"damage_scale head"				"1.25"
+
+	"snd_sight"						"monster_sentry1_sight"
+	"snd_chatter"					"monster_sentry1_chatter"
+	"snd_chatter_combat"			"monster_sentry1_chatter"
+	"snd_pain"						"monster_sentry1_pain"
+	"snd_attackmissile"				"monster_sentry1_attackmissile"
+}
+
+entityDef	damage_plasmatracer {
+	"damage"						"40"
+	"smoke_wound_flesh"				"bloodwound.smoke"
+	"snd_flesh"						"bullet_impact_flesh"
+}
+
+entityDef projectile_plasmatracer {
+	"spawnclass"					"idProjectile"
+	"mins"							"-3 -3 -3"
+	"maxs"							"3 3 3"
+	"model" 						"models/monsters/sentry/plasmatracer.lwo"
+
+	"def_damage"					"damage_plasmatracer"
+
+	"health"						"0"					// amount of damage projectile can take if damaged (0 means it can't be destroyed)
+	"velocity"						"700 0 0"			// how fast the projectile leaves the gun (or distance if fuse is 0)
+	"angular_velocity"				"0 0 0"				// how the projectile is rotating when it leaves the gun
+	"thrust"						"0"					// the rate of acceleration (always in the direction of the projectiles model)
+	"thrust_start"					"0"					// when to start accelerating
+	"thrust_end"					"0"					// when to stop accelerating
+	"linear_friction"				"0"					// "air" friction
+	"angular_friction"				"0"
+	"contact_friction"				"0"
+	"bounce"						"0"					// how much speed a projectile retains when it bounces off of objects (coefficient of restitution).  0 means no bounce.
+	"mass"							"5"
+	"gravity"						"0"					// how much gravity affects the trajectory.  gravity direction is same as the entity that fired it.
+	"fuse"							"10"				// how long before the projectile is removed or self-detonates.  Use 0 for beam weapons (velocity == distance).
+
+	"detonate_on_fuse"				"0"					// whether projectile should detonate when it's fuse runs out
+	"detonate_on_death"				"1"					// whether projectile should detonate when it's "killed" (health runs out)
+	"detonate_on_world"				"1"					// whether projectile should detonate when it hits an obstacle
+	"detonate_on_actor"				"1"					// whether projectile should detonate when it hits a character in the game
+
+	"impact_damage_effect"			"0"					// whether projectile causes blood splats from characters that bleed
+	"impact_gib"					"1"					// whether projectile can gib a character or not (for example: bullets don't gib, but rockets do)
+
+	"mtr_detonate"					"textures/decals/ballburn01"
+	"decal_size"					"75" 
+
+	"smoke_fly"						""					// particle effect while in the air
+	"smoke_detonate"				""					// particle effect when detonates
+	"smoke_residue"					""					// particle effect while in the air
+	"smoke_bounce"					""					// particle effect when bounces
+	"smoke_fuse"					""					// particle effect when removed from fuse expiring
+
+	"mtr_light_shader"				"lights/defaultPointLight"
+	"light_color"					"0 0 0.8"
+	"light_radius"					"160"
+	"light_offset"					"-8 0 0"
+
+	"mtr_explode_light_shader"		"muzzleflash"
+	"explode_light_color"			"0 0 1"
+	"explode_light_radius"			"160"
+	"explode_light_fadetime"		"0.25"
+
+	"snd_fly"						"sound/zaphod/plasmafly.wav"					// sound effect while in the air
+	"snd_explode"					"sound/zaphod/plasmaexplode.wav"
+	// DUDE: id's commented-out light(s) for the sentry bot plasma tracer, restored as-is (an empty
+	// mtr_light_shader created no light at all, so it now names lights/defaultPointLight).
+	// Only shown with g_extraLights 1 (idProjectile gates).
+	"dude_extra_light"				"1"
+	"dude_extra_explode_light"		"1"
+}
+
