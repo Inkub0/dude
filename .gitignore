@@ -48,7 +48,12 @@
 !/d3xp/def/
 /d3xp/def/*
 !/d3xp/def/*.def
-/d3le/
+# d3le (Lost Mission) game data is ignored (its pk4s and description.txt), EXCEPT DUDE's def
+# overrides (id's restored commented-out lights), mirroring d3xp/def
+/d3le/*
+!/d3le/def/
+/d3le/def/*
+!/d3le/def/*.def
 savegames/
 /base/generated/
 /base/screenshots/
