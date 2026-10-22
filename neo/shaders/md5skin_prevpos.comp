@@ -1,0 +1,7 @@
+// MD5 GPU skin kernel, PREVPOS variant (loaded as "md5skin_prevpos"). Same body as
+// md5skin.comp, but also snapshots last frame's posed position into binding 6 so the
+// normal/velocity prepass can emit a per-vertex skinned motion vector
+// (r_skinnedMotionVectors). A separate program because a storage binding a shader
+// statically uses must be bound at dispatch. See md5skin_body.glsl.
+#define PREVPOS 1
+#include "md5skin_body.glsl"

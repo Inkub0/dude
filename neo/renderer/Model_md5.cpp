@@ -91,7 +91,11 @@ idCVar r_gpuSkinWeld( "r_gpuSkinWeld", "1", CVAR_RENDERER | CVAR_BOOL,
 idCVar r_tessDeform( "r_tessDeform", "0", CVAR_RENDERER | CVAR_BOOL | CVAR_ARCHIVE,
 	"deform tessellated meshes once/frame in a compute pass instead of per-pass fixed-function tess (Vulkan only; docs/tessellation.md)" );
 
-// GPU MD5 skinning kernel (option B, blended-LBS): one invocation per OUTPUT vertex, walking
+// GPU MD5 skinning kernel (option B, blended-LBS) -- the kernel now lives in neo/shaders/md5skin.comp
+// (+ the PREVPOS variant md5skin_prevpos.comp), compiled to SPIR-V at build time and loaded via
+// LoadComputeShader so it needs no runtime shaderc (the old inline-string CreateComputeShader path
+// returned 0 on the Windows/mingw build + Proton, silently disabling GPU skinning). The comment below
+// documents the shared algorithm: one invocation per OUTPUT vertex, walking
 // that vertex's run in the EXPANDED weight stream (per-vertex start from wstart, terminator from
 // wi[].y). In a single loop it accumulates:
 //  * position — the full affine jointMat*scaledWeight, mirroring idJointMat::operator*(idVec4)
@@ -104,55 +108,8 @@ idCVar r_tessDeform( "r_tessDeform", "0", CVAR_RENDERER | CVAR_BOOL | CVAR_ARCHI
 //    — so it is opt-in and off by default.
 // The output SSBO is a raw idDrawVert float array (15 floats/vert); the kernel writes only the
 // animated fields (xyz, normal, tangents) and leaves st + color as CreateBuffer seeded them.
-static const char *MD5_SKIN_SRC =
-	"#version 450\n"
-	"layout(local_size_x = 64) in;\n"
-	"layout(std430, binding = 0) readonly buffer Joints   { float jm[]; };\n"
-	"layout(std430, binding = 1) readonly buffer Weights  { vec4 sw[]; };\n"
-	"layout(std430, binding = 2) readonly buffer WIndex   { ivec2 wi[]; };\n"
-	"layout(std430, binding = 3) readonly buffer WStart   { uint wstart[]; };\n"
-	"layout(std430, binding = 4)          buffer OutVert  { float v[]; };\n"
-	"layout(std430, binding = 5) readonly buffer LocalTBN { vec4 lt[]; };\n"
-	"#ifdef PREVPOS\n"							// skinned motion vectors: last frame's model-space position per vert
-	"layout(std430, binding = 6)          buffer PrevPos  { vec4 pp[]; };\n"
-	"#endif\n"
-	"layout(push_constant) uniform PC { uint numVerts; float skinScale; uint prevValid; } pc;\n"
-	"vec3 jrot( uint b, vec3 n ) {\n"		// rotate n by the joint's 3x3 (rows), no translation
-	"    return vec3( dot(vec3(jm[b+0u], jm[b+1u], jm[b+2u]),  n),\n"
-	"                 dot(vec3(jm[b+4u], jm[b+5u], jm[b+6u]),  n),\n"
-	"                 dot(vec3(jm[b+8u], jm[b+9u], jm[b+10u]), n) );\n"
-	"}\n"
-	"void main() {\n"
-	"    uint i = gl_GlobalInvocationID.x;\n"
-	"    if ( i >= pc.numVerts ) return;\n"
-	"    uint j = wstart[i];\n"
-	"    vec3 p = vec3(0.0), nrm = vec3(0.0), t0 = vec3(0.0), t1 = vec3(0.0);\n"
-	"    for ( int guard = 0; guard < 256; guard++ ) {\n"
-	"        int base = wi[j].x;\n"
-	"        vec4 w = sw[j];\n"
-	"        vec4 ws = vec4( w.xyz * pc.skinScale, w.w );\n"
-	"        p.x += dot( vec4(jm[base+0], jm[base+1], jm[base+2],  jm[base+3]),  ws );\n"
-	"        p.y += dot( vec4(jm[base+4], jm[base+5], jm[base+6],  jm[base+7]),  ws );\n"
-	"        p.z += dot( vec4(jm[base+8], jm[base+9], jm[base+10], jm[base+11]), ws );\n"
-	"        uint b = uint(base);\n"
-	"        nrm += w.w * jrot( b, lt[j*3u+0u].xyz );\n"
-	"        t0  += w.w * jrot( b, lt[j*3u+1u].xyz );\n"
-	"        t1  += w.w * jrot( b, lt[j*3u+2u].xyz );\n"
-	"        if ( wi[j].y == 1 ) break;\n"
-	"        j++;\n"
-	"    }\n"
-	"    nrm = normalize( nrm );  t0 = normalize( t0 );  t1 = normalize( t1 );\n"
-	"    uint o = i*15u;\n"
-	"#ifdef PREVPOS\n"							// what is in the output buffer right now IS last frame's pose
-	"    pp[i] = ( pc.prevValid != 0u ) ? vec4( v[o+0u], v[o+1u], v[o+2u], 1.0 ) : vec4( p, 1.0 );\n"
-	"#endif\n"
-	"    v[o+0u]=p.x;   v[o+1u]=p.y;   v[o+2u]=p.z;\n"		// st = v[o+3..4] (seeded, untouched)
-	"    v[o+5u]=nrm.x; v[o+6u]=nrm.y; v[o+7u]=nrm.z;\n"
-	"    v[o+8u]=t0.x;  v[o+9u]=t0.y;  v[o+10u]=t0.z;\n"
-	"    v[o+11u]=t1.x; v[o+12u]=t1.y; v[o+13u]=t1.z;\n"	// color = v[o+14] (seeded, untouched)
-	"}\n";
 
-// GPU re-derive + seam weld (r_gpuSkinDerive 1) — the SECOND skin pass, run after MD5_SKIN_SRC has
+// GPU re-derive + seam weld (r_gpuSkinDerive 1) — the SECOND skin pass (neo/shaders/md5derive.comp), run after md5skin.comp has
 // written every posed xyz. Per OUTPUT vertex:
 //   * tangent/bitangent: derived from the vertex's OWN dominant triangle on the posed positions, the
 //     exact arithmetic of idSIMD_SSE41::DeriveUnsmoothedTangents (DERIVE_UNSMOOTHED_BITANGENT variant;
@@ -164,50 +121,6 @@ static const char *MD5_SKIN_SRC =
 //     reduce to the plain per-vertex derive. This is what the bare 2026-08 derive lacked.
 // Reads only xyz + st (neither written here) and writes only normal/tangents, so invocations never
 // race though they read neighbour vertices. Overwrites the LBS bind TBN the position kernel wrote.
-static const char *MD5_DERIVE_SRC =
-	"#version 450\n"
-	"layout(local_size_x = 64) in;\n"
-	"layout(std430, binding = 0)          buffer OutVert     { float v[]; };\n"
-	"layout(std430, binding = 1) readonly buffer DomIdx      { uvec2 di[]; };\n"
-	"layout(std430, binding = 2) readonly buffer DomScale    { vec4  ds[]; };\n"
-	"layout(std430, binding = 3) readonly buffer WeldInfo    { uvec2 wi[]; };\n"	// {start, count} into wm
-	"layout(std430, binding = 4) readonly buffer WeldMembers { uint  wm[]; };\n"
-	"layout(push_constant) uniform PC { uint numVerts; uint doWeld; } pc;\n"
-	"vec3 derN( uint m ) {\n"					// m's bind-scaled face normal from its dominant tri (posed)
-	"    uint ma = m*15u, mb = di[m].x*15u, mc = di[m].y*15u;\n"
-	"    vec3 a  = vec3( v[ma], v[ma+1u], v[ma+2u] );\n"
-	"    vec3 db = vec3( v[mb], v[mb+1u], v[mb+2u] ) - a;\n"
-	"    vec3 dc = vec3( v[mc], v[mc+1u], v[mc+2u] ) - a;\n"
-	"    return ds[m].z * cross( dc, db );\n"
-	"}\n"
-	"void main() {\n"
-	"    uint i = gl_GlobalInvocationID.x;\n"
-	"    if ( i >= pc.numVerts ) return;\n"
-	"    uint ia = i*15u, ib = di[i].x*15u, ic = di[i].y*15u;\n"	// 15 floats per idDrawVert
-	"    vec3 a  = vec3( v[ia], v[ia+1u], v[ia+2u] );\n"
-	"    vec3 db = vec3( v[ib], v[ib+1u], v[ib+2u] ) - a;\n"
-	"    vec3 dc = vec3( v[ic], v[ic+1u], v[ic+2u] ) - a;\n"
-	"    float d4 = v[ib+4u] - v[ia+4u];\n"		// st[1] deltas (st = v[o+3..4])
-	"    float d9 = v[ic+4u] - v[ia+4u];\n"
-	"    vec3 nOwn = ds[i].z * cross( dc, db );\n"
-	"    vec3 t    = ds[i].x * ( d9 * db - d4 * dc );\n"
-	"    vec3 b    = ds[i].y * cross( t, nOwn );\n"	// bitangent from OWN normal (weld touches normal only)
-	// Weld ONLY when PN tessellation is active: it averages coincident-group normals to keep seams from
-	// tearing under subdivision, but with no angle gate that same averaging rounds a HARD EDGE at a UV/
-	// mirror seam into a visible shading cut. A non-tessellated draw has no crack to prevent, so there the
-	// bare per-vertex derive is kept -- bit-identical to the CPU skinner (R_DeriveUnsmoothedTangents, which
-	// likewise never welds). doWeld is set from r_tessellation / r_tessDeform per frame.
-	"    vec3 n = normalize( nOwn );\n"
-	"    if ( pc.doWeld != 0u ) {\n"
-	"        vec3 nsum = vec3( 0.0 );\n"
-	"        uint ws = wi[i].x, wc = wi[i].y;\n"
-	"        for ( uint k = 0u; k < wc; k++ ) { nsum += derN( wm[ws + k] ); }\n"
-	"        if ( dot( nsum, nsum ) > 1.0e-12 ) { n = normalize( nsum ); }\n"
-	"    }\n"
-	"    v[ia+5u]=n.x;  v[ia+6u]=n.y;  v[ia+7u]=n.z;\n"
-	"    v[ia+8u]=t.x;  v[ia+9u]=t.y;  v[ia+10u]=t.z;\n"
-	"    v[ia+11u]=b.x; v[ia+12u]=b.y; v[ia+13u]=b.z;\n"
-	"}\n";
 
 // Backend generation for the per-mesh GPU skin/tess buffers. Bumped on every full backend teardown
 // (R_MD5_ResetGpuShaders). A mesh stamps this at upload; when it no longer matches, that mesh's cached
@@ -230,9 +143,9 @@ idCVar r_skinnedMotionVectors( "r_skinnedMotionVectors", "1", CVAR_RENDERER | CV
 static rhi::ShaderHandle R_MD5_SkinShader( rhi::RHI *r ) {
 	if ( !r_md5SkinShaderTried ) {
 		r_md5SkinShaderTried = true;
-		r_md5SkinShader = r->CreateComputeShader( "cs_md5skin", MD5_SKIN_SRC );
+		r_md5SkinShader = r->LoadComputeShader( "md5skin" );	// build-time SPIR-V: no runtime shaderc, so it works on the Windows/mingw build + Proton
 		if ( r_md5SkinShader == 0 ) {
-			common->Printf( "gpuSkin: no compute lane (GL3, or the kernel failed to compile)\n" );
+			common->Printf( "gpuSkin: no compute lane (GL3, or the md5skin SPIR-V is missing)\n" );
 		}
 	}
 	return r_md5SkinShader;
@@ -243,9 +156,9 @@ static rhi::ShaderHandle R_MD5_SkinShader( rhi::RHI *r ) {
 static rhi::ShaderHandle R_MD5_DeriveShader( rhi::RHI *r ) {
 	if ( !r_md5DeriveShaderTried ) {
 		r_md5DeriveShaderTried = true;
-		r_md5DeriveShader = r->CreateComputeShader( "cs_md5derive", MD5_DERIVE_SRC );
+		r_md5DeriveShader = r->LoadComputeShader( "md5derive" );	// build-time SPIR-V (Windows/Proton-safe)
 		if ( r_md5DeriveShader == 0 ) {
-			common->Printf( "gpuSkin: tangent-derive kernel failed to compile -- falling back to baked bind TBN\n" );
+			common->Printf( "gpuSkin: tangent-derive kernel unavailable (md5derive SPIR-V missing) -- falling back to baked bind TBN\n" );
 		}
 	}
 	return r_md5DeriveShader;
@@ -266,9 +179,7 @@ static ID_INLINE idVec3 R_MD5_InvRotate( const float *m, const idVec3 &v ) {
 static rhi::ShaderHandle R_MD5_SkinPrevShader( rhi::RHI *r ) {
 	if ( !r_md5SkinPrevShaderTried ) {
 		r_md5SkinPrevShaderTried = true;
-		idStr src = MD5_SKIN_SRC;
-		src.Replace( "#version 450\n", "#version 450\n#define PREVPOS 1\n" );
-		r_md5SkinPrevShader = r->CreateComputeShader( "cs_md5skin_prevpos", src.c_str() );
+		r_md5SkinPrevShader = r->LoadComputeShader( "md5skin_prevpos" );	// PREVPOS variant, build-time SPIR-V (Windows/Proton-safe)
 	}
 	return r_md5SkinPrevShader;
 }
@@ -620,7 +531,7 @@ duplicates) gets its own contiguous run of weights, each entry carrying the join
 Replicating per output vertex is what lets mirror verts keep their own tangent handedness while
 sharing the source's joints. Uses a bind-pose R_DeriveTangents to get the model-space TBN, then
 undoes each contributing joint's bind rotation so the kernel can re-apply the current rotation.
-Vulkan only; see the kernel MD5_SKIN_SRC.
+Vulkan only; see the kernel in neo/shaders/md5skin.comp.
 ====================
 */
 static int R_MD5_UFFind( int *parent, int x ) {
@@ -1002,61 +913,6 @@ void idMD5Mesh::TransformScaledVerts( idDrawVert *verts, const idJointMat *entJo
 // normal + the displacement are ported bit-identically from neo/shaders/tess.glsl so the one
 // resulting buffer can feed every depth-EQUAL pass (B-2). st/normal/tangents are the linear
 // barycentric interpolation of the source corners (matching interaction.tese's flat interp).
-static const char *MD5_TESSDEFORM_SRC =
-	"#version 450\n"
-	"layout(local_size_x = 64) in;\n"
-	"layout(std430, binding = 0) readonly buffer SrcVerts { float sv[]; };\n"		// 15 floats/vert
-	"layout(std430, binding = 1) readonly buffer BarySeam { vec4 bs[]; };\n"		// (u,v,w, seam)
-	"layout(std430, binding = 2) readonly buffer SrcTri   { int   sti[]; };\n"		// 3 corner indices/vert
-	"layout(std430, binding = 3) readonly buffer Height   { float ht[]; };\n"		// relief scalar/vert
-	"layout(std430, binding = 4)          buffer OutVert  { float ov[]; };\n"		// 15 floats/vert
-	"layout(push_constant) uniform PC { uint numVerts; float dispStrength; } pc;\n"
-	"vec3 gPos( int v ) { uint o = uint(v)*15u; return vec3( sv[o],     sv[o+1u],  sv[o+2u]  ); }\n"
-	"vec2 gST(  int v ) { uint o = uint(v)*15u; return vec2( sv[o+3u],  sv[o+4u]             ); }\n"
-	"vec3 gNrm( int v ) { uint o = uint(v)*15u; return vec3( sv[o+5u],  sv[o+6u],  sv[o+7u]  ); }\n"
-	"vec3 gT0(  int v ) { uint o = uint(v)*15u; return vec3( sv[o+8u],  sv[o+9u],  sv[o+10u] ); }\n"
-	"vec3 gT1(  int v ) { uint o = uint(v)*15u; return vec3( sv[o+11u], sv[o+12u], sv[o+13u] ); }\n"
-	// dudeTessPN, verbatim from tess.glsl (op order preserved for bit-parity)
-	"vec3 dudeTessPN( vec3 p0, vec3 p1, vec3 p2, vec3 n0, vec3 n1, vec3 n2, vec3 tc ) {\n"
-	"    vec3 b300 = p0; vec3 b030 = p1; vec3 b003 = p2;\n"
-	"    vec3 b210 = ( 2.0 * p0 + p1 - dot( p1 - p0, n0 ) * n0 ) / 3.0;\n"
-	"    vec3 b120 = ( 2.0 * p1 + p0 - dot( p0 - p1, n1 ) * n1 ) / 3.0;\n"
-	"    vec3 b021 = ( 2.0 * p1 + p2 - dot( p2 - p1, n1 ) * n1 ) / 3.0;\n"
-	"    vec3 b012 = ( 2.0 * p2 + p1 - dot( p1 - p2, n2 ) * n2 ) / 3.0;\n"
-	"    vec3 b102 = ( 2.0 * p2 + p0 - dot( p0 - p2, n2 ) * n2 ) / 3.0;\n"
-	"    vec3 b201 = ( 2.0 * p0 + p2 - dot( p2 - p0, n0 ) * n0 ) / 3.0;\n"
-	"    vec3 e = ( b210 + b120 + b021 + b012 + b102 + b201 ) / 6.0;\n"
-	"    vec3 vmid = ( p0 + p1 + p2 ) / 3.0;\n"
-	"    vec3 b111 = e + ( e - vmid ) * 0.5;\n"
-	"    float a = tc.x, b = tc.y, c = tc.z;\n"
-	"    float a2 = a * a, b2 = b * b, c2 = c * c;\n"
-	"    return b300 * ( a2 * a ) + b030 * ( b2 * b ) + b003 * ( c2 * c )\n"
-	"         + b210 * ( 3.0 * a2 * b ) + b120 * ( 3.0 * a * b2 )\n"
-	"         + b021 * ( 3.0 * b2 * c ) + b012 * ( 3.0 * b * c2 )\n"
-	"         + b102 * ( 3.0 * a * c2 ) + b201 * ( 3.0 * a2 * c )\n"
-	"         + b111 * ( 6.0 * a * b * c );\n"
-	"}\n"
-	"void main() {\n"
-	"    uint i = gl_GlobalInvocationID.x;\n"
-	"    if ( i >= pc.numVerts ) return;\n"
-	"    int c0 = sti[i*3u+0u], c1 = sti[i*3u+1u], c2 = sti[i*3u+2u];\n"
-	"    vec3 p0 = gPos(c0), p1 = gPos(c1), p2 = gPos(c2);\n"
-	"    vec3 rn0 = gNrm(c0), rn1 = gNrm(c1), rn2 = gNrm(c2);\n"
-	"    vec3 n0 = normalize(rn0), n1 = normalize(rn1), n2 = normalize(rn2);\n"
-	"    vec3 bary = bs[i].xyz;\n"
-	"    vec3 pos = dudeTessPN( p0, p1, p2, n0, n1, n2, bary );\n"
-	"    vec3 geoN = normalize( n0 * bary.x + n1 * bary.y + n2 * bary.z );\n"
-	"    pos += geoN * ( ht[i] * pc.dispStrength );\n"
-	"    vec3 ot0 = gT0(c0) * bary.x + gT0(c1) * bary.y + gT0(c2) * bary.z;\n"
-	"    vec3 ot1 = gT1(c0) * bary.x + gT1(c1) * bary.y + gT1(c2) * bary.z;\n"
-	"    vec2 ost = gST(c0) * bary.x + gST(c1) * bary.y + gST(c2) * bary.z;\n"
-	"    uint o = i*15u;\n"
-	"    ov[o+0u]=pos.x;  ov[o+1u]=pos.y;  ov[o+2u]=pos.z;\n"
-	"    ov[o+3u]=ost.x;  ov[o+4u]=ost.y;\n"
-	"    ov[o+5u]=geoN.x; ov[o+6u]=geoN.y; ov[o+7u]=geoN.z;\n"
-	"    ov[o+8u]=ot0.x;  ov[o+9u]=ot0.y;  ov[o+10u]=ot0.z;\n"
-	"    ov[o+11u]=ot1.x; ov[o+12u]=ot1.y; ov[o+13u]=ot1.z;\n"		// color (float 14) left seeded
-	"}\n";
 
 static rhi::ShaderHandle r_md5TessShader = 0;
 static bool r_md5TessShaderTried = false;
@@ -1065,9 +921,9 @@ static bool r_md5TessShaderTried = false;
 static rhi::ShaderHandle R_MD5_TessShader( rhi::RHI *r ) {
 	if ( !r_md5TessShaderTried ) {
 		r_md5TessShaderTried = true;
-		r_md5TessShader = r->CreateComputeShader( "cs_md5tessdeform", MD5_TESSDEFORM_SRC );
+		r_md5TessShader = r->LoadComputeShader( "md5tessdeform" );	// build-time SPIR-V (Windows/Proton-safe)
 		if ( r_md5TessShader == 0 ) {
-			common->Printf( "tessDeform: no compute lane (GL3, or the kernel failed to compile)\n" );
+			common->Printf( "tessDeform: no compute lane (GL3, or the md5tessdeform SPIR-V is missing)\n" );
 		}
 	}
 	return r_md5TessShader;
@@ -1485,7 +1341,7 @@ void idMD5Mesh::UpdateSurface( const struct renderEntity_s *ent, const idJointMa
 		if ( !deriveActive && r_gpuSkinning.GetBool() && skinExpandLocalTBN && skinWeightStart && skinExpandWDesc
 		     && skinExpandWeights && skinExpandCount > 0 && numOutputVerts == deformInfo->numOutputVerts ) {
 			// EXACT decal-vs-body parity: reconstruct on the CPU the SAME LBS-of-welded-bind normal the
-			// GPU skin kernel (MD5_SKIN_SRC) writes into gpuSkinVB, and store it in tri->verts.normal --
+			// GPU skin kernel (md5skin.comp) writes into gpuSkinVB, and store it in tri->verts.normal --
 			// the source the blood decal copies (ModelOverlay.cpp). The geometry-derived R_DeriveTangents
 			// normal drifts a few degrees from the LBS normal on heavily-deforming multi-joint regions
 			// (shoulders/hands), and dudeTessPN bends the surface using ONLY corner normals, so that drift

@@ -1,0 +1,59 @@
+// MD5 GPU re-derive + seam weld (r_gpuSkinDerive 1) — loaded as "md5derive". The SECOND
+// skin pass, run after md5skin.comp has written every posed xyz. Build-time SPIR-V so it
+// needs no runtime shaderc (works on the mingw/Windows build + Proton). Do NOT add a
+// #version line: the Vulkan prelude supplies #version 460.
+//
+// Per OUTPUT vertex:
+//   * tangent/bitangent: derived from the vertex's OWN dominant triangle on the posed
+//     positions, the exact arithmetic of idSIMD_SSE41::DeriveUnsmoothedTangents
+//     (DERIVE_UNSMOOTHED_BITANGENT variant; normalizationScale carries the bind 1/len, so
+//     no runtime normalize). b = ds.y * (t x nOwn), from the vertex's OWN normal.
+//   * normal: the SUM of the derived unit normals of every member of this vertex's
+//     coincident group (dupVerts + mirror), then normalized -> coincident verts get one
+//     identical normal, so PN tessellation cannot tear them apart. Singletons reduce to
+//     the plain per-vertex derive.
+// Reads only xyz + st (neither written here) and writes only normal/tangents, so
+// invocations never race though they read neighbour vertices. Overwrites the LBS bind TBN
+// the position kernel wrote.
+layout(local_size_x = 64) in;
+layout(std430, binding = 0)          buffer OutVert     { float v[]; };
+layout(std430, binding = 1) readonly buffer DomIdx      { uvec2 di[]; };
+layout(std430, binding = 2) readonly buffer DomScale    { vec4  ds[]; };
+layout(std430, binding = 3) readonly buffer WeldInfo    { uvec2 wi[]; };	// {start, count} into wm
+layout(std430, binding = 4) readonly buffer WeldMembers { uint  wm[]; };
+layout(push_constant) uniform PC { uint numVerts; uint doWeld; } pc;
+vec3 derN( uint m ) {					// m's bind-scaled face normal from its dominant tri (posed)
+	uint ma = m*15u, mb = di[m].x*15u, mc = di[m].y*15u;
+	vec3 a  = vec3( v[ma], v[ma+1u], v[ma+2u] );
+	vec3 db = vec3( v[mb], v[mb+1u], v[mb+2u] ) - a;
+	vec3 dc = vec3( v[mc], v[mc+1u], v[mc+2u] ) - a;
+	return ds[m].z * cross( dc, db );
+}
+void main() {
+	uint i = gl_GlobalInvocationID.x;
+	if ( i >= pc.numVerts ) return;
+	uint ia = i*15u, ib = di[i].x*15u, ic = di[i].y*15u;	// 15 floats per idDrawVert
+	vec3 a  = vec3( v[ia], v[ia+1u], v[ia+2u] );
+	vec3 db = vec3( v[ib], v[ib+1u], v[ib+2u] ) - a;
+	vec3 dc = vec3( v[ic], v[ic+1u], v[ic+2u] ) - a;
+	float d4 = v[ib+4u] - v[ia+4u];		// st[1] deltas (st = v[o+3..4])
+	float d9 = v[ic+4u] - v[ia+4u];
+	vec3 nOwn = ds[i].z * cross( dc, db );
+	vec3 t    = ds[i].x * ( d9 * db - d4 * dc );
+	vec3 b    = ds[i].y * cross( t, nOwn );	// bitangent from OWN normal (weld touches normal only)
+	// Weld ONLY when PN tessellation is active: it averages coincident-group normals to keep seams
+	// from tearing under subdivision, but with no angle gate that same averaging rounds a HARD EDGE
+	// at a UV/mirror seam into a visible shading cut. A non-tessellated draw has no crack to prevent,
+	// so there the bare per-vertex derive is kept -- bit-identical to the CPU skinner. doWeld is set
+	// from r_tessellation / r_tessDeform per frame.
+	vec3 n = normalize( nOwn );
+	if ( pc.doWeld != 0u ) {
+		vec3 nsum = vec3( 0.0 );
+		uint ws = wi[i].x, wc = wi[i].y;
+		for ( uint k = 0u; k < wc; k++ ) { nsum += derN( wm[ws + k] ); }
+		if ( dot( nsum, nsum ) > 1.0e-12 ) { n = normalize( nsum ); }
+	}
+	v[ia+5u]=n.x;  v[ia+6u]=n.y;  v[ia+7u]=n.z;
+	v[ia+8u]=t.x;  v[ia+9u]=t.y;  v[ia+10u]=t.z;
+	v[ia+11u]=b.x; v[ia+12u]=b.y; v[ia+13u]=b.z;
+}
