@@ -1,0 +1,3 @@
+// MD5 GPU skin kernel — build-time SPIR-V entry, no PREVPOS (loaded as "md5skin").
+// The kernel body is shared with the skinned-motion-vector variant; see md5skin_body.glsl.
+#include "md5skin_body.glsl"

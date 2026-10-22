@@ -1,0 +1,64 @@
+// MD5 GPU tessellation deform-once kernel (r_tessDeform) — loaded as "md5tessdeform".
+// Build-time SPIR-V so it needs no runtime shaderc (works on the mingw/Windows build +
+// Proton). Do NOT add a #version line: the Vulkan prelude supplies #version 460.
+//
+// One thread per OUTPUT (tessellated) vertex: reads the baked source-corner verts
+// (binding 0), the per-vertex barycentric + seam (binding 1), the source-corner output
+// indices (binding 2) and the CPU-sampled displacement relief (binding 3); writes the PN
+// + displaced vertex (binding 4). dudeTessPN + the geometric normal + the displacement
+// are ported bit-identically from neo/shaders/tess.glsl so the one resulting buffer can
+// feed every depth-EQUAL pass. st/normal/tangents are the linear barycentric interpolation
+// of the source corners (matching interaction.tese's flat interp).
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) readonly buffer SrcVerts { float sv[]; };	// 15 floats/vert
+layout(std430, binding = 1) readonly buffer BarySeam { vec4 bs[]; };	// (u,v,w, seam)
+layout(std430, binding = 2) readonly buffer SrcTri   { int   sti[]; };	// 3 corner indices/vert
+layout(std430, binding = 3) readonly buffer Height   { float ht[]; };	// relief scalar/vert
+layout(std430, binding = 4)          buffer OutVert  { float ov[]; };	// 15 floats/vert
+layout(push_constant) uniform PC { uint numVerts; float dispStrength; } pc;
+vec3 gPos( int v ) { uint o = uint(v)*15u; return vec3( sv[o],     sv[o+1u],  sv[o+2u]  ); }
+vec2 gST(  int v ) { uint o = uint(v)*15u; return vec2( sv[o+3u],  sv[o+4u]             ); }
+vec3 gNrm( int v ) { uint o = uint(v)*15u; return vec3( sv[o+5u],  sv[o+6u],  sv[o+7u]  ); }
+vec3 gT0(  int v ) { uint o = uint(v)*15u; return vec3( sv[o+8u],  sv[o+9u],  sv[o+10u] ); }
+vec3 gT1(  int v ) { uint o = uint(v)*15u; return vec3( sv[o+11u], sv[o+12u], sv[o+13u] ); }
+// dudeTessPN, verbatim from tess.glsl (op order preserved for bit-parity)
+vec3 dudeTessPN( vec3 p0, vec3 p1, vec3 p2, vec3 n0, vec3 n1, vec3 n2, vec3 tc ) {
+	vec3 b300 = p0; vec3 b030 = p1; vec3 b003 = p2;
+	vec3 b210 = ( 2.0 * p0 + p1 - dot( p1 - p0, n0 ) * n0 ) / 3.0;
+	vec3 b120 = ( 2.0 * p1 + p0 - dot( p0 - p1, n1 ) * n1 ) / 3.0;
+	vec3 b021 = ( 2.0 * p1 + p2 - dot( p2 - p1, n1 ) * n1 ) / 3.0;
+	vec3 b012 = ( 2.0 * p2 + p1 - dot( p1 - p2, n2 ) * n2 ) / 3.0;
+	vec3 b102 = ( 2.0 * p2 + p0 - dot( p0 - p2, n2 ) * n2 ) / 3.0;
+	vec3 b201 = ( 2.0 * p0 + p2 - dot( p2 - p0, n0 ) * n0 ) / 3.0;
+	vec3 e = ( b210 + b120 + b021 + b012 + b102 + b201 ) / 6.0;
+	vec3 vmid = ( p0 + p1 + p2 ) / 3.0;
+	vec3 b111 = e + ( e - vmid ) * 0.5;
+	float a = tc.x, b = tc.y, c = tc.z;
+	float a2 = a * a, b2 = b * b, c2 = c * c;
+	return b300 * ( a2 * a ) + b030 * ( b2 * b ) + b003 * ( c2 * c )
+	     + b210 * ( 3.0 * a2 * b ) + b120 * ( 3.0 * a * b2 )
+	     + b021 * ( 3.0 * b2 * c ) + b012 * ( 3.0 * b * c2 )
+	     + b102 * ( 3.0 * a * c2 ) + b201 * ( 3.0 * a2 * c )
+	     + b111 * ( 6.0 * a * b * c );
+}
+void main() {
+	uint i = gl_GlobalInvocationID.x;
+	if ( i >= pc.numVerts ) return;
+	int c0 = sti[i*3u+0u], c1 = sti[i*3u+1u], c2 = sti[i*3u+2u];
+	vec3 p0 = gPos(c0), p1 = gPos(c1), p2 = gPos(c2);
+	vec3 rn0 = gNrm(c0), rn1 = gNrm(c1), rn2 = gNrm(c2);
+	vec3 n0 = normalize(rn0), n1 = normalize(rn1), n2 = normalize(rn2);
+	vec3 bary = bs[i].xyz;
+	vec3 pos = dudeTessPN( p0, p1, p2, n0, n1, n2, bary );
+	vec3 geoN = normalize( n0 * bary.x + n1 * bary.y + n2 * bary.z );
+	pos += geoN * ( ht[i] * pc.dispStrength );
+	vec3 ot0 = gT0(c0) * bary.x + gT0(c1) * bary.y + gT0(c2) * bary.z;
+	vec3 ot1 = gT1(c0) * bary.x + gT1(c1) * bary.y + gT1(c2) * bary.z;
+	vec2 ost = gST(c0) * bary.x + gST(c1) * bary.y + gST(c2) * bary.z;
+	uint o = i*15u;
+	ov[o+0u]=pos.x;  ov[o+1u]=pos.y;  ov[o+2u]=pos.z;
+	ov[o+3u]=ost.x;  ov[o+4u]=ost.y;
+	ov[o+5u]=geoN.x; ov[o+6u]=geoN.y; ov[o+7u]=geoN.z;
+	ov[o+8u]=ot0.x;  ov[o+9u]=ot0.y;  ov[o+10u]=ot0.z;
+	ov[o+11u]=ot1.x; ov[o+12u]=ot1.y; ov[o+13u]=ot1.z;	// color (float 14) left seeded
+}
