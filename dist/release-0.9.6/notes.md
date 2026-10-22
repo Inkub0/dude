@@ -74,13 +74,6 @@ Vulkan presets render exactly what they did in 0.9.5.
   no longer occlude the bake.
 - **GPU skinning**: the seam weld is decoupled from lighting (crack-free and cut-free), with a
   toggle in the GPU Offload settings group.
-- **Windows / Proton: animated characters no longer smear.** The MD5 GPU-skinning compute kernels
-  were runtime-compiled on first use, which needs a shader compiler the Windows build doesn't ship —
-  so GPU skinning silently stayed off there, and without it skinned characters wrote no motion
-  vectors and smeared/ghosted under the temporal passes (RT denoiser, FSR2) while the static world
-  stayed sharp. Those kernels are now compiled to SPIR-V at build time and embedded like every other
-  shader, so GPU skinning and skinned motion vectors work on the Windows/Proton build too. (Linux was
-  unaffected.)
 
 ### Emissive Mode — experimental, shipping OFF (incomplete)
 
