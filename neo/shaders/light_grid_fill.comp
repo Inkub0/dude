@@ -90,9 +90,14 @@ void main() {
 			// hogged the slots of every cell near their edge and a room's own fixture rows were evicted (the alcoves that
 			// died as the reach grew, 2026-10-20). Floored at the cell's half-diagonal so a cell containing the light ranks
 			// it at full strength; a light whose volume only grazes the cell still ranks by the cell centre's distance.
-			float rad  = max( lights.l[ li ].radius, 1.0 );
-			float dd   = max( length( center - lights.l[ li ].pos ) - cellHalfDiag, 0.0 );
-			imp = lum * max( 1.0 - dd / rad, 0.0 );
+			// Measured against the light's CULL SPHERE (the volume the in-range test above admitted it by), NOT pos/radius:
+			// a projected spot's radius is the 320 fallback (spots do not use light_radius) and a light_center light's pos is
+			// off its box, so pos/radius ranked part of the real volume at exactly 0 and the `imp <= 0` skip below DROPPED an
+			// in-range light from a cell with free slots - whole floor patches lost their light under DI (the hell cage bars,
+			// 2026-10-22). The small floor keeps every in-range light a candidate: the rank only ORDERS, so a cell with free
+			// slots keeps its whole in-range set, and a full cell still evicts its rim-of-volume lights first.
+			float dd   = max( length( center - cull.xyz ) - cellHalfDiag, 0.0 );
+			imp = lum * max( 1.0 - dd / max( cull.w, 1.0 ), 0.02 );
 		} else {
 			float rad  = max( lights.l[ li ].radius, 1.0 );
 			vec3  pd   = center - lights.l[ li ].pos;

@@ -6083,7 +6083,9 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 		L.color[0] = col[0]; L.color[1] = col[1]; L.color[2] = col[2];
 		L.flags = ( ld->parms.parallel ? 1u : 0u )				// bit0 = parallel/sun (no distance falloff)
 		        | ( ld->parms.pointLight ? 0u : 2u )			// bit1 = projected (spot) light: falloff runs along the frustum axis
-		        | ( ld->parms.noShadows ? 4u : 0u )				// bit2 = casts no shadows in stock: volumetrics skip its visibility ray
+		        | ( ( ld->parms.noShadows || !ls->LightCastsShadows() ) ? 4u : 0u )	// bit2 = casts no shadows in stock (the entity's
+		                                                                        // noshadows OR a light material that casts none, as the forward
+		                                                                        // path's lightMayShadow): DI / volumetrics skip its visibility ray
 		        | ( ld->parms.allowLightInViewID ? 8u : 0u )	// bit3 = first-person weapon light (flashlight, muzzle flash)
 		        | ( diFast ? 32u : 0u );						// bit5 = fast-changing: ReSTIR DI skips it, the forward path lights it
 		{
@@ -6131,7 +6133,18 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 			if ( liveStage != NULL && liveStage->texture.image != NULL && liveStage->texture.image->type == TT_2D
 					&& liveStage->texture.cinematic == NULL ) {
 				L.projTex = RB_RHI_LightImageIndex( liveStage->texture.image );
-				if ( L.projTex != 0 && liveStage->texture.hasMatrix && cregs != NULL ) {
+				// Bake the stage's texture matrix ONLY into a zero-clamped cookie. The consumer (rt_light_tex.glsl)
+				// treats s/t outside [0,1] as black - exact for a CLAMP_TO_ZERO cookie, where a scroll/rotate really
+				// moves its black border - but a REPEATING cookie (lights/cloudscroll*: no zeroClamp, "translate
+				// time * .03") tiles forever: baked, its time-growing offset pushed the WHOLE box outside [0,1] after
+				// ~30 s and the light went dark everywhere under DI / GI bounce / reflections / haze (hell1's red
+				// cave wash, 2026-10-22). Unbaked, s/t stay the light box's own [0,1] (an exact box clip) and the
+				// cookie lights its whole volume; the trade-off is a static pattern (no spare room in the 128 B row
+				// to carry the offset separately).
+				const textureRepeat_t cookieWrap = liveStage->texture.image->repeat;
+				const bool cookieZeroClamped = cookieWrap == TR_CLAMP_TO_ZERO || cookieWrap == TR_CLAMP_TO_ZERO_ALPHA
+					|| cookieWrap == TR_CLAMP_TO_BORDER;
+				if ( L.projTex != 0 && liveStage->texture.hasMatrix && cregs != NULL && cookieZeroClamped ) {
 					float texMat[16];
 					RB_GetShaderTextureMatrix( cregs, &liveStage->texture, texMat );
 					RB_RHI_BakeLightTextureMatrix( L.proj, texMat );
