@@ -22,6 +22,15 @@ for every release.
 libstdc++/libgcc/shaderc static, RUNPATH `$ORIGIN/lib`. **Never ship `build/dude`
 (the dev build) in a release** — it needs the host's rolling-release glibc.
 
+**Always build a release with `-c` (clean) when a shader was added or renamed since the
+last build.** Both scripts reconfigure CMake only when their build dir has no cache, and
+the SPIR-V/embed steps key off a `file(GLOB)` captured at configure time — so an
+incremental rebuild silently omits new `.comp`/`.vert`/… from the embedded table. The
+binary then builds fine but runs without those shaders (e.g. the GPU-skinning kernels went
+missing on Windows this way, disabling skinned motion vectors). `./build-win.sh -c` and
+`./build-linux-release.sh -c` wipe and reconfigure. Verify (see below) that any new shader
+is embedded: `strings <bin> | grep spv/<name>`.
+
 Sanity — BOTH binaries, EVERY release (a stale sandbox build once shipped without
 the embedded shaders → black screen on GL3/VK):
 
