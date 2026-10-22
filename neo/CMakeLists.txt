@@ -53,6 +53,7 @@ option(CORE			"Build the core" ON)
 option(BASE			"Build the base game code" ON)
 option(D3XP			"Build the d3xp game code" ON)
 option(D3LE			"Build the d3le (The Lost Mission) game code" ON)
+option(NULLGAME		"Build the null game (spectator-only game library, see docs/quake4-port.md)" ON)
 if(MSVC)
 	option(TOOLS		"Build the tools game code (Visual Studio+SDL2/SDL3 only)" OFF)
 endif()
@@ -941,6 +942,7 @@ set(src_framework
 	framework/EventLoop.cpp
 	framework/File.cpp
 	framework/FileSystem.cpp
+	framework/GameTitle.cpp
 	framework/ModCvarTranslation.cpp
 	framework/KeyInput.cpp
 	framework/UsercmdGen.cpp
@@ -1772,6 +1774,28 @@ if(D3LE AND NOT HARDLINK_GAME)
 
 	if(NOT APPLE AND NOT WIN32)
 		install(TARGETS d3le
+				RUNTIME DESTINATION "${bindir}"
+				LIBRARY DESTINATION "${libdir}"
+				ARCHIVE DESTINATION "${libdir}"
+		)
+	endif()
+endif()
+
+# DUDE: the null game - a spectator-only game library (nullgame.so). It renders and flies
+# through any title's maps with no gameplay: the fallback for a game title whose own game
+# library is not built yet (Quake 4), and on request with +set fs_game nullgame.
+if(NULLGAME AND NOT HARDLINK_GAME AND NOT AROS)
+	set(src_nullgame nullgame/NullGame.cpp)
+	add_library(nullgame SHARED ${src_nullgame})
+	source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} PREFIX neo FILES ${src_nullgame})
+	set_target_properties(nullgame PROPERTIES PREFIX "")
+	set_target_properties(nullgame PROPERTIES COMPILE_DEFINITIONS "GAME_DLL")
+	set_target_properties(nullgame PROPERTIES LINK_FLAGS "${ldflags}")
+	set_target_properties(nullgame PROPERTIES INSTALL_NAME_DIR "@executable_path")
+	target_link_libraries(nullgame idlib)
+
+	if(NOT APPLE AND NOT WIN32)
+		install(TARGETS nullgame
 				RUNTIME DESTINATION "${bindir}"
 				LIBRARY DESTINATION "${libdir}"
 				ARCHIVE DESTINATION "${libdir}"

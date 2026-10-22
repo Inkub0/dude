@@ -30,6 +30,7 @@ If you have questions concerning this license or the applicable additional terms
 #include "idlib/CmdArgs.h"
 #include "framework/async/AsyncNetwork.h"
 #include "framework/Licensee.h"
+#include "framework/GameTitle.h"
 #include "framework/UsercmdGen.h"
 #include "renderer/tr_local.h"
 #include "sys/win32/rc/CreateResourceIDs.h"
@@ -484,7 +485,7 @@ bool Sys_GetPath(sysPath_t type, idStr &path) {
 			path.StripFilename();
 
 			s = path;
-			s.AppendPath(BASE_GAMEDIR);
+			s.AppendPath(GameTitle::Get().baseGameDir);	// DUDE: per game title
 			if (_stat(s.c_str(), &st) != -1 && (st.st_mode & _S_IFDIR)) {
 				common->Warning("using path of executable: %s", path.c_str());
 				return true;

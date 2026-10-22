@@ -32,6 +32,13 @@ If you have questions concerning this license or the applicable additional terms
 
 #define FILESIZE_fontInfo_t (20548)
 
+// DUDE: Raven's Quake 4 font sheet, <font>_<pt>.fontdat. 256 glyphs of 9 little-endian
+// float32 (imageWidth, imageHeight, horiAdvance, horiBearingX, horiBearingY, s, t, s2, t2),
+// then pointSize, fontHeight, ascender, descender (float32) and 4 bytes of padding. Every
+// glyph samples the one image <font>_<pt>.tga. Layout read from the retail files
+// (docs/quake4-port.md section 1.1); metrics are fractional pixels.
+#define FILESIZE_ravenFontInfo_t	( GLYPHS_PER_FONT * 9 * 4 + 5 * 4 )	// 9236
+
 #ifdef BUILD_FREETYPE
 #include "../ft2/fterrors.h"
 #include "../ft2/ftsystem.h"
@@ -260,6 +267,68 @@ float readFloat( void ) {
 
 /*
 ============
+R_ParseRavenFontSheet
+
+DUDE: fills one point size of a font from a Quake 4 .fontdat already in fdFile. Raven's
+metrics map onto id's glyph fields: horiAdvance is the advance (xSkip), horiBearingY the
+height above the baseline (top), horiBearingX the new left bearing; the bitmap size is
+both the drawn quad (imageWidth/Height) and the glyph height. Returns the tallest glyph
+and widest advance, rounded up to whole pixels, for the font's layout metrics.
+============
+*/
+static void R_ParseRavenFontSheet( const char *fontName, int pointSize, fontInfo_t *outFont, int &maxHeight, int &maxWidth ) {
+	const idMaterial *sheet = declManager->FindMaterial( va( "%s_%i.tga", fontName, pointSize ) );
+	sheet->SetSort( SS_GUI );
+
+	const char *leaf = fontName;
+	for ( const char *c = fontName; *c; c++ ) {
+		if ( *c == '/' || *c == '\\' ) {
+			leaf = c + 1;
+		}
+	}
+
+	float mh = 0.0f, mw = 0.0f;
+	for ( int i = 0; i < GLYPHS_PER_FONT; i++ ) {
+		glyphInfo_t &g = outFont->glyphs[i];
+		const float width		= readFloat();
+		const float height		= readFloat();
+		const float advance		= readFloat();
+		const float bearingX	= readFloat();
+		const float bearingY	= readFloat();
+		g.s				= readFloat();
+		g.t				= readFloat();
+		g.s2			= readFloat();
+		g.t2			= readFloat();
+		g.imageWidth	= width;
+		g.imageHeight	= height;
+		g.height		= height;
+		g.top			= bearingY;
+		g.bottom		= height - bearingY;
+		g.pitch			= width;
+		g.xSkip			= advance;
+		g.left			= bearingX;
+		g.glyph			= sheet;
+		idStr::snPrintf( g.shaderName, sizeof( g.shaderName ), "%s_%i.tga", leaf, pointSize );
+		if ( i < GLYPH_END ) {			// same range id's loader measures
+			mh = Max( mh, height );
+			mw = Max( mw, advance );
+		}
+	}
+
+	const float filePointSize = readFloat();	// then fontHeight, ascender, descender, padding: unused
+	if ( idMath::Fabs( filePointSize - pointSize ) > 0.5f ) {
+		common->Warning( "RegisterFont: '%s_%i.fontdat' says it is %g pt", fontName, pointSize, filePointSize );
+	}
+
+	// id's sheets carry glyphScale in the file; Raven's do not. It is the same
+	// 48 / point size id uses (the GUI is authored against the 48 pt sheet).
+	outFont->glyphScale = 48.0f / pointSize;
+	maxHeight = (int)ceilf( mh );
+	maxWidth = (int)ceilf( mw );
+}
+
+/*
+============
 RegisterFont
 
 Loads 3 point sizes, 12, 24, and 48
@@ -316,6 +385,18 @@ bool idRenderSystemLocal::RegisterFont( const char *fontName, fontInfoEx_t &font
 
 		idStr::snPrintf( name, sizeof(name), "%s/fontImage_%i.dat", fontName, pointSize );
 
+		// DUDE: id's fontImage_<pt>.dat first; if it is not there, Raven's Quake 4 layout
+		bool ravenFormat = false;
+		len = fileSystem->ReadFile( name, NULL, &ftime );
+		if ( len != FILESIZE_fontInfo_t ) {
+			char ravenName[1024];
+			idStr::snPrintf( ravenName, sizeof(ravenName), "%s_%i.fontdat", fontName, pointSize );
+			if ( fileSystem->ReadFile( ravenName, NULL, &ftime ) == FILESIZE_ravenFontInfo_t ) {
+				idStr::Copynz( name, ravenName, sizeof( name ) );
+				ravenFormat = true;
+			}
+		}
+
 		fontInfo_t *outFont;
 		if ( fontCount == 0 ) {
 			outFont = &font.fontInfoSmall;
@@ -330,14 +411,32 @@ bool idRenderSystemLocal::RegisterFont( const char *fontName, fontInfoEx_t &font
 		idStr::Copynz( outFont->name, name, sizeof( outFont->name ) );
 
 		len = fileSystem->ReadFile( name, NULL, &ftime );
-		if ( len != FILESIZE_fontInfo_t ) {
-			common->Warning( "RegisterFont: couldn't find font: '%s'", name );
+		if ( len != ( ravenFormat ? FILESIZE_ravenFontInfo_t : FILESIZE_fontInfo_t ) ) {
+			common->Warning( "RegisterFont: couldn't find font: '%s' (nor %s_%i.fontdat)", name, fontName, pointSize );
 			return false;
 		}
 
 		fileSystem->ReadFile( name, &faceData, &ftime );
 		fdOffset = 0;
 		fdFile = reinterpret_cast<unsigned char*>(faceData);
+
+		if ( ravenFormat ) {
+			int mh = 0, mw = 0;
+			R_ParseRavenFontSheet( fontName, pointSize, outFont, mh, mw );
+			if ( fontCount == 0 ) {
+				font.maxWidthSmall = mw;
+				font.maxHeightSmall = mh;
+			} else if ( fontCount == 1 ) {
+				font.maxWidthMedium = mw;
+				font.maxHeightMedium = mh;
+			} else {
+				font.maxWidthLarge = mw;
+				font.maxHeightLarge = mh;
+			}
+			fileSystem->FreeFile( faceData );
+			continue;
+		}
+
 		for( i = 0; i < GLYPHS_PER_FONT; i++ ) {
 			outFont->glyphs[i].height		= readInt();
 			outFont->glyphs[i].top			= readInt();
@@ -350,6 +449,7 @@ bool idRenderSystemLocal::RegisterFont( const char *fontName, fontInfoEx_t &font
 			outFont->glyphs[i].t			= readFloat();
 			outFont->glyphs[i].s2			= readFloat();
 			outFont->glyphs[i].t2			= readFloat();
+			outFont->glyphs[i].left			= 0.0f;		// DUDE: id fonts have no bearing
 			/* font.glyphs[i].glyph			= */ readInt();
 			//FIXME: the +6, -6 skips the embedded fonts/
 			memcpy( outFont->glyphs[i].shaderName, &fdFile[fdOffset + 6], 32 - 6 );
@@ -363,11 +463,12 @@ bool idRenderSystemLocal::RegisterFont( const char *fontName, fontInfoEx_t &font
 			idStr::snPrintf(name, sizeof(name), "%s/%s", fontName, outFont->glyphs[i].shaderName);
 			outFont->glyphs[i].glyph = declManager->FindMaterial(name);
 			outFont->glyphs[i].glyph->SetSort( SS_GUI );
+			// DUDE: metrics are float now; id's are whole pixels, so this is exact
 			if (mh < outFont->glyphs[i].height) {
-				mh = outFont->glyphs[i].height;
+				mh = (int)outFont->glyphs[i].height;
 			}
 			if (mw < outFont->glyphs[i].xSkip) {
-				mw = outFont->glyphs[i].xSkip;
+				mw = (int)outFont->glyphs[i].xSkip;
 			}
 		}
 		if (fontCount == 0) {

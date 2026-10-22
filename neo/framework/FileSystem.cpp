@@ -54,6 +54,7 @@ If you have questions concerning this license or the applicable additional terms
 #include "framework/DeclManager.h"
 
 #include "framework/FileSystem.h"
+#include "framework/GameTitle.h"
 #include "framework/ModCvarTranslation.h"
 
 /*
@@ -872,17 +873,19 @@ const char *idFileSystemLocal::OSPathToRelativePath( const char *OSPath ) {
 	// "//Purgatory/purgatory/doom/base/models/mapobjects/bitch/hologirl.tga"
 	// which won't match any of our drive letter based search paths
 	// look for the first complete directory name
-	base = strstr( OSPath, BASE_GAMEDIR );
+	// DUDE: the active title's base folder (base/ for Doom 3, q4base/ for Quake 4)
+	const char *baseGameDir = GameTitle::Get().baseGameDir;
+	base = strstr( OSPath, baseGameDir );
 	while ( base ) {
 		char c1 = '\0', c2;
 		if ( base > OSPath ) {
 			c1 = *(base - 1);
 		}
-		c2 = *( base + strlen( BASE_GAMEDIR ) );
+		c2 = *( base + strlen( baseGameDir ) );
 		if ( ( c1 == '/' || c1 == '\\' ) && ( c2 == '/' || c2 == '\\' ) ) {
 			break;
 		}
-		base = strstr( base + 1, BASE_GAMEDIR );
+		base = strstr( base + 1, baseGameDir );
 	}
 
 	// fs_game and fs_game_base support - look for first complete name with a mod path
@@ -1843,7 +1846,7 @@ idModList *idFileSystemLocal::ListMods( void ) {
 
 		dirs.Remove( "." );
 		dirs.Remove( ".." );
-		dirs.Remove( "base" );
+		dirs.Remove( GameTitle::Get().baseGameDir );
 		dirs.Remove( "pb" );
 
 		// see if there are any pk4 files in each directory
@@ -1889,7 +1892,7 @@ idModList *idFileSystemLocal::ListMods( void ) {
 	}
 
 	list->mods.Insert( "" );
-	list->descriptions.Insert( "Doom 3 (base game)" );
+	list->descriptions.Insert( va( "%s (base game)", GameTitle::Get().displayName ) );
 
 	// DG: if installed, add d3xp with useful description, right below the base game
 	if ( HasD3XP() ) {
@@ -2287,7 +2290,7 @@ void idFileSystemLocal::InstallGuiOverrides( const char *gameName ) {
 	// Mods based on d3xp/base are treated as DUDE-friendly.
 	const char *activeMod = fs_game.GetString();
 	const bool foreignMod = activeMod[0]
-		&& idStr::Icmp( activeMod, BASE_GAMEDIR ) != 0
+		&& idStr::Icmp( activeMod, GameTitle::Get().baseGameDir ) != 0
 		&& idStr::Icmp( activeMod, "d3xp" ) != 0;
 
 	idStr srcDir = BuildOSPath( base, gameName, "guis" );
@@ -2431,17 +2434,19 @@ void idFileSystemLocal::Startup( void ) {
 		common->Printf( "restarting filesystem with %d addon pak file(s) to include\n", addonChecksums.Num() );
 	}
 
-	SetupGameDirectories( BASE_GAMEDIR );
+	// DUDE: the active title's base folder (GameTitle), base/ for Doom 3
+	const char *baseGameDir = GameTitle::Get().baseGameDir;
+	SetupGameDirectories( baseGameDir );
 
 	// fs_game_base override
 	if ( fs_game_base.GetString()[0] &&
-		 idStr::Icmp( fs_game_base.GetString(), BASE_GAMEDIR ) ) {
+		 idStr::Icmp( fs_game_base.GetString(), baseGameDir ) ) {
 		SetupGameDirectories( fs_game_base.GetString() );
 	}
 
 	// fs_game override
 	if ( fs_game.GetString()[0] &&
-		 idStr::Icmp( fs_game.GetString(), BASE_GAMEDIR ) &&
+		 idStr::Icmp( fs_game.GetString(), baseGameDir ) &&
 		 idStr::Icmp( fs_game.GetString(), fs_game_base.GetString() ) ) {
 		SetupGameDirectories( fs_game.GetString() );
 	}
@@ -2904,6 +2909,11 @@ void idFileSystemLocal::Init( void ) {
 	common->StartupVariable( "fs_copyfiles", false );
 	common->StartupVariable( "fs_restrict", false );
 	common->StartupVariable( "fs_searchAddons", false );
+	common->StartupVariable( "com_title", false );
+
+	// DUDE: decide which game we are running before anything looks for its folder:
+	// Sys_GetPath(PATH_BASE) and Startup() both ask the title for its base folder.
+	GameTitle::Select( fs_basepath.GetString() );
 
 	idStr path;
 	if (fs_basepath.GetString()[0] == '\0' && Sys_GetPath(PATH_BASE, path))
@@ -2960,8 +2970,10 @@ void idFileSystemLocal::Init( void ) {
 
 	if ( ReadFile( "default.cfg", NULL, NULL ) <= 0 ) {
 		// DG: the demo gamedata is in demo/ instead of base/. to make it "just work", add a fallback for that
-		if(fs_game.GetString()[0] == '\0' || idStr::Icmp(fs_game.GetString(), BASE_GAMEDIR) == 0) {
-			common->Warning("Couldn't find default.cfg in %s/, trying again with demo/\n", BASE_GAMEDIR);
+		// DUDE: only Doom 3 has a demo/ layout; other titles go straight to the fatal error
+		const gameTitleProfile_t &title = GameTitle::Get();
+		if( title.doom3Layout && ( fs_game.GetString()[0] == '\0' || idStr::Icmp(fs_game.GetString(), title.baseGameDir) == 0 ) ) {
+			common->Warning("Couldn't find default.cfg in %s/, trying again with demo/\n", title.baseGameDir);
 			fs_game.SetString("demo");
 			fs_game_base.SetString("demo");
 			Restart();
@@ -2970,7 +2982,8 @@ void idFileSystemLocal::Init( void ) {
 			// busted and error out now, rather than getting an unreadable
 			// graphics screen when the font fails to load
 			// Dedicated servers can run with no outside files at all
-			common->FatalError( "Couldn't load default.cfg" );
+			common->FatalError( "Couldn't load default.cfg from %s/ (game title %s, fs_basepath '%s')",
+				title.baseGameDir, title.name, fs_basepath.GetString() );
 		}
 	}
 }
@@ -4060,6 +4073,12 @@ bool idFileSystemLocal::HasD3XP( void ) {
 		return false;
 	} else if ( d3xp == 1 ) {
 		return true;
+	}
+
+	// DUDE: Resurrection of Evil is a Doom 3 expansion; never report it for another title
+	if ( !GameTitle::Get().doom3Layout ) {
+		d3xp = -1;
+		return false;
 	}
 
 #if 0

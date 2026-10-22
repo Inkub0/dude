@@ -30,6 +30,7 @@ If you have questions concerning this license or the applicable additional terms
 #include "idlib/geometry/DrawVert.h"
 
 #include "ui/DeviceContext.h"
+#include "framework/GameTitle.h"
 
 idVec4 idDeviceContext::colorPurple;
 idVec4 idDeviceContext::colorOrange;
@@ -85,7 +86,9 @@ void idDeviceContext::SetupFonts() {
 	}
 
 	// Default font has to be added first
-	FindFont( "fonts" );
+	// DUDE: per game title - "fonts" (fonts/<lang>/fontImage_*.dat) for Doom 3,
+	// "fonts/chain" (fonts/<lang>/chain_*.fontdat) for Quake 4
+	FindFont( GameTitle::Get().defaultFont );
 }
 
 void idDeviceContext::SetFont( int num ) {
@@ -100,7 +103,9 @@ void idDeviceContext::SetFont( int num ) {
 void idDeviceContext::Init() {
 	xScale = 0.0;
 	SetSize(VIRTUAL_WIDTH, VIRTUAL_HEIGHT);
-	whiteImage = declManager->FindMaterial("guis/assets/white.tga");
+	// DUDE: GUI fill + cursor/scrollbar art live under different names per game title
+	const gameTitleProfile_t &title = GameTitle::Get();
+	whiteImage = declManager->FindMaterial( title.guiWhiteMaterial );
 	whiteImage->SetSort( SS_GUI );
 	mbcs = false;
 	SetupFonts();
@@ -114,15 +119,15 @@ void idDeviceContext::Init() {
 	colorWhite = idVec4(1, 1, 1, 1);
 	colorBlack = idVec4(0, 0, 0, 1);
 	colorNone = idVec4(0, 0, 0, 0);
-	cursorImages[CURSOR_ARROW] = declManager->FindMaterial("ui/assets/guicursor_arrow.tga");
-	cursorImages[CURSOR_HAND] = declManager->FindMaterial("ui/assets/guicursor_hand.tga");
-	scrollBarImages[SCROLLBAR_HBACK] = declManager->FindMaterial("ui/assets/scrollbarh.tga");
-	scrollBarImages[SCROLLBAR_VBACK] = declManager->FindMaterial("ui/assets/scrollbarv.tga");
-	scrollBarImages[SCROLLBAR_THUMB] = declManager->FindMaterial("ui/assets/scrollbar_thumb.tga");
-	scrollBarImages[SCROLLBAR_RIGHT] = declManager->FindMaterial("ui/assets/scrollbar_right.tga");
-	scrollBarImages[SCROLLBAR_LEFT] = declManager->FindMaterial("ui/assets/scrollbar_left.tga");
-	scrollBarImages[SCROLLBAR_UP] = declManager->FindMaterial("ui/assets/scrollbar_up.tga");
-	scrollBarImages[SCROLLBAR_DOWN] = declManager->FindMaterial("ui/assets/scrollbar_down.tga");
+	cursorImages[CURSOR_ARROW] = declManager->FindMaterial( va( "%sguicursor_arrow.tga", title.guiArtPrefix ) );
+	cursorImages[CURSOR_HAND] = declManager->FindMaterial( va( "%sguicursor_hand.tga", title.guiArtPrefix ) );
+	scrollBarImages[SCROLLBAR_HBACK] = declManager->FindMaterial( va( "%sscrollbarh.tga", title.guiArtPrefix ) );
+	scrollBarImages[SCROLLBAR_VBACK] = declManager->FindMaterial( va( "%sscrollbarv.tga", title.guiArtPrefix ) );
+	scrollBarImages[SCROLLBAR_THUMB] = declManager->FindMaterial( va( "%sscrollbar_thumb.tga", title.guiArtPrefix ) );
+	scrollBarImages[SCROLLBAR_RIGHT] = declManager->FindMaterial( va( "%sscrollbar_right.tga", title.guiArtPrefix ) );
+	scrollBarImages[SCROLLBAR_LEFT] = declManager->FindMaterial( va( "%sscrollbar_left.tga", title.guiArtPrefix ) );
+	scrollBarImages[SCROLLBAR_UP] = declManager->FindMaterial( va( "%sscrollbar_up.tga", title.guiArtPrefix ) );
+	scrollBarImages[SCROLLBAR_DOWN] = declManager->FindMaterial( va( "%sscrollbar_down.tga", title.guiArtPrefix ) );
 	cursorImages[CURSOR_ARROW]->SetSort( SS_GUI );
 	cursorImages[CURSOR_HAND]->SetSort( SS_GUI );
 	scrollBarImages[SCROLLBAR_HBACK]->SetSort( SS_GUI );
@@ -899,7 +904,8 @@ int idDeviceContext::DrawText(float x, float y, float scale, idVec4 color, const
 				continue;
 			} else {
 				float yadj = useScale * glyph->top;
-				PaintChar(x,y - yadj,glyph->imageWidth,glyph->imageHeight,useScale,glyph->s,glyph->t,glyph->s2,glyph->t2,glyph->glyph);
+				// DUDE: + left bearing (Raven fonts; always 0 for id fonts)
+				PaintChar(x + useScale * glyph->left,y - yadj,glyph->imageWidth,glyph->imageHeight,useScale,glyph->s,glyph->t,glyph->s2,glyph->t2,glyph->glyph);
 
 				if (cursor == count) {
 					DrawEditCursor(x, y, scale);
@@ -1118,7 +1124,8 @@ int idDeviceContext::CharWidth( const char c, float scale ) {
 }
 
 int idDeviceContext::TextWidth( const char *text, float scale, int limit ) {
-	int i, width;
+	int i;
+	float width;	// DUDE: float - Raven fonts have fractional advances (id's sum exactly)
 
 	SetFontByScale( scale );
 	const glyphInfo_t *glyphs = useFont->glyphs;
@@ -1284,7 +1291,7 @@ void idDeviceContext::DrawEditCursor( float x, float y, float scale ) {
 	float useScale = scale * useFont->glyphScale;
 	const glyphInfo_t *glyph2 = &useFont->glyphs[overStrikeMode ? int('_') : int('|')];
 	float	yadj = useScale * glyph2->top;
-	PaintChar(x, y - yadj,glyph2->imageWidth,glyph2->imageHeight,useScale,glyph2->s,glyph2->t,glyph2->s2,glyph2->t2,glyph2->glyph);
+	PaintChar(x + useScale * glyph2->left, y - yadj,glyph2->imageWidth,glyph2->imageHeight,useScale,glyph2->s,glyph2->t,glyph2->s2,glyph2->t2,glyph2->glyph);
 }
 
 int idDeviceContext::DrawText( const char *text, float textScale, int textAlign, idVec4 color, idRectangle rectDraw, bool wrap, int cursor, bool calcOnly, idList<int> *breaks, int limit ) {

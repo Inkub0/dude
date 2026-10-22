@@ -50,6 +50,7 @@ If you have questions concerning this license or the applicable additional terms
 #include "framework/KeyInput.h"
 #include "framework/EventLoop.h"
 #include "framework/ModCvarTranslation.h"
+#include "framework/GameTitle.h"
 #include "renderer/Image.h"
 #include "renderer/Model.h"
 #include "renderer/ModelManager.h"
@@ -2740,9 +2741,10 @@ void idCommonLocal::PrintLoadingMessage( const char *msg ) {
 			renderSystem->DrawStretchPic( 0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, 0, 0, 1, 1, declManager->FindMaterial( "_black" ) );
 		}
 	}
-	renderSystem->DrawStretchPic( x, y, w, h, 0, 0, 1, 1, declManager->FindMaterial( "splashScreen" ) );
+	const gameTitleProfile_t &title = GameTitle::Get();
+	renderSystem->DrawStretchPic( x, y, w, h, 0, 0, 1, 1, declManager->FindMaterial( title.splashMaterial ) );
 	int len = strlen( msg );
-	renderSystem->DrawSmallStringExt( ( 640 - len * SMALLCHAR_WIDTH ) / 2, 410, msg, idVec4( 0.0f, 0.81f, 0.94f, 1.0f ), true, declManager->FindMaterial( "textures/bigchars" ) );
+	renderSystem->DrawSmallStringExt( ( 640 - len * SMALLCHAR_WIDTH ) / 2, 410, msg, idVec4( 0.0f, 0.81f, 0.94f, 1.0f ), true, declManager->FindMaterial( title.charsetMaterial ) );
 	renderSystem->EndFrame( NULL, NULL );
 }
 
@@ -3087,9 +3089,13 @@ void idCommonLocal::LoadGameDLL( void ) {
 	gameExport_t	gameExport;
 	GetGameAPI_t	GetGameAPI;
 
+	// DUDE: the base game library is named after the active title's base folder
+	// (base.so for Doom 3, q4base.so for Quake 4) - see GameTitle
+	const gameTitleProfile_t &title = GameTitle::Get();
+
 	fs_game = cvarSystem->GetCVarString("fs_game");
 	if (!fs_game || !fs_game[0])
-		fs_game = BASE_GAMEDIR;
+		fs_game = title.baseGameDir;
 
 	gameDLL = 0;
 
@@ -3113,8 +3119,18 @@ void idCommonLocal::LoadGameDLL( void ) {
 		}
 
 		if ( !gameDLL ) {
-			sys->DLL_GetFileName(BASE_GAMEDIR, dll, sizeof(dll));
-			LoadGameDLLbyName(dll, BASE_GAMEDIR, s);
+			sys->DLL_GetFileName(title.baseGameDir, dll, sizeof(dll));
+			LoadGameDLLbyName(dll, title.baseGameDir, s);
+		}
+
+		// DUDE: a title whose own game library is not built yet still boots, with the
+		// spectator-only null game, so the engine side (loaders, decls, GUIs, effects)
+		// can be brought up and tested ahead of the game code.
+		if ( !gameDLL && title.nullGameFallback ) {
+			common->Warning( "%s game library %s is not available - running the null game "
+							 "(free-fly spectator, no gameplay)\n", title.displayName, dll );
+			sys->DLL_GetFileName(GAME_NULL_LIBRARY, dll, sizeof(dll));
+			LoadGameDLLbyName(dll, NULL, s);
 		}
 	}
 

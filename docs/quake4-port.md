@@ -1,6 +1,7 @@
 # Quake 4 on DUDE — milestone plan (draft 2026-10-15)
 
-Status: PLAN / for review. No engine code yet. Goal: **DUDE runs the retail Quake 4 (2005,
+Status (2026-10-22): **Q0 done; Q1 built on `feat/quake4-title-profile`, awaiting the user's
+gate run** (§6). Goal: **DUDE runs the retail Quake 4 (2005,
 Raven Software, idTech4) single-player campaign natively** — its own `q4base/*.pk4` assets,
 its own game logic, on DUDE's GL3 and Vulkan backends, with DUDE's enhancement tiers
 (PBR, tessellation, RT) available as opt-in on top. Multiplayer is out of scope for v1 (§9).
@@ -46,7 +47,7 @@ decisions the plan hinged on were taken by the user on 2026-10-15 and are record
   14.7 k new lines** (10.8 k of them BSE). Expect the same order of magnitude here.
 - **One `dude` executable for every supported title** (decision, §9). A runtime title profile
   (§5.1) picks the base directory, config, decl set and the per-title game library —
-  `q4game.so` beside today's `game.so` / `d3xp.so` / `d3le.so` — exactly as `fs_game` does now.
+  `q4base.so` beside today's `base.so` / `d3xp.so` / `d3le.so` — exactly as `fs_game` does now.
   No separate Quake 4 binary, no compile-time title macros.
 - **Game logic exists in source**: SDK 1.4.2 = `game/` + `mpgame/` + `idlib/` source and
   engine headers (`bse/` ships only `BSEInterface.h`). Steam 1.4.3 differs from 1.4.2 only in
@@ -278,7 +279,7 @@ Settle this before any SDK code is touched; it decides what lives in the DUDE re
 2. **The game library lives in a separate repository** (`dude-quake4-game`, working name):
    SDK `game/` + `idlib/` + the interface headers, DUDE's adaptation patches applied, the EULA
    RTF attached, README stating non-commercial terms. That is the §5-permitted form and the
-   OpenQ4 precedent. It `#include`s DUDE's public headers and builds `q4game.so`/`.dll`
+   OpenQ4 precedent. It `#include`s DUDE's public headers and builds `q4base.so`/`.dll`
    against them. The DUDE repository ships only `tools/quake4/build-q4game.sh` that clones/
    builds it, and documentation.
 3. The engine ↔ game boundary stays the existing `GetGameAPI` C ABI (`neo/framework/Game.h`),
@@ -317,16 +318,30 @@ detection) and `Session_menu.cpp`. Quake 4's base dir is `q4base`, its config
 `Quake4Config.cfg`, its cvar defaults differ (`r_varmegs`, `bse_*`, `g_playerLean`, `si_fps`
 90, …), and it has no `d3xp`.
 
-Introduce a **runtime title profile** (`idTitleProfile`, one struct), selected by
+Introduce a **runtime title profile** (as built: `gameTitleProfile_t` in
+`neo/framework/GameTitle.{h,cpp}`), selected by
 `+set com_title quake4` or auto-detected from the pak set at `fs_basepath`
 (`q4base/pak001.pk4` present → Quake 4). Raven's own constants, for reference: `BASE_GAMEDIR
 "q4base"`, `BASE_MPGAMEDIR "q4mp"` (since 1.4 MP runs as `fs_game q4mp`), `CONFIG_FILE
 "Quake4Config.cfg"`, `DEFAULT_BASE_PATH "/usr/local/games/quake4"`. The profile also owns the
 **entity-filter map command** (`map game/process1 first` → `si_entityFilter`, passed to the game
-and stored in saves) and the engine-selected loading screens (`guis/loading/generic.gui` for SP). It carries: base game dir, config name
-(`dude-q4.cfg`), save dir (`~/.local/share/dude/q4base`), game-library stem (`q4game`), the
-decl folders/types to register (§5.2), default cvar overrides, the expected pak set for a
-sanity check, and the "faithful floor" preset. Doom 3 keeps profile `doom3` with all current
+and stored in saves) and the engine-selected loading screens (`guis/loading/generic.gui` for SP).
+
+**As built in Q1:** the profile carries the base game folder (which is also the base game
+library stem: `base.so` for Doom 3, `q4base.so` for Quake 4, so no separate name is needed),
+a probe file for autodetection (`base/pak000.pk4`, `q4base/pak001.pk4`), whether the Doom 3
+`base/` + `d3xp/` + `demo/` conventions apply (RoE detection, the demo fallback, the mod
+list), whether a missing game library falls back to the null game (Quake 4: yes, Doom 3: no),
+and the engine-owned asset names that differ per title: console charset (`textures/bigchars`
+vs `gfx/2d/bigchars`), splash (`splashScreen` vs `gfx/splashScreen`), GUI fill
+(`guis/assets/white.tga` vs `_white`), GUI cursor/scrollbar art (`ui/assets/` vs `gfx/guis/`),
+default GUI font (`fonts` vs `fonts/chain`, OpenQ4's choice), stats-overlay font (`fonts/bank`
+vs `fonts/profont`) and loading screen (`guis/map/loading.gui` vs `guis/loading/generic.gui`).
+Config and saves need no renaming: both are already per game folder, so Quake 4 lands in
+`~/.config/dude/q4base/dude.cfg` and `~/.local/share/dude/q4base/`. Selection happens once in
+`idFileSystemLocal::Init`, before the per-OS base-path probe, which now looks for the active
+title's folder. Later phases add the decl folders/types (Q2), default cvar overrides and the
+"faithful floor" preset (Q7). Doom 3 keeps profile `doom3` with all current
 behaviour — **zero change for existing users**. idTech4A++ does this with compile-time
 `_RAVEN`/`_QUAKE4` macros and separate binaries; the user's decision (§9) is **one `dude`
 binary for every title**: one executable, one settings system, the profile chosen at startup,
@@ -496,14 +511,23 @@ particles do today).
    rewrite to DUDE's headers, idlib shim, interface adaptations per §5.4, `GetGameAPI` export
    matching DUDE's `GAME_API_VERSION`. Keep them mechanical; behavioural adaptations go into
    DUDE's engine side, where they are GPL.
-3. CMake: a `q4game` SHARED target whose include path is DUDE's `neo/` — never the reverse.
-4. Output `q4game.so`/`.dll` next to `build/dude`; `LoadGameDLLbyName` already searches next
+3. CMake: a SHARED target whose include path is DUDE's `neo/` — never the reverse.
+4. Output `q4base.so`/`.dll` (named after the title's base folder, like `base.so`) next to
+   `build/dude`; `LoadGameDLLbyName` already searches next
    to the binary first (how `d3le.so` is found today).
 
 ### 5.7 The null game (engine, GPL, small, high leverage)
 
 A ~400-line `nullgame` library implementing `idGame` with a free-flying spectator camera and
-nothing else. It validates every engine-side phase (§6) **without** the SDK — load any
+nothing else. **As built in Q1:** `neo/nullgame/NullGame.cpp`, CMake option `NULLGAME`
+(default ON), output `build/nullgame.so`. It parses the `.map` only to start the camera at the
+first player start, flies with the normal movement keys (run doubles the speed), places the
+sound listener, renders the session's world with a hor+ 90 degree view, and offers
+`getviewpos` / `setviewpos`. Every `idGameEdit` method is stubbed because the engine calls some
+outside the editors (GUI `renderDef` windows, the worldspawn lookup at map load). It loads
+automatically when a title allows it and its own library is missing (Quake 4 until Q5), or on
+request with `+set fs_game nullgame` on any title. Collision loading is added in Q3, once the
+`.cm 3` loader exists. It validates every engine-side phase (§6) **without** the SDK — load any
 title's map, render it, play effects with `testEffect`, exercise loaders and parsers, run the
 smoke harness (§7) — and stays as a permanent diagnostics tool for Doom 3 itself.
 
@@ -516,15 +540,15 @@ a **gate** that is automated or a user-verified run — nothing advances on "it 
 
 | # | Phase | Scope | Gate | Est. |
 |---|---|---|---|---|
-| Q0 | **Preparation** | Decisions taken (§9, done); set up the separate game repository from an SDK mirror (or from `openQ4-game`, already modernised and EULA-attached, with credit); clone idTech4A++ / OpenQ4 for reference; `tools/quake4/` audit (done); provenance + credits rules written into both repos' READMEs; branch `feat/quake4-title-profile` | Trees on disk; credits section started | 0.5 |
-| Q1 | **Title profile + boot** | §5.1 profile; `.fontdat` loader; profile-driven decl registration; `run-q4.sh` (`+set com_title quake4 +set fs_basepath "<Quake 4 dir>"`); null game | `./run-q4.sh` boots on both backends, lists the 36 paks, draws the console with the Quake 4 fonts, `exec default.cfg` runs without errors | 1 |
+| Q0 | **Preparation** — **DONE 2026-10-22** | Decisions taken (§9); reference trees cloned outside the repo to `~/quake4-refs/` as blobless sparse checkouts (idTech4A++ `ce49510` 39 MB, OpenQ4 `29c8103` 123 MB, SDK mirror `Xanz/Quake4SDK` `5077f68` 14 MB; the mirror dropped its EULA, OpenQ4 carries it in `LICENSES/QUAKE-4-SDK-EULA.rtf`); `tools/quake4/` audit. The separate game repository moves to Q5, where it is first needed: `openQ4-game` was archived on 2026-10-01 and its code now lives in OpenQ4's `src/game` / `src/mpgame` | Trees on disk | 0.5 |
+| Q1 | **Title profile + boot** — **BUILT 2026-10-22, gate pending** | §5.1 profile; `.fontdat` loader (float glyph metrics + left bearing, Doom 3 fonts unchanged); `run-q4.sh` (Steam library autodetect or `Q4DIR`, then `+set com_title quake4 +set fs_basepath "<Quake 4 dir>"`); null game. Decl registration moved to Q2, where the new decl types land: Quake 4 uses the same `materials/`, `skins/` and `sound/` folders Doom 3 registers, so Q1 had nothing to change there | `./run-q4.sh` boots on both backends, lists the 36 paks, draws the console with the Quake 4 fonts, `exec default.cfg` runs without errors | 1 |
 | Q2 | **Decl/material/GUI/sound parity** | §5.2 guide preprocessor, keywords, new decl types, EFX mapping, UI API additions | `lintDecls` (new console cmd) reports **0 errors** over 110 mtr / 301 gui / 174 sndshd / 1180 fx / 87 lipsync / 14 playback; `mainmenu.gui` renders and is navigable (user screenshot) | 2 |
 | Q3 | **World formats** | §5.3 `.map 3` (incl. `func_group` resolve + entity filter), `.proc 4` (incl. coloured verts, portal fade data), `.cm 3`, `.aas 1.08` (incl. dummy-file detection); collision API additions | Null game loads **all 31 SP maps** and renders them; `cm`/`aas` self-checks (counts match file headers); user screenshot of `airdefense1` on GL3 and VK | 1.5–2 |
 | Q4 | **BSE effects** | §5.5: own implementation from grammar + docs, decompile-derived code as last-resort reference, re-expressed in our C++ | All 1180 effects parse; `testEffect` plays each particle type; `bseSweep` plays every effect once without errors; user visual check of ~20 representative effects vs retail; OpenQ4 parity data passes where applicable | **5–7** |
 | Q5 | **Game library** | §5.4 interfaces (API 37 union, render/sound/collision/decl/UI additions), §5.6 repo + build script, idlib shim, `playback`/`lipSync` consumers, `rvClientEffect` bridge, ASAN pass | `airdefense1` **playable**: spawn, HUD, weapons, AI, scripts, triggers, VO + lipsync, cinematic (`md5camera`), save + load round-trip; transition to `airdefense2` | 5–7 |
 | Q6 | **Campaign pass** | Per-map issue log seeded from idTech4A++'s fixes (§4); vehicles (`convoy1/2`, `walker`), tram (`tram1/1b`), MCC sequences, Strogg-ification (`medlabs`), hub, `core1/2` ending; difficulty, objectives, loading screens | User completes the campaign start to finish on one backend, then the other; every logged issue closed or explicitly deferred | 3–5 |
 | Q7 | **DUDE enhancements on Quake 4** | Presets (Potato = faithful); PBR classifier calibration on Raven textures; parallax/tess gating; RT: world + animated BLAS from Q4 content, RTAO/RTGI/ReSTIR DI tiers; FSR2 motion vectors for BSE; perf pass (`r_vkGpuTime`) | Ultra Nightmare runs `airdefense1` within ±25 % of the Doom 3 reference budget; fidelity-note policy applied to every new toggle; user screenshots per tier | 2–3 |
-| Q8 | **Packaging** | Steam/GOG path auto-detect; Windows cross-build of the engine (`build-win.sh`) and `q4game.dll` via the same script under mingw; README/docs; release notes; `dist/` layout as 0.9.x | Clean-machine install test on Linux + Windows following only the README | 1–2 |
+| Q8 | **Packaging** | Steam/GOG path auto-detect inside the engine (Q1's `run-q4.sh` already scans Steam libraries); ship `nullgame.so`/`.dll` with the release (`build-win.sh` already copies every `.dll`; check `build-linux-release.sh`); Windows cross-build of the engine (`build-win.sh`) and `q4base.dll` via the same script under mingw; README/docs; release notes; `dist/` layout as 0.9.x | Clean-machine install test on Linux + Windows following only the README | 1–2 |
 | Q9 | **Later / optional** | Multiplayer (`mpgame`, `q4mp` paks, bots), Q4 mods (Awakening, Hardqore — OpenQ4/idTech4A++ run them), Prey (2006) via the same title profile | — | — |
 
 Total for v1 (Q0–Q8): **~22–30 person-weeks**. Q4 (BSE) and Q5 (game library) touch disjoint
@@ -586,8 +610,8 @@ Every layer is checkable independently of the layers above it. Build these as yo
 ## 9. Decisions taken (user, 2026-10-15)
 
 1. **One executable for all supported games.** Implemented as the runtime title profile
-   (§5.1): a single `dude` binary; the per-title game library (`game.so`, `d3xp.so`,
-   `d3le.so`, `q4game.so`) is selected by the profile the way `fs_game` selects it today. No
+   (§5.1): a single `dude` binary; the per-title game library (`base.so`, `d3xp.so`,
+   `d3le.so`, `q4base.so`) is selected by the profile the way `fs_game` selects it today. No
    per-title binaries, no compile-time title macros.
 2. **BSE and the decompile-derived code.** DUDE writes its own BSE from the file grammar, the
    SDK interface header and the public docs. The decompile-derived implementations are used
