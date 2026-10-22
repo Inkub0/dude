@@ -464,7 +464,9 @@ void idProjectile::Think( void ) {
 	}
 
 	// add the light
-	if ( renderLight.lightRadius.x > 0.0f && g_projectileLights.GetBool() ) {
+	// DUDE: a fly light marked "dude_extra_light" (restored / added by DUDE) only shows with g_extraLights
+	if ( renderLight.lightRadius.x > 0.0f && g_projectileLights.GetBool()
+		&& ( g_extraLights.GetBool() || !spawnArgs.GetBool( "dude_extra_light" ) ) ) {
 		renderLight.origin = GetPhysics()->GetOrigin() + GetPhysics()->GetAxis() * lightOffset;
 		renderLight.axis = GetPhysics()->GetAxis();
 		if ( ( lightDefHandle != -1 ) ) {
@@ -849,6 +851,10 @@ void idProjectile::Explode( const trace_t &collision, idEntity *ignore ) {
 
 	// explosion light
 	light_shader = spawnArgs.GetString( "mtr_explode_light_shader" );
+	// DUDE: an explode light marked "dude_extra_explode_light" (restored by DUDE) only shows with g_extraLights
+	if ( !g_extraLights.GetBool() && spawnArgs.GetBool( "dude_extra_explode_light" ) ) {
+		light_shader = "";
+	}
 	if ( *light_shader ) {
 		renderLight.shader = declManager->FindMaterial( light_shader, false );
 		renderLight.pointLight = true;

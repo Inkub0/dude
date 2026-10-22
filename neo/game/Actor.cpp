@@ -538,6 +538,14 @@ void idActor::Spawn( void ) {
 	while ( kv ) {
 		idDict args;
 
+		// DUDE: an attachment marked "dude_extra_light" (e.g. the lost-soul fire light) is only
+		// spawned with g_extraLights, so 0 keeps the classic look
+		const idDict *attachDef = gameLocal.FindEntityDefDict( kv->GetValue().c_str(), false );
+		if ( attachDef != NULL && attachDef->GetBool( "dude_extra_light" ) && !g_extraLights.GetBool() ) {
+			kv = spawnArgs.MatchPrefix( "def_attach", kv );
+			continue;
+		}
+
 		args.Set( "classname", kv->GetValue().c_str() );
 
 		// make items non-touchable so the player can't take them out of the character's hands

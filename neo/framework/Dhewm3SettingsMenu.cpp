@@ -2052,6 +2052,13 @@ static CVarOption lightingOptions[] = {
 	// value is 1.0; lower to dampen, 0 to switch them off. Works on all backends
 	// but lives here as the deviate-from-vanilla knob.
 	CVarOption( "r_flareSize", "Light Flare / Glare Size", OT_FLOAT, 0.0f, 2.0f ),
+};
+
+// "New Light Effects": light effects vanilla Doom 3 never had - added light sources (screens, pickups,
+// extra dynamic lights), skin subsurface scattering, and Volumetric Lighting (hand-drawn after these in
+// DrawEnhGroup_NewLightEffects) - as opposed to the Lighting group above, which changes how the existing
+// lights shade. Each one defaults to the classic look.
+static CVarOption newLightOptions[] = {
 	CVarOption( "r_emissiveSurfaces", []( idCVar& cvar ) {
 		bool enable = cvar.GetBool();
 		if ( ImGui::Checkbox( "Emissive Surfaces Cast Light", &enable ) ) {
@@ -2061,6 +2068,18 @@ static CVarOption lightingOptions[] = {
 			"so they read as decals pasted on an unlit wall. This lets them bleed a small,\n"
 			"content-tinted fill light onto nearby geometry. Fine-tuning lives in the Debugging tab.";
 		AddCVarOptionTooltips( cvar, descr );
+	} ),
+	// the fill light's brightness, moved here from Debugging > Emissive Surfaces (the finer knobs stay there)
+	CVarOption( "r_emissiveLightScale", []( idCVar& cvar ) {
+		ImGui::BeginDisabled( !r_emissiveSurfaces.GetBool() );
+		float f = cvar.GetFloat();
+		if ( ImGui::SliderFloat( "Emissive Light Intensity", &f, 0.0f, 4.0f, "%.2f", 0 ) ) {
+			cvar.SetFloat( idMath::ClampFloat( 0.0f, 4.0f, f ) );
+		}
+		AddCVarOptionTooltips( cvar, "Brightness of the fill light a glowing screen casts. 0 = off, 0.50 = default, higher = a strong glow." );
+		ImGui::SameLine();
+		if ( ImGui::SmallButton( "reset##emscale" ) ) { cvar.Reset(); }
+		ImGui::EndDisabled();
 	} ),
 	CVarOption( "r_itemGlow", []( idCVar& cvar ) {
 		float f = cvar.GetFloat();
@@ -2094,6 +2113,20 @@ static CVarOption lightingOptions[] = {
 			"a soft red instead of cutting off hard and plastic-looking. Keyed off the material\n"
 			"classifier's skin/flesh tags (no per-map setup) and works on every tier, not just PBR.\n"
 			"Purely a look; strength and reach are tuned in the Debugging tab.";
+		AddCVarOptionTooltips( cvar, descr );
+	} ),
+	// g_extraLights is a GAME cvar (defined in base/d3xp/d3le game code); found by name at menu init like
+	// g_decals. It gates every def tagged "dude_extra_light" / "dude_extra_explode_light".
+	CVarOption( "g_extraLights", []( idCVar& cvar ) {
+		bool enable = cvar.GetBool();
+		if ( ImGui::Checkbox( "Extra Dynamic Lights", &enable ) ) {
+			cvar.SetBool( enable );
+		}
+		const char* descr = "Lights the classic game left out: the lost souls' burning skulls, and the in-flight\n"
+			"and impact lights id wrote but commented out for the plasma gun, the sentry bot's plasma\n"
+			"tracer and the Guardian's fireball (the mancubus fireball borrows the imp's light).\n"
+			"Projectile lights apply from the next shot; monster lights from the next level load\n"
+			"(a loaded savegame keeps the monsters it was saved with).";
 		AddCVarOptionTooltips( cvar, descr );
 	} ),
 };
@@ -2358,6 +2391,7 @@ static CVarOption particleOptions[] = {
 // collapsible category. Init()/DrawOptions() recurse into each group's child array.
 static CVarOption enhancementOptions[] = {
 	CVarOption( "Lighting", nullptr, lightingOptions, IM_ARRAYSIZE( lightingOptions ) ),
+	CVarOption( "New Light Effects", nullptr, newLightOptions, IM_ARRAYSIZE( newLightOptions ) ),
 	CVarOption( "Tessellation (only Vulkan)", "r_tessellation", tessellationOptions, IM_ARRAYSIZE( tessellationOptions ),
 		"GPU PN-triangle tessellation that rounds the low-poly silhouettes of animated\n"
 		"characters (enemies, NPCs). Vulkan only - the OpenGL backend's GL 3.3 context has\n"
@@ -3462,6 +3496,41 @@ static void DrawEnhGroup_Lighting()
 {
 	if ( BeginSettingsGroup( "Lighting" ) ) {
 		DrawOptions( lightingOptions, IM_ARRAYSIZE( lightingOptions ) );
+		EndSettingsGroup();
+	}
+}
+
+static void DrawEnhGroup_Tessellation()
+{
+	if ( BeginSettingsGroup( "Tessellation (only Vulkan)", &r_tessellation,
+			"GPU PN-triangle tessellation that rounds the low-poly silhouettes of animated\n"
+			"characters (enemies, NPCs). Vulkan only - the OpenGL backend's GL 3.3 context has\n"
+			"no tessellation stages, so this does nothing there. Static props are left flat on\n"
+			"purpose (PN inflates hard-surface geometry). Off = vanilla.\n"
+			"(Fine-tuning: Min Triangle Size lives in the Debugging tab.)" ) ) {
+		DrawOptions( tessellationOptions, IM_ARRAYSIZE( tessellationOptions ) );
+		EndSettingsGroup();
+	}
+}
+
+static void DrawEnhGroup_SurfaceRelief()
+{
+	if ( BeginSettingsGroup( "Surface Relief (Parallax)", &r_parallax,
+			"Per-pixel surface relief on world walls, floors and panels: a height field is\n"
+			"taken from each material's authored height map, or built from its normal map\n"
+			"when the normal carries the detail, then marched to fake real depth. Opaque\n"
+			"world (BSP) geometry only - props and characters are left to Tessellation,\n"
+			"where parallax would deform their curved surfaces. Takes effect on the next\n"
+			"map load. Off = vanilla." ) ) {
+		DrawOptions( parallaxOptions, IM_ARRAYSIZE( parallaxOptions ) );
+		EndSettingsGroup();
+	}
+}
+
+static void DrawEnhGroup_NewLightEffects()
+{
+	if ( BeginSettingsGroup( "New Light Effects" ) ) {
+		DrawOptions( newLightOptions, IM_ARRAYSIZE( newLightOptions ) );
 
 		// Volumetric lighting (docs/volumetric-lighting.md). Same idiom as the Shadows / Ambient Occlusion /
 		// Reflections groups' RT sections: greyed on the legacy/GL3 backend and non-RT GPUs, where the cvars
@@ -3514,33 +3583,6 @@ static void DrawEnhGroup_Lighting()
 
 			ImGui::EndDisabled();	// !rtCapable
 		}
-		EndSettingsGroup();
-	}
-}
-
-static void DrawEnhGroup_Tessellation()
-{
-	if ( BeginSettingsGroup( "Tessellation (only Vulkan)", &r_tessellation,
-			"GPU PN-triangle tessellation that rounds the low-poly silhouettes of animated\n"
-			"characters (enemies, NPCs). Vulkan only - the OpenGL backend's GL 3.3 context has\n"
-			"no tessellation stages, so this does nothing there. Static props are left flat on\n"
-			"purpose (PN inflates hard-surface geometry). Off = vanilla.\n"
-			"(Fine-tuning: Min Triangle Size lives in the Debugging tab.)" ) ) {
-		DrawOptions( tessellationOptions, IM_ARRAYSIZE( tessellationOptions ) );
-		EndSettingsGroup();
-	}
-}
-
-static void DrawEnhGroup_SurfaceRelief()
-{
-	if ( BeginSettingsGroup( "Surface Relief (Parallax)", &r_parallax,
-			"Per-pixel surface relief on world walls, floors and panels: a height field is\n"
-			"taken from each material's authored height map, or built from its normal map\n"
-			"when the normal carries the detail, then marched to fake real depth. Opaque\n"
-			"world (BSP) geometry only - props and characters are left to Tessellation,\n"
-			"where parallax would deform their curved surfaces. Takes effect on the next\n"
-			"map load. Off = vanilla." ) ) {
-		DrawOptions( parallaxOptions, IM_ARRAYSIZE( parallaxOptions ) );
 		EndSettingsGroup();
 	}
 }
@@ -4303,6 +4345,7 @@ static void DrawGraphicsMenu()
 	DrawEnhGroup_Shadows();
 	DrawEnhGroup_AmbientOcclusion();
 	DrawEnhGroup_Lighting();
+	DrawEnhGroup_NewLightEffects();
 	DrawEnhGroup_Reflections();
 	DrawEnhGroup_Particles();
 	DrawEnhGroup_PostProcess();
@@ -4451,12 +4494,12 @@ static void DrawDbgGroup_Tessellation()
 static void DrawDbgGroup_SkinSSS()
 {
 	// DUDE skin / flesh subsurface scattering (docs/skin-shading.md). The on/off lives in the
-	// Graphics tab (Lighting); these are the two live-tuning knobs. Both are per-draw uniforms, so
+	// Graphics tab (New Light Effects); these are the two live-tuning knobs. Both are per-draw uniforms, so
 	// they apply instantly -- dial them in-game and report the good ones back.
 	if ( BeginSettingsGroup( "Skin Subsurface Scattering" ) ) {
 
 	if ( r_skinShading.GetFloat() <= 0.0f ) {
-		ImGui::TextDisabled( "Skin SSS is off - enable \"Skin Subsurface Scattering (SSS)\" in the Graphics tab first." );
+		ImGui::TextDisabled( "Skin SSS is off - enable \"Skin Subsurface Scattering (SSS)\" in Graphics > New Light Effects first." );
 	}
 	ImGui::BeginDisabled( r_skinShading.GetFloat() <= 0.0f );
 
@@ -5804,17 +5847,13 @@ static void DrawDbgGroup_ShadowMaps()
 static void DrawDbgGroup_Emissive()
 {
 	const bool supported = R_BackendSupportsEnhancements();
-	// --- Emissive surfaces (independent of shadow mapping; master toggle is in Graphics > Lighting) ---
+	// --- Emissive surfaces (independent of shadow mapping; master toggle + intensity are in Graphics > New Light Effects) ---
 	if ( BeginSettingsGroup( "Emissive Surfaces" ) ) {
-	ImGui::TextDisabled( "Fill-light behaviour for glowing screens/monitors. Enable in Graphics > Lighting." );
+	ImGui::TextDisabled( "Fill-light behaviour for glowing screens/monitors. Enable it and set its intensity in Graphics > New Light Effects." );
 	ImGui::Spacing();
 
 	ImGui::BeginDisabled( !supported );
 	ImGui::BeginDisabled( !r_emissiveSurfaces.GetBool() );
-
-	CvarSliderF( "Intensity", r_emissiveLightScale, 0.0f, 4.0f, "%.2f", "Brightness of the fill light a glowing screen casts. 0 = off, 0.50 = default, higher = a strong glow." );
-	ImGui::SameLine();
-	if ( ImGui::SmallButton( "reset##emscale" ) ) { r_emissiveLightScale.Reset(); }
 
 	CvarSliderF( "Reach (distance)", r_emissiveLightRadius, 0.25f, 16.0f, "%.2f", "How far the fill light reaches, as a multiple of the screen's own size. Small/medium screens "
 		"scale linearly; large ones roll off toward the Max Reach cap below. Default 1.80." );
