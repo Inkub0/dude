@@ -68,13 +68,21 @@ cd base && zip -q ../dist/release-X.Y/zz_dude_menu.pk4 \
   guis/mainmenu.gui \
   guis/dude/mainmenu.gui \
   guis/_dude_anchor.pd \
-  guis/assets/mainmenu/dude_logo.tga
+  guis/assets/mainmenu/dude_logo.tga \
+  fx/teleporter.fx fx/teleporter1.fx fx/teleporter1_fly.fx \
+  fx/teleporter2.fx fx/teleporter3.fx
 ```
 
 The `zz_` prefix is load-bearing: it must sort after `pak000` and `zWideGuis_D3` so it
 wins the search-path priority. If the menu ever grows new asset dependencies, add them
 here — test with a clean-sandbox launch (fresh `fs_basepath` with only stock pk4s +
 this pk4, fresh `fs_savepath`) before shipping.
+
+**FX overrides (since 0.9.6):** DUDE's loose `base/fx/teleporter*.fx` (the dimmed,
+reddened monster spawn-in flash) are packed into this same pk4 — they only override the
+stock pak00x copies if they ship behind the load-bearing `zz_` prefix, so a release that
+omits them silently reverts the spawn flash to stock white. The RoE copies go in the RoE
+menu pk4 below.
 
 Note on `dude_logo.tga`: copyright-protected id/Bethesda logo artwork, shipped as a
 deliberate exception — see the "Known exception" paragraph in docs/publishing.md.
@@ -94,6 +102,10 @@ cp d3xp/guis/mainmenu.gui   /tmp/roemenu/guis/mainmenu.gui
 cp base/guis/_dude_anchor.pd /tmp/roemenu/guis/_cst_anchor.pd
 cd /tmp/roemenu && zip -q <repo>/dist/release-X.Y/zz_dude_roe_menu.pk4 \
   guis/mainmenu.gui guis/_cst_anchor.pd
+# then the RoE spawn-flash FX overrides (since 0.9.6), from the repo d3xp/:
+cd <repo>/d3xp && zip -q <repo>/dist/release-X.Y/zz_dude_roe_menu.pk4 \
+  fx/teleporter_96.fx fx/teleporter1_96.fx fx/teleporter1_vulgar.fx \
+  fx/teleporter2_96.fx fx/teleporter3_96.fx
 ```
 
 The RoE `.gui` also `#include`s `guis/test/grid2b.pd` + `grid3b.pd`; those are stock id
