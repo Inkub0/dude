@@ -26,6 +26,7 @@ Doom 3 GPL Source Code (see ArbProgram.h for license header)
 #include "framework/CmdSystem.h"
 #include "framework/CVarSystem.h"
 #include "framework/FileSystem.h"
+#include "framework/DeclManager.h"
 #include "framework/Game.h"
 #include "renderer/RenderSystem.h"
 #include "renderer/RenderWorld.h"
@@ -190,6 +191,23 @@ void idNullGame::Init( void ) {
 	// undefined symbol and fail dlopen) - the resolved title is in the com_title cvar
 	common->Printf( "spectator only: maps render, nothing spawns or simulates (com_title %s)\n",
 		cvarSystem->GetCVarString( "com_title" ) );
+
+	// The decl types and folders a game library registers, so the engine's decl tools
+	// (lintDecls, listEntityDefs ...) cover the title's game decls too. Model, export and
+	// camera decls are kept as text: the null game spawns nothing.
+	const bool quake4 = idStr::Icmp( cvarSystem->GetCVarString( "com_title" ), "quake4" ) == 0;
+	declManager->RegisterDeclType( "model",		DECL_MODELDEF,		idDeclAllocator<idDecl> );
+	declManager->RegisterDeclType( "export",	DECL_MODELEXPORT,	idDeclAllocator<idDecl> );
+	if ( quake4 ) {
+		declManager->RegisterDeclType( "camera",	DECL_CAMERADEF,		idDeclAllocator<idDecl> );
+	}
+	declManager->RegisterDeclFolder( "def",		".def",		DECL_ENTITYDEF );
+	declManager->RegisterDeclFolder( "af",		".af",		DECL_AF );
+	if ( !quake4 ) {		// Doom 3's game-side effect decls (Quake 4's are the engine's BSE effects)
+		declManager->RegisterDeclFolder( "fx",			".fx",		DECL_FX );
+		declManager->RegisterDeclFolder( "particles",	".prt",		DECL_PARTICLE );
+		declManager->RegisterDeclFolder( "newpdas",		".pda",		DECL_PDA );
+	}
 
 	cmdSystem->AddCommand( "getviewpos", NullGame_GetViewPos_f, CMD_FL_GAME, "prints the null game camera position and angles" );
 	cmdSystem->AddCommand( "setviewpos", NullGame_SetViewPos_f, CMD_FL_GAME, "moves the null game camera: setviewpos x y z [yaw [pitch]]" );

@@ -22,4 +22,27 @@ Q4BASE="/path/to/Quake 4/q4base" python3 tools/quake4/q4_inventory.py > /tmp/q4_
   1180 effect files. Also lists every `spawnclass` the `.def` files reference (the
   game-library surface) and the decl types per file extension.
 
+- `q4_gui_census.py` — GUI parser check: walks every Quake 4 GUI the way DUDE's window parser
+  does and lists (1) window properties that would **desynchronise** the parser (multi-value
+  properties DUDE does not know; the generic fallback keeps one token), (2) harmless unknown
+  single values, (3) event, `onTime` and script-command usage, with the commands DUDE does not
+  implement. Its "known" tables mirror `neo/ui/*.cpp`: update them together. After Q2's GUI
+  work it reports zero desync sources other than three quirks in the retail files themselves.
+- `test_guides.sh` (+ `check_guides.py`, `tests/guide_expand_test.cpp`) — material guides:
+  compiles the engine's own `neo/framework/DeclGuides.cpp` against `build/libidlib.a`, expands
+  every retail `.mtr`, and diffs the result byte for byte against an independent Python
+  expansion and line map, plus structural checks (one statement per line, braces, no guide left, every guide-defined
+  material present). Needs a configured `build/`.
+- `q4_material_census.py <expanded materials dir>` — lists every material/stage keyword in the
+  guide-expanded `.mtr` files (the `out/materials` of `test_guides.sh`) that
+  `neo/renderer/Material.cpp` does not know; an unknown keyword defaults the whole material.
+  Also lists image-program functions (`map downsize( x, 1 )`) that
+  `neo/renderer/Image_program.cpp` does not know. After Q2 it lists none (`snap` is a false
+  positive: a `table` option; `fp20Program` is in Raven's own test material).
+- `q4_sound_census.py [q4base] [language]` — parses every sound shader with the grammar
+  `neo/sound/snd_shader.cpp` accepts for Quake 4, resolves every sample the way the engine does
+  (bare names, `sound/vo/` → `sound/vo_<language>/`), and checks every `maps/**/*.reverb` area
+  table against the presets in `efxs/default.efx`. After Q2: one broken retail shader
+  (`leadin_test`), 539 samples absent from the retail paks, 0 reverb problems.
+
 Nothing here touches the install: the scripts only read the `.pk4` zip archives.

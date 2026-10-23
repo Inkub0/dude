@@ -23,6 +23,11 @@ static const gameTitleProfile_t titleProfiles[GAME_TITLE_COUNT] = {
 		"base", "pak000.pk4",
 		true,							// doom3Layout
 		false,							// nullGameFallback: a missing base.so stays a fatal error
+		false,							// recursiveDeclFolders: Doom 3 keeps its flat scan
+		1.0f,							// soundUnitsToMeters
+		false,							// bareSampleNames: a Doom 3 path without .wav/.ogg stays an error (as shipped)
+		NULL,							// voLanguagePrefix
+		NULL,							// reverbPresets
 		"textures/bigchars",
 		"splashScreen",
 		"guis/assets/white.tga",
@@ -37,6 +42,11 @@ static const gameTitleProfile_t titleProfiles[GAME_TITLE_COUNT] = {
 		"q4base", "pak001.pk4",
 		false,							// doom3Layout
 		true,							// nullGameFallback: q4base.so comes from the separate game repository (Q5)
+		true,							// recursiveDeclFolders: 34 of 96 .mtr files live in subfolders
+		0.0254f,						// soundUnitsToMeters: inches (DOOM_TO_METERS), "maxDistance 1181" = 30 m
+		true,							// bareSampleNames: sound/null plays sound/null.ogg
+		"sound/vo_",					// voLanguagePrefix: sound/vo_english/...
+		"efxs/default.efx",				// reverbPresets: 23 EAX presets, maps/<map>.reverb picks one per area
 		"gfx/2d/bigchars",
 		"gfx/splashScreen",
 		"_white",						// Quake 4 ships no guis/assets/white.tga

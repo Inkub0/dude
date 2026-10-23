@@ -44,4 +44,31 @@ private:
 	idList<idSoundEffect *>effects;
 };
 
+/*
+===============
+idMapReverb - DUDE: Quake 4's per-map reverb table, maps/<map>.reverb
+
+reverb
+{
+	{ 0 Plain }
+	{ 1 Mountains }
+	...
+}
+
+Names the EFX preset (from the title's preset library, efxs/default.efx) each portal area
+uses. Doom 3 keys its per-map .efx file by area instead.
+===============
+*/
+class idMapReverb {
+public:
+	bool			LoadFile( const char *filename );
+	void			Clear( void ) { presets.Clear(); }
+	int				NumAreas( void ) const { return presets.Num(); }
+	// preset name for an area, NULL when the table does not name one
+	const char *	PresetForArea( int area ) const;
+
+private:
+	idStrList		presets;		// indexed by area, "" = unset
+};
+
 #endif // __EFXLIBH

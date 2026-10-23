@@ -1462,6 +1462,7 @@ void	GL_Cull( int cullType );
 
 const int GLS_SRCBLEND_ZERO						= 0x00000001;
 const int GLS_SRCBLEND_ONE						= 0x0;
+const int GLS_SRCBLEND_SRC_COLOR				= 0x00000002;	// DUDE: Quake 4 (one material); a source factor since GL 1.4
 const int GLS_SRCBLEND_DST_COLOR				= 0x00000003;
 const int GLS_SRCBLEND_ONE_MINUS_DST_COLOR		= 0x00000004;
 const int GLS_SRCBLEND_SRC_ALPHA				= 0x00000005;

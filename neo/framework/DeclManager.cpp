@@ -45,6 +45,9 @@ If you have questions concerning this license or the applicable additional terms
 #include "sound/sound.h"
 
 #include "framework/DeclManager.h"
+#include "framework/DeclGuides.h"
+#include "framework/DeclQuake4.h"
+#include "framework/GameTitle.h"
 
 /*
 
@@ -186,6 +189,7 @@ public:
 	int							checksum;
 	int							fileSize;
 	int							numLines;
+	bool						guidesExpanded;		// DUDE: decl text comes from expanded material guides, not the file as written
 
 	idDeclLocal *				decls;
 };
@@ -258,6 +262,7 @@ private:
 	static void					ListDecls_f( const idCmdArgs &args );
 	static void					ReloadDecls_f( const idCmdArgs &args );
 	static void					TouchDecl_f( const idCmdArgs &args );
+	static void					LintDecls_f( const idCmdArgs &args );	// DUDE
 };
 
 idCVar idDeclManagerLocal::decl_show( "decl_show", "0", CVAR_SYSTEM, "set to 1 to print parses, 2 to also print references", 0, 2, idCmdSystem::ArgCompletion_Integer<0,2> );
@@ -567,6 +572,7 @@ idDeclFile::idDeclFile( const char *fileName, declType_t defaultType ) {
 	this->checksum = 0;
 	this->fileSize = 0;
 	this->numLines = 0;
+	this->guidesExpanded = false;
 	this->decls = NULL;
 }
 
@@ -582,6 +588,7 @@ idDeclFile::idDeclFile() {
 	this->checksum = 0;
 	this->fileSize = 0;
 	this->numLines = 0;
+	this->guidesExpanded = false;
 	this->decls = NULL;
 }
 
@@ -636,6 +643,25 @@ int idDeclFile::LoadAndParse() {
 		return 0;
 	}
 
+	// DUDE: Quake 4 material guides - "guide <material> <template>(args)" and inlineGuide
+	// become ordinary material text before the file is split into declarations. The
+	// expansion has more lines than the file; lineMap gives each decl its line in the file.
+	idList<int> lineMap;
+	guidesExpanded = false;
+	if ( DeclGuides::Num() > 0 && fileName.CheckExtension( ".mtr" ) ) {
+		idStr expanded;
+		if ( DeclGuides::Expand( buffer, length, fileName, expanded, lineMap ) ) {
+			Mem_Free( buffer );
+			length = expanded.Length();
+			buffer = (char *)Mem_Alloc( length + 1 );
+			memcpy( buffer, expanded.c_str(), length + 1 );
+			guidesExpanded = true;
+		}
+	}
+	auto fileLine = [&lineMap]( int line ) {
+		return lineMap.Num() ? lineMap[ idMath::ClampInt( 1, lineMap.Num(), line ) - 1 ] : line;
+	};
+
 	if ( !src.LoadMemory( buffer, length, fileName ) ) {
 		common->Error( "Couldn't parse %s", fileName.c_str() );
 		Mem_Free( buffer );
@@ -657,7 +683,7 @@ int idDeclFile::LoadAndParse() {
 	while( 1 ) {
 
 		startMarker = src.GetFileOffset();
-		sourceLine = src.GetLineNum();
+		sourceLine = fileLine( src.GetLineNum() );
 
 		// parse the decl type name
 		if ( !src.ReadToken( &token ) ) {
@@ -773,7 +799,7 @@ int idDeclFile::LoadAndParse() {
 		}
 	}
 
-	numLines = src.GetLineNum();
+	numLines = fileLine( src.GetLineNum() );
 
 	Mem_Free( buffer );
 
@@ -835,15 +861,37 @@ void idDeclManagerLocal::Init( void ) {
 	RegisterDeclType( "video",				DECL_VIDEO,			idDeclAllocator<idDeclVideo> );
 	RegisterDeclType( "audio",				DECL_AUDIO,			idDeclAllocator<idDeclAudio> );
 
+	// DUDE: Quake 4 decl types (docs/quake4-port.md 5.2), only for that game title
+	const bool quake4 = ( GameTitle::Get().title == GAME_TITLE_QUAKE4 );
+	if ( quake4 ) {
+		RegisterDeclType( "materialType",	DECL_MATERIALTYPE,	idDeclAllocator<idDeclMaterialType> );
+		RegisterDeclType( "lipSync",		DECL_LIPSYNC,		idDeclAllocator<idDeclLipSync> );
+		RegisterDeclType( "playback",		DECL_PLAYBACK,		idDeclAllocator<idDeclPlayback> );
+		RegisterDeclType( "effect",			DECL_EFFECT,		idDeclAllocator<idDeclEffect> );
+		RegisterDeclType( "playerModel",	DECL_PLAYER_MODEL,	idDeclAllocator<idDeclEntityDef> );
+	}
+
+	// DUDE: Quake 4's material templates, before the materials that use them
+	DeclGuides::Load();
+
+	if ( quake4 ) {
+		RegisterDeclFolder( "materials/types",	".mtt",		DECL_MATERIALTYPE );	// before the materials that name them
+	}
 	RegisterDeclFolder( "materials",		".mtr",				DECL_MATERIAL );
 	RegisterDeclFolder( "skins",			".skin",			DECL_SKIN );
 	RegisterDeclFolder( "sound",			".sndshd",			DECL_SOUND );
+	if ( quake4 ) {
+		RegisterDeclFolder( "lipsync",		".lipsync",		DECL_LIPSYNC );
+		RegisterDeclFolder( "playbacks",	".playback",	DECL_PLAYBACK );
+		RegisterDeclFolder( "effects",		".fx",			DECL_EFFECT );
+	}
 
 	// add console commands
 	cmdSystem->AddCommand( "listDecls", ListDecls_f, CMD_FL_SYSTEM, "lists all decls" );
 
 	cmdSystem->AddCommand( "reloadDecls", ReloadDecls_f, CMD_FL_SYSTEM, "reloads decls" );
 	cmdSystem->AddCommand( "touch", TouchDecl_f, CMD_FL_SYSTEM, "touches a decl" );
+	cmdSystem->AddCommand( "lintDecls", LintDecls_f, CMD_FL_SYSTEM, "parses every decl and reports the ones that fail: lintDecls [type] [all]" );
 
 	cmdSystem->AddCommand( "listTables", idListDecls_f<DECL_TABLE>, CMD_FL_SYSTEM, "lists tables", idCmdSystem::ArgCompletion_String<listDeclStrings> );
 	cmdSystem->AddCommand( "listMaterials", idListDecls_f<DECL_MATERIAL>, CMD_FL_SYSTEM, "lists materials", idCmdSystem::ArgCompletion_String<listDeclStrings> );
@@ -912,6 +960,8 @@ void idDeclManagerLocal::Shutdown( void ) {
 	declTypes.DeleteContents( true );
 	declFolders.DeleteContents( true );
 
+	DeclGuides::Clear();	// DUDE
+
 #ifdef USE_COMPRESSED_DECLS
 	ShutdownHuffman();
 #endif
@@ -923,6 +973,7 @@ idDeclManagerLocal::Reload
 ===================
 */
 void idDeclManagerLocal::Reload( bool force ) {
+	DeclGuides::Load();		// DUDE: an edited template applies to the materials reloaded below
 	for ( int i = 0; i < loadedFiles.Num(); i++ ) {
 		loadedFiles[i]->Reload( force );
 	}
@@ -1012,11 +1063,16 @@ void idDeclManagerLocal::RegisterDeclFolder( const char *folder, const char *ext
 	}
 
 	// scan for decl files
-	fileList = fileSystem->ListFiles( declFolder->folder, declFolder->extension, true );
+	// DUDE: Quake 4 keeps decl files in subfolders too (materials/effects/*.mtr, every effect
+	// material) and its engine scans decl folders recursively; Doom 3 keeps the flat scan.
+	// The tree listing returns paths that already start with the folder.
+	const bool recursive = GameTitle::Get().recursiveDeclFolders;
+	fileList = recursive ? fileSystem->ListFilesTree( declFolder->folder, declFolder->extension, true )
+						 : fileSystem->ListFiles( declFolder->folder, declFolder->extension, true );
 
 	// load and parse decl files
 	for ( i = 0; i < fileList->GetNumFiles(); i++ ) {
-		fileName = declFolder->folder + "/" + fileList->GetFile( i );
+		fileName = recursive ? idStr( fileList->GetFile( i ) ) : declFolder->folder + "/" + fileList->GetFile( i );
 
 		// check whether this file has already been loaded
 		for ( j = 0; j < loadedFiles.Num(); j++ ) {
@@ -1663,6 +1719,77 @@ void idDeclManagerLocal::ReloadDecls_f( const idCmdArgs &args ) {
 
 /*
 ===================
+idDeclManagerLocal::LintDecls_f
+
+DUDE: parse every decl of every type (or of one type) and report the ones whose parse
+failed. "lintDecls" lists the first few failures per type, "lintDecls all" every one,
+"lintDecls material" one type. A gate check for a game title's data (docs/quake4-port.md
+section 7): headless as  +lintDecls +quit. Images register without loading their pixels
+and sound samples register without decoding while it runs, so it costs parse time only.
+===================
+*/
+extern void Sound_RegisterSamplesOnly( bool registerOnly );		// sound/snd_system.cpp
+
+void idDeclManagerLocal::LintDecls_f( const idCmdArgs &args ) {
+	const char *onlyType = NULL;
+	bool listAll = false;
+	for ( int a = 1; a < args.Argc(); a++ ) {
+		if ( !idStr::Icmp( args.Argv( a ), "all" ) ) {
+			listAll = true;
+		} else {
+			onlyType = args.Argv( a );
+		}
+	}
+
+	const bool preload = cvarSystem->GetCVarBool( "image_preload" );
+	cvarSystem->SetCVarBool( "image_preload", false );
+	Sound_RegisterSamplesOnly( true );
+
+	int totalChecked = 0, totalFailed = 0;
+	common->Printf( "----- lintDecls -----\n" );
+	for ( int t = 0; t < declManagerLocal.declTypes.Num(); t++ ) {
+		const idDeclType *typeInfo = declManagerLocal.declTypes[t];
+		if ( typeInfo == NULL || typeInfo->typeName.Length() == 0 ) {
+			continue;
+		}
+		if ( onlyType != NULL && typeInfo->typeName.Icmp( onlyType ) != 0 ) {
+			continue;
+		}
+		const declType_t type = typeInfo->type;
+		// snapshot: parsing materials creates implicit decls (image names) at the end
+		const int num = declManagerLocal.linearLists[type].Num();
+		int checked = 0, failed = 0, implicit = 0;
+		for ( int i = 0; i < num; i++ ) {
+			idDeclLocal *decl = declManagerLocal.linearLists[type][i];
+			if ( decl->IsImplicit() ) {
+				implicit++;
+				continue;
+			}
+			declManagerLocal.DeclByIndex( type, i, true );		// parses it if it is not yet
+			checked++;
+			if ( decl->GetState() == DS_DEFAULTED ) {
+				failed++;
+				if ( listAll || failed <= 5 ) {
+					common->Printf( "  %s(%d): %s '%s' failed to parse\n", decl->GetFileName(), decl->GetLineNum(),
+						typeInfo->typeName.c_str(), decl->GetName() );
+				}
+			}
+		}
+		if ( failed > 5 && !listAll ) {
+			common->Printf( "  ... %d more (lintDecls %s all)\n", failed - 5, typeInfo->typeName.c_str() );
+		}
+		common->Printf( "%-20s %6d checked %6d failed %6d implicit\n", typeInfo->typeName.c_str(), checked, failed, implicit );
+		totalChecked += checked;
+		totalFailed += failed;
+	}
+	common->Printf( "lintDecls: %d decls, %d failed\n", totalChecked, totalFailed );
+
+	cvarSystem->SetCVarBool( "image_preload", preload );
+	Sound_RegisterSamplesOnly( false );
+}
+
+/*
+===================
 idDeclManagerLocal::TouchDecl_f
 ===================
 */
@@ -1964,6 +2091,12 @@ bool idDeclLocal::ReplaceSourceFileText( void ) {
 
 	if ( sourceFile == &declManagerLocal.implicitDecls ) {
 		common->Warning( "Can't save implicit declaration %s.", GetName() );
+		return false;
+	}
+
+	// DUDE: the offsets are into the guide-expanded text, not the file as written
+	if ( sourceFile->guidesExpanded ) {
+		common->Warning( "Can't save %s: %s uses material guides; edit the file by hand.", GetName(), GetFileName() );
 		return false;
 	}
 

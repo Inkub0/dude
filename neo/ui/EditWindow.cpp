@@ -70,6 +70,16 @@ bool idEditWindow::ParseInternalVar( const char *_name, idParser *src ) {
 		cvarMax = src->ParseInt();
 		return true;
 	}
+	// DUDE: Quake 4 edit field properties
+	if ( idStr::Icmp( _name, "cvarMin" ) == 0) {
+		cvarMin = src->ParseInt();
+		cvarMinSet = true;
+		return true;
+	}
+	if ( idStr::Icmp( _name, "chatWindow" ) == 0 || idStr::Icmp( _name, "showCursor" ) == 0 ) {
+		src->ParseBool();		// multiplayer chat line; the edit cursor is always drawn here
+		return true;
+	}
 
 	return idWindow::ParseInternalVar( _name, src );
 }
@@ -97,6 +107,8 @@ void idEditWindow::CommonInit() {
 	cursorPos = 0;
 	cursorLine = 0;
 	cvarMax = 0;
+	cvarMin = 0;
+	cvarMinSet = false;
 	wrap = false;
 	sourceFile = "";
 	scroller = NULL;
@@ -621,6 +633,9 @@ void idEditWindow::UpdateCvar( bool read, bool force ) {
 				cvar->SetString( text );
 				if ( cvarMax && ( cvar->GetInteger() > cvarMax ) ) {
 					cvar->SetInteger( cvarMax );
+				}
+				if ( cvarMinSet && ( cvar->GetInteger() < cvarMin ) ) {
+					cvar->SetInteger( cvarMin );
 				}
 			}
 		}

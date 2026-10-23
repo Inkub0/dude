@@ -12253,6 +12253,7 @@ VkPipeline VulkanBackend::GetPipeline( const PipelineDesc &desc ) {
 			case GLS_SRCBLEND_DST_ALPHA:			return VK_BLEND_FACTOR_DST_ALPHA;
 			case GLS_SRCBLEND_ONE_MINUS_DST_ALPHA:	return VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA;
 			case GLS_SRCBLEND_ALPHA_SATURATE:		return VK_BLEND_FACTOR_SRC_ALPHA_SATURATE;
+			case GLS_SRCBLEND_SRC_COLOR:			return VK_BLEND_FACTOR_SRC_COLOR;
 			default:								return VK_BLEND_FACTOR_ONE;
 			}
 		}

@@ -155,6 +155,10 @@ bool idDeclTable::Parse( const char *text, const int textLength ) {
 					break;
 				}
 				if ( token == "," ) {
+					// DUDE: a comma before the closing brace (one Quake 4 table)
+					if ( src.CheckTokenString( "}" ) ) {
+						break;
+					}
 					continue;
 				}
 				src.Warning( "expected comma or brace" );

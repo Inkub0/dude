@@ -83,6 +83,15 @@ typedef enum {
 	DECL_MODELEXPORT,
 	DECL_MAPDEF,
 
+	// DUDE: Quake 4 decl types (appended: Doom 3's values are unchanged). The Quake 4 game
+	// library is compiled against these names (docs/quake4-port.md 5.2).
+	DECL_MATERIALTYPE,			// materialType - materials/types/*.mtt
+	DECL_LIPSYNC,				// lipSync - lipsync/*.lipsync
+	DECL_PLAYBACK,				// playback - playbacks/*.playback
+	DECL_EFFECT,				// effect - effects/*.fx (Raven's BSE)
+	DECL_PLAYER_MODEL,			// playerModel - def/*.def
+	DECL_CAMERADEF,				// camera - def/*.def (registered by the game, like model/export)
+
 	// new decl types can be added here
 
 	DECL_MAX_TYPES			= 32

@@ -632,6 +632,44 @@ protected:
 	idVec4 data;
 };
 
+// DUDE: one channel of a window's colour - Quake 4 GUIs address forecolor_w, matcolor_x,
+// backcolor_w ... directly (3858 uses in the retail GUIs, mostly alpha fades). A float view
+// onto one component of the owning idWinVec4: `set` writes the channel, `transition` animates
+// it (idWindow::Transition), and the other three channels are left alone. Writing switches
+// off the parent's register evaluation, exactly as `set`/`transition` on the whole colour
+// do, so the window's parsed value no longer overwrites the script's. The value lives in the
+// parent, so save games carry it there. Owned by the window that exposes the colour.
+class idWinVec4Component : public idWinVar {
+public:
+	idWinVec4Component( idWinVec4 *vec, int component ) : idWinVar(), vec( vec ), component( component ) {}
+	~idWinVec4Component() {}
+
+	// "matcolor_w" -> base "matcolor", component 3. x/r = 0, y/g = 1, z/b = 2, w/a = 3.
+	static bool		SplitName( const char *name, idStr &base, int &component );
+
+	float			Get( void ) const { return ( (const idVec4 &)*vec )[component]; }
+	void			SetFloat( float f ) {
+		idVec4 v = *vec;
+		v[component] = f;
+		*vec = v;
+		vec->SetEval( false );
+	}
+	idWinVec4 *		GetVec( void ) const { return vec; }
+	int				GetComponent( void ) const { return component; }
+
+	virtual void	Init( const char *_name, idWindow *win ) {}
+	virtual void	Set( const char *val ) { SetFloat( atof( val ) ); }
+	virtual void	Update() {}
+	virtual const char *c_str() const { return va( "%f", Get() ); }
+	virtual void	WriteToSaveGame( idFile *savefile ) { savefile->Write( &eval, sizeof( eval ) ); }
+	virtual void	ReadFromSaveGame( idFile *savefile ) { savefile->Read( &eval, sizeof( eval ) ); }
+	virtual float	x( void ) const { return Get(); }
+
+private:
+	idWinVec4 *		vec;
+	int				component;
+};
+
 class idWinVec3 : public idWinVar {
 public:
 	idWinVec3() : idWinVar() {};

@@ -65,6 +65,28 @@ void idWinVar::Init(const char *_name, idWindow *win) {
 	}
 }
 
+/*
+================
+idWinVec4Component::SplitName
+================
+*/
+bool idWinVec4Component::SplitName( const char *name, idStr &base, int &component ) {
+	const int len = name ? (int)strlen( name ) : 0;
+	if ( len < 3 || name[len - 2] != '_' ) {
+		return false;
+	}
+	switch ( idStr::ToLower( name[len - 1] ) ) {
+		case 'x': case 'r':	component = 0; break;
+		case 'y': case 'g':	component = 1; break;
+		case 'z': case 'b':	component = 2; break;
+		case 'w': case 'a':	component = 3; break;
+		default:			return false;
+	}
+	base = name;
+	base.CapLength( len - 2 );
+	return true;
+}
+
 void idMultiWinVar::Set( const char *val ) {
 	for ( int i = 0; i < Num(); i++ ) {
 		(*this)[i]->Set( val );

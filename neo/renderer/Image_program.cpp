@@ -561,6 +561,21 @@ static bool R_ParseImageProgram_r( idLexer &src, byte **pic, int *width, int *he
 		return true;
 	}
 
+	// DUDE: Quake 4 "downsize( <image>, <levels> )" - Raven's mark that an image may load
+	// smaller at lower texture quality. The image itself is unchanged, which is what Quake 4
+	// shows at its highest texture quality; the levels stay in the program's name.
+	if ( !token.Icmp( "downsize" ) ) {
+		MatchAndAppendToken( src, "(" );
+
+		R_ParseImageProgram_r( src, pic, width, height, timestamps, depth );
+
+		MatchAndAppendToken( src, "," );
+		src.ReadToken( &token );
+		AppendToken( token );
+		MatchAndAppendToken( src, ")" );
+		return true;
+	}
+
 	if ( !token.Icmp( "makeAlpha" ) ) {
 		int		i;
 

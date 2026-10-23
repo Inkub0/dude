@@ -167,6 +167,20 @@ const char *idLangDict::GetString( const char *str ) const {
 		}
 	}
 
+	// DUDE: Quake 4 renumbered the engine's strings by prefixing a 1: the engine asks for
+	// Doom 3's "#str_04343" (LOADING...) and Quake 4 ships it as "#str_104343". Neither game has
+	// the other's form, so this only answers lookups that would fail.
+	if ( str[STRTABLE_ID_LENGTH] == '0' && idStr::Length( str ) == STRTABLE_ID_LENGTH + 5 ) {
+		char raven[STRTABLE_ID_LENGTH + 7];
+		idStr::snPrintf( raven, sizeof( raven ), "%s1%s", STRTABLE_ID, str + STRTABLE_ID_LENGTH );
+		hashKey = GetHashKey( raven );
+		for ( int i = hash.First( hashKey ); i != -1; i = hash.Next( i ) ) {
+			if ( args[i].key.Cmp( raven ) == 0 ) {
+				return args[i].value;
+			}
+		}
+	}
+
 	idLib::common->Warning( "Unknown string id %s", str );
 	return str;
 }

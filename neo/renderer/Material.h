@@ -289,7 +289,10 @@ typedef enum {
 	MF_FORCESHADOWS				= BIT(3),
 	MF_NOSELFSHADOW				= BIT(4),
 	MF_NOPORTALFOG				= BIT(5),	// this fog volume won't ever consider a portal fogged out
-	MF_EDITOR_VISIBLE			= BIT(6)	// in use (visible) per editor
+	MF_EDITOR_VISIBLE			= BIT(6),	// in use (visible) per editor
+	// DUDE: Quake 4 (Raven's bit numbers)
+	MF_SKY						= BIT(7),	// "sky": portal-sky surface (skycaulk)
+	MF_NEED_CURRENT_RENDER		= BIT(8)	// "needCurrentRender": a HUD material that samples _currentRender
 } materialFlags_t;
 
 // contents flags, NOTE: make sure to keep the defines in doom_defs.script up to date with these!
@@ -311,9 +314,18 @@ typedef enum {
 	CONTENTS_AAS_OBSTACLE		= BIT(14),	// used to compile an obstacle into AAS that can be enabled/disabled
 	CONTENTS_FLASHLIGHT_TRIGGER	= BIT(15),	// used for triggers that are activated by the flashlight
 
+	// DUDE: Quake 4 contents (Raven's bit numbers, all free in Doom 3's layout)
+	CONTENTS_SIGHTCLIP			= BIT(16),	// blocks sight for actors and cameras
+	CONTENTS_LARGESHOTCLIP		= BIT(17),	// blocks large shots (a fence that lets bullets through but not rockets)
+	CONTENTS_NOTACTICALFEATURES	= BIT(18),	// AAS places no tactical features here
+	CONTENTS_VEHICLECLIP		= BIT(19),	// solid to vehicles
+
 	// contents used by utils
 	CONTENTS_AREAPORTAL			= BIT(20),	// portal separating renderer areas
 	CONTENTS_NOCSG				= BIT(21),	// don't cut this brush with CSG operations in the editor
+	CONTENTS_FLYCLIP			= BIT(22),	// DUDE: Quake 4 - solid to flying vehicles and creatures
+	CONTENTS_ITEMCLIP			= BIT(23),	// DUDE: Quake 4 - solid to items
+	CONTENTS_PROJECTILECLIP		= BIT(24),	// DUDE: Quake 4 - solid to projectiles but not hitscans
 
 	CONTENTS_REMOVE_UTIL		= ~(CONTENTS_AREAPORTAL|CONTENTS_NOCSG)
 } contentsFlags_t;
@@ -357,8 +369,11 @@ typedef enum {
 	SURF_NOSTEPS				= BIT(9),	// no footstep sounds
 	SURF_DISCRETE				= BIT(10),	// not clipped or merged by utilities
 	SURF_NOFRAGMENT				= BIT(11),	// dmap won't cut surface at each bsp boundary
-	SURF_NULLNORMAL				= BIT(12)	// renderbump will draw this surface as 0x80 0x80 0x80, which
+	SURF_NULLNORMAL				= BIT(12),	// renderbump will draw this surface as 0x80 0x80 0x80, which
 											// won't collect light from any angle
+	// DUDE: Quake 4 (Raven's bit numbers)
+	SURF_BOUNCE					= BIT(13),	// "bounce": projectiles bounce off this surface
+	SURF_NO_T_FIX				= BIT(14)	// "notfix": dmap merges these surfaces but does not T-fix them
 } surfaceFlags_t;
 
 class idSoundEmitter;
@@ -653,6 +668,16 @@ public:
 	bool				IsPortalSky() const						{ return portalSky; };
 	void				AddReference();
 
+	// DUDE: Quake 4 material data (docs/quake4-port.md 1.3). The material type names what a
+	// trace hit (impacts, footsteps, effect variants); the material image is Raven's per-texel
+	// hit map, a colour-coded image whose colours name material types, loaded by whoever
+	// queries it; the portal fields are the visportal fade a map's .proc also carries.
+	const idDecl *		GetMaterialType( void ) const			{ return materialType; }
+	const char *		GetMaterialImageName( void ) const		{ return materialImageName.c_str(); }
+	const char *		GetPortalImageName( void ) const		{ return portalImageName.c_str(); }
+	float				GetPortalDistanceNear( void ) const		{ return portalDistanceNear; }
+	float				GetPortalDistanceFar( void ) const		{ return portalDistanceFar; }
+
 private:
 	// parse the entire material
 	void				CommonInit();
@@ -759,6 +784,13 @@ private:
 	float				pbrWetness;		// specular-energy multiplier; -1 = inherit
 	float				pbrEnv;			// metal env-glow multiplier; -1 = inherit
 	int					pbrCategory;	// pbrCategory_t (below)
+
+	// DUDE: Quake 4 (appended: existing members keep their offsets)
+	const idDecl *		materialType;		// DECL_MATERIALTYPE, NULL = none
+	idStr				materialImageName;
+	idStr				portalImageName;
+	float				portalDistanceNear;
+	float				portalDistanceFar;
 };
 
 // DUDE PBR: the main material classes the generated table tags entries with.

@@ -47,6 +47,7 @@ struct idTabRect {
 	int	type;
 	idVec2 iconSize;
 	float iconVOffset;
+	float textScale;		// DUDE: Quake 4 tabTextScales; <= 0 uses the window's textscale
 };
 
 class idListWindow : public idWindow {
@@ -69,6 +70,7 @@ private:
 	virtual bool		ParseInternalVar(const char *name, idParser *src);
 	void				CommonInit();
 	void				InitScroller( bool horizontal );
+	float				RowHeight( void );		// DUDE: the font's line height, or Quake 4's itemHeight if taller
 	void				SetCurrentSel( int sel );
 	void				AddCurrentSel( int sel );
 	int					GetCurrentSel();
@@ -85,6 +87,13 @@ private:
 	idStr				tabTypeStr;
 	idStr				tabIconSizeStr;
 	idStr				tabIconVOffsetStr;
+	// DUDE: Quake 4 list properties
+	idStr				tabTextScaleStr;
+	float				itemHeight;
+	const idMaterial *	backgroundHover;	// row under the cursor
+	const idMaterial *	backgroundFocus;	// selected row
+	const idMaterial *	backgroundLine;		// every other row
+	const idMaterial *	backgroundGreyed;	// rows of a list that takes no input
 	idHashTable<const idMaterial*> iconMaterials;
 	bool				multipleSel;
 

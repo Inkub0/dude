@@ -253,6 +253,8 @@ idUserInterfaceLocal::idUserInterfaceLocal() {
 	refs = 1;
 	timeStamp = 0;
 	lastGlWidth = lastGlHeight = 0;
+	initScriptsRun = false;
+	lightColor.Set( 1.0f, 1.0f, 1.0f, 1.0f );
 }
 
 idUserInterfaceLocal::~idUserInterfaceLocal() {
@@ -542,6 +544,14 @@ void idUserInterfaceLocal::Redraw( int _time ) {
 		}
 
 		time = _time;
+
+		// DUDE: Quake 4 onInit runs once, on the first redraw: by then the game has set the
+		// gui_parm* state that world screens branch on (strogg vs marine labels and the like).
+		if ( !initScriptsRun ) {
+			initScriptsRun = true;
+			desktop->RunInitScripts();
+		}
+
 		uiManagerLocal.dc.PushClipRect( uiManagerLocal.screenRect );
 		desktop->Redraw( 0, 0 );
 		uiManagerLocal.dc.PopClipRect();
@@ -754,6 +764,8 @@ bool idUserInterfaceLocal::ReadFromSaveGame( idFile *savefile ) {
 	int i, len;
 	idStr key;
 	idStr value;
+
+	initScriptsRun = true;	// DUDE: the saved state already includes what onInit set up
 
 	savefile->Read( &num, sizeof( num ) );
 

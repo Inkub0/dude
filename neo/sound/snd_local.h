@@ -812,6 +812,7 @@ public:
 
 	idEFXFile				EFXDatabase;
 	bool					efxloaded;
+	idMapReverb				mapReverb;			// DUDE: Quake 4 maps/<map>.reverb (area -> EFXDatabase preset)
 							// latches
 	static bool				useEFXReverb;
 							// mark available during initialization, or through an explicit test
@@ -990,12 +991,16 @@ public:
 
 	void					PrintMemInfo( MemInfo_t *mi );
 
+	// DUDE: FindSound registers samples without loading them (see Sound_RegisterSamplesOnly)
+	void					SetRegisterOnly( bool only ) { registerOnly = only; }
+
 private:
 	// DUDE: decode the samples FindSound() queued in samplesToLoad on worker threads, then upload
 	// their OpenAL buffers on the calling thread. Called from EndLevelLoad().
 	void					LoadPendingParallel();
 
 	bool					insideLevelLoad;
+	bool					registerOnly;
 	idList<idSoundSample*>	listCache;
 	idList<idSoundSample*>	samplesToLoad;		// DUDE: queued by FindSound() during a level load, drained by LoadPendingParallel()
 };

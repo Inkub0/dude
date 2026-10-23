@@ -1,7 +1,7 @@
 # Quake 4 on DUDE — milestone plan (draft 2026-10-15)
 
-Status (2026-10-22): **Q0 done; Q1 built on `feat/quake4-title-profile`, awaiting the user's
-gate run** (§6). Goal: **DUDE runs the retail Quake 4 (2005,
+Status (2026-10-23): **Q0 done; Q1 built on `feat/quake4-title-profile` and Q2 built on
+`feat/quake4-decl-parity` (stacked on it), both awaiting the user's gate run** (§6). Goal: **DUDE runs the retail Quake 4 (2005,
 Raven Software, idTech4) single-player campaign natively** — its own `q4base/*.pk4` assets,
 its own game logic, on DUDE's GL3 and Vulkan backends, with DUDE's enhancement tiers
 (PBR, tessellation, RT) available as opt-in on top. Multiplayer is out of scope for v1 (§9).
@@ -152,6 +152,16 @@ flags in the SDK header also include `useDoppler`, `isVO`, `causeRumble`, `cente
 and `soundShaderParms_t` gains `frequencyShift`, `wetLevel`, `dryLevel`. Already
 supported: `minDistance`, `maxDistance`, `description`, `onDemand`, `looping`, `global`,
 `soundClass`, `no_dups`, `shakes`, `no_occlusion`, `omnidirectional`.
+
+Found while building Q2 (`tools/quake4/q4_sound_census.py`): **distances are in map units**,
+not Doom 3's metres (`maxDistance 1181` is 30 m; 600 is the commonest value) — both references
+keep Raven's units; DUDE converts at the shader boundary instead, so the mixer stays metric.
+**4805 of 6789 sample names have no extension** (`sound/null` is `sound/null.ogg`; a few are
+WAV only). **Voice-over lives in `sound/vo_<language>/`**, English included, while shaders
+say `sound/vo/…`. 539 named samples are not in the retail paks at all (cut content: `vo/mcc_2`,
+`impact/bullet`, …). One retail shader is broken (`ambient.sndshd` `leadin_test`: a `volume`
+with no value). Unused by the retail files, so not parsed: `useDoppler`, `causeRumble`,
+`center`, `isVO`.
 
 ### 1.5 GUI keywords DUDE does not accept
 
@@ -349,6 +359,64 @@ and only the game library differs per title (as `d3xp.so` / `d3le.so` already do
 
 ### 5.2 Decl manager and parsers (engine, GPL)
 
+**As built in Q2** (branch `feat/quake4-decl-parity`; everything Quake 4-only is keyed off
+the title profile, so a Doom 3 run parses exactly as before):
+- *Guides* — `neo/framework/DeclGuides.{h,cpp}`: templates from `guides/*.guide`, expanded in
+  `.mtr` text before parsing, keeping the template's own lines (the material parser is
+  line-sensitive: `qer_editorimage` skips the rest of its line, so a one-line expansion lost
+  every guide material: the cause found for the first gate run's 1507 material lint failures)
+  with a line map back to the file for decl line numbers; 1398 guide-defined materials. Checked offline byte for byte against an independent Python
+  expansion (`tools/quake4/test_guides.sh`). The profile also turns on recursive decl folders:
+  34 of the 96 `.mtr` files (all effect materials) live in `materials/<sub>/`.
+- *Materials* — every keyword the retail `.mtr` files use parses
+  (`tools/quake4/q4_material_census.py` lists none left): `materialType`, `materialImage`,
+  `portalImage`, `portalDistanceNear/Far`, `sky`, `needCurrentRender`, stage `nomips`; content
+  and surface bits at Raven's numbers (all free in Doom 3's layout). Raven's GLSL stages
+  (`glslProgram` / `shaderParm` / `shaderTexture`) are parsed and dropped: each has a
+  `glslPrograms == 0` fallback stage, and most of the `.glsl` files they name are not in the
+  paks. `glslPrograms`, `IsMultiplayer`, `DecalLife`, `VertexRandomizer` evaluate to 0.
+  Raven's image-program function `downsize( <image>, <levels> )` (404 uses, also in
+  `materialImage`) loads the image unchanged — Quake 4 at its highest texture quality; the
+  short `decalInfo <stay>[, <fade>]` forms, a table's trailing comma and `gl_src_color` as a
+  source blend factor (`GLS_SRCBLEND_SRC_COLOR`, GL3 + Vulkan) are accepted. Left failing, as in
+  retail: Raven's test materials in `test.mtr` (`POTCorrectionX`, `watermove`, `fp20Program`),
+  `guisurf entity4..6` (Quake 4's own `MAX_RENDERENTITY_GUI` is 3 too).
+- *Decl types* — `materialType` (`.mtt`), `lipSync`, `playback`, `effect` (brace-checked
+  only; the BSE grammar is Q4) and `playerModel`, in `neo/framework/DeclQuake4.{h,cpp}`, with
+  enum values appended after Doom 3's. The null game registers the game-side types and folders
+  (`model`, `export`, `camera`, `def`, `af`) so `lintDecls` covers entity defs too.
+- *GUIs* — Raven's script language and keywords (see §1.5), `tools/quake4/q4_gui_census.py`.
+- *Sound shaders* — the keywords of §1.4; distances converted from map units to metres
+  (profile `soundUnitsToMeters`); bare sample names and `sound/vo/` → `sound/vo_<sys_lang>/`
+  (falling back to English for a line a language pack does not voice) under profile flags;
+  `noRandomStart` honoured by the emitter; `shakeData`, `frequencyShift`, `frequentlyUsed`,
+  `voForPlayer`, `no_shakes` stored on `idSoundShader` for the Q5 game library (the shake
+  envelope replaces Doom 3's WAV amplitude scan, which OGG samples cannot feed).
+- *EFX* — profile `reverbPresets` = `efxs/default.efx` (23 EAX presets, same grammar as Doom
+  3's `.efx`) loaded for every map, plus `maps/<map>.reverb` (`idMapReverb`, area → preset)
+  consulted first when the listener's area changes; `Generic` is the fallback (Quake 4's
+  library has no `default`). All 50 retail tables resolve (`q4_sound_census.py`).
+- *`lintDecls [type] [all]`* — parses every decl and lists the ones that fail; images and
+  sound samples only register while it runs.
+
+Open after Q2 (each lands with the phase that consumes it): the `^c###` / `^i####` text
+escapes, render-window multi-model and `onTabRelease` (GUI, Q5/Q9); per-decal `DecalLife`
+(renderer, Q5); `setLightColor` reaching a render light (Q5); the shake envelope and
+`frequencyShift` pitch in the mixer, and what plays for the 539 missing samples (Q5/Q6); the
+decl-manager API the game calls (`FindEffect`, `FindMapDef(map, filter)`, playback data) (Q5);
+the settings page's engine-filled lists (`gui::4_3_choices` / `16_9` / `16_10`,
+`gui::aspect_choices`, `gui::device_name`), the Doom 3 art paths the engine's menu code sets
+(`loadgame_shot` = `guis/assets/blankLevelShot`, `browser_levelshot` = `guis/assets/splash/pdtempa`;
+Quake 4 keeps its level shots in `gfx/guis/loadscreens/`) and the Raven-named engine cvars it binds
+(`s_volume`, `s_musicVolume`, `s_speakerFraction`, `s_deviceName`, `s_useOpenAL`,
+`r_aspectRatio`, `r_skipSky`, `r_forceAmbient`, `r_useSmp`, `in_freeLook`) — the game cvars
+on that page (`si_*`, `ui_*`, `g_*`) come with the game library (Q5); `deform rectSprite`
+billboards like `sprite` (two multiplayer materials, Q9).
+
+Engine strings: Quake 4 ships the engine's strings as `#str_1` + Doom 3's digits
+(`#str_104343` LOADING...); `idLangDict::GetString` tries that form after a miss. Quake 4's
+`default.cfg` binds `LEFTCTRL` / `RIGHTSHIFT` …, read as aliases of Doom 3's key names.
+
 - **Guide preprocessor.** `guide <material> <macro>( args… )` and `inlineGuide` expand
   templates from `guides/*.guide` (up to 20 parameters) into decl text before parsing (DUDE's
   decl manager has no notion of guides; the SDK exposes it as `ParseGuides` /
@@ -542,12 +610,12 @@ a **gate** that is automated or a user-verified run — nothing advances on "it 
 |---|---|---|---|---|
 | Q0 | **Preparation** — **DONE 2026-10-22** | Decisions taken (§9); reference trees cloned outside the repo to `~/quake4-refs/` as blobless sparse checkouts (idTech4A++ `ce49510` 39 MB, OpenQ4 `29c8103` 123 MB, SDK mirror `Xanz/Quake4SDK` `5077f68` 14 MB; the mirror dropped its EULA, OpenQ4 carries it in `LICENSES/QUAKE-4-SDK-EULA.rtf`); `tools/quake4/` audit. The separate game repository moves to Q5, where it is first needed: `openQ4-game` was archived on 2026-10-01 and its code now lives in OpenQ4's `src/game` / `src/mpgame` | Trees on disk | 0.5 |
 | Q1 | **Title profile + boot** — **BUILT 2026-10-22, gate pending** | §5.1 profile; `.fontdat` loader (float glyph metrics + left bearing, Doom 3 fonts unchanged); `run-q4.sh` (Steam library autodetect or `Q4DIR`, then `+set com_title quake4 +set fs_basepath "<Quake 4 dir>"`); null game. Decl registration moved to Q2, where the new decl types land: Quake 4 uses the same `materials/`, `skins/` and `sound/` folders Doom 3 registers, so Q1 had nothing to change there | `./run-q4.sh` boots on both backends, lists the 36 paks, draws the console with the Quake 4 fonts, `exec default.cfg` runs without errors | 1 |
-| Q2 | **Decl/material/GUI/sound parity** | §5.2 guide preprocessor, keywords, new decl types, EFX mapping, UI API additions | `lintDecls` (new console cmd) reports **0 errors** over 110 mtr / 301 gui / 174 sndshd / 1180 fx / 87 lipsync / 14 playback; `mainmenu.gui` renders and is navigable (user screenshot) | 2 |
+| Q2 | **Decl/material/GUI/sound parity** — **BUILT 2026-10-23; `lintDecls` gate PASSED (17085 decls, 3 retail quirks), menu verified on GL3; Vulkan + Doom 3 regression pending** | §5.2 guide preprocessor, keywords, new decl types, EFX mapping, UI API additions (as built: §5.2) | `lintDecls` (new console cmd) reports **0 failures** over every material / sound shader / effect / lipSync / playback / materialType / entity decl, except the retail data quirks listed in §1.4 and `tools/quake4/README.md` (GUIs are not decls: `q4_gui_census.py` offline, the menu run by the user); `mainmenu.gui` renders and is navigable (user screenshot); Doom 3 menu, sound and materials unchanged | 2 |
 | Q3 | **World formats** | §5.3 `.map 3` (incl. `func_group` resolve + entity filter), `.proc 4` (incl. coloured verts, portal fade data), `.cm 3`, `.aas 1.08` (incl. dummy-file detection); collision API additions | Null game loads **all 31 SP maps** and renders them; `cm`/`aas` self-checks (counts match file headers); user screenshot of `airdefense1` on GL3 and VK | 1.5–2 |
 | Q4 | **BSE effects** | §5.5: own implementation from grammar + docs, decompile-derived code as last-resort reference, re-expressed in our C++ | All 1180 effects parse; `testEffect` plays each particle type; `bseSweep` plays every effect once without errors; user visual check of ~20 representative effects vs retail; OpenQ4 parity data passes where applicable | **5–7** |
 | Q5 | **Game library** | §5.4 interfaces (API 37 union, render/sound/collision/decl/UI additions), §5.6 repo + build script, idlib shim, `playback`/`lipSync` consumers, `rvClientEffect` bridge, ASAN pass | `airdefense1` **playable**: spawn, HUD, weapons, AI, scripts, triggers, VO + lipsync, cinematic (`md5camera`), save + load round-trip; transition to `airdefense2` | 5–7 |
 | Q6 | **Campaign pass** | Per-map issue log seeded from idTech4A++'s fixes (§4); vehicles (`convoy1/2`, `walker`), tram (`tram1/1b`), MCC sequences, Strogg-ification (`medlabs`), hub, `core1/2` ending; difficulty, objectives, loading screens | User completes the campaign start to finish on one backend, then the other; every logged issue closed or explicitly deferred | 3–5 |
-| Q7 | **DUDE enhancements on Quake 4** | Presets (Potato = faithful); PBR classifier calibration on Raven textures; parallax/tess gating; RT: world + animated BLAS from Q4 content, RTAO/RTGI/ReSTIR DI tiers; FSR2 motion vectors for BSE; perf pass (`r_vkGpuTime`) | Ultra Nightmare runs `airdefense1` within ±25 % of the Doom 3 reference budget; fidelity-note policy applied to every new toggle; user screenshots per tier | 2–3 |
+| Q7 | **DUDE enhancements on Quake 4** | Presets (Potato = faithful); textures: Quake 4 ships 2010 precompressed DXT `.dds` (`progimg/`, `dds/`) — offer DUDE's own upload compression instead where the source image exists (dhewm3's `image_useCompression 2` = BC7/BPTC), opt-in (user note 2026-10-23); PBR classifier calibration on Raven textures; parallax/tess gating; RT: world + animated BLAS from Q4 content, RTAO/RTGI/ReSTIR DI tiers; FSR2 motion vectors for BSE; perf pass (`r_vkGpuTime`) | Ultra Nightmare runs `airdefense1` within ±25 % of the Doom 3 reference budget; fidelity-note policy applied to every new toggle; user screenshots per tier | 2–3 |
 | Q8 | **Packaging** | Steam/GOG path auto-detect inside the engine (Q1's `run-q4.sh` already scans Steam libraries); ship `nullgame.so`/`.dll` with the release (`build-win.sh` already copies every `.dll`; check `build-linux-release.sh`); Windows cross-build of the engine (`build-win.sh`) and `q4base.dll` via the same script under mingw; README/docs; release notes; `dist/` layout as 0.9.x | Clean-machine install test on Linux + Windows following only the README | 1–2 |
 | Q9 | **Later / optional** | Multiplayer (`mpgame`, `q4mp` paks, bots), Q4 mods (Awakening, Hardqore — OpenQ4/idTech4A++ run them), Prey (2006) via the same title profile | — | — |
 
@@ -567,7 +635,9 @@ game repository must already exist.
 Every layer is checkable independently of the layers above it. Build these as you go:
 
 1. **`tools/quake4/q4_keywords.py` as regression** — after each parser extension the `*`
-   markers for that file type must be gone. Offline, cheap, already written.
+   markers for that file type must be gone. Offline, cheap, already written. Q2 added the
+   per-format checks `q4_material_census.py`, `q4_gui_census.py`, `q4_sound_census.py` and the
+   guide differential test `test_guides.sh`.
 2. **`lintDecls` console command** (Q2) — parse every decl of every registered type, print
    per-type error counts; headless via `+lintDecls +quit`. Goes on the Doom 3 release
    checklist too.

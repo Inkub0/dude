@@ -56,6 +56,20 @@ void idListWindow::CommonInit() {
 	horizontal = false;
 	scroller = new idSliderWindow(dc, gui);
 	multipleSel = false;
+	itemHeight = 0.0f;
+	backgroundHover = backgroundFocus = backgroundLine = backgroundGreyed = NULL;
+}
+
+/*
+================
+idListWindow::RowHeight
+
+DUDE: Quake 4 lists set an itemHeight taller than the text (their row art needs room);
+Doom 3 lists have none and keep the font's line height.
+================
+*/
+float idListWindow::RowHeight( void ) {
+	return Max( GetMaxCharHeight(), itemHeight );
 }
 
 idListWindow::idListWindow(idDeviceContext *d, idUserInterfaceLocal *g) : idWindow(d, g) {
@@ -97,7 +111,7 @@ const char *idListWindow::HandleEvent(const sysEvent_t *event, bool *updateVisua
 	// need to call this to allow proper focus and capturing on embedded children
 	const char *ret = idWindow::HandleEvent(event, updateVisuals);
 
-	float vert = GetMaxCharHeight();
+	float vert = RowHeight();
 	int numVisibleLines = textRect.h / vert;
 
 	int key = event->evValue;
@@ -286,6 +300,40 @@ bool idListWindow::ParseInternalVar(const char *_name, idParser *src) {
 		ParseString(src, tabIconVOffsetStr);
 		return true;
 	}
+	// DUDE: Quake 4 list properties
+	if (idStr::Icmp(_name, "tabTextScales") == 0) {
+		ParseString(src, tabTextScaleStr);
+		return true;
+	}
+	if (idStr::Icmp(_name, "itemHeight") == 0) {
+		itemHeight = src->ParseFloat();
+		return true;
+	}
+	if (idStr::Icmp(_name, "scrollbar") == 0) {
+		// Quake 4 marks the lists that show a scrollbar; the scroller here already appears
+		// whenever the items overflow, so the flag only needs consuming
+		src->ParseBool();
+		return true;
+	}
+	const idMaterial **rowArt = NULL;
+	if (idStr::Icmp(_name, "backgroundHover") == 0) {
+		rowArt = &backgroundHover;
+	} else if (idStr::Icmp(_name, "backgroundFocus") == 0) {
+		rowArt = &backgroundFocus;
+	} else if (idStr::Icmp(_name, "backgroundLine") == 0) {
+		rowArt = &backgroundLine;
+	} else if (idStr::Icmp(_name, "backgroundGreyed") == 0) {
+		rowArt = &backgroundGreyed;
+	}
+	if (rowArt != NULL) {
+		idStr matName;
+		ParseString(src, matName);
+		*rowArt = matName.Length() ? declManager->FindMaterial(matName) : NULL;
+		if (*rowArt) {
+			(*rowArt)->SetSort(SS_GUI);
+		}
+		return true;
+	}
 
 	idStr strName = _name;
 	if(idStr::Icmp(strName.Left(4), "mtr_") == 0) {
@@ -390,6 +438,18 @@ void idListWindow::PostParse() {
 		}
 	}
 
+	// DUDE: Quake 4 tabTextScales ".3,.3,.22"
+	idList<float> tabTextScales;
+	if (tabTextScaleStr.Length()) {
+		idParser src(tabTextScaleStr, tabTextScaleStr.Length(), "tabtextscales", LEXFL_NOFATALERRORS | LEXFL_NOSTRINGCONCAT | LEXFL_NOSTRINGESCAPECHARS);
+		idToken tok;
+		while (src.ReadToken(&tok)) {
+			if (tok == ",") {
+				continue;
+			}
+			tabTextScales.Append(atof(tok));
+		}
+	}
 	int c = tabStops.Num();
 	bool doAligns = (tabAligns.Num() == tabStops.Num());
 	for (int i = 0; i < c; i++) {
@@ -417,6 +477,7 @@ void idListWindow::PostParse() {
 		} else {
 			r.iconVOffset = 0;
 		}
+		r.textScale = ( i < tabTextScales.Num() ) ? tabTextScales[i] : 0.0f;
 		tabInfo.Append(r);
 	}
 	flags |= WIN_CANFOCUS;
@@ -471,7 +532,7 @@ void idListWindow::Draw(int time, float x, float y) {
 	int count = listItems.Num();
 	idRectangle rect = textRect;
 	float scale = textScale;
-	float lineHeight = GetMaxCharHeight();
+	float lineHeight = RowHeight();
 
 	float bottom = textRect.Bottom();
 	float width = textRect.w;
@@ -490,7 +551,27 @@ void idListWindow::Draw(int time, float x, float y) {
 	}
 
 	for (int i = top; i < count; i++) {
-		if ( IsSelected( i ) ) {
+		// DUDE: Quake 4 row art - one material per row: the selected row's, else the hovered
+		// row's, else the greyed one when the list takes no input, else the plain line. A list
+		// without row art (all of Doom 3's) draws the selection as before.
+		const idMaterial *rowArt = NULL;
+		if ( backgroundFocus || backgroundHover || backgroundLine || backgroundGreyed ) {
+			idRectangle hoverRect = rect;
+			hoverRect.y += 1.0f;
+			hoverRect.h = lineHeight - 1.0f;
+			if ( IsSelected( i ) ) {
+				rowArt = backgroundFocus;
+			} else if ( hover && !noEvents && Contains( hoverRect, gui->CursorX(), gui->CursorY() ) ) {
+				rowArt = backgroundHover;
+			} else if ( noEvents ) {
+				rowArt = backgroundGreyed;
+			} else {
+				rowArt = backgroundLine;
+			}
+		}
+		if ( rowArt != NULL ) {
+			dc->DrawMaterial( rect.x, rect.y + pixelOffset, rect.w, lineHeight, rowArt, colorWhite, 1.0f, 1.0f );
+		} else if ( IsSelected( i ) ) {
 			rect.h = lineHeight;
 			dc->DrawFilledRect(rect.x, rect.y + pixelOffset, rect.w, rect.h, borderColor);
 			if ( flags & WIN_FOCUS ) {
@@ -525,7 +606,9 @@ void idListWindow::Draw(int time, float x, float y) {
 				dc->PushClipRect( rect );
 
 				if ( tabInfo[tab].type == TAB_TYPE_TEXT ) {
-					dc->DrawText(work, scale, tabInfo[tab].align, color, rect, false, -1);
+					// DUDE: Quake 4 per-column text scale, text style and spacing (0 for Doom 3)
+					const float tabScale = ( tabInfo[tab].textScale > 0.0f ) ? tabInfo[tab].textScale : scale;
+					dc->DrawWindowText(work, tabScale, tabInfo[tab].align, color, rect, false, 0, (int)textStyle, textSpacing);
 				} else if (tabInfo[tab].type == TAB_TYPE_ICON) {
 
 					const idMaterial	**hashMat;
@@ -577,7 +660,7 @@ void idListWindow::Draw(int time, float x, float y) {
 			rect.x = textRect.x;
 			rect.w = width;
 		} else {
-			dc->DrawText(listItems[i], scale, 0, color, rect, false, -1);
+			dc->DrawWindowText(listItems[i], scale, 0, color, rect, false, 0, (int)textStyle, textSpacing);
 		}
 		rect.y += lineHeight;
 		if ( rect.y > bottom ) {
@@ -610,7 +693,7 @@ void idListWindow::UpdateList() {
 			break;
 		}
 	}
-	float vert = GetMaxCharHeight();
+	float vert = RowHeight();
 	int fit = textRect.h / vert;
 	int selection = gui->State().GetInt( va( "%s_sel_0", listName.c_str() ) );
 	if ( listItems.Num() < fit ) {

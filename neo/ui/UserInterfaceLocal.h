@@ -93,6 +93,12 @@ public:
 	idStr						&GetPendingCmd() { return pendingCmd; };
 	idStr						&GetReturnCmd() { return returnCmd; };
 
+	// DUDE: Quake 4 GUI script support (nonInteractive, setLightColor). Engine-side for now;
+	// the game-facing interface gains them with the Quake 4 game library (docs/quake4-port.md 5.4).
+	void						SetInteractive( bool b ) { interactive = b; }
+	void						SetLightColor( const idVec4 &color ) { lightColor = color; }
+	const idVec4 &				GetLightColor( void ) const { return lightColor; }
+
 private:
 	bool						active;
 	bool						loading;
@@ -115,6 +121,10 @@ private:
 	int							time;
 
 	int							refs;
+
+	// DUDE: Quake 4
+	bool						initScriptsRun;		// onInit ran (first redraw, or restored from a save game)
+	idVec4						lightColor;			// setLightColor
 
 	// DG: used so we can notify GUI scripts about changes in side padding.
 	//  Relevant if they use cstAnchor, so they can know how big padding on the left/right
