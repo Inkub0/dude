@@ -33,6 +33,7 @@ const int MAX_INHERIT_DEPTH = 16;
 
 // the parts of a model def ("model <name> { mesh ... anim ... }") the dressing needs
 struct modelDef_t {
+				modelDef_t( void ) { offset.Zero(); }	// idVec3 does not clear itself; most defs give no offset
 	idStr		mesh;
 	idStr		skin;
 	idVec3		offset;
