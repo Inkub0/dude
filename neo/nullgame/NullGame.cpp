@@ -32,6 +32,7 @@ Doom 3 GPL Source Code (see ArbProgram.h for license header)
 #include "framework/DeclManager.h"
 #include "framework/DeclEntityDef.h"
 #include "framework/Game.h"
+#include "cm/CollisionModel.h"
 #include "renderer/RenderSystem.h"
 #include "renderer/RenderWorld.h"
 #include "sound/sound.h"
@@ -246,6 +247,7 @@ idNullGame::Shutdown
 */
 void idNullGame::Shutdown( void ) {
 	MapShutdown();
+	collisionModelManager->FreeMap();		// as idGameLocal::Shutdown
 	cmdSystem->RemoveFlaggedCommands( CMD_FL_GAME );
 	idLib::ShutDown();
 }
@@ -361,6 +363,10 @@ void idNullGame::InitFromNewMap( const char *mapName, idRenderWorld *rw, idSound
 	FindPlayerStart( parsed ? &mapFile : NULL, mapName );
 	hasPortalSky = false;
 	if ( parsed ) {
+		// the collision map, as the Doom 3 game loads it (idGameLocal::LoadMap): nothing here
+		// traces against it yet, but loading it runs every map's .cm through the loader and
+		// prints its statistics; the manager drops the previous map's when the map changes
+		collisionModelManager->LoadMap( &mapFile );
 		FindPortalSky( mapFile );
 		NullGameDressing::Spawn( mapFile, renderWorld, gameTime );
 	}

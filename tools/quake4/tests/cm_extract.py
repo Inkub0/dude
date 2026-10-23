@@ -39,6 +39,7 @@ def main():
     for name in ("ParseVertices", "ParseEdges", "ParseNodes"):
         parts.append(function(files, rf"idCollisionModelManagerLocal::{name}\("))
     parts.append(function(files, r"^static int ParseBlockSize\("))
+    parts.append(function(files, r"^static void CheckBlockCounts\("))
     for name in ("ParsePolygons", "ParseBrushes", "ParseCollisionModel", "LoadCollisionModelFile"):
         parts.append(function(files, rf"idCollisionModelManagerLocal::{name}\("))
     text = "\n\n".join(parts) + "\n"

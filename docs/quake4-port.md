@@ -469,7 +469,10 @@ Version-tolerant parsing, both formats through one code path:
   Doom 3's (`sightclip` … `projectileclip`, and `shotclip`: "block bullets but not players or
   monsters", baked into 22 brushes of 8 MP maps, so `shot_clip`'s material keyword now sets
   `CONTENTS_SHOTCLIP` = bit 25 too). A Quake 4 file's CRC is taken as current (Raven's tools
-  wrote it; a mismatch would make the engine rebuild collision from the `.map`).
+  wrote it; a mismatch would make the engine rebuild collision from the `.map`). Self-check: a
+  two-count block header that disagrees with the rows read prints a warning naming the file
+  and model (`CheckBlockCounts`; none over the retail files, and a header bumped by one in a
+  copy of `airdefense1.cm` is reported).
   **Verification:** `tools/quake4/test_cm_parse.sh` runs the loader's own code (copied out of
   `neo/cm/` verbatim) with the real `idLexer` over every retail file — Quake 4 944/944,
   Doom 3 + RoE + LM 112/112, no warnings; `q4_cm_check.py` is the Python replica. A negative
@@ -626,8 +629,10 @@ sound listener, renders the session's world with a hor+ 90 degree view, and offe
 `getviewpos` / `setviewpos`. Every `idGameEdit` method is stubbed because the engine calls some
 outside the editors (GUI `renderDef` windows, the worldspawn lookup at map load). It loads
 automatically when a title allows it and its own library is missing (Quake 4 until Q5), or on
-request with `+set fs_game nullgame` on any title. Collision loading follows in Q3 now that
-the `.cm 3` loader exists (§5.3).
+request with `+set fs_game nullgame` on any title. Since Q3 it also loads the map's collision
+(`collisionModelManager->LoadMap` in `InitFromNewMap`, `FreeMap` at shutdown, as
+`idGameLocal` does): nothing traces against it yet, but every map's `.cm` goes through the
+loader and its statistics land in the log.
 
 **Map dressing (Q3 step 0, `neo/nullgame/NullGameDressing.cpp`):** a bare world says little
 about whether a map renders right, so the null game adds, render-only, what the map's

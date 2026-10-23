@@ -400,19 +400,40 @@ DUDE: the memory to reserve for a polygons / brushes block, from its header. Doo
 the byte count (polygons, a comment naming polygonMemory, 123456, {); Quake 4 writes the
 element and sub-element counts (numPolygons 41470 and numPolygonEdges 163348, each after a
 comment naming it), from which the same byte count follows. 0 = no header numbers (allocate
-one by one).
+one by one). The counts, when the header gives them, go to numElements / numSubElements
+(else -1) for the caller's check against the rows it reads.
 ================
 */
-static int ParseBlockSize( idLexer *src, int elementSize, int subElementSize ) {
+static int ParseBlockSize( idLexer *src, int elementSize, int subElementSize, int &numElements, int &numSubElements ) {
 	idToken first, second;
+	numElements = numSubElements = -1;
 	if ( !src->CheckTokenType( TT_NUMBER, 0, &first ) ) {
 		return 0;
 	}
 	if ( !src->CheckTokenType( TT_NUMBER, 0, &second ) ) {
 		return first.GetIntValue();
 	}
+	numElements = first.GetIntValue();
+	numSubElements = second.GetIntValue();
 	// each element's struct already holds one sub-element (edges[1] / planes[1])
-	return first.GetIntValue() * ( elementSize - subElementSize ) + second.GetIntValue() * subElementSize;
+	return numElements * ( elementSize - subElementSize ) + numSubElements * subElementSize;
+}
+
+/*
+================
+CheckBlockCounts
+
+DUDE: a Quake 4 block header counts its rows; one that disagrees with what was read means a
+file this loader misreads (or a damaged one), so say so - the load itself goes on, as the
+rows are what the collision uses.
+================
+*/
+static void CheckBlockCounts( idLexer *src, const cm_model_t *model, const char *what, const char *subWhat,
+		int headerCount, int headerSubCount, int count, int subCount ) {
+	if ( headerCount >= 0 && ( headerCount != count || headerSubCount != subCount ) ) {
+		common->Warning( "%s: collision model '%s' has %d %s and %d %s, its header says %d and %d",
+			src->GetFileName(), model->name.c_str(), count, what, subCount, subWhat, headerCount, headerSubCount );
+	}
 }
 
 /*
@@ -426,17 +447,21 @@ void idCollisionModelManagerLocal::ParsePolygons( idLexer *src, cm_model_t *mode
 	idVec3 normal;
 	idToken token;
 
-	const int blockSize = ParseBlockSize( src, sizeof( cm_polygon_t ), sizeof( p->edges[0] ) );
+	int headerPolygons, headerEdges;
+	const int blockSize = ParseBlockSize( src, sizeof( cm_polygon_t ), sizeof( p->edges[0] ), headerPolygons, headerEdges );
 	if ( blockSize > 0 ) {
 		model->polygonBlock = (cm_polygonBlock_t *) Mem_Alloc( sizeof( cm_polygonBlock_t ) + blockSize );
 		model->polygonBlock->bytesRemaining = blockSize;
 		model->polygonBlock->next = ( (byte *) model->polygonBlock ) + sizeof( cm_polygonBlock_t );
 	}
 
+	int numRead = 0, numEdgesRead = 0;
 	src->ExpectTokenString( "{" );
 	while ( !src->CheckTokenString( "}" ) ) {
 		// parse polygon
 		numEdges = src->ParseInt();
+		numRead++;
+		numEdgesRead += numEdges;
 		p = AllocPolygon( model, numEdges );
 		p->numEdges = numEdges;
 		src->ExpectTokenString( "(" );
@@ -470,6 +495,7 @@ void idCollisionModelManagerLocal::ParsePolygons( idLexer *src, cm_model_t *mode
 		// filter polygon into tree
 		R_FilterPolygonIntoTree( model, model->node, NULL, p );
 	}
+	CheckBlockCounts( src, model, "polygons", "edges", headerPolygons, headerEdges, numRead, numEdgesRead );
 }
 
 /*
@@ -483,17 +509,21 @@ void idCollisionModelManagerLocal::ParseBrushes( idLexer *src, cm_model_t *model
 	idVec3 normal;
 	idToken token;
 
-	const int blockSize = ParseBlockSize( src, sizeof( cm_brush_t ), sizeof( b->planes[0] ) );
+	int headerBrushes, headerPlanes;
+	const int blockSize = ParseBlockSize( src, sizeof( cm_brush_t ), sizeof( b->planes[0] ), headerBrushes, headerPlanes );
 	if ( blockSize > 0 ) {
 		model->brushBlock = (cm_brushBlock_t *) Mem_Alloc( sizeof( cm_brushBlock_t ) + blockSize );
 		model->brushBlock->bytesRemaining = blockSize;
 		model->brushBlock->next = ( (byte *) model->brushBlock ) + sizeof( cm_brushBlock_t );
 	}
 
+	int numRead = 0, numPlanesRead = 0;
 	src->ExpectTokenString( "{" );
 	while ( !src->CheckTokenString( "}" ) ) {
 		// parse brush
 		numPlanes = src->ParseInt();
+		numRead++;
+		numPlanesRead += numPlanes;
 		b = AllocBrush( model, numPlanes );
 		b->numPlanes = numPlanes;
 		src->ExpectTokenString( "{" );
@@ -520,6 +550,7 @@ void idCollisionModelManagerLocal::ParseBrushes( idLexer *src, cm_model_t *model
 		// filter brush into tree
 		R_FilterBrushIntoTree( model, model->node, NULL, b );
 	}
+	CheckBlockCounts( src, model, "brushes", "planes", headerBrushes, headerPlanes, numRead, numPlanesRead );
 }
 
 /*
