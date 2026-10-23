@@ -306,13 +306,33 @@ void idCollisionModelManagerLocal::FreeBrushReference( cm_brushRef_t *bref ) {
 
 /*
 ================
+CM_AllocatedInBlock
+
+DUDE: whether a polygon / brush came from its model's block rather than from AllocPolygon /
+AllocBrush's one-by-one fallback. A block sized from a .cm header can be too small: Doom 3's
+headers hold the byte count of a 32-bit build's structs, which a 64-bit build's outgrow, so
+the last rows of most models are allocated one by one - and must be freed one by one, or every
+map unload leaks them (up to ~390 KB per map).
+================
+*/
+template< class blockType >
+static bool CM_AllocatedInBlock( const blockType *block, const void *element ) {
+	if ( block == NULL ) {
+		return false;
+	}
+	const byte *start = (const byte *)block + sizeof( blockType );
+	return (const byte *)element >= start && (const byte *)element < block->next;
+}
+
+/*
+================
 idCollisionModelManagerLocal::FreePolygon
 ================
 */
 void idCollisionModelManagerLocal::FreePolygon( cm_model_t *model, cm_polygon_t *poly ) {
 	model->numPolygons--;
 	model->polygonMemory -= sizeof( cm_polygon_t ) + ( poly->numEdges - 1 ) * sizeof( poly->edges[0] );
-	if ( model->polygonBlock == NULL ) {
+	if ( !CM_AllocatedInBlock( model->polygonBlock, poly ) ) {
 		Mem_Free( poly );
 	}
 }
@@ -325,7 +345,7 @@ idCollisionModelManagerLocal::FreeBrush
 void idCollisionModelManagerLocal::FreeBrush( cm_model_t *model, cm_brush_t *brush ) {
 	model->numBrushes--;
 	model->brushMemory -= sizeof( cm_brush_t ) + ( brush->numPlanes - 1 ) * sizeof( brush->planes[0] );
-	if ( model->brushBlock == NULL ) {
+	if ( !CM_AllocatedInBlock( model->brushBlock, brush ) ) {
 		Mem_Free( brush );
 	}
 }
