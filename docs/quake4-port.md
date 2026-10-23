@@ -443,7 +443,24 @@ Engine strings: Quake 4 ships the engine's strings as `#str_1` + Doom 3's digits
 ### 5.3 World loaders (engine, GPL)
 
 Version-tolerant parsing, both formats through one code path:
-- `.map` — accept `Version 3` in `idMapFile::Parse`; nothing else changes.
+- `.map` — accept `Version 3` in `idMapFile::Parse`; nothing else changes in the parser.
+  **Entity filter, as built (Q3, 2026-10-23):** `process1` and `storage1` each hold two levels;
+  an entity marked `filter_first "1"` / `filter_second "1"` belongs to one (process1: 203 / 12),
+  and each level has its own `info_player_start`. `map game/process1 first` (also `devmap`, the
+  addon-pak reload, and a game-issued `map <next> <filter>` from `target_endLevel`'s
+  `entityFilter`) sets serverinfo `si_entityFilter` - the Quake 4 game skips an entity with any
+  `filter_*` key unless it names `filter_<filter>` (SDK `idGameLocal::InhibitEntitySpawn`), and the
+  session finds the level's mapDef as `<map>_<filter>` (`idSessionLocal::FindMapDef`: name, load
+  sizes, autosave title; autosave files get `_<filter>`). Gated on the title profile's
+  `entityFilters` (Doom 3: off - no key, unchanged lookups). The null game applies the same rule to
+  its dressing and its player start. Also from the mapDef: Quake 4's loading screen
+  (`guis/loading/generic.gui`) gets `loading_bkgnd` = `loadimage` and `loading_levelname`, which
+  DUDE never set (every Quake 4 map loaded on a blank screen); only a mapDef with a `loadimage`
+  does that, so Doom 3's loading GUIs are untouched. **Quake 4 inline statics stay solid**
+  (SDK `idStaticEntity::Spawn`: "inline models can be solid") - unlike Doom 3, where `Hide()`
+  zeroes their contents - so terrain dmap merged into the world keeps its own `.cm` collision
+  (Q5's game does this itself; a null-game floor drop that left them out sank the intro
+  marines of `airdefense1` onto a buried brush and was reverted).
 - `.proc` — accept `PROC "4"` + CRC; vertices with 8 **or** 12 floats (store the RGBA in
   `idDrawVert::color` — DUDE already consumes per-vertex colour for terrain blends); IAP fade
   tuple into `portal_t` (`fadeImage`, `near`, `far`) for `RenderPortalFades`. Measured

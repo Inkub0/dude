@@ -36,6 +36,7 @@ typedef struct gameTitleProfile_s {
 	bool			doom3Layout;		// base/ + d3xp/ + demo/ conventions: RoE detection, demo fallback, mod list
 	bool			nullGameFallback;	// run the null game when the title's own game library is not built yet
 	bool			recursiveDeclFolders;	// decl files also live in subfolders (Quake 4: materials/effects/...)
+	bool			entityFilters;		// "map <map> <filter>" picks one of the levels a .map holds (Quake 4: si_entityFilter, mapDef <map>_<filter>)
 
 	// sound
 	float			soundUnitsToMeters;	// sound shader min/maxDistance units: Doom 3 authors metres, Quake 4 map units

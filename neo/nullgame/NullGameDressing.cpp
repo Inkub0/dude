@@ -716,10 +716,20 @@ const idMaterial *AddLight( idRenderWorld *rw, const idDict &args, counts_t &cou
 
 /*
 ================
+NullGameDressing::EntityFilteredOut
+================
+*/
+bool NullGameDressing::EntityFilteredOut( const idDict &spawnArgs, const char *entityFilter ) {
+	return entityFilter != NULL && entityFilter[0] != '\0' && spawnArgs.MatchPrefix( "filter_" ) != NULL
+		&& !spawnArgs.GetBool( va( "filter_%s", entityFilter ) );
+}
+
+/*
+================
 NullGameDressing::Spawn
 ================
 */
-void NullGameDressing::Spawn( const idMapFile &mapFile, idRenderWorld *rw, int gameTime ) {
+void NullGameDressing::Spawn( const idMapFile &mapFile, idRenderWorld *rw, int gameTime, const char *entityFilter ) {
 	Clear( NULL );
 	if ( rw == NULL || nullgame_dressing.GetInteger() <= 0 || mapFile.GetNumEntities() == 0 ) {
 		return;
@@ -743,6 +753,10 @@ void NullGameDressing::Spawn( const idMapFile &mapFile, idRenderWorld *rw, int g
 		}
 		const char *spawnclass = args.GetString( "spawnclass" );
 
+		// another of the levels this .map holds (Quake 4's entity filter)
+		if ( EntityFilteredOut( args, entityFilter ) ) {
+			continue;
+		}
 		// what does not show when it spawns: hidden until triggered (idEntity::Spawn), AI
 		// waiting for a cinematic, a trigger or a teleport (each title's idAI::Spawn),
 		// switched off, triggers, statics dmap merged into the world (idStaticEntity::Spawn)

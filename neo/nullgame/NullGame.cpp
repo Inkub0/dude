@@ -125,7 +125,7 @@ public:
 
 private:
 	gameReturn_t				EmptyReturn( void ) const;
-	void						FindPlayerStart( const idMapFile *mapFile, const char *mapName );
+	void						FindPlayerStart( const idMapFile *mapFile, const char *mapName, const char *entityFilter );
 	void						FindPortalSky( const idMapFile &mapFile );
 	void						CheckAAS( const idMapFile &mapFile );
 	idMat3						ViewAxis( void ) const;
@@ -310,10 +310,11 @@ idNullGame::FindPlayerStart
 
 Where to put the camera: the first info_player_start (or, failing that, any player
 start) of the parsed .map, at the eye height of a standing player. mapFile is NULL when
-the .map did not parse.
+the .map did not parse. A start of another level the .map holds is skipped (Quake 4's entity
+filter).
 ================
 */
-void idNullGame::FindPlayerStart( const idMapFile *mapFile, const char *mapName ) {
+void idNullGame::FindPlayerStart( const idMapFile *mapFile, const char *mapName, const char *entityFilter ) {
 	viewOrigin.Zero();
 	idAngles start( 0.0f, 0.0f, 0.0f );
 
@@ -323,13 +324,15 @@ void idNullGame::FindPlayerStart( const idMapFile *mapFile, const char *mapName 
 		const idMapEntity *best = NULL;
 		for ( int i = 0; i < mapFile->GetNumEntities() && best == NULL; i++ ) {
 			const idMapEntity *ent = mapFile->GetEntity( i );
-			if ( idStr::Icmp( ent->epairs.GetString( "classname" ), "info_player_start" ) == 0 ) {
+			if ( idStr::Icmp( ent->epairs.GetString( "classname" ), "info_player_start" ) == 0
+				 && !NullGameDressing::EntityFilteredOut( ent->epairs, entityFilter ) ) {
 				best = ent;
 			}
 		}
 		for ( int i = 0; i < mapFile->GetNumEntities() && best == NULL; i++ ) {
 			const idMapEntity *ent = mapFile->GetEntity( i );
-			if ( idStr::Icmpn( ent->epairs.GetString( "classname" ), "info_player_", 12 ) == 0 ) {
+			if ( idStr::Icmpn( ent->epairs.GetString( "classname" ), "info_player_", 12 ) == 0
+				 && !NullGameDressing::EntityFilteredOut( ent->epairs, entityFilter ) ) {
 				best = ent;
 			}
 		}
@@ -363,7 +366,12 @@ void idNullGame::InitFromNewMap( const char *mapName, idRenderWorld *rw, idSound
 
 	idMapFile mapFile;
 	const bool parsed = mapFile.Parse( mapName );
-	FindPlayerStart( parsed ? &mapFile : NULL, mapName );
+	// Quake 4: which of the levels the .map holds ("map game/process1 first")
+	const char *entityFilter = serverInfo.GetString( "si_entityFilter" );
+	if ( entityFilter[0] != '\0' ) {
+		common->Printf( "null game: entity filter '%s'\n", entityFilter );
+	}
+	FindPlayerStart( parsed ? &mapFile : NULL, mapName, entityFilter );
 	hasPortalSky = false;
 	if ( parsed ) {
 		// the collision map, as the Doom 3 game loads it (idGameLocal::LoadMap): nothing here
@@ -372,7 +380,7 @@ void idNullGame::InitFromNewMap( const char *mapName, idRenderWorld *rw, idSound
 		collisionModelManager->LoadMap( &mapFile );
 		CheckAAS( mapFile );
 		FindPortalSky( mapFile );
-		NullGameDressing::Spawn( mapFile, renderWorld, gameTime );
+		NullGameDressing::Spawn( mapFile, renderWorld, gameTime, entityFilter );
 	}
 }
 
