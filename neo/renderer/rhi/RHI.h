@@ -284,6 +284,12 @@ public:
 	// GL only swaps in the RC_SWAP_BUFFERS case, so a backend that owns its presentation (Vulkan)
 	// must not present those either. One-shot: consumed by the next BeginFrame, defaults to true.
 	virtual void	SetFramePresent( bool present ) {}
+	// DUDE: height of the image the scene pass draws into this frame - the frame target's, else
+	// the scene image's - for screen-position math that has to place a viewport smaller than that
+	// image on a top-down backend (Vulkan: a glass probe face renders at the tile size straight
+	// into the window-sized scene image). 0 = bottom-up like GL, where a viewport at (0, 0) needs
+	// no correction.
+	virtual int		SceneImageHeight() { return 0; }
 
 	// ---- passes (begin/end-scoped; backend decides render-pass objects) ----
 	virtual void	BeginPass( const ClearArgs *clear ) = 0;	// NULL = load existing

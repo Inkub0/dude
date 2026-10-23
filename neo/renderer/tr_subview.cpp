@@ -588,7 +588,11 @@ staging, so the sky never takes the frame's once-per-frame slots.
 */
 bool R_PortalSkyRender( void ) {
 	viewDef_t *parent = tr.viewDef;
-	if ( parent == NULL || parent->isSubview || !parent->isWindowView || parent->viewEntitys == NULL ) {
+	// the player's view, and a glass probe face (bakeGlassProbe: six tile-sized top-level views
+	// that are not window views) - else the probe's sky directions show whatever _currentRender
+	// last held through RoE's portal_sky surfaces, a stale picture of the player's view
+	if ( parent == NULL || parent->isSubview || ( !parent->isWindowView && !tr.takingEnvProbe )
+	     || parent->viewEntitys == NULL ) {
 		return false;
 	}
 	idRenderWorldLocal *world = static_cast<idRenderWorldLocal *>( parent->renderWorld );

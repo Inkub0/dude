@@ -1967,6 +1967,34 @@ static void RB_RHI_RenderCustomStage( rhi::RHI *r, const viewDef_t *viewDef, con
 
 /*
 =============
+RB_RHI_VkScreenRowOffset
+
+DUDE: u_windowCoord.w of the screen-position stages on Vulkan (heat haze, portal sky, the portal
+sky composite): screenTc.y = ( fragY * -1/h + w ) * screenCorrection.y, with Vulkan's top-down
+gl_FragCoord.y. 1.0 maps a view that starts at the image's top row, the value these stages always
+used (checked on full-window and cropped renders). A glass probe face is different: it renders at
+the tile size straight into the window-sized scene image (RB_RHI_HdrBeginFrame routes no frame
+target while baking), where the GL->VK flip puts its GL bottom-left viewport on the image's rows
+[imageH - y - h, imageH - y) - 1184..1440 for a 256 face at 1440, where the probe's captures also
+copy from - so while baking the term is ( imageH - y ) / h, which maps that face's top row to the
+top of its capture.
+=============
+*/
+static float RB_RHI_VkScreenRowOffset( rhi::RHI *r, const viewDef_t *viewDef ) {
+	if ( !tr.takingEnvProbe ) {
+		return 1.0f;
+	}
+	const int imageH = r->SceneImageHeight();
+	const int h = viewDef->viewport.y2 - viewDef->viewport.y1 + 1;
+	if ( imageH <= 0 || h <= 0 ) {
+		return 1.0f;
+	}
+	const int y = tr.viewportOffset[1] + viewDef->viewport.y1;
+	return (float)( imageH - y ) / h;
+}
+
+/*
+=============
 RB_RHI_RenderBuiltinArbStage
 
 Vulkan (Phase 4 M5): a stock custom-ARB stage drawn with its hand-translated
@@ -2028,7 +2056,7 @@ static void RB_RHI_RenderBuiltinArbStage( rhi::RHI *r, const viewDef_t *viewDef,
 	// crops the scene, h != vidHeight) it shifted the sample, so _currentRender heat-haze
 	// blood decals showed a shrunk copy of the window. 1.0 is correct at any viewport size.
 	parms.windowCoord[1] = -1.0f / h;
-	parms.windowCoord[3] = 1.0f;
+	parms.windowCoord[3] = RB_RHI_VkScreenRowOffset( r, viewDef );	// 1.0 but in a glass probe face
 
 	// stage vertexParms -> u_localParam0/1 (the stock programs use locals 0/1)
 	for ( int i = 0; i < ns->numVertexParms && i < 2; i++ ) {
@@ -2412,7 +2440,7 @@ static void RB_RHI_RenderTexgenStage( rhi::RHI *r, const viewDef_t *viewDef, con
 			// vidHeight/h only matched when h==vidHeight and mis-sampled sub-window
 			// (cropped) renders — same fix as the heat-haze path above.
 			parms.windowCoord[1] = -1.0f / h;
-			parms.windowCoord[3] = 1.0f;
+			parms.windowCoord[3] = RB_RHI_VkScreenRowOffset( r, viewDef );	// 1.0 but in a glass probe face
 		}
 		screenImg->Bind();
 		vkTex[0] = screenImg->rhiHandle;
@@ -3597,7 +3625,7 @@ static void RB_RHI_PortalSkyComposite( rhi::RHI *r, const viewDef_t *viewDef ) {
 	parms.windowCoord[1] = 1.0f / h;
 	if ( vkMode ) {
 		parms.windowCoord[1] = -1.0f / h;	// top-down gl_FragCoord vs the GL-layout capture
-		parms.windowCoord[3] = 1.0f;
+		parms.windowCoord[3] = RB_RHI_VkScreenRowOffset( r, viewDef );
 	}
 
 	// the light loop left the scissor on the last light's screen rect: back to the view's own,
