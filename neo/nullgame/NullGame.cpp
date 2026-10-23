@@ -9,7 +9,10 @@ Doom 3 GPL Source Code (see ArbProgram.h for license header)
 // It implements idGame with nothing but a free-flying camera: the session loads a map's
 // render world as usual, and this library renders it, flies through it with the normal
 // movement keys and places the sound listener. No entities are spawned, no scripts run,
-// nothing collides. That is exactly what is needed to bring up an engine-side feature
+// nothing collides; what the map's entities would show when they spawn (lights, models,
+// MD5 models frozen on their start animation, GUIs) is added render-only by the map
+// dressing (NullGameDressing.cpp, nullgame_dressing 0 for the world alone). That is exactly
+// what is needed to bring up an engine-side feature
 // (file loaders, decls, materials, GUIs, effects) for a game title whose own game code
 // is not built yet, which is how Quake 4 support starts (docs/quake4-port.md section 5.7).
 //
@@ -31,6 +34,7 @@ Doom 3 GPL Source Code (see ArbProgram.h for license header)
 #include "renderer/RenderSystem.h"
 #include "renderer/RenderWorld.h"
 #include "sound/sound.h"
+#include "nullgame/NullGameDressing.h"
 
 // interface pointers handed over by the engine in GetGameAPI
 idSys *						sys = NULL;
@@ -110,7 +114,7 @@ public:
 
 private:
 	gameReturn_t				EmptyReturn( void ) const;
-	void						FindPlayerStart( const char *mapName );
+	void						FindPlayerStart( const idMapFile *mapFile, const char *mapName );
 	idMat3						ViewAxis( void ) const;
 
 	idRenderWorld *				renderWorld;
@@ -189,12 +193,12 @@ void idNullGame::Init( void ) {
 	common->Printf( "----- Initializing Null Game -----\n" );
 	// a game library cannot call engine free functions (GameTitle::Get would leave an
 	// undefined symbol and fail dlopen) - the resolved title is in the com_title cvar
-	common->Printf( "spectator only: maps render, nothing spawns or simulates (com_title %s)\n",
+	common->Printf( "spectator only: maps render with their lights and models, nothing moves or simulates (com_title %s)\n",
 		cvarSystem->GetCVarString( "com_title" ) );
 
 	// The decl types and folders a game library registers, so the engine's decl tools
 	// (lintDecls, listEntityDefs ...) cover the title's game decls too. Model, export and
-	// camera decls are kept as text: the null game spawns nothing.
+	// camera decls are kept as text: the map dressing reads the model defs it needs itself.
 	const bool quake4 = idStr::Icmp( cvarSystem->GetCVarString( "com_title" ), "quake4" ) == 0;
 	declManager->RegisterDeclType( "model",		DECL_MODELDEF,		idDeclAllocator<idDecl> );
 	declManager->RegisterDeclType( "export",	DECL_MODELEXPORT,	idDeclAllocator<idDecl> );
@@ -277,27 +281,27 @@ void idNullGame::SetPersistentPlayerInfo( int clientNum, const idDict &info ) {
 ================
 idNullGame::FindPlayerStart
 
-Parses the .map only to find where to put the camera: the first info_player_start (or,
-failing that, any player start), at the eye height of a standing player.
+Where to put the camera: the first info_player_start (or, failing that, any player
+start) of the parsed .map, at the eye height of a standing player. mapFile is NULL when
+the .map did not parse.
 ================
 */
-void idNullGame::FindPlayerStart( const char *mapName ) {
+void idNullGame::FindPlayerStart( const idMapFile *mapFile, const char *mapName ) {
 	viewOrigin.Zero();
 	idAngles start( 0.0f, 0.0f, 0.0f );
 
-	idMapFile mapFile;
-	if ( !mapFile.Parse( mapName ) ) {
+	if ( mapFile == NULL ) {
 		common->Warning( "null game: couldn't parse %s - camera starts at the origin", mapName );
 	} else {
 		const idMapEntity *best = NULL;
-		for ( int i = 0; i < mapFile.GetNumEntities() && best == NULL; i++ ) {
-			const idMapEntity *ent = mapFile.GetEntity( i );
+		for ( int i = 0; i < mapFile->GetNumEntities() && best == NULL; i++ ) {
+			const idMapEntity *ent = mapFile->GetEntity( i );
 			if ( idStr::Icmp( ent->epairs.GetString( "classname" ), "info_player_start" ) == 0 ) {
 				best = ent;
 			}
 		}
-		for ( int i = 0; i < mapFile.GetNumEntities() && best == NULL; i++ ) {
-			const idMapEntity *ent = mapFile.GetEntity( i );
+		for ( int i = 0; i < mapFile->GetNumEntities() && best == NULL; i++ ) {
+			const idMapEntity *ent = mapFile->GetEntity( i );
 			if ( idStr::Icmpn( ent->epairs.GetString( "classname" ), "info_player_", 12 ) == 0 ) {
 				best = ent;
 			}
@@ -323,11 +327,19 @@ idNullGame::InitFromNewMap
 ================
 */
 void idNullGame::InitFromNewMap( const char *mapName, idRenderWorld *rw, idSoundWorld *sw, bool isServer, bool isClient, int randseed ) {
-	MapShutdown();
+	// the session has already loaded the new map into rw, which dropped anything added to
+	// it before: forget the old dressing's handles without freeing them
+	NullGameDressing::Clear( NULL );
 	renderWorld = rw;
 	soundWorld = sw;
 	gameTime = 0;
-	FindPlayerStart( mapName );
+
+	idMapFile mapFile;
+	const bool parsed = mapFile.Parse( mapName );
+	FindPlayerStart( parsed ? &mapFile : NULL, mapName );
+	if ( parsed ) {
+		NullGameDressing::Spawn( mapFile, renderWorld, gameTime );
+	}
 }
 
 /*
@@ -350,6 +362,7 @@ idNullGame::MapShutdown
 ================
 */
 void idNullGame::MapShutdown( void ) {
+	NullGameDressing::Clear( renderWorld );		// the render world still holds the dressing here
 	renderWorld = NULL;
 	soundWorld = NULL;
 }

@@ -1787,7 +1787,7 @@ endif()
 # through any title's maps with no gameplay: the fallback for a game title whose own game
 # library is not built yet (Quake 4), and on request with +set fs_game nullgame.
 if(NULLGAME AND NOT HARDLINK_GAME AND NOT AROS)
-	set(src_nullgame nullgame/NullGame.cpp)
+	set(src_nullgame nullgame/NullGame.cpp nullgame/NullGameDressing.cpp)
 	add_library(nullgame SHARED ${src_nullgame})
 	source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} PREFIX neo FILES ${src_nullgame})
 	set_target_properties(nullgame PROPERTIES PREFIX "")
