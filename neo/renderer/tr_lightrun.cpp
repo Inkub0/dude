@@ -197,10 +197,25 @@ void R_CreateEntityRefs( idRenderEntityLocal *def ) {
 						def->referenceBounds[1][1] - def->referenceBounds[0][1] );
 	}
 
+	// DUDE: a model with no thickness (a pane of glass, a flat sign) lying exactly on a BSP node
+	// plane has every corner at distance 0, which PushVolumeIntoTree counts as the front side
+	// only - and when that plane is a portal, the area behind it is then the only one that sees
+	// the model, through a portal stack whose last plane is the portal itself, which culls it as
+	// well: it never drew from the side it faces. Quake 4 puts window glass in the plane of its
+	// fading portal (mcc_1 / mcc_2). A flat axis gets a quarter unit of thickness for the area
+	// links only; culling keeps the true bounds
+	idBounds linkBounds = def->referenceBounds;
+	for ( i = 0; i < 3; i++ ) {
+		if ( linkBounds[1][i] - linkBounds[0][i] < 0.5f ) {
+			linkBounds[0][i] -= 0.25f;
+			linkBounds[1][i] += 0.25f;
+		}
+	}
+
 	for (i = 0 ; i < 8 ; i++) {
-		v[0] = def->referenceBounds[i&1][0];
-		v[1] = def->referenceBounds[(i>>1)&1][1];
-		v[2] = def->referenceBounds[(i>>2)&1][2];
+		v[0] = linkBounds[i&1][0];
+		v[1] = linkBounds[(i>>1)&1][1];
+		v[2] = linkBounds[(i>>2)&1][2];
 
 		R_LocalPointToGlobal( def->modelMatrix, v, transformed[i] );
 	}
