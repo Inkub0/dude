@@ -203,12 +203,17 @@ void Script_Transition(idWindow *window, idList<idGSWinVar> *src) {
 		//  added float variable
 		idWinFloat* val = NULL;
 		//
+		// DUDE: Quake 4 single-channel colour (matcolor_w ...)
+		idWinVec4Component *comp = NULL;
 		if (vec4 == NULL) {
 			rect = dynamic_cast<idWinRectangle*>((*src)[0].var);
 			//
 			//  added float variable
 			if ( NULL == rect ) {
 				val = dynamic_cast<idWinFloat*>((*src)[0].var);
+				if ( NULL == val ) {
+					comp = dynamic_cast<idWinVec4Component*>((*src)[0].var);
+				}
 			}
 			//
 		}
@@ -217,7 +222,7 @@ void Script_Transition(idWindow *window, idList<idGSWinVar> *src) {
 		idWinStr *timeStr = dynamic_cast<idWinStr*>((*src)[3].var);
 		//
 		//  added float variable
-		if (!((vec4 || rect || val) && from && to && timeStr)) {
+		if (!((vec4 || rect || val || comp) && from && to && timeStr)) {
 			//
 			common->Warning("Bad transition in gui %s in window %s\n", window->GetGui()->GetSourceFile(), window->GetName());
 			return;
@@ -242,11 +247,140 @@ void Script_Transition(idWindow *window, idList<idGSWinVar> *src) {
 			val->SetEval ( false );
 			window->AddTransition(val, *from, *to, time, ac, dc);
 			//
+		} else if ( comp ) {
+			comp->GetVec()->SetEval( false );
+			window->AddTransition(comp, *from, *to, time, ac, dc);
 		} else {
 			rect->SetEval(false);
 			window->AddTransition(rect, *from, *to, time, ac, dc);
 		}
 		window->StartTransition();
+	}
+}
+
+/*
+=========================
+Quake 4 GUI script commands (DUDE)
+
+Raven's GUIs drive their screens with these; without them every menu screen stays in its
+initial state. Behaviour follows what the retail GUIs expect of them.
+=========================
+*/
+
+// the window a "window" or "window::rest" argument names; the desktop matches its own name
+static idWindow *Script_FindWindow( idWindow *window, const char *name ) {
+	drawWin_t *dw = window->GetGui()->GetDesktop()->FindChildByName( name );
+	return ( dw != NULL ) ? dw->win : NULL;	// simple windows have no scripts, events or transitions
+}
+
+/*
+=========================
+Script_NamedEvent
+
+namedEvent "window::event" runs the event on that window and its children; a bare
+namedEvent "event" runs it across the whole GUI.
+=========================
+*/
+void Script_NamedEvent( idWindow *window, idList<idGSWinVar> *src ) {
+	// events fire events; a GUI whose events end up firing themselves must not take the
+	// engine down with a stack overflow
+	static const int MAX_NAMED_EVENT_DEPTH = 32;
+	static int depth = 0;
+	idStr target = (*src)[0].var->c_str();
+	if ( depth >= MAX_NAMED_EVENT_DEPTH ) {
+		common->Warning( "gui %s: namedEvent \"%s\" nested %d deep - stopped (an event that fires itself?)",
+			window->GetGui()->GetSourceFile(), target.c_str(), depth );
+		return;
+	}
+	depth++;
+	const int sep = target.Find( "::" );
+	if ( sep <= 0 ) {
+		window->GetGui()->HandleNamedEvent( target );
+	} else {
+		idWindow *win = Script_FindWindow( window, target.Left( sep ) );
+		if ( win != NULL ) {
+			win->RunNamedEvent( target.Right( target.Length() - sep - 2 ) );
+		}
+	}
+	depth--;
+}
+
+/*
+=========================
+Script_StopTransitions
+
+stopTransitions "window": the transitions that window's scripts started stop where they are.
+=========================
+*/
+void Script_StopTransitions( idWindow *window, idList<idGSWinVar> *src ) {
+	idWindow *win = Script_FindWindow( window, (*src)[0].var->c_str() );
+	if ( win != NULL ) {
+		win->ClearTransitions();
+	}
+}
+
+/*
+=========================
+Script_ConsoleCmd
+
+consoleCmd "g_skill 1" - every argument, space-separated, queued as one console command.
+The menu starts a new game this way (g_skill N, then map game/airdefense1), so each command
+gets its own line: appended back to back without one, two commands would run together.
+=========================
+*/
+void Script_ConsoleCmd( idWindow *window, idList<idGSWinVar> *src ) {
+	idStr cmd;
+	for ( int i = 0; i < src->Num(); i++ ) {
+		if ( i > 0 ) {
+			cmd += " ";
+		}
+		cmd += (*src)[i].var->c_str();
+	}
+	if ( cmd.Length() ) {
+		cmd += "\n";
+		cmdSystem->BufferCommandText( CMD_EXEC_APPEND, cmd );
+	}
+}
+
+/*
+=========================
+Script_ResetVideo
+
+resetVideo "window": restart the cinematic on that window's background (the intro movies).
+=========================
+*/
+void Script_ResetVideo( idWindow *window, idList<idGSWinVar> *src ) {
+	idWindow *win = Script_FindWindow( window, (*src)[0].var->c_str() );
+	if ( win == NULL ) {
+		win = window;
+	}
+	win->ResetCinematics();
+	win->EvalRegs( -1, true );
+}
+
+/*
+=========================
+Script_NonInteractive
+
+nonInteractive "1": the GUI stops taking input (world screens once they have been used).
+=========================
+*/
+void Script_NonInteractive( idWindow *window, idList<idGSWinVar> *src ) {
+	window->GetGui()->SetInteractive( atoi( (*src)[0].var->c_str() ) == 0 );
+}
+
+/*
+=========================
+Script_SetLightColor
+
+setLightColor "window::matcolor": the colour the GUI's surface should light its
+surroundings with (weapon ammo screens). Stored on the GUI for the game and the renderer.
+=========================
+*/
+void Script_SetLightColor( idWindow *window, idList<idGSWinVar> *src ) {
+	idWinVec4 *color = dynamic_cast<idWinVec4*>( (*src)[0].var );
+	if ( color != NULL ) {
+		window->GetGui()->SetLightColor( *color );
 	}
 }
 
@@ -267,7 +401,14 @@ guiCommandDef_t commandList[] = {
 	{ "transition", Script_Transition, 4, 6 },
 	{ "localSound", Script_LocalSound, 1, 1 },
 	{ "runScript", Script_RunScript, 1, 1 },
-	{ "evalRegs", Script_EvalRegs, 0, 0 }
+	{ "evalRegs", Script_EvalRegs, 0, 0 },
+	// DUDE: Quake 4
+	{ "namedEvent", Script_NamedEvent, 1, 1 },
+	{ "stopTransitions", Script_StopTransitions, 1, 1 },
+	{ "consoleCmd", Script_ConsoleCmd, 1, 999 },
+	{ "resetVideo", Script_ResetVideo, 1, 1 },
+	{ "nonInteractive", Script_NonInteractive, 1, 1 },
+	{ "setLightColor", Script_SetLightColor, 1, 1 }
 };
 
 int	scriptCommandCount = sizeof(commandList) / sizeof(guiCommandDef_t);
@@ -584,6 +725,17 @@ void idGuiScript::FixupParms(idWindow *win) {
 		}
 		//
 
+	} else if (handler == &Script_SetLightColor) {
+		// DUDE: Quake 4 - the argument names a colour ("bg::matcolor"), resolve it like `set` does
+		idWinStr *str = dynamic_cast<idWinStr*>(parms[0].var);
+		idWinVar *dest = str ? win->GetWinVarByName(*str, true) : NULL;
+		if (dest) {
+			delete parms[0].var;
+			parms[0].var = dest;
+			parms[0].own = false;
+		} else if (str) {
+			common->Warning("Window %s in gui %s: setLightColor names no variable %s", win->GetName(), win->GetGui()->GetSourceFile(), str->c_str());
+		}
 	} else {
 		int c = parms.Num();
 		for (int i = 0; i < c; i++) {

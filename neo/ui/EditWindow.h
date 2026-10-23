@@ -74,6 +74,8 @@ private:
 	int					cursorPos;
 	int					cursorLine;
 	int					cvarMax;
+	int					cvarMin;		// DUDE: Quake 4; applied only when cvarMinSet
+	bool				cvarMinSet;
 	bool				wrap;
 	bool				readonly;
 	bool				numeric;

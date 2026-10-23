@@ -62,6 +62,8 @@ idSimpleWindow::idSimpleWindow(idWindow *win) {
 	borderColor = win->borderColor;
 	textScale = win->textScale;
 	rotate = win->rotate;
+	textSpacing = win->textSpacing;
+	textStyle = win->textStyle;
 	shear = win->shear;
 	backGroundName = win->backGroundName;
 	if (backGroundName.Length()) {
@@ -136,7 +138,7 @@ idSimpleWindow::idSimpleWindow(idWindow *win) {
 }
 
 idSimpleWindow::~idSimpleWindow() {
-
+	componentVars.DeleteContents( true );
 }
 
 void idSimpleWindow::StateChanged( bool redraw ) {
@@ -281,17 +283,8 @@ void idSimpleWindow::Redraw(float x, float y) {
 	//#modified-fva; END
 
 	DrawBorderAndCaption(drawRect);
-	if ( textShadow ) {
-		idStr shadowText = text;
-		idRectangle shadowRect = textRect;
-
-		shadowText.RemoveColors();
-		shadowRect.x += textShadow;
-		shadowRect.y += textShadow;
-
-		dc->DrawText( shadowText, textScale, textAlign, colorBlack, shadowRect, !( flags & WIN_NOWRAP ), -1 );
-	}
-	dc->DrawText(text, textScale, textAlign, foreColor, textRect, !( flags & WIN_NOWRAP ), -1);
+	// DUDE: shadow (Doom 3), textStyle + textSpacing (Quake 4); see idDeviceContext::DrawWindowText
+	dc->DrawWindowText( text, textScale, textAlign, foreColor, textRect, !( flags & WIN_NOWRAP ), textShadow, (int)textStyle, textSpacing );
 	dc->SetTransformInfo(vec3_origin, mat3_identity);
 	if ( flags & WIN_NOCLIP ) {
 		dc->EnableClipping( true );
@@ -389,6 +382,33 @@ idWinVar *idSimpleWindow::GetWinVarByName(const char *_name) {
 		retVar = &cstAnchorFactor;
 	}
 	//#modified-fva; END
+
+	// DUDE: Quake 4
+	if (idStr::Icmp(_name, "textspacing") == 0) {
+		retVar = &textSpacing;
+	} else if (idStr::Icmp(_name, "textstyle") == 0) {
+		retVar = &textStyle;
+	}
+
+	// DUDE: Quake 4 single-channel colour (matcolor_w ...); see idWindow::ColorComponentVar
+	if ( retVar == NULL ) {
+		for ( int i = 0; i < componentVars.Num(); i++ ) {
+			if ( idStr::Icmp( _name, componentVars[i]->GetName() ) == 0 ) {
+				return componentVars[i];
+			}
+		}
+		idStr base;
+		int component;
+		if ( _name[0] != '$' && strchr( _name, ':' ) == NULL && idWinVec4Component::SplitName( _name, base, component ) ) {
+			idWinVec4 *vec = dynamic_cast<idWinVec4*>( GetWinVarByName( base ) );
+			if ( vec != NULL ) {
+				idWinVec4Component *var = new idWinVec4Component( vec, component );
+				var->SetName( _name );
+				componentVars.Append( var );
+				retVar = var;
+			}
+		}
+	}
 
 	return retVar;
 }

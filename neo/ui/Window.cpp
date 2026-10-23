@@ -113,7 +113,11 @@ const char *idWindow::ScriptNames[] = {
 	"onTrigger",
 	"onActionRelease",
 	"onEnter",
-	"onEnterRelease"
+	"onEnterRelease",
+	// DUDE: Quake 4 GUI events (see the ON_BACKACTION enum)
+	"onBackAction",
+	"onTabRelease",
+	"onInit"
 };
 
 /*
@@ -144,6 +148,8 @@ void idWindow::CommonInit() {
 	rotate = 0;
 	shear.Zero();
 	textScale = 0.35f;
+	textSpacing = 0.0f;
+	textStyle = 0.0f;
 	backColor.Zero();
 	foreColor = idVec4(1, 1, 1, 1);
 	hoverColor = idVec4(1, 1, 1, 1);
@@ -348,17 +354,9 @@ void idWindow::Draw( int time, float x, float y ) {
 	if ( text.Length() == 0 ) {
 		return;
 	}
-	if ( textShadow ) {
-		idStr shadowText = text;
-		idRectangle shadowRect = textRect;
-
-		shadowText.RemoveColors();
-		shadowRect.x += textShadow;
-		shadowRect.y += textShadow;
-
-		dc->DrawText( shadowText, textScale, textAlign, colorBlack, shadowRect, !( flags & WIN_NOWRAP ), -1 );
-	}
-	dc->DrawText( text, textScale, textAlign, foreColor, textRect, !( flags & WIN_NOWRAP ), -1 );
+	// DUDE: shadow (Doom 3), textStyle + textSpacing (Quake 4); identical to the old code
+	// for Doom 3 windows (style and spacing 0)
+	dc->DrawWindowText( text, textScale, textAlign, foreColor, textRect, !( flags & WIN_NOWRAP ), textShadow, (int)textStyle, textSpacing );
 
 	if ( gui_edit.GetBool() ) {
 		dc->EnableClipping( false );
@@ -858,6 +856,11 @@ const char *idWindow::HandleEvent(const sysEvent_t *event, bool *updateVisuals) 
 						}
 					}
 				}
+				// DUDE: Quake 4 runs a window's onBackAction on a right-click press, the way a
+				// left-click press runs onAction (the menu's back buttons, the crosshair picker)
+				if (event->evValue2 && !actionDownRun) {
+					actionDownRun = RunScript( ON_BACKACTION );
+				}
 			} else if (event->evValue == K_MOUSE3) {
 				if (gui_edit.GetBool()) {
 					int c = children.Num();
@@ -1057,6 +1060,17 @@ void idWindow::Transition() {
 			if ( !r ) {
 				val = dynamic_cast<idWinFloat*>(data->data);
 			}
+		}
+		// DUDE: Quake 4 single-channel colour transition (matcolor_w ...)
+		idWinVec4Component *comp = ( v4 == NULL && r == NULL && val == NULL ) ? dynamic_cast<idWinVec4Component*>(data->data) : NULL;
+		if ( comp ) {
+			if ( data->interp.IsDone( gui->GetTime() ) ) {
+				comp->SetFloat( data->interp.GetEndValue()[0] );
+			} else {
+				clear = false;
+				comp->SetFloat( data->interp.GetCurrentValue( gui->GetTime() )[0] );
+			}
+			continue;
 		}
 		if ( data->interp.IsDone( gui->GetTime() ) && data->data) {
 			if (v4) {
@@ -1934,6 +1948,13 @@ idWinVar *idWindow::GetWinVarByName(const char *_name, bool fixup, drawWin_t** o
 	if (idStr::Icmp(_name, "rotate") == 0) {
 		retVar = &rotate;
 	}
+	// DUDE: Quake 4
+	if (idStr::Icmp(_name, "textspacing") == 0) {
+		retVar = &textSpacing;
+	}
+	if (idStr::Icmp(_name, "textstyle") == 0) {
+		retVar = &textStyle;
+	}
 	if (idStr::Icmp(_name, "noEvents") == 0) {
 		retVar = &noEvents;
 	}
@@ -1964,6 +1985,13 @@ idWinVar *idWindow::GetWinVarByName(const char *_name, bool fixup, drawWin_t** o
 			retVar = definedVars[i];
 			break;
 		}
+	}
+
+	// DUDE: Quake 4 single-channel colour (matcolor_w ...): a view onto one component of
+	// one of this window's colours, created on first use and kept in definedVars, so the
+	// lookup above finds it next time and the window frees it
+	if ( retVar == NULL ) {
+		retVar = ColorComponentVar( _name );
 	}
 
 	if (retVar) {
@@ -2181,6 +2209,38 @@ bool idWindow::ParseInternalVar(const char *_name, idParser *src) {
 		idStr fontStr;
 		ParseString( src, fontStr );
 		fontNum = dc->FindFont( fontStr );
+		return true;
+	}
+	// DUDE: Quake 4 window properties
+	if ( idStr::Icmp( _name, "textspacing" ) == 0 ) {
+		textSpacing = src->ParseFloat();
+		return true;
+	}
+	if ( idStr::Icmp( _name, "textstyle" ) == 0 ) {
+		textStyle = src->ParseInt();
+		return true;
+	}
+	if ( idStr::Icmp( _name, "alwaysthink" ) == 0 ) {
+		if ( src->ParseBool() ) {
+			flags |= WIN_ALWAYSTHINK;
+		}
+		return true;
+	}
+	if ( idStr::Icmp( _name, "selected" ) == 0 ) {		// editor selection state saved into a few retail GUIs
+		src->ParseInt();
+		return true;
+	}
+	if ( idStr::Icmp( _name, "fontsize" ) == 0 ) {		// unused: the point size comes from textscale
+		src->ParseFloat();
+		return true;
+	}
+	if ( idStr::Icmp( _name, "defineicon" ) == 0 ) {
+		// defineicon "code" "material" names the icon a ^iCODE text escape draws. Only the
+		// multiplayer server browser inserts those (no retail text contains one), so the
+		// escape is drawn with the multiplayer work; parsed here so the window stays in sync.
+		idStr code, material;
+		ParseString( src, code );
+		ParseString( src, material );
 		return true;
 	}
 
@@ -2512,7 +2572,22 @@ bool idWindow::Parse( idParser *src, bool rebuild) {
 				src->Error( "Unexpected end of file" );
 				return false;
 			}
+			// DUDE: Quake 4 "onTime +N" = N ms after this window's previous onTime (0 if none).
+			// The lexer returns '+' on its own; reading it as the time (atoi -> 0) used to leave
+			// the number where the script's '{' was expected, abandon the rest of the window and
+			// desynchronise every window after it.
+			bool relativeTime = false;
+			if ( token == "+" ) {
+				relativeTime = true;
+				if ( !src->ReadToken( &token ) ) {
+					src->Error( "Unexpected end of file" );
+					return false;
+				}
+			}
 			ev->time = atoi(token.c_str());
+			if ( relativeTime && timeLineEvents.Num() > 0 ) {
+				ev->time += timeLineEvents[timeLineEvents.Num() - 1]->time;
+			}
 
 			// reset the mark since we dont want it to include the time
 			src->SetMarker ( );
@@ -2765,6 +2840,65 @@ void idWindow::AddTransition(idWinVar *dest, idVec4 from, idVec4 to, int time, f
 	data.data = dest;
 	data.interp.Init(gui->GetTime(), accelTime * time, decelTime * time, time, from, to);
 	transitions.Append(data);
+}
+
+/*
+================
+idWindow::ClearTransitions
+
+DUDE: Quake 4's stopTransitions "window": drop the transitions that window started (they
+are owned by the window whose script ran `transition`), leaving every animated value where
+it is. Its timeline keeps running; the GUIs follow it with a resetTime of the reverse
+animation.
+================
+*/
+void idWindow::ClearTransitions() {
+	transitions.SetNum( 0, false );
+	flags &= ~WIN_INTRANSITION;
+}
+
+/*
+================
+idWindow::RunInitScripts
+
+DUDE: Quake 4's onInit, parent first, then every child.
+================
+*/
+void idWindow::RunInitScripts() {
+	RunScript( ON_INIT );
+	for ( int i = 0; i < children.Num(); i++ ) {
+		children[i]->RunInitScripts();
+	}
+}
+
+/*
+================
+idWindow::ColorComponentVar
+
+DUDE: "forecolor_w" -> a view onto component 3 of this window's foreColor. Any of the
+window's own idWinVec4 vars qualifies (forecolor, backcolor, matcolor, hovercolor,
+bordercolor, definevec4 names). Created once and kept in definedVars.
+================
+*/
+idWinVar *idWindow::ColorComponentVar( const char *_name ) {
+	// only this window's own plain variable names: "win::var" is split by the caller, and a
+	// lookup of a "gui::" or "$" base would create and bind a state variable as a side effect
+	if ( _name[0] == '$' || strchr( _name, ':' ) != NULL ) {
+		return NULL;
+	}
+	idStr base;
+	int component;
+	if ( !idWinVec4Component::SplitName( _name, base, component ) ) {
+		return NULL;
+	}
+	idWinVec4 *vec = dynamic_cast<idWinVec4*>( GetWinVarByName( base, false ) );
+	if ( vec == NULL ) {
+		return NULL;
+	}
+	idWinVec4Component *var = new idWinVec4Component( vec, component );
+	var->SetName( _name );
+	definedVars.Append( var );
+	return var;
 }
 
 
@@ -4348,6 +4482,8 @@ void idWindow::SetDefaults ( void ) {
 	rotate = 0;
 	shear.Zero();
 	textScale = 0.35f;
+	textSpacing = 0.0f;
+	textStyle = 0.0f;
 	backColor.Zero();
 	foreColor = idVec4(1, 1, 1, 1);
 	hoverColor = idVec4(1, 1, 1, 1);

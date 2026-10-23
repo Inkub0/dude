@@ -1294,7 +1294,7 @@ void idDeviceContext::DrawEditCursor( float x, float y, float scale ) {
 	PaintChar(x + useScale * glyph2->left, y - yadj,glyph2->imageWidth,glyph2->imageHeight,useScale,glyph2->s,glyph2->t,glyph2->s2,glyph2->t2,glyph2->glyph);
 }
 
-int idDeviceContext::DrawText( const char *text, float textScale, int textAlign, idVec4 color, idRectangle rectDraw, bool wrap, int cursor, bool calcOnly, idList<int> *breaks, int limit ) {
+int idDeviceContext::DrawText( const char *text, float textScale, int textAlign, idVec4 color, idRectangle rectDraw, bool wrap, int cursor, bool calcOnly, idList<int> *breaks, int limit, float adjust ) {
 	const char	*p, *textPtr, *newLinePtr;
 	char		buff[1024];
 	int			len, newLine, newLineWidth, count;
@@ -1389,7 +1389,7 @@ int idDeviceContext::DrawText( const char *text, float textScale, int textAlign,
 			}
 
 			if (!calcOnly) {
-				count += DrawText(x, y, textScale, color, buff, 0, 0, 0, cursor);
+				count += DrawText(x, y, textScale, color, buff, adjust, 0, 0, cursor);
 			}
 
 			if ( cursor < newLine ) {
@@ -1431,11 +1431,45 @@ int idDeviceContext::DrawText( const char *text, float textScale, int textAlign,
 		buff[len] = '\0';
 		// update the width
 		if ( *( buff + len - 1 ) != C_COLOR_ESCAPE && (len <= 1 || *( buff + len - 2 ) != C_COLOR_ESCAPE)) {
-			textWidth += textScale * useFont->glyphScale * useFont->glyphs[ (const unsigned char)*( buff + len - 1 ) ].xSkip;
+			// DUDE: + adjust, the per-character spacing the line will be drawn with, so
+			// alignment and wrapping measure what is drawn
+			textWidth += textScale * useFont->glyphScale * useFont->glyphs[ (const unsigned char)*( buff + len - 1 ) ].xSkip + adjust;
 		}
 	}
 
 	return idMath::FtoiFast( rectDraw.w / charSkip );
+}
+
+/*
+=============
+idDeviceContext::DrawWindowText
+=============
+*/
+void idDeviceContext::DrawWindowText( const char *text, float textScale, int textAlign, const idVec4 &color, const idRectangle &rectDraw, bool wrap, int shadow, int style, float spacing ) {
+	if ( shadow ) {
+		// Doom 3: an opaque black copy, shadow px down and right
+		idStr shadowText = text;
+		shadowText.RemoveColors();
+		idRectangle shadowRect = rectDraw;
+		shadowRect.x += shadow;
+		shadowRect.y += shadow;
+		DrawText( shadowText, textScale, textAlign, colorBlack, shadowRect, wrap, -1, false, NULL, 0, spacing );
+	} else if ( style == 1 || style == 2 ) {
+		// Quake 4: black at the text's alpha - nearly all Quake 4 text fades through
+		// forecolor_w, and an opaque copy would linger after the text has gone
+		idStr shadowText = text;
+		shadowText.RemoveColors();
+		const idVec4 shadowColor( 0.0f, 0.0f, 0.0f, color.w );
+		static const float offsets[4][2] = { { 1, 1 }, { -1, 1 }, { -1, -1 }, { 1, -1 } };
+		const int passes = ( style == 2 ) ? 4 : 1;
+		for ( int i = 0; i < passes; i++ ) {
+			idRectangle shadowRect = rectDraw;
+			shadowRect.x += offsets[i][0];
+			shadowRect.y += offsets[i][1];
+			DrawText( shadowText, textScale, textAlign, shadowColor, shadowRect, wrap, -1, false, NULL, 0, spacing );
+		}
+	}
+	DrawText( text, textScale, textAlign, color, rectDraw, wrap, -1, false, NULL, 0, spacing );
 }
 
 /*

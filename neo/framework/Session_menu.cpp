@@ -765,6 +765,55 @@ void idSessionLocal::HandleMainMenuCommands( const char *menuCommand ) {
 			continue;
 		}
 
+		// DUDE: Quake 4 menu commands. Harmless for Doom 3's menus, which never send them.
+		// (Quake 4's "exec cvar_restart", "exec s_restart" and "exec disconnect" are single
+		// commands that the existing "exec" handler below already runs.)
+		if ( !idStr::Icmp( cmd, "GetCVarValue" ) ) {
+			// GetCVarValue <cvar> <guiVar>: copy a cvar into the menu's state for its widgets
+			if ( icmd + 1 < args.Argc() ) {
+				const char *cvarName = args.Argv( icmd++ );
+				const char *guiVar = args.Argv( icmd++ );
+				guiActive->SetStateString( guiVar, cvarSystem->GetCVarString( cvarName ) );
+			}
+			continue;
+		}
+		if ( !idStr::Icmp( cmd, "GetVecCVarValue" ) ) {
+			// GetVecCVarValue <cvar> <component> <guiVar>: one component of a vector cvar
+			if ( icmd + 2 < args.Argc() ) {
+				const char *cvarName = args.Argv( icmd++ );
+				const int component = atoi( args.Argv( icmd++ ) );
+				const char *guiVar = args.Argv( icmd++ );
+				idVec4 v( 0.0f, 0.0f, 0.0f, 0.0f );
+				sscanf( cvarSystem->GetCVarString( cvarName ), "%f %f %f %f", &v.x, &v.y, &v.z, &v.w );
+				guiActive->SetStateFloat( guiVar, ( component >= 0 && component < 4 ) ? v[component] : 0.0f );
+			}
+			continue;
+		}
+		if ( !idStr::Icmp( cmd, "CVarStrcmp" ) ) {
+			// CVarStrcmp <cvar> <guiVar> <value0> <value1> ...: guiVar = the index of the value
+			// the cvar holds (case-insensitive), -1 if none - the language picker uses it
+			if ( icmd + 1 < args.Argc() ) {
+				const char *cvarValue = cvarSystem->GetCVarString( args.Argv( icmd++ ) );
+				const char *guiVar = args.Argv( icmd++ );
+				int match = -1;
+				for ( int i = 0; icmd < args.Argc() && idStr::Cmp( args.Argv( icmd ), ";" ) != 0; i++, icmd++ ) {
+					if ( match < 0 && !idStr::Icmp( args.Argv( icmd ), cvarValue ) ) {
+						match = i;
+					}
+				}
+				guiActive->SetStateInt( guiVar, match );
+			}
+			continue;
+		}
+		if ( !idStr::Icmp( cmd, "fixup_mode" ) ) {
+			// Quake 4 narrowed its mode list to the picked aspect ratio; DUDE's video settings
+			// own resolution and aspect, so the argument is only consumed
+			if ( icmd < args.Argc() ) {
+				icmd++;
+			}
+			continue;
+		}
+
 		if ( !idStr::Icmp( cmd, "quit" ) ) {
 			ExitMenu();
 			common->Quit();

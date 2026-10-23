@@ -62,6 +62,9 @@ const int WIN_ACTIVE		= 0x00200000;
 const int WIN_SHOWCOORDS	= 0x00400000;
 const int WIN_SHOWTIME		= 0x00800000;
 const int WIN_WANTENTER		= 0x01000000;
+// DUDE: Quake 4 "alwaysThink": keep running this window's timeline and transitions while
+// its GUI is not the active one (parsed; consumers come with the in-game GUI work)
+const int WIN_ALWAYSTHINK	= 0x02000000;
 
 const int WIN_DESKTOP		= 0x10000000;
 
@@ -191,6 +194,10 @@ public:
 		ON_ACTIONRELEASE,
 		ON_ENTER,
 		ON_ENTERRELEASE,
+		// DUDE: Quake 4 GUI events. Appended so Doom 3's indices (and save games) are unchanged.
+		ON_BACKACTION,		// right-click press, as a left-click press runs onAction
+		ON_TABRELEASE,		// Tab released while the window has focus
+		ON_INIT,			// once, on the GUI's first redraw (after the game has set its parms)
 		SCRIPT_COUNT
 	};
 
@@ -301,6 +308,8 @@ public:
 	float EvalRegs(int test = -1, bool force = false);
 	void StartTransition();
 	void AddTransition(idWinVar *dest, idVec4 from, idVec4 to, int time, float accelTime, float decelTime);
+	void ClearTransitions();				// DUDE: Quake 4 stopTransitions
+	void RunInitScripts();					// DUDE: Quake 4 onInit, this window and all children
 	void ResetTime(int time);
 	void ResetCinematics();
 
@@ -369,6 +378,7 @@ protected:
 	void RestoreExpressionParseState();
 	void ParseBracedExpression(idParser *src);
 	bool ParseScriptEntry(const char *name, idParser *src);
+	idWinVar *ColorComponentVar(const char *name);	// DUDE: Quake 4 forecolor_w and friends
 	bool ParseRegEntry(const char *name, idParser *src);
 	virtual bool ParseInternalVar(const char *name, idParser *src);
 	void ParseString(idParser *src, idStr &out);
@@ -414,6 +424,8 @@ protected:
 	idWinVec4	borderColor;
 	idWinFloat	textScale;
 	idWinFloat	rotate;
+	idWinFloat	textSpacing;	// DUDE: Quake 4 per-character spacing (virtual px), passed to DrawText as adjust
+	idWinFloat	textStyle;		// DUDE: Quake 4 text style: 1 = drop shadow (fades with the text), 2 = outline
 	idWinStr	text;
 	idWinBackground	backGroundName;			//
 

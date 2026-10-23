@@ -90,12 +90,16 @@ protected:
 	idWinVec4		borderColor;
 	idWinFloat		textScale;
 	idWinFloat		rotate;
+	idWinFloat		textSpacing;		// DUDE: Quake 4 (see idWindow)
+	idWinFloat		textStyle;			// DUDE: Quake 4 (see idWindow)
 	idWinVec2		shear;
 	idWinBackground	backGroundName;
 
 	const idMaterial* background;
 
 	idWindow *		mParent;
+
+	idList<idWinVar*> componentVars;	// DUDE: Quake 4 matcolor_w etc. views, created on first use
 
 	idWinBool	hideCursor;
 

@@ -219,5 +219,15 @@ bool idRenderWindow::ParseInternalVar(const char *_name, idParser *src) {
 		ParseString(src, animClass);
 		return true;
 	}
+	// DUDE: Quake 4's multiplayer model preview adds numbered lights ("lightOrigin0 -100, -50,
+	// -60, 0") next to its numbered models. The four-value lights must be consumed here: the
+	// generic fallback keeps one token and would read the rest as property names. The extra
+	// models and lights are drawn with the multiplayer work (docs/quake4-port.md Q9).
+	if ( ( idStr::Icmpn(_name, "lightOrigin", 11) == 0 || idStr::Icmpn(_name, "lightColor", 10) == 0 )
+		&& _name[ idStr::Length(_name) - 1 ] >= '0' && _name[ idStr::Length(_name) - 1 ] <= '9' ) {
+		idVec4 unused;
+		ParseVec4(src, unused);
+		return true;
+	}
 	return idWindow::ParseInternalVar(_name, src);
 }

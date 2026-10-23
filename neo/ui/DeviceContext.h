@@ -56,7 +56,12 @@ public:
 	void				DrawMaterial(float x, float y, float w, float h, const idMaterial *mat, const idVec4 &color, float scalex = 1.0, float scaley = 1.0);
 	void				DrawRect(float x, float y, float width, float height, float size, const idVec4 &color);
 	void				DrawFilledRect(float x, float y, float width, float height, const idVec4 &color);
-	int					DrawText(const char *text, float textScale, int textAlign, idVec4 color, idRectangle rectDraw, bool wrap, int cursor = -1, bool calcOnly = false, idList<int> *breaks = NULL, int limit = 0 );
+	// DUDE: adjust = extra virtual px after each character (Quake 4 textSpacing); 0 = Doom 3
+	int					DrawText(const char *text, float textScale, int textAlign, idVec4 color, idRectangle rectDraw, bool wrap, int cursor = -1, bool calcOnly = false, idList<int> *breaks = NULL, int limit = 0, float adjust = 0.0f );
+	// DUDE: a window's text with its decorations: Doom 3's "shadow N" (opaque black, N px), or
+	// Quake 4's textStyle 1 (1 px drop shadow) / 2 (1 px outline) in black at the text's alpha,
+	// and Quake 4's textSpacing. Shared by idWindow and idSimpleWindow.
+	void				DrawWindowText( const char *text, float textScale, int textAlign, const idVec4 &color, const idRectangle &rectDraw, bool wrap, int shadow, int style, float spacing );
 	void				DrawMaterialRect( float x, float y, float w, float h, float size, const idMaterial *mat, const idVec4 &color);
 	// fva/DG: added adjustCoords argument for CstDoom3 anchored GUIs and our old scale-menus-to-4:3-fix
 	void				DrawStretchPic(float x, float y, float w, float h, float s0, float t0, float s1, float t1, const idMaterial *mat, bool adjustCoords = false);
