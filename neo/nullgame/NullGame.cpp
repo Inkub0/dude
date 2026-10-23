@@ -33,6 +33,8 @@ Doom 3 GPL Source Code (see ArbProgram.h for license header)
 #include "framework/DeclEntityDef.h"
 #include "framework/Game.h"
 #include "cm/CollisionModel.h"
+#include "tools/compilers/aas/AASFile.h"
+#include "tools/compilers/aas/AASFileManager.h"
 #include "renderer/RenderSystem.h"
 #include "renderer/RenderWorld.h"
 #include "sound/sound.h"
@@ -125,6 +127,7 @@ private:
 	gameReturn_t				EmptyReturn( void ) const;
 	void						FindPlayerStart( const idMapFile *mapFile, const char *mapName );
 	void						FindPortalSky( const idMapFile &mapFile );
+	void						CheckAAS( const idMapFile &mapFile );
 	idMat3						ViewAxis( void ) const;
 
 	idRenderWorld *				renderWorld;
@@ -367,8 +370,43 @@ void idNullGame::InitFromNewMap( const char *mapName, idRenderWorld *rw, idSound
 		// traces against it yet, but loading it runs every map's .cm through the loader and
 		// prints its statistics; the manager drops the previous map's when the map changes
 		collisionModelManager->LoadMap( &mapFile );
+		CheckAAS( mapFile );
 		FindPortalSky( mapFile );
 		NullGameDressing::Spawn( mapFile, renderWorld, gameTime );
+	}
+}
+
+/*
+================
+idNullGame::CheckAAS
+
+Loads the map's navigation files the way the Doom 3 game does (idGameLocal::LoadMap: one per
+"type" of the aas_types entityDef, with the map's geometry CRC), reports each and frees it:
+nothing routes in the null game, but every map's files go through the loader. Quake 4 lists
+five sizes; a size the map has no use for is a dummy file (settings, no areas).
+================
+*/
+void idNullGame::CheckAAS( const idMapFile &mapFile ) {
+	const idDecl *decl = declManager->FindType( DECL_ENTITYDEF, "aas_types", false );
+	if ( decl == NULL ) {
+		return;
+	}
+	const idDict &types = static_cast<const idDeclEntityDef *>( decl )->dict;
+	for ( const idKeyValue *kv = types.MatchPrefix( "type" ); kv != NULL; kv = types.MatchPrefix( "type", kv ) ) {
+		idStr fileName = mapFile.GetName();
+		fileName.SetFileExtension( kv->GetValue() );
+		idAASFile *file = AASFileManager->LoadAAS( fileName, mapFile.GetGeometryCRC() );
+		if ( file == NULL ) {
+			common->Printf( "null game: %s did not load\n", fileName.c_str() );
+			continue;
+		}
+		if ( file->IsDummyFile() ) {
+			common->Printf( "null game: %s is a dummy (no areas)\n", fileName.c_str() );
+		} else {
+			common->Printf( "null game: %s: %d areas, %d clusters, %d tactical features\n", fileName.c_str(),
+				file->GetNumAreas(), file->GetNumClusters(), file->GetNumFeatures() );
+		}
+		AASFileManager->FreeAAS( file );
 	}
 }
 

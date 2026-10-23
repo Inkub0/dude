@@ -601,6 +601,9 @@ int idAASFileLocal::MaxTreeDepth( void ) const {
 	int depth, maxDepth;
 
 	depth = maxDepth = 0;
+	if ( nodes.Num() < 2 ) {
+		return 0;		// DUDE: no tree (a Quake 4 dummy file); node 1 is the root otherwise
+	}
 	MaxTreeDepth_r( 1, depth, maxDepth );
 	return maxDepth;
 }

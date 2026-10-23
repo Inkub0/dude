@@ -167,6 +167,7 @@ idAASSettings::idAASSettings( void ) {
 	tt_startCrouching = 100;
 	tt_waterJump = 100;
 	tt_startWalkOffLedge = 100;
+	generateTacticalFeatures = false;
 }
 
 /*
@@ -327,6 +328,9 @@ bool idAASSettings::FromParser( idLexer &src ) {
 		}
 		else if ( token == "tt_startWalkOffLedge" ) {
 			if ( !ParseInt( src, tt_startWalkOffLedge ) ) { return false; }
+		}
+		else if ( token == "generateTacticalFeatures" ) {		// DUDE: Quake 4
+			if ( !ParseBool( src, generateTacticalFeatures ) ) { return false; }
 		}
 		else {
 			src.Error( "invalid token '%s'", token.c_str() );
@@ -581,6 +585,10 @@ idAASFileLocal::idAASFileLocal( void ) {
 	portals.SetGranularity( AAS_LIST_GRANULARITY );
 	portalIndex.SetGranularity( AAS_INDEX_GRANULARITY );
 	clusters.SetGranularity( AAS_LIST_GRANULARITY );
+	areaFeatures.SetGranularity( AAS_LIST_GRANULARITY );
+	featureIndex.SetGranularity( AAS_INDEX_GRANULARITY );
+	features.SetGranularity( AAS_LIST_GRANULARITY );
+	quake4File = false;
 }
 
 /*
@@ -617,6 +625,9 @@ void idAASFileLocal::Clear( void ) {
 	portals.Clear();
 	portalIndex.Clear();
 	clusters.Clear();
+	areaFeatures.Clear();
+	featureIndex.Clear();
+	features.Clear();
 }
 
 /*
@@ -962,6 +973,7 @@ bool idAASFileLocal::ParseAreas( idLexer &src ) {
 
 	numAreas = src.ParseInt();
 	areas.Resize( numAreas );
+	areaFeatures.Resize( quake4File ? numAreas : 0 );
 	if ( !src.ExpectTokenString( "{" ) ) {
 		return false;
 	}
@@ -974,6 +986,13 @@ bool idAASFileLocal::ParseAreas( idLexer &src ) {
 		area.numFaces = src.ParseInt();
 		area.cluster = src.ParseInt();
 		area.clusterAreaNum = src.ParseInt();
+		if ( quake4File ) {
+			// DUDE: Quake 4 ends the row with the area's run in the feature index
+			aasAreaFeatures_t af;
+			af.numFeatures = src.ParseInt();
+			af.firstFeature = src.ParseInt();
+			areaFeatures.Append( af );
+		}
 		area.reach = NULL;
 		area.rev_reach = NULL;
 		area.bounds.Zero();
@@ -1084,6 +1103,79 @@ bool idAASFileLocal::ParseClusters( idLexer &src ) {
 
 /*
 ================
+idAASFileLocal::ParseFeatures
+
+DUDE: Quake 4's tactical features. A row holds flags, height, normalx, normaly, x, y, z (the
+order the retail data shows - height 72 or 48, the normal bytes 0 / 127 / 254, then a position -
+and the one idTech4A++'s Quake 4 loader reads); aasFeature_t's weight is not in the file.
+================
+*/
+bool idAASFileLocal::ParseFeatures( idLexer &src ) {
+	const int numFeatures = src.ParseInt();
+	features.Resize( numFeatures );
+	if ( !src.ExpectTokenString( "{" ) ) {
+		return false;
+	}
+	for ( int i = 0; i < numFeatures; i++ ) {
+		aasFeature_t feature;
+		src.ParseInt();
+		src.ExpectTokenString( "(" );
+		feature.flags = src.ParseInt();
+		feature.height = src.ParseInt();
+		feature.normalx = src.ParseInt();
+		feature.normaly = src.ParseInt();
+		feature.x = src.ParseInt();
+		feature.y = src.ParseInt();
+		feature.z = src.ParseInt();
+		feature.weight = 0;
+		src.ExpectTokenString( ")" );
+		features.Append( feature );
+	}
+	return src.ExpectTokenString( "}" ) != 0;
+}
+
+/*
+================
+idAASFileLocal::CheckFeatures
+
+DUDE: self-check of a Quake 4 file's feature data - every area's run lies in the feature index,
+the runs follow each other, and every index entry names a feature. A file that fails is read
+wrong (or damaged); the load goes on, the routing data does not depend on it.
+================
+*/
+void idAASFileLocal::CheckFeatures( void ) const {
+	if ( areaFeatures.Num() != areas.Num() ) {
+		if ( quake4File ) {
+			common->Warning( "AAS file '%s': %d area feature runs for %d areas", name.c_str(), areaFeatures.Num(), areas.Num() );
+		}
+		return;
+	}
+	int next = 0;
+	for ( int i = 0; i < areaFeatures.Num(); i++ ) {
+		const aasAreaFeatures_t &af = areaFeatures[i];
+		if ( af.numFeatures == 0 ) {
+			continue;
+		}
+		if ( af.firstFeature != next || af.firstFeature + af.numFeatures > featureIndex.Num() ) {
+			common->Warning( "AAS file '%s': area %d's features %d..%d do not follow on (expected %d, index has %d)",
+				name.c_str(), i, af.firstFeature, af.firstFeature + af.numFeatures - 1, next, featureIndex.Num() );
+			return;
+		}
+		next += af.numFeatures;
+	}
+	if ( next != featureIndex.Num() ) {
+		common->Warning( "AAS file '%s': the areas use %d of %d feature index entries", name.c_str(), next, featureIndex.Num() );
+	}
+	for ( int i = 0; i < featureIndex.Num(); i++ ) {
+		if ( featureIndex[i] < 0 || featureIndex[i] >= features.Num() ) {
+			common->Warning( "AAS file '%s': feature index %d names feature %d of %d", name.c_str(), i, featureIndex[i], features.Num() );
+			return;
+		}
+	}
+}
+
+/*
+================
 idAASFileLocal::FinishAreas
 ================
 */
@@ -1125,7 +1217,13 @@ bool idAASFileLocal::Load( const idStr &fileName, unsigned int mapFileCRC ) {
 		return false;
 	}
 
-	if ( !src.ReadToken( &token ) || token != AAS_FILEVERSION ) {
+	// DUDE: Doom 3's 1.07 or Quake 4's 1.08 - the same sections, with Quake 4's additions read
+	// where they appear (the settings key, ParseAreas, the feature sections)
+	if ( !src.ReadToken( &token ) ) {
+		token = "";
+	}
+	quake4File = ( token == AAS_FILEVERSION_QUAKE4 );
+	if ( !quake4File && token != AAS_FILEVERSION ) {
 		common->Warning( "AAS file '%s' has version %s instead of %s", name.c_str(), token.c_str(), AAS_FILEVERSION );
 		return false;
 	}
@@ -1135,8 +1233,10 @@ bool idAASFileLocal::Load( const idStr &fileName, unsigned int mapFileCRC ) {
 		return false;
 	}
 
+	// a Quake 4 file's CRC comes from Raven's tools and ships with its .map, like its .cm: taken
+	// as current (refusing it would leave the AI without navigation)
 	c = token.GetUnsignedIntValue();
-	if ( mapFileCRC && c != mapFileCRC ) {
+	if ( mapFileCRC && c != mapFileCRC && !quake4File ) {
 		common->Warning( "AAS file '%s' is out of date", name.c_str() );
 		return false;
 	}
@@ -1186,6 +1286,12 @@ bool idAASFileLocal::Load( const idStr &fileName, unsigned int mapFileCRC ) {
 		else if ( token == "clusters" ) {
 			if ( !ParseClusters( src ) ) { return false; }
 		}
+		else if ( token == "featureIndex" && quake4File ) {
+			if ( !ParseIndex( src, featureIndex ) ) { return false; }
+		}
+		else if ( token == "features" && quake4File ) {
+			if ( !ParseFeatures( src ) ) { return false; }
+		}
 		else {
 			src.Error( "idAASFileLocal::Load: bad token \"%s\"", token.c_str() );
 			return false;
@@ -1193,6 +1299,7 @@ bool idAASFileLocal::Load( const idStr &fileName, unsigned int mapFileCRC ) {
 	}
 
 	FinishAreas();
+	CheckFeatures();
 
 	depth = MaxTreeDepth();
 	if ( depth > MAX_AAS_TREE_DEPTH ) {
@@ -1223,6 +1330,9 @@ int idAASFileLocal::MemorySize( void ) const {
 	size += portals.Size();
 	size += portalIndex.Size();
 	size += clusters.Size();
+	size += areaFeatures.Size();
+	size += featureIndex.Size();
+	size += features.Size();
 	size += sizeof( idReachability_Walk ) * NumReachabilities();
 
 	return size;
@@ -1236,6 +1346,9 @@ idAASFileLocal::PrintInfo
 void idAASFileLocal::PrintInfo( void ) const {
 	common->Printf( "%6d KB file size\n", MemorySize() >> 10 );
 	common->Printf( "%6d areas\n", areas.Num() );
+	if ( features.Num() > 0 ) {
+		common->Printf( "%6d tactical features\n", features.Num() );		// DUDE: Quake 4
+	}
 	common->Printf( "%6d max tree depth\n", MaxTreeDepth() );
 	ReportRoutingEfficiency();
 }

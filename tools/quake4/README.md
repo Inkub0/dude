@@ -54,6 +54,12 @@ Q4BASE="/path/to/Quake 4/q4base" python3 tools/quake4/q4_inventory.py > /tmp/q4_
   `build/`. Run it after touching `neo/cm/CollisionModel_files.cpp`: a replica cannot see lexer
   mechanics (an `UnreadToken` after a `PeekTokenString` drops a token; the replica passed it,
   this test fails 47 of 83 Doom 3 files on it).
+- `test_aas_parse.sh` (+ `tests/aas_parse_test.cpp`) — navigation files: compiles the engine's
+  own `neo/tools/compilers/aas/AASFile.cpp` and `AASFile_sample.cpp` (only the lexer's file open
+  is redirected to memory) with the real `idLexer`, and loads every `.aas*` of the Quake 4 paks
+  (`DewmAAS "1.08"`) and of Doom 3 + RoE + Lost Mission (`1.07`). Reports failures and warnings
+  (the loader's feature self-check included), areas, clusters, dummy files, tactical features.
+  Needs a configured `build/`.
 - `q4_cm_check.py <pk4 glob>[,<glob>...]` — the Python replica of the same loader: also checks
   that a Quake 4 block header's counts match the rows and that every brush contents name is
   one `cm_contentsNameByIndex` knows.

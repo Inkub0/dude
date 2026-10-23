@@ -484,9 +484,31 @@ Version-tolerant parsing, both formats through one code path:
   `FreeBrush` skipped every row of a model with a block) — ~12 MB over all Doom 3/RoE/LM
   files, up to 387 KB per map load (`le_enpro2`); fixed on its own branch
   (`fix/cm-block-fallback-leak`).
-- `.aas` — accept `1.08`: extended `settings`, 8-int `areas`, `features`/`featureIndex` into
-  `idAASFile` with the layout the SDK's `aas/AASFile.h` declares (the game reads it through
-  `idAASFileManager`). The engine loads whatever extension the game's `aas_types` asks for.
+- `.aas` — **as built (Q3, 2026-10-23)**, one loader for both (`neo/tools/compilers/aas/AASFile.cpp`),
+  the additions read by file revision: `DewmAAS "1.08"` adds the settings key
+  `generateTacticalFeatures`, two numbers per area row (the area's run in the feature index:
+  `numFeatures`, `firstFeature` - their sum is the index size and the runs follow each other in all
+  28 files that have features) and the sections `featureIndex` (as the other indexes) and
+  `features` (a row holds flags, height, normalx, normaly, x, y, z; Raven's 12-byte
+  `aasFeature_t` adds an unstored weight; the order is what the data shows - height 72/48, normal
+  bytes 0/127/254 - and what idTech4A++'s loader reads). Measured over the 150 retail files (30
+  maps x `aas32/48/96/128/250`): 81 dummies (settings, every section empty), features only in the
+  `.aas32` files (28), no file has a section or key beyond these. **ABI:** `aasArea_t` and the
+  members Doom 3 game libraries read inline are unchanged - the feature data lives in lists
+  appended after `settings` (`areaFeatures`, `featureIndex`, `features`) with inline accessors
+  named as Raven's (`GetNumFeatures`, `GetFeature`, `GetNumFeatureIndexes`, `GetFeatureIndex`,
+  plus `GetAreaFeatures` for the per-area run) and `IsDummyFile()` (no areas: a real file always
+  has area 0; Raven's game frees a dummy at once). `generateTacticalFeatures` is appended at the
+  end of `idAASSettings`, `idAASFile`'s last member. Raven's own `idAASFile` is a fully virtual
+  interface with a different ABI: adapting it is Q5's. A Quake 4 file's CRC is taken as current,
+  as for `.cm`. Fixed on the way: the tree-depth report walked node 1 of a file without nodes (a
+  dummy). Self-check: an area run off the index, a gap, or an index entry past the features
+  prints a warning. The null game loads every `aas_types` size per map and logs one line each.
+  **Verification:** `tools/quake4/test_aas_parse.sh` compiles the loader's own `AASFile.cpp` +
+  `AASFile_sample.cpp` with the real `idLexer`: Quake 4 150/150, no warnings (7422 features,
+  21402 index entries); Doom 3 + RoE + LM 83/84 with totals identical to master's loader (the one
+  refusal is `maps/testmaps/test_boxstack.aas48`, version 1.06, refused before too); a shifted
+  feature run in a copy of `airdefense1.aas32` is reported.
 
 ### 5.4 Engine interfaces the game library needs (engine, GPL)
 
@@ -702,7 +724,8 @@ Every layer is checkable independently of the layers above it. Build these as yo
    markers for that file type must be gone. Offline, cheap, already written. Q2 added the
    per-format checks `q4_material_census.py`, `q4_gui_census.py`, `q4_sound_census.py` and the
    guide differential test `test_guides.sh`; Q3 the loader replicas `q4_proc_check.py`,
-   `q4_cm_check.py` and `test_cm_parse.sh`, which runs the engine's own `.cm` parse code.
+   `q4_cm_check.py` and the real-code tests `test_cm_parse.sh` / `test_aas_parse.sh`, which run
+   the engine's own `.cm` / `.aas` parse code over both titles.
 2. **`lintDecls` console command** (Q2) — parse every decl of every registered type, print
    per-type error counts; headless via `+lintDecls +quit`. Goes on the Doom 3 release
    checklist too.
