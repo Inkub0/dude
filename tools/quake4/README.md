@@ -31,7 +31,7 @@ Q4BASE="/path/to/Quake 4/q4base" python3 tools/quake4/q4_inventory.py > /tmp/q4_
 - `test_guides.sh` (+ `check_guides.py`, `tests/guide_expand_test.cpp`) — material guides:
   compiles the engine's own `neo/framework/DeclGuides.cpp` against `build/libidlib.a`, expands
   every retail `.mtr`, and diffs the result byte for byte against an independent Python
-  expansion, plus structural checks (line counts, braces, no guide left, every guide-defined
+  expansion and line map, plus structural checks (one statement per line, braces, no guide left, every guide-defined
   material present). Needs a configured `build/`.
 - `q4_material_census.py <expanded materials dir>` — lists every material/stage keyword in the
   guide-expanded `.mtr` files (the `out/materials` of `test_guides.sh`) that

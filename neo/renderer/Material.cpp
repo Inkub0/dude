@@ -2274,7 +2274,9 @@ void idMaterial::ParseDeform( idLexer &src ) {
 		return;
 	}
 
-	if ( !token.Icmp( "sprite" ) ) {
+	// DUDE: Quake 4's rectSprite (two multiplayer materials) keeps the quad's aspect; until
+	// multiplayer (docs/quake4-port.md Q9) it billboards like sprite instead of defaulting
+	if ( !token.Icmp( "sprite" ) || !token.Icmp( "rectSprite" ) ) {
 		deform = DFRM_SPRITE;
 		cullType = CT_TWO_SIDED;
 		SetMaterialFlag( MF_NOSHADOWS );

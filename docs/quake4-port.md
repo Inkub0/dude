@@ -362,8 +362,10 @@ and only the game library differs per title (as `d3xp.so` / `d3le.so` already do
 **As built in Q2** (branch `feat/quake4-decl-parity`; everything Quake 4-only is keyed off
 the title profile, so a Doom 3 run parses exactly as before):
 - *Guides* — `neo/framework/DeclGuides.{h,cpp}`: templates from `guides/*.guide`, expanded in
-  `.mtr` text before parsing with the line count preserved (decl line numbers stay right);
-  1398 guide-defined materials. Checked offline byte for byte against an independent Python
+  `.mtr` text before parsing, keeping the template's own lines (the material parser is
+  line-sensitive: `qer_editorimage` skips the rest of its line, so a one-line expansion lost
+  every guide material: the cause found for the first gate run's 1507 material lint failures)
+  with a line map back to the file for decl line numbers; 1398 guide-defined materials. Checked offline byte for byte against an independent Python
   expansion (`tools/quake4/test_guides.sh`). The profile also turns on recursive decl folders:
   34 of the 96 `.mtr` files (all effect materials) live in `materials/<sub>/`.
 - *Materials* — every keyword the retail `.mtr` files use parses
@@ -395,7 +397,17 @@ Open after Q2 (each lands with the phase that consumes it): the `^c###` / `^i###
 escapes, render-window multi-model and `onTabRelease` (GUI, Q5/Q9); per-decal `DecalLife`
 (renderer, Q5); `setLightColor` reaching a render light (Q5); the shake envelope and
 `frequencyShift` pitch in the mixer, and what plays for the 539 missing samples (Q5/Q6); the
-decl-manager API the game calls (`FindEffect`, `FindMapDef(map, filter)`, playback data) (Q5).
+decl-manager API the game calls (`FindEffect`, `FindMapDef(map, filter)`, playback data) (Q5);
+the settings page's engine-filled lists (`gui::4_3_choices` / `16_9` / `16_10`,
+`gui::aspect_choices`, `gui::device_name`) and the Raven-named engine cvars it binds
+(`s_volume`, `s_musicVolume`, `s_speakerFraction`, `s_deviceName`, `s_useOpenAL`,
+`r_aspectRatio`, `r_skipSky`, `r_forceAmbient`, `r_useSmp`, `in_freeLook`) — the game cvars
+on that page (`si_*`, `ui_*`, `g_*`) come with the game library (Q5); `deform rectSprite`
+billboards like `sprite` (two multiplayer materials, Q9).
+
+Engine strings: Quake 4 ships the engine's strings as `#str_1` + Doom 3's digits
+(`#str_104343` LOADING...); `idLangDict::GetString` tries that form after a miss. Quake 4's
+`default.cfg` binds `LEFTCTRL` / `RIGHTSHIFT` …, read as aliases of Doom 3's key names.
 
 - **Guide preprocessor.** `guide <material> <macro>( args… )` and `inlineGuide` expand
   templates from `guides/*.guide` (up to 20 parameters) into decl text before parsing (DUDE's

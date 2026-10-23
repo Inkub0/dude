@@ -15,6 +15,7 @@ Doom 3 GPL Source Code (see ArbProgram.h for license header)
 #include "framework/DeclGuides.h"
 
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -137,7 +138,8 @@ std::string Substitute( const guideTemplate_t &tpl, const idStrList &args ) {
 	return out;
 }
 
-bool ExpandText( const char *text, int length, const char *fileName, int firstLine, std::string &out, int depth );
+bool ExpandText( const char *text, int length, const char *fileName, int firstLine, std::string &out, int depth,
+				 std::vector<int> *lineMap );
 
 /*
 ================
@@ -250,7 +252,7 @@ bool ExpandReference( const char *text, int length, int pos, bool isInline, cons
 	std::string body = Substitute( *tpl, args );
 	if ( depth < MAX_EXPAND_DEPTH ) {
 		std::string nested;
-		if ( ExpandText( body.c_str(), (int)body.size(), tpl->file, 1, nested, depth + 1 ) ) {
+		if ( ExpandText( body.c_str(), (int)body.size(), tpl->file, 1, nested, depth + 1, NULL ) ) {
 			body.swap( nested );
 		}
 	}
@@ -267,13 +269,24 @@ bool ExpandReference( const char *text, int length, int pos, bool isInline, cons
 /*
 ================
 ExpandText
+
+An expansion keeps the template's newlines: the material parser is line-sensitive
+(qer_editorimage skips the rest of its line, renderbump reads it). lineMap, when given,
+receives the source line of every output line after the first, so the decl loader can
+report the file's own line numbers.
 ================
 */
-bool ExpandText( const char *text, int length, const char *fileName, int firstLine, std::string &out, int depth ) {
+bool ExpandText( const char *text, int length, const char *fileName, int firstLine, std::string &out, int depth,
+				 std::vector<int> *lineMap ) {
 	bool changed = false;
 	int braceDepth = 0;
 	int line = firstLine;
 	out.reserve( out.size() + length + length / 2 );
+	auto newLine = [&]( int sourceLine ) {
+		if ( lineMap != NULL ) {
+			lineMap->push_back( sourceLine );
+		}
+	};
 
 	int i = 0;
 	while ( i < length ) {
@@ -290,7 +303,7 @@ bool ExpandText( const char *text, int length, const char *fileName, int firstLi
 				i += 2;
 				while ( i < length && !( text[i] == '*' && i + 1 < length && text[i + 1] == '/' ) ) {
 					if ( text[i] == '\n' ) {
-						line++;
+						newLine( ++line );
 					}
 					i++;
 				}
@@ -324,17 +337,18 @@ bool ExpandText( const char *text, int length, const char *fileName, int firstLi
 				std::string expansion;
 				int end = 0;
 				if ( ExpandReference( text, length, i + keywordLength, isInline, fileName, line, depth, expansion, end ) ) {
-					// all on the reference's first line, then the newlines it spanned
+					// the template's lines all belong to the reference's line, then the
+					// newlines the reference itself spanned
+					out += expansion;
 					for ( size_t k = 0; k < expansion.size(); k++ ) {
-						if ( expansion[k] == '\n' || expansion[k] == '\r' ) {
-							expansion[k] = ' ';
+						if ( expansion[k] == '\n' ) {
+							newLine( line );
 						}
 					}
-					out += expansion;
 					for ( int k = i; k < end; k++ ) {
 						if ( text[k] == '\n' ) {
 							out += '\n';
-							line++;
+							newLine( ++line );
 						}
 					}
 					i = end;
@@ -349,7 +363,7 @@ bool ExpandText( const char *text, int length, const char *fileName, int firstLi
 		} else if ( c == '}' ) {
 			braceDepth--;
 		} else if ( c == '\n' ) {
-			line++;
+			newLine( ++line );
 		}
 		out += c;
 		i++;
@@ -525,7 +539,7 @@ void DeclGuides::Load( void ) {
 DeclGuides::Expand
 ================
 */
-bool DeclGuides::Expand( const char *text, int length, const char *fileName, idStr &out ) {
+bool DeclGuides::Expand( const char *text, int length, const char *fileName, idStr &out, idList<int> &lineMap ) {
 	if ( templates.Num() == 0 || text == NULL || length <= 0 ) {
 		return false;
 	}
@@ -534,9 +548,14 @@ bool DeclGuides::Expand( const char *text, int length, const char *fileName, idS
 		return false;
 	}
 	std::string expanded;
-	if ( !ExpandText( text, length, fileName, 1, expanded, 0 ) ) {
+	std::vector<int> lines( 1, 1 );
+	if ( !ExpandText( text, length, fileName, 1, expanded, 0, &lines ) ) {
 		return false;
 	}
 	out = expanded.c_str();
+	lineMap.SetNum( (int)lines.size() );
+	for ( size_t k = 0; k < lines.size(); k++ ) {
+		lineMap[(int)k] = lines[k];
+	}
 	return true;
 }

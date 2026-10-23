@@ -189,6 +189,7 @@ public:
 	int							checksum;
 	int							fileSize;
 	int							numLines;
+	bool						guidesExpanded;		// DUDE: decl text comes from expanded material guides, not the file as written
 
 	idDeclLocal *				decls;
 };
@@ -571,6 +572,7 @@ idDeclFile::idDeclFile( const char *fileName, declType_t defaultType ) {
 	this->checksum = 0;
 	this->fileSize = 0;
 	this->numLines = 0;
+	this->guidesExpanded = false;
 	this->decls = NULL;
 }
 
@@ -586,6 +588,7 @@ idDeclFile::idDeclFile() {
 	this->checksum = 0;
 	this->fileSize = 0;
 	this->numLines = 0;
+	this->guidesExpanded = false;
 	this->decls = NULL;
 }
 
@@ -641,16 +644,23 @@ int idDeclFile::LoadAndParse() {
 	}
 
 	// DUDE: Quake 4 material guides - "guide <material> <template>(args)" and inlineGuide
-	// become ordinary material text before the file is split into declarations
+	// become ordinary material text before the file is split into declarations. The
+	// expansion has more lines than the file; lineMap gives each decl its line in the file.
+	idList<int> lineMap;
+	guidesExpanded = false;
 	if ( DeclGuides::Num() > 0 && fileName.CheckExtension( ".mtr" ) ) {
 		idStr expanded;
-		if ( DeclGuides::Expand( buffer, length, fileName, expanded ) ) {
+		if ( DeclGuides::Expand( buffer, length, fileName, expanded, lineMap ) ) {
 			Mem_Free( buffer );
 			length = expanded.Length();
 			buffer = (char *)Mem_Alloc( length + 1 );
 			memcpy( buffer, expanded.c_str(), length + 1 );
+			guidesExpanded = true;
 		}
 	}
+	auto fileLine = [&lineMap]( int line ) {
+		return lineMap.Num() ? lineMap[ idMath::ClampInt( 1, lineMap.Num(), line ) - 1 ] : line;
+	};
 
 	if ( !src.LoadMemory( buffer, length, fileName ) ) {
 		common->Error( "Couldn't parse %s", fileName.c_str() );
@@ -673,7 +683,7 @@ int idDeclFile::LoadAndParse() {
 	while( 1 ) {
 
 		startMarker = src.GetFileOffset();
-		sourceLine = src.GetLineNum();
+		sourceLine = fileLine( src.GetLineNum() );
 
 		// parse the decl type name
 		if ( !src.ReadToken( &token ) ) {
@@ -789,7 +799,7 @@ int idDeclFile::LoadAndParse() {
 		}
 	}
 
-	numLines = src.GetLineNum();
+	numLines = fileLine( src.GetLineNum() );
 
 	Mem_Free( buffer );
 
@@ -2081,6 +2091,12 @@ bool idDeclLocal::ReplaceSourceFileText( void ) {
 
 	if ( sourceFile == &declManagerLocal.implicitDecls ) {
 		common->Warning( "Can't save implicit declaration %s.", GetName() );
+		return false;
+	}
+
+	// DUDE: the offsets are into the guide-expanded text, not the file as written
+	if ( sourceFile->guidesExpanded ) {
+		common->Warning( "Can't save %s: %s uses material guides; edit the file by hand.", GetName(), GetFileName() );
 		return false;
 	}
 

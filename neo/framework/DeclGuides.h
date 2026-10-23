@@ -23,6 +23,9 @@ Doom 3 GPL Source Code (see ArbProgram.h for license header)
 #ifndef __DECLGUIDES_H__
 #define __DECLGUIDES_H__
 
+#include "idlib/Str.h"
+#include "idlib/containers/List.h"
+
 namespace DeclGuides {
 
 // (Re)load every guides/*.guide template. Call before the materials are registered.
@@ -33,9 +36,10 @@ void		Clear( void );
 int			Num( void );
 
 // Expand the guide and inlineGuide references in a decl file's text into out. Returns false
-// (and leaves out untouched) when the text has none. Line count is preserved: an expansion
-// is put on the line its reference started on, so warnings keep pointing at the right line.
-bool		Expand( const char *text, int length, const char *fileName, idStr &out );
+// (and leaves out untouched) when the text has none. An expansion keeps the template's own
+// lines (the material parser is line-sensitive), so out has more lines than text: lineMap[k]
+// is the line of text that line k + 1 of out comes from.
+bool		Expand( const char *text, int length, const char *fileName, idStr &out, idList<int> &lineMap );
 
 }
 

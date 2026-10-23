@@ -3,8 +3,11 @@
 
 An independent Python implementation of the same rules expands every extracted Quake 4
 .mtr file and compares, byte for byte, with what the C++ produced (tools/quake4/tests/
-guide_expand_test.cpp). Also checks structure: the line count is preserved, braces balance,
-no guide/inlineGuide reference survives, and every guide-defined material exists.
+guide_expand_test.cpp), and compares the C++ line map (expanded line -> file line, the
+<file>.lines it writes) with its own. Also checks structure: braces balance, no
+guide/inlineGuide reference survives, every guide-defined material exists, and every
+material statement starts its own line (the material parser is line-sensitive: an
+expansion squeezed onto one line loses everything after qer_editorimage).
 
 Usage: check_guides.py <extracted q4base dir> <C++ output dir>
 """
@@ -119,8 +122,13 @@ def parse_args(text, p):
     return None
 
 
-def expand(text, tpls, depth=0):
-    out, i, n, brace = [], 0, len(text), 0
+def expand(text, tpls, depth=0, lines=None):
+    """lines, when given, receives the source line of every output line after the first."""
+    out, i, n, brace, line = [], 0, len(text), 0, 1
+
+    def newline(src):
+        if lines is not None:
+            lines.append(src)
     while i < n:
         c = text[i]
         if text.startswith("//", i):
@@ -130,6 +138,8 @@ def expand(text, tpls, depth=0):
         if text.startswith("/*", i):
             j = text.find("*/", i + 2)
             j = n if j < 0 else j + 2
+            for _ in range(text.count("\n", i, j)):
+                line += 1; newline(line)
             out.append(text[i:j]); i = j; continue
         if c == '"':
             j = i + 1
@@ -148,13 +158,18 @@ def expand(text, tpls, depth=0):
             res = ref(text, i + kw, kw == 11, tpls, depth)
             if res:
                 exp, end = res
-                out.append(exp.replace("\r", " ").replace("\n", " "))
-                out.append("\n" * text.count("\n", i, end))
+                out.append(exp)
+                for _ in range(exp.count("\n")):
+                    newline(line)
+                for _ in range(text.count("\n", i, end)):
+                    out.append("\n"); line += 1; newline(line)
                 i = end; continue
         if c == "{":
             brace += 1
         elif c == "}":
             brace -= 1
+        elif c == "\n":
+            line += 1; newline(line)
         out.append(c); i += 1
     return "".join(out)
 
@@ -208,14 +223,29 @@ def main():
                    for r, _, fs in os.walk(mdir) for f in fs if f.endswith(".mtr"))
     for f in names:
         orig = open(os.path.join(src, "materials", f), encoding="latin-1", newline="").read()
-        want = expand(orig, tpls)
+        want_lines = [1]
+        want = expand(orig, tpls, lines=want_lines)
         got = open(os.path.join(cpp, "materials", f), encoding="latin-1", newline="").read()
+        map_path = os.path.join(cpp, "materials", f + ".lines")
+        if want != orig:
+            got_lines = [int(x) for x in open(map_path).read().split()] if os.path.exists(map_path) else []
+            if got_lines != want_lines:
+                problems += 1; print(f"LINEMAP {f}: c++ {len(got_lines)} entries, python {len(want_lines)}")
+            if len(want_lines) != got.count("\n") + 1 or want_lines[-1] != orig.count("\n") + 1 \
+                    or any(b < a for a, b in zip(want_lines, want_lines[1:])):
+                problems += 1; print(f"LINEMAP {f}: does not cover the file monotonically")
         if got != want:
             mismatches += 1
             k = next(i for i in range(min(len(got), len(want)) + 1) if i >= min(len(got), len(want)) or got[i] != want[i])
             print(f"MISMATCH {f} at {k}: c++ {got[max(0, k - 40):k + 60]!r}\n          python {want[max(0, k - 40):k + 60]!r}")
-        if got.count("\n") != orig.count("\n"):
-            problems += 1; print(f"LINES {f}: {orig.count(chr(10))} -> {got.count(chr(10))}")
+        # one statement per line inside a guide-defined material: qer_editorimage must not
+        # share its line with anything that follows it
+        # (retail text after the image name, like "cs_pipetech_01_d .tga", is skipped by the
+        # engine as shipped; only braces or statements there mean an expansion was squeezed)
+        for m in re.finditer(r"qer_editorimage[ \t]+\S+([^\n]*)", strip_comments(got), re.I):
+            if re.search(r"[{}]|\b(diffusemap|bumpmap|specularmap|map|blend|materialType)\b", m.group(1), re.I):
+                problems += 1; print(f"SAMELINE {f}: '{m.group(0)[:60]}' - the parser skips the rest of that line")
+                break
         clean = strip_comments(got)
         clean = re.sub(r'"[^"\n]*"', '""', clean)
         if clean.count("{") != clean.count("}"):

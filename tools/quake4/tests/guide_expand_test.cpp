@@ -123,8 +123,9 @@ int main( int argc, char **argv ) {
 	for ( const std::string &m : ListDir( in + "/materials", ".mtr" ) ) {
 		const std::string text = ReadAll( in + "/materials/" + m );
 		idStr expanded;
+		idList<int> lineMap;
 		files++;
-		const bool changed = DeclGuides::Expand( text.c_str(), (int)text.size(), ( "materials/" + m ).c_str(), expanded );
+		const bool changed = DeclGuides::Expand( text.c_str(), (int)text.size(), ( "materials/" + m ).c_str(), expanded, lineMap );
 		const std::string dst = out + "/materials/" + m;
 		for ( size_t k = ( out + "/materials/" ).size(); ( k = dst.find( '/', k ) ) != std::string::npos; k++ ) {
 			mkdir( dst.substr( 0, k ).c_str(), 0755 );
@@ -133,6 +134,11 @@ int main( int argc, char **argv ) {
 		if ( changed ) {
 			expandedFiles++;
 			o.write( expanded.c_str(), expanded.Length() );
+			// the source line of every expanded line, for check_guides.py
+			std::ofstream l( dst + ".lines", std::ios::binary );
+			for ( int k = 0; k < lineMap.Num(); k++ ) {
+				l << lineMap[k] << "\n";
+			}
 		} else {
 			o.write( text.data(), text.size() );
 		}
