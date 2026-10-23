@@ -38,6 +38,7 @@ If you have questions concerning this license or the applicable additional terms
 #include "sys/platform.h"
 #include "framework/Licensee.h"
 #include "framework/FileSystem.h"
+#include "framework/GameTitle.h"
 #include "sys/posix/posix_public.h"
 #include "sys/sys_local.h"
 
@@ -290,7 +291,8 @@ bool Sys_GetPath(sysPath_t type, idStr &path) {
 		if (Sys_GetPath(PATH_EXE, path)) {
 			path = path.StripFilename();
 			// the path should have a base dir in it, otherwise it probably just contains the executable
-			idStr testPath = path + "/" BASE_GAMEDIR;
+			// DUDE: the active game title's base folder (base/ for Doom 3, q4base/ for Quake 4)
+			idStr testPath = path + "/" + GameTitle::Get().baseGameDir;
 			if (stat(testPath.c_str(), &st) != -1 && S_ISDIR(st.st_mode)) {
 				common->Warning("using path of executable: %s", path.c_str());
 				return true;
@@ -304,7 +306,7 @@ bool Sys_GetPath(sysPath_t type, idStr &path) {
 			// layout keeps the binary in build/ (or bin/) with the game data
 			// in a sibling base/, so build/dude finds ../base from any cwd.
 			path.StripFilename();
-			testPath = path + "/" BASE_GAMEDIR;
+			testPath = path + "/" + GameTitle::Get().baseGameDir;
 			if (path.Length() && stat(testPath.c_str(), &st) != -1 && S_ISDIR(st.st_mode)) {
 				common->Warning("using parent of executable path: %s", path.c_str());
 				return true;
@@ -314,7 +316,7 @@ bool Sys_GetPath(sysPath_t type, idStr &path) {
 
 		// DUDE: current working directory (unzip-and-run portable installs)
 		if (getcwd(buf, sizeof(buf))) {
-			idStr testPath = idStr(buf) + "/" BASE_GAMEDIR;
+			idStr testPath = idStr(buf) + "/" + GameTitle::Get().baseGameDir;
 			if (stat(testPath.c_str(), &st) != -1 && S_ISDIR(st.st_mode)) {
 				common->Warning("using current working directory: %s", buf);
 				path = buf;

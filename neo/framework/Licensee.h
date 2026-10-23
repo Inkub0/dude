@@ -66,6 +66,9 @@ If you have questions concerning this license or the applicable additional terms
 #endif
 
 // paths
+// DOOM 3's base game folder. The engine asks the active game title for its base folder
+// (GameTitle::Get().baseGameDir, framework/GameTitle.h); only Doom 3-specific code (CD-key
+// files, the game libraries' own model-import tools) still uses this constant.
 #define	BASE_GAMEDIR					"base"
 
 // filenames

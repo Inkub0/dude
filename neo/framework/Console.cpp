@@ -41,6 +41,7 @@ If you have questions concerning this license or the applicable additional terms
 #include "sound/sound.h"
 
 #include "framework/Console.h"
+#include "framework/GameTitle.h"
 
 #include "tools/edit_public.h"
 
@@ -209,7 +210,7 @@ static bool Con_GetDebugFont( idDeviceContext **dcOut, int *fontOut ) {
 		debugDC.Init();
 	}
 	if ( bankFont == -2 && debugDC.Initialized() ) {
-		bankFont = debugDC.FindFont( "fonts/bank" );
+		bankFont = debugDC.FindFont( GameTitle::Get().overlayFont );	// fonts/bank on Doom 3
 	}
 	if ( !debugDC.Initialized() || bankFont < 0 ) {
 		return false;
@@ -515,7 +516,7 @@ the renderSystem is initialized
 ==============
 */
 void idConsoleLocal::LoadGraphics() {
-	charSetShader = declManager->FindMaterial( "textures/bigchars" );
+	charSetShader = declManager->FindMaterial( GameTitle::Get().charsetMaterial );	// DUDE: per game title
 	whiteShader = declManager->FindMaterial( "_white" );
 	consoleShader = declManager->FindMaterial( "console" );
 }

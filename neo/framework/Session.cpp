@@ -36,6 +36,7 @@ If you have questions concerning this license or the applicable additional terms
 #include "renderer/ModelManager.h"
 
 #include "framework/Licensee.h"
+#include "framework/GameTitle.h"
 #include "framework/LoadTiming.h"
 #include "framework/Session_local.h"
 
@@ -970,7 +971,7 @@ void idSessionLocal::StartPlayingRenderDemo( idStr demoName ) {
 
 	// bring up the loading screen manually, since demos won't
 	// call ExecuteMapChange()
-	guiLoading = uiManager->FindGui( "guis/map/loading.gui", true, false, true );
+	guiLoading = uiManager->FindGui( GameTitle::Get().loadingGui, true, false, true );
 	guiLoading->SetStateString( "demo", common->GetLanguageDict()->GetString( "#str_02087" ) );
 	readDemo = new idDemoFile;
 	demoName.DefaultFileExtension( ".demo" );
@@ -1731,7 +1732,7 @@ void idSessionLocal::StartPlayingCmdDemo(const char *demoName) {
 		return;
 	}
 
-	guiLoading = uiManager->FindGui( "guis/map/loading.gui", true, false, true );
+	guiLoading = uiManager->FindGui( GameTitle::Get().loadingGui, true, false, true );
 	//cmdDemoFile->Read(&loadGameTime, sizeof(loadGameTime));
 
 	LoadCmdDemoFromFile(cmdDemoFile);
@@ -1835,7 +1836,7 @@ void idSessionLocal::LoadLoadingGui( const char *mapName ) {
 	if ( uiManager->CheckGui( guiMap ) ) {
 		guiLoading = uiManager->FindGui( guiMap, true, false, true );
 	} else {
-		guiLoading = uiManager->FindGui( "guis/map/loading.gui", true, false, true );
+		guiLoading = uiManager->FindGui( GameTitle::Get().loadingGui, true, false, true );
 	}
 	guiLoading->SetStateFloat( "map_loading", 0.0f );
 }

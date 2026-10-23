@@ -137,18 +137,24 @@ const int GLYPH_CHARSTART		= 32;
 const int GLYPH_CHAREND			= 127;
 const int GLYPHS_PER_FONT		= GLYPH_END - GLYPH_START + 1;
 
+// DUDE: the metrics are float. id's fontImage_*.dat stores whole pixels as ints (read
+// into these floats exactly, so Doom 3 text is unchanged); Raven's Quake 4 .fontdat
+// stores fractional pixels (an 8.562 px advance is typical), and rounding those per
+// glyph would accumulate visible spacing error along a string. Engine-only struct: no
+// game library uses it (checked against game/, d3xp/, d3le/).
 typedef struct {
-	int					height;			// number of scan lines
-	int					top;			// top of glyph in buffer
-	int					bottom;			// bottom of glyph in buffer
-	int					pitch;			// width for copying
-	int					xSkip;			// x adjustment
-	int					imageWidth;		// width of actual image
-	int					imageHeight;	// height of actual image
+	float				height;			// number of scan lines
+	float				top;			// top of glyph in buffer
+	float				bottom;			// bottom of glyph in buffer
+	float				pitch;			// width for copying
+	float				xSkip;			// x adjustment
+	float				imageWidth;		// width of actual image
+	float				imageHeight;	// height of actual image
 	float				s;				// x offset in image where glyph starts
 	float				t;				// y offset in image where glyph starts
 	float				s2;
 	float				t2;
+	float				left;			// DUDE: horizontal bearing (pen to glyph left edge); Raven fonts only, 0 for id fonts
 	const idMaterial *	glyph;			// shader with the glyph
 	char				shaderName[32];
 } glyphInfo_t;

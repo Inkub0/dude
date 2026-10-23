@@ -108,6 +108,11 @@ the pk4s next to the executable. Writable data (configs, saves, screenshots) liv
 its own "dude folder" (`~/.local/share/dude` on Linux, `Documents/My Games/dude` on
 Windows).
 
+**Quake 4 (in development).** The same executable is learning to run the retail _Quake 4_
+from your own install ([docs/quake4-port.md](docs/quake4-port.md)). `./run-q4.sh` finds a
+Steam install (or takes `Q4DIR=/path/to/Quake 4`) and boots its data; until the Quake 4
+game library exists it runs a spectator-only "null game" with no gameplay.
+
 # Upstream: dhewm3
 
 DUDE is built on **dhewm3**; everything documented there (game data setup, original

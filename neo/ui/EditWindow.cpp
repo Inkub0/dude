@@ -30,6 +30,7 @@ If you have questions concerning this license or the applicable additional terms
 #include "framework/FileSystem.h"
 #include "framework/KeyInput.h"
 #include "ui/DeviceContext.h"
+#include "framework/GameTitle.h"
 #include "ui/Window.h"
 #include "ui/UserInterfaceLocal.h"
 #include "ui/SliderWindow.h"
@@ -458,12 +459,14 @@ This is the same as in idListWindow
 */
 void idEditWindow::InitScroller( bool horizontal )
 {
-	const char *thumbImage = "guis/assets/scrollbar_thumb.tga";
-	const char *barImage = "guis/assets/scrollbarv.tga";
+	// DUDE: scrollbar art lives under a different folder per game title (GameTitle)
+	const char *prefix = GameTitle::Get().guiListArtPrefix;
+	idStr thumbImage = va( "%sscrollbar_thumb.tga", prefix );
+	idStr barImage = va( "%sscrollbarv.tga", prefix );
 	const char *scrollerName = "_scrollerWinV";
 
 	if (horizontal) {
-		barImage = "guis/assets/scrollbarh.tga";
+		barImage = va( "%sscrollbarh.tga", prefix );
 		scrollerName = "_scrollerWinH";
 	}
 
