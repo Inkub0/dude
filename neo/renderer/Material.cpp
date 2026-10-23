@@ -118,6 +118,13 @@ void idMaterial::CommonInit() {
 	refCount = 0;
 	portalSky = false;
 
+	// DUDE: Quake 4
+	materialType = NULL;
+	materialImageName.Clear();
+	portalImageName.Clear();
+	portalDistanceNear = 0.0f;
+	portalDistanceFar = 0.0f;
+
 	decalInfo.stayTime = 10000;
 	decalInfo.fadeTime = 4000;
 	decalInfo.start[0] = 1;
@@ -704,6 +711,20 @@ static const infoParm_t	infoParms[] = {
 	{"ladder",		0,	SURF_LADDER,	0 },		// climbable
 	{"nosteps",		0,	SURF_NOSTEPS,	0 },		// no footsteps
 
+	// DUDE: Quake 4 surface and content parms
+	{"bounce",		0,	SURF_BOUNCE,	0 },		// projectiles bounce
+	{"notfix",		0,	SURF_NO_T_FIX,	0 },		// dmap: merge but do not T-fix
+	{"sightclip",			0,	0,	CONTENTS_SIGHTCLIP },
+	{"largeshotclip",		0,	0,	CONTENTS_LARGESHOTCLIP },
+	{"notacticalfeatures",	0,	0,	CONTENTS_NOTACTICALFEATURES },
+	{"vehicleclip",			0,	0,	CONTENTS_VEHICLECLIP },
+	{"flyclip",				0,	0,	CONTENTS_FLYCLIP },
+	{"itemclip",			0,	0,	CONTENTS_ITEMCLIP },
+	{"projectileclip",		0,	0,	CONTENTS_PROJECTILECLIP },
+	// textures/common/shot_clip: no game mask tests a shot-clip bit and no retail .cm file
+	// contains one (dmap bakes brush contents into the .cm), so it carries no flag
+	{"shotclip",			0,	0,	0 },
+
 	// material types for particle, sound, footstep feedback
 	{"metal",		0,  SURFTYPE_METAL,		0 },	// metal
 	{"stone",		0,  SURFTYPE_STONE,		0 },	// stone
@@ -1046,6 +1067,27 @@ int idMaterial::ParseTerm( idLexer &src ) {
 	}
 	if ( !token.Icmp( "fragmentPrograms" ) ) {
 		return GetExpressionConstant( (float) glConfig.ARBFragmentProgramAvailable );
+	}
+
+	// DUDE: Quake 4 terms (docs/quake4-port.md 1.3)
+	if ( !token.Icmp( "glslPrograms" ) ) {
+		// 0: Raven's GLSL stages are dropped, so the "glslPrograms == 0" fallback stages draw
+		return GetExpressionConstant( 0.0f );
+	}
+	if ( !token.Icmp( "IsMultiplayer" ) ) {
+		// single-player only until multiplayer lands (docs/quake4-port.md Q9)
+		return GetExpressionConstant( 0.0f );
+	}
+	if ( !token.Icmp( "DecalLife" ) ) {
+		// Raven feeds each decal's age (0 at spawn, 1 at death) here; decals use it as
+		// "rgba decalFade[DecalLife]". Until the renderer tracks per-decal life, 0 keeps them
+		// at full strength and Doom 3's vertex-colour decal fade (their stages are
+		// vertexColor) still fades them out.
+		return GetExpressionConstant( 0.0f );
+	}
+	if ( !token.Icmp( "VertexRandomizer" ) ) {
+		// Raven's per-vertex random offset (one retail decal); no per-vertex source here
+		return GetExpressionConstant( 0.0f );
 	}
 
 	if ( !token.Icmp( "sound" ) ) {
@@ -1610,6 +1652,7 @@ void idMaterial::ParseStage( idLexer &src, const textureRepeat_t trpDefault ) {
 	int					a, b;
 	int					matrix[2][3];
 	newShaderStage_t	newStage;
+	bool				glslStage = false;	// DUDE: Quake 4 glslProgram stage, dropped after parsing
 
 	if ( numStages >= MAX_SHADER_STAGES ) {
 		SetMaterialFlag( MF_DEFAULTED );
@@ -1792,6 +1835,25 @@ void idMaterial::ParseStage( idLexer &src, const textureRepeat_t trpDefault ) {
 		}
 		if ( !token.Icmp( "nopicmip" ) ) {
 			allowPicmip = false;
+			continue;
+		}
+		if ( !token.Icmp( "nomips" ) ) {		// DUDE: Quake 4 - sample without mipmaps, as "linear" does
+			tf = TF_LINEAR;
+			continue;
+		}
+		// DUDE: Quake 4 GLSL stages. Raven's glslProgram stages always come with a fallback
+		// stage gated on "glslPrograms == 0", and most of the .glsl files they name are not
+		// even in the retail paks, so the whole stage is parsed and then dropped (below):
+		// glslPrograms is 0 here and the fallbacks draw. The values are skipped unevaluated,
+		// since they use terms (viewOrigin, POTCorrectionX) only Raven's GLSL path defines.
+		if ( !token.Icmp( "glslProgram" ) ) {
+			glslStage = true;
+			src.SkipRestOfLine();
+			continue;
+		}
+		if ( !token.Icmp( "shaderParm" ) || !token.Icmp( "shaderTexture" ) ) {
+			glslStage = true;
+			src.SkipRestOfLine();
 			continue;
 		}
 		if ( !token.Icmp( "vertexColor" ) ) {
@@ -2071,6 +2133,11 @@ void idMaterial::ParseStage( idLexer &src, const textureRepeat_t trpDefault ) {
 		return;
 	}
 
+
+	// DUDE: a Quake 4 GLSL stage is not kept (see glslProgram above); its slot is reused
+	if ( glslStage ) {
+		return;
+	}
 
 	// if we are using newStage, allocate a copy of it
 	if ( newStage.fragmentProgram || newStage.vertexProgram ) {
@@ -2439,6 +2506,43 @@ void idMaterial::ParseMaterial( idLexer &src ) {
 		else if ( !token.Icmp( "description") ) {
 			src.ReadTokenOnLine( &token );
 			desc = token.c_str();
+			continue;
+		}
+		// DUDE: Quake 4 material keywords (docs/quake4-port.md 1.3)
+		else if ( !token.Icmp( "materialType" ) ) {
+			// the surface's material type decl (materials/types/*.mtt): impacts, footsteps
+			src.ReadTokenOnLine( &token );
+			materialType = declManager->FindType( DECL_MATERIALTYPE, token, false );
+			if ( materialType == NULL ) {
+				common->Warning( "material '%s': unknown materialType '%s'", GetName(), token.c_str() );
+			}
+			continue;
+		}
+		else if ( !token.Icmp( "materialImage" ) ) {
+			// Raven's per-texel hit map (<name>_hit.tga); loaded by whoever queries it
+			src.ReadTokenOnLine( &token );
+			materialImageName = token.c_str();
+			continue;
+		}
+		else if ( !token.Icmp( "portalImage" ) ) {
+			src.ReadTokenOnLine( &token );
+			portalImageName = token.c_str();
+			continue;
+		}
+		else if ( !token.Icmp( "portalDistanceNear" ) ) {
+			portalDistanceNear = src.ParseFloat();
+			continue;
+		}
+		else if ( !token.Icmp( "portalDistanceFar" ) ) {
+			portalDistanceFar = src.ParseFloat();
+			continue;
+		}
+		else if ( !token.Icmp( "sky" ) ) {
+			SetMaterialFlag( MF_SKY );
+			continue;
+		}
+		else if ( !token.Icmp( "needCurrentRender" ) ) {
+			SetMaterialFlag( MF_NEED_CURRENT_RENDER );
 			continue;
 		}
 		// check for the surface / content bit flags

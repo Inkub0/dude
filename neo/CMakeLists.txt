@@ -935,6 +935,7 @@ set(src_framework
 	framework/DeclGuides.cpp
 	framework/DeclManager.cpp
 	framework/DeclParticle.cpp
+	framework/DeclQuake4.cpp
 	framework/DeclPDA.cpp
 	framework/DeclSkin.cpp
 	framework/DeclTable.cpp

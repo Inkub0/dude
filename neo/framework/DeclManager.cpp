@@ -46,6 +46,7 @@ If you have questions concerning this license or the applicable additional terms
 
 #include "framework/DeclManager.h"
 #include "framework/DeclGuides.h"
+#include "framework/DeclQuake4.h"
 #include "framework/GameTitle.h"
 
 /*
@@ -260,6 +261,7 @@ private:
 	static void					ListDecls_f( const idCmdArgs &args );
 	static void					ReloadDecls_f( const idCmdArgs &args );
 	static void					TouchDecl_f( const idCmdArgs &args );
+	static void					LintDecls_f( const idCmdArgs &args );	// DUDE
 };
 
 idCVar idDeclManagerLocal::decl_show( "decl_show", "0", CVAR_SYSTEM, "set to 1 to print parses, 2 to also print references", 0, 2, idCmdSystem::ArgCompletion_Integer<0,2> );
@@ -849,18 +851,37 @@ void idDeclManagerLocal::Init( void ) {
 	RegisterDeclType( "video",				DECL_VIDEO,			idDeclAllocator<idDeclVideo> );
 	RegisterDeclType( "audio",				DECL_AUDIO,			idDeclAllocator<idDeclAudio> );
 
+	// DUDE: Quake 4 decl types (docs/quake4-port.md 5.2), only for that game title
+	const bool quake4 = ( GameTitle::Get().title == GAME_TITLE_QUAKE4 );
+	if ( quake4 ) {
+		RegisterDeclType( "materialType",	DECL_MATERIALTYPE,	idDeclAllocator<idDeclMaterialType> );
+		RegisterDeclType( "lipSync",		DECL_LIPSYNC,		idDeclAllocator<idDeclLipSync> );
+		RegisterDeclType( "playback",		DECL_PLAYBACK,		idDeclAllocator<idDeclPlayback> );
+		RegisterDeclType( "effect",			DECL_EFFECT,		idDeclAllocator<idDeclEffect> );
+		RegisterDeclType( "playerModel",	DECL_PLAYER_MODEL,	idDeclAllocator<idDeclEntityDef> );
+	}
+
 	// DUDE: Quake 4's material templates, before the materials that use them
 	DeclGuides::Load();
 
+	if ( quake4 ) {
+		RegisterDeclFolder( "materials/types",	".mtt",		DECL_MATERIALTYPE );	// before the materials that name them
+	}
 	RegisterDeclFolder( "materials",		".mtr",				DECL_MATERIAL );
 	RegisterDeclFolder( "skins",			".skin",			DECL_SKIN );
 	RegisterDeclFolder( "sound",			".sndshd",			DECL_SOUND );
+	if ( quake4 ) {
+		RegisterDeclFolder( "lipsync",		".lipsync",		DECL_LIPSYNC );
+		RegisterDeclFolder( "playbacks",	".playback",	DECL_PLAYBACK );
+		RegisterDeclFolder( "effects",		".fx",			DECL_EFFECT );
+	}
 
 	// add console commands
 	cmdSystem->AddCommand( "listDecls", ListDecls_f, CMD_FL_SYSTEM, "lists all decls" );
 
 	cmdSystem->AddCommand( "reloadDecls", ReloadDecls_f, CMD_FL_SYSTEM, "reloads decls" );
 	cmdSystem->AddCommand( "touch", TouchDecl_f, CMD_FL_SYSTEM, "touches a decl" );
+	cmdSystem->AddCommand( "lintDecls", LintDecls_f, CMD_FL_SYSTEM, "parses every decl and reports the ones that fail: lintDecls [type] [all]" );
 
 	cmdSystem->AddCommand( "listTables", idListDecls_f<DECL_TABLE>, CMD_FL_SYSTEM, "lists tables", idCmdSystem::ArgCompletion_String<listDeclStrings> );
 	cmdSystem->AddCommand( "listMaterials", idListDecls_f<DECL_MATERIAL>, CMD_FL_SYSTEM, "lists materials", idCmdSystem::ArgCompletion_String<listDeclStrings> );
@@ -1684,6 +1705,73 @@ void idDeclManagerLocal::ReloadDecls_f( const idCmdArgs &args ) {
 	declManagerLocal.Reload( force );
 
 	soundSystem->SetMute( false );
+}
+
+/*
+===================
+idDeclManagerLocal::LintDecls_f
+
+DUDE: parse every decl of every type (or of one type) and report the ones whose parse
+failed. "lintDecls" lists the first few failures per type, "lintDecls all" every one,
+"lintDecls material" one type. A gate check for a game title's data (docs/quake4-port.md
+section 7): headless as  +lintDecls +quit. Images register without loading their pixels
+while it runs, so it costs parse time only.
+===================
+*/
+void idDeclManagerLocal::LintDecls_f( const idCmdArgs &args ) {
+	const char *onlyType = NULL;
+	bool listAll = false;
+	for ( int a = 1; a < args.Argc(); a++ ) {
+		if ( !idStr::Icmp( args.Argv( a ), "all" ) ) {
+			listAll = true;
+		} else {
+			onlyType = args.Argv( a );
+		}
+	}
+
+	const bool preload = cvarSystem->GetCVarBool( "image_preload" );
+	cvarSystem->SetCVarBool( "image_preload", false );
+
+	int totalChecked = 0, totalFailed = 0;
+	common->Printf( "----- lintDecls -----\n" );
+	for ( int t = 0; t < declManagerLocal.declTypes.Num(); t++ ) {
+		const idDeclType *typeInfo = declManagerLocal.declTypes[t];
+		if ( typeInfo == NULL || typeInfo->typeName.Length() == 0 ) {
+			continue;
+		}
+		if ( onlyType != NULL && typeInfo->typeName.Icmp( onlyType ) != 0 ) {
+			continue;
+		}
+		const declType_t type = typeInfo->type;
+		// snapshot: parsing materials creates implicit decls (image names) at the end
+		const int num = declManagerLocal.linearLists[type].Num();
+		int checked = 0, failed = 0, implicit = 0;
+		for ( int i = 0; i < num; i++ ) {
+			idDeclLocal *decl = declManagerLocal.linearLists[type][i];
+			if ( decl->IsImplicit() ) {
+				implicit++;
+				continue;
+			}
+			declManagerLocal.DeclByIndex( type, i, true );		// parses it if it is not yet
+			checked++;
+			if ( decl->GetState() == DS_DEFAULTED ) {
+				failed++;
+				if ( listAll || failed <= 5 ) {
+					common->Printf( "  %s(%d): %s '%s' failed to parse\n", decl->GetFileName(), decl->GetLineNum(),
+						typeInfo->typeName.c_str(), decl->GetName() );
+				}
+			}
+		}
+		if ( failed > 5 && !listAll ) {
+			common->Printf( "  ... %d more (lintDecls %s all)\n", failed - 5, typeInfo->typeName.c_str() );
+		}
+		common->Printf( "%-20s %6d checked %6d failed %6d implicit\n", typeInfo->typeName.c_str(), checked, failed, implicit );
+		totalChecked += checked;
+		totalFailed += failed;
+	}
+	common->Printf( "lintDecls: %d decls, %d failed\n", totalChecked, totalFailed );
+
+	cvarSystem->SetCVarBool( "image_preload", preload );
 }
 
 /*
