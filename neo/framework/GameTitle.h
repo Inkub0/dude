@@ -37,6 +37,12 @@ typedef struct gameTitleProfile_s {
 	bool			nullGameFallback;	// run the null game when the title's own game library is not built yet
 	bool			recursiveDeclFolders;	// decl files also live in subfolders (Quake 4: materials/effects/...)
 
+	// sound
+	float			soundUnitsToMeters;	// sound shader min/maxDistance units: Doom 3 authors metres, Quake 4 map units
+	bool			bareSampleNames;	// sound shaders name samples by path without .wav/.ogg (Quake 4: 4805 of 6952)
+	const char *	voLanguagePrefix;	// "sound/vo/x" plays <prefix><sys_lang>/x (Quake 4: sound/vo_english/); NULL = Doom 3's sound/vo/<lang>/ for non-English only
+	const char *	reverbPresets;		// EFX preset library picked per area by maps/<map>.reverb; NULL = Doom 3's efxs/<map>.efx keyed by area
+
 	// engine-owned assets whose names differ per title
 	const char *	charsetMaterial;	// console / small-string bitmap font
 	const char *	splashMaterial;		// startup splash screen

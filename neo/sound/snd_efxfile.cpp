@@ -303,3 +303,56 @@ bool idEFXFile::LoadFile( const char *filename, bool OSPath ) {
 
 	return true;
 }
+
+/*
+===============
+idMapReverb::LoadFile
+===============
+*/
+bool idMapReverb::LoadFile( const char *filename ) {
+	idLexer src( LEXFL_NOSTRINGCONCAT | LEXFL_NOFATALERRORS | LEXFL_ALLOWPATHNAMES );
+	idToken token;
+
+	Clear();
+	src.LoadFile( filename );
+	if ( !src.IsLoaded() ) {
+		return false;
+	}
+	if ( !src.ExpectTokenString( "reverb" ) || !src.ExpectTokenString( "{" ) ) {
+		return false;
+	}
+	while ( src.ReadToken( &token ) && token != "}" ) {
+		if ( token != "{" ) {
+			src.Warning( "idMapReverb: expected '{', found '%s'", token.c_str() );
+			Clear();
+			return false;
+		}
+		const int area = src.ParseInt();
+		if ( !src.ReadToken( &token ) || area < 0 || area > 0xffff ) {
+			src.Warning( "idMapReverb: bad area entry" );
+			Clear();
+			return false;
+		}
+		while ( presets.Num() <= area ) {
+			presets.Append( "" );
+		}
+		presets[area] = token;
+		if ( !src.ExpectTokenString( "}" ) ) {
+			Clear();
+			return false;
+		}
+	}
+	return true;
+}
+
+/*
+===============
+idMapReverb::PresetForArea
+===============
+*/
+const char *idMapReverb::PresetForArea( int area ) const {
+	if ( area < 0 || area >= presets.Num() || presets[area].Length() == 0 ) {
+		return NULL;
+	}
+	return presets[area].c_str();
+}

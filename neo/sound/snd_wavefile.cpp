@@ -29,6 +29,7 @@ If you have questions concerning this license or the applicable additional terms
 #include "sys/platform.h"
 #include "framework/FileSystem.h"
 
+#include "framework/GameTitle.h"
 #include "sound/snd_local.h"
 
 //-----------------------------------------------------------------------------
@@ -87,6 +88,15 @@ int idWaveFile::Open( const char* strFileName, waveformatex_t* pwfx ) {
 	}
 
 	memset( &mpwfx, 0, sizeof( waveformatextensible_t ) );
+
+	// DUDE: Quake 4 shaders name samples without an extension; a few are WAV only
+	idStr ext;
+	name = strFileName;
+	name.ExtractFileExtension( ext );
+	if ( ext.Length() == 0 && GameTitle::Get().bareSampleNames ) {
+		name += ".wav";
+		strFileName = name.c_str();
+	}
 
 	mhmmio = fileSystem->OpenFileRead( strFileName );
 	if ( !mhmmio ) {

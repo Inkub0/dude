@@ -28,5 +28,19 @@ Q4BASE="/path/to/Quake 4/q4base" python3 tools/quake4/q4_inventory.py > /tmp/q4_
   single values, (3) event, `onTime` and script-command usage, with the commands DUDE does not
   implement. Its "known" tables mirror `neo/ui/*.cpp`: update them together. After Q2's GUI
   work it reports zero desync sources other than three quirks in the retail files themselves.
+- `test_guides.sh` (+ `check_guides.py`, `tests/guide_expand_test.cpp`) — material guides:
+  compiles the engine's own `neo/framework/DeclGuides.cpp` against `build/libidlib.a`, expands
+  every retail `.mtr`, and diffs the result byte for byte against an independent Python
+  expansion, plus structural checks (line counts, braces, no guide left, every guide-defined
+  material present). Needs a configured `build/`.
+- `q4_material_census.py <expanded materials dir>` — lists every material/stage keyword in the
+  guide-expanded `.mtr` files (the `out/materials` of `test_guides.sh`) that
+  `neo/renderer/Material.cpp` does not know; an unknown keyword defaults the whole material.
+  After Q2 it lists none (`snap` is a false positive: a `table` option).
+- `q4_sound_census.py [q4base] [language]` — parses every sound shader with the grammar
+  `neo/sound/snd_shader.cpp` accepts for Quake 4, resolves every sample the way the engine does
+  (bare names, `sound/vo/` → `sound/vo_<language>/`), and checks every `maps/**/*.reverb` area
+  table against the presets in `efxs/default.efx`. After Q2: one broken retail shader
+  (`leadin_test`), 539 samples absent from the retail paks, 0 reverb problems.
 
 Nothing here touches the install: the scripts only read the `.pk4` zip archives.

@@ -29,6 +29,7 @@ If you have questions concerning this license or the applicable additional terms
 #include "sys/platform.h"
 #include "framework/FileSystem.h"
 #include "framework/Session.h"
+#include "framework/GameTitle.h"
 #include "renderer/RenderWorld.h"
 
 #include "sound/snd_local.h"
@@ -536,13 +537,28 @@ void idSoundWorldLocal::MixLoop( int current44kHz, int numSpeakers, float *final
 			soundSystemLocal.alAuxiliaryEffectSlotf(listenerSlot, AL_EFFECTSLOT_GAIN, gain);
 		}
 
-		bool found = soundSystemLocal.EFXDatabase.FindEffect(s, &effect);
+		bool found = false;
+		// DUDE: Quake 4 - the map's .reverb table names this area's preset
+		const char *mapPreset = soundSystemLocal.mapReverb.PresetForArea(listenerArea);
+		if (mapPreset != NULL) {
+			s = mapPreset;
+			found = soundSystemLocal.EFXDatabase.FindEffect(s, &effect);
+		}
+		if (!found) {
+			s = idStr( listenerArea );
+			found = soundSystemLocal.EFXDatabase.FindEffect(s, &effect);
+		}
 		if (!found) {
 			s = listenerAreaName;
 			found = soundSystemLocal.EFXDatabase.FindEffect(s, &effect);
 		}
 		if (!found) {
 			s = "default";
+			found = soundSystemLocal.EFXDatabase.FindEffect(s, &effect);
+		}
+		// DUDE: Quake 4's preset library has no "default"; its first preset is "Generic"
+		if (!found && GameTitle::Get().reverbPresets != NULL) {
+			s = "Generic";
 			found = soundSystemLocal.EFXDatabase.FindEffect(s, &effect);
 		}
 

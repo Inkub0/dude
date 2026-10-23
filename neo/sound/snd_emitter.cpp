@@ -853,8 +853,9 @@ int idSoundEmitterLocal::StartSound( const idSoundShader *shader, const s_channe
 	}
 
 	// adjust the start time based on diversity for looping sounds, so they don't all start
-	// at the same point
-	if ( chan->parms.soundShaderFlags & SSF_LOOPING && !chan->leadinSample->LengthIn44kHzSamples() ) {
+	// at the same point (DUDE: unless a Quake 4 shader asks for noRandomStart)
+	if ( chan->parms.soundShaderFlags & SSF_LOOPING && !( chan->parms.soundShaderFlags & SSF_NO_RANDOMSTART )
+			&& !chan->leadinSample->LengthIn44kHzSamples() ) {
 		chan->trigger44kHzTime -= diversity * length;
 		chan->trigger44kHzTime &= ~7;		// so we don't have to worry about the 22kHz and 11kHz expansions
 											// starting in fractional samples

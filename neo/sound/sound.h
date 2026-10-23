@@ -30,6 +30,7 @@ If you have questions concerning this license or the applicable additional terms
 #define __SOUND__
 
 #include "idlib/math/Vector.h"
+#include "idlib/containers/StrList.h"
 #include "framework/DeclManager.h"
 #include "framework/DemoFile.h"
 #include "renderer/Cinematic.h"
@@ -60,6 +61,9 @@ static const int	SSF_PLAY_ONCE =			BIT(6);	// never restart if already playing o
 static const int	SSF_UNCLAMPED =			BIT(7);	// don't clamp calculated volumes at 1.0
 static const int	SSF_NO_FLICKER =		BIT(8);	// always return 1.0 for volume queries
 static const int	SSF_NO_DUPS =			BIT(9);	// try not to play the same sound twice in a row
+// DUDE: Quake 4 shader flags (Raven's bit numbers)
+static const int	SSF_NO_RANDOMSTART =	BIT(11);	// a looping sound starts at its beginning, not at a diversity offset
+static const int	SSF_VO_FOR_PLAYER =		BIT(12);	// voice-over addressed to the player (radio chatter)
 
 // these options can be overriden from sound shader defaults on a per-emitter and per-channel basis
 typedef struct {
@@ -111,6 +115,15 @@ public:
 
 	virtual bool			CheckShakesAndOgg( void ) const;
 
+	// DUDE: Quake 4 shader data (not virtual: Doom 3 game libraries see the same vtable)
+	float					GetMinFrequencyShift( void ) const	{ return minFrequencyShift; }	// a play picks a pitch in [min, max]
+	float					GetMaxFrequencyShift( void ) const	{ return maxFrequencyShift; }
+	bool					IsFrequentlyUsed( void ) const		{ return frequentlyUsed; }
+	bool					GetNoShakes( void ) const			{ return noShakes; }
+	// Raven's precomputed screen-shake envelope for entry <index> (OGG samples carry no
+	// amplitude data): one letter per 1/30 s, 'a' = still. NULL when the shader has none.
+	const char *			GetShakeData( int index ) const;
+
 private:
 	friend class idSoundWorldLocal;
 	friend class idSoundEmitterLocal;
@@ -131,6 +144,13 @@ private:
 	int						numLeadins;
 	idSoundSample *	entries[SOUND_MAX_LIST_WAVS];
 	int						numEntries;
+
+	// DUDE: Quake 4 (appended)
+	float					minFrequencyShift;
+	float					maxFrequencyShift;
+	bool					frequentlyUsed;
+	bool					noShakes;
+	idStrList				shakeData;					// per entry index, "" = none
 
 private:
 	void					Init( void );

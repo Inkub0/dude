@@ -28,6 +28,7 @@ If you have questions concerning this license or the applicable additional terms
 
 #include "sys/platform.h"
 #include "framework/FileSystem.h"
+#include "framework/GameTitle.h"
 
 #include "sound/snd_local.h"
 
@@ -44,6 +45,10 @@ void idSoundShader::Init( void ) {
 	numLeadins = 0;
 	leadinVolume = 0;
 	altSound = NULL;
+	minFrequencyShift = 1.0f;
+	maxFrequencyShift = 1.0f;
+	frequentlyUsed = false;
+	noShakes = false;
 }
 
 /*
@@ -69,7 +74,7 @@ idSoundShader::Size
 =================
 */
 size_t idSoundShader::Size( void ) const {
-	return sizeof( idSoundShader );
+	return sizeof( idSoundShader ) + shakeData.Allocated();
 }
 
 /*
@@ -80,6 +85,7 @@ idSoundShader::idSoundShader::FreeData
 void idSoundShader::FreeData() {
 	numEntries = 0;
 	numLeadins = 0;
+	shakeData.Clear();
 }
 
 /*
@@ -162,6 +168,14 @@ bool idSoundShader::ParseShader( idLexer &src ) {
 
 	speakerMask = 0;
 	altSound = NULL;
+	minFrequencyShift = 1.0f;
+	maxFrequencyShift = 1.0f;
+	frequentlyUsed = false;
+	noShakes = false;
+	shakeData.Clear();
+
+	// DUDE: Quake 4 authors distances in map units; the mixer works in metres
+	const float distanceScale = GameTitle::Get().soundUnitsToMeters;
 
 	for( i = 0; i < SOUND_MAX_LIST_WAVS; i++ ) {
 		leadins[i] = NULL;
@@ -194,11 +208,11 @@ bool idSoundShader::ParseShader( idLexer &src ) {
 		}
 		// mindistance
 		else if ( !token.Icmp( "mindistance" ) ) {
-			parms.minDistance = src.ParseFloat();
+			parms.minDistance = src.ParseFloat() * distanceScale;
 		}
 		// maxdistance
 		else if ( !token.Icmp( "maxdistance" ) ) {
-			parms.maxDistance = src.ParseFloat();
+			parms.maxDistance = src.ParseFloat() * distanceScale;
 		}
 		// shakes screen
 		else if ( !token.Icmp( "shakes" ) ) {
@@ -223,6 +237,48 @@ bool idSoundShader::ParseShader( idLexer &src ) {
 		// volume
 		else if ( !token.Icmp( "volume" ) ) {
 			parms.volume = src.ParseFloat();
+		}
+		// DUDE: Quake 4 keywords
+		// volumeDb: Raven's name for volume, which is in dB here too
+		else if ( !token.Icmp( "volumeDb" ) ) {
+			parms.volume = src.ParseFloat();
+		}
+		// shakeData <entry> <envelope>: precomputed screen-shake amplitudes for one sample
+		else if ( !token.Icmp( "shakeData" ) ) {
+			const int index = src.ParseInt();
+			if ( !src.ReadTokenOnLine( &token ) ) {
+				src.Warning( "shakeData without amplitudes" );
+				return false;
+			}
+			if ( index >= 0 && index < SOUND_MAX_LIST_WAVS ) {
+				while ( shakeData.Num() <= index ) {
+					shakeData.Append( "" );
+				}
+				shakeData[index] = token;
+			}
+		}
+		// no_shakes: never shakes, even when the game asks
+		else if ( !token.Icmp( "no_shakes" ) ) {
+			parms.shakes = 0.0f;
+			noShakes = true;
+		}
+		// frequencyShift <min>, <max>: each play picks a pitch in the range
+		else if ( !token.Icmp( "frequencyShift" ) ) {
+			minFrequencyShift = src.ParseFloat();
+			if ( !src.ExpectTokenString( "," ) ) {
+				return false;
+			}
+			maxFrequencyShift = src.ParseFloat();
+		}
+		// frequentlyUsed: keep decoded in memory (every sample already is here)
+		else if ( !token.Icmp( "frequentlyUsed" ) ) {
+			frequentlyUsed = true;
+		}
+		else if ( !token.Icmp( "noRandomStart" ) ) {
+			parms.soundShaderFlags |= SSF_NO_RANDOMSTART;
+		}
+		else if ( !token.Icmp( "voForPlayer" ) ) {
+			parms.soundShaderFlags |= SSF_VO_FOR_PLAYER;
 		}
 		// leadinVolume is used to allow light breaking leadin sounds to be much louder than the broken loop
 		else if ( !token.Icmp( "leadinVolume" ) ) {
@@ -332,12 +388,31 @@ bool idSoundShader::ParseShader( idLexer &src ) {
 				leadins[ numLeadins ] = soundSystemLocal.soundCache->FindSound( token.c_str(), onDemand );
 				numLeadins++;
 			}
-		} else if ( token.Find( ".wav", false ) != -1 || token.Find( ".ogg", false ) != -1 ) {
-			// add to the wav list
+		} else if ( token.Find( ".wav", false ) != -1 || token.Find( ".ogg", false ) != -1
+				|| ( GameTitle::Get().bareSampleNames && ( token.Find( '/' ) != -1 || token.Find( '\\' ) != -1 ) ) ) {
+			// add to the wav list (DUDE: Quake 4 names samples by path without an extension;
+			// the sample loader finds the .ogg, or the .wav)
 			if ( soundSystemLocal.soundCache && numEntries < maxSamples ) {
 				token.BackSlashesToSlashes();
 				idStr lang = cvarSystem->GetCVarString( "sys_lang" );
-				if ( lang.Icmp( "english" ) != 0 && token.Find( "sound/vo/", false ) >= 0 ) {
+				const char *voPrefix = GameTitle::Get().voLanguagePrefix;
+				if ( voPrefix != NULL ) {
+					// DUDE: Quake 4 keeps every language's voice-over in its own folder, English
+					// included: sound/vo/x plays sound/vo_<lang>/x
+					if ( !token.IcmpPrefix( "sound/vo/" ) ) {
+						const idStr line = token.c_str() + 9;
+						idStr work = va( "%s%s/%s", voPrefix, lang.c_str(), line.c_str() );
+						if ( lang.Icmp( "english" ) != 0 ) {
+							// a language pack that does not voice this line falls back to English
+							idStr probe = work;
+							probe.SetFileExtension( ".ogg" );
+							if ( fileSystem->ReadFile( probe, NULL, NULL ) <= 0 && fileSystem->ReadFile( work, NULL, NULL ) <= 0 ) {
+								work = va( "%senglish/%s", voPrefix, line.c_str() );
+							}
+						}
+						token = work;
+					}
+				} else if ( lang.Icmp( "english" ) != 0 && token.Find( "sound/vo/", false ) >= 0 ) {
 					idStr work = token;
 					work.ToLower();
 					work.StripLeading( "sound/vo/" );
@@ -392,6 +467,18 @@ bool idSoundShader::CheckShakesAndOgg( void ) const {
 		}
 	}
 	return ret;
+}
+
+/*
+===============
+idSoundShader::GetShakeData
+===============
+*/
+const char *idSoundShader::GetShakeData( int index ) const {
+	if ( index < 0 || index >= shakeData.Num() || shakeData[index].Length() == 0 ) {
+		return NULL;
+	}
+	return shakeData[index].c_str();
 }
 
 /*

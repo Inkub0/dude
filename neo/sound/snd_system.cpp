@@ -28,6 +28,7 @@ If you have questions concerning this license or the applicable additional terms
 
 #include "sys/platform.h"
 
+#include "framework/GameTitle.h"
 #include "sound/snd_local.h"
 #include <limits.h>
 
@@ -332,6 +333,15 @@ bool CheckOpenALDeviceAndRecoverIfNeeded()
 	return true;
 }
 
+// DUDE: the same way (no public interface change): while set, parsing a sound shader
+// registers its samples without decoding them; they load when first played or at the next
+// level load. lintDecls parses thousands of shaders this way.
+void Sound_RegisterSamplesOnly( bool registerOnly )
+{
+	if ( soundSystemLocal.soundCache )
+		soundSystemLocal.soundCache->SetRegisterOnly( registerOnly );
+}
+
 /*
 ===============
 idSoundSystemLocal::Init
@@ -566,6 +576,7 @@ void idSoundSystemLocal::Shutdown() {
 
 	// EFX or not, the list needs to be cleared
 	EFXDatabase.Clear();
+	mapReverb.Clear();
 
 	efxloaded = false;
 
@@ -1229,6 +1240,7 @@ void idSoundSystemLocal::BeginLevelLoad() {
 		EFXDatabase.Clear();
 		efxloaded = false;
 	}
+	mapReverb.Clear();
 }
 
 /*
@@ -1244,6 +1256,29 @@ void idSoundSystemLocal::EndLevelLoad( const char *mapstring ) {
 
 	if (!useEFXReverb)
 		return;
+
+	// DUDE: Quake 4 - one preset library for every map, and per map a table naming the
+	// preset each portal area uses (maps/game/airdefense1.reverb beside the .map)
+	const char *presetLibrary = GameTitle::Get().reverbPresets;
+	if ( presetLibrary != NULL ) {
+		efxloaded = EFXDatabase.LoadFile( presetLibrary );
+		if ( !efxloaded ) {
+			common->Printf( "sound: missing %s\n", presetLibrary );
+			return;
+		}
+		idStr reverbName = mapstring;
+		reverbName.BackSlashesToSlashes();
+		if ( reverbName.IcmpPrefix( "maps/" ) ) {
+			reverbName = "maps/" + reverbName;
+		}
+		reverbName.SetFileExtension( ".reverb" );
+		if ( mapReverb.LoadFile( reverbName ) ) {
+			common->Printf( "sound: found %s (%d areas, presets from %s)\n", reverbName.c_str(), mapReverb.NumAreas(), presetLibrary );
+		} else {
+			common->Printf( "sound: missing %s, every area uses the default preset\n", reverbName.c_str() );
+		}
+		return;
+	}
 
 	idStr efxname( "efxs/" );
 	idStr mapname( mapstring );
@@ -1540,3 +1575,4 @@ int idSoundSystemLocal::IsEFXAvailable( void ) {
 	return EFXAvailable;
 #endif
 }
+

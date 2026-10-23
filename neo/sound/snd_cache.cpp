@@ -65,6 +65,7 @@ idSoundCache::idSoundCache() {
 	listCache.AssureSize( 1024, NULL );
 	listCache.SetGranularity( 256 );
 	insideLevelLoad = false;
+	registerOnly = false;
 }
 
 /*
@@ -112,7 +113,7 @@ idSoundSample *idSoundCache::FindSound( const idStr& filename, bool loadOnDemand
 		idSoundSample *def = listCache[i];
 		if ( def && def->name == fname ) {
 			def->levelLoadReferenced = true;
-			if ( def->purged && !loadOnDemandOnly ) {
+			if ( def->purged && !loadOnDemandOnly && !registerOnly ) {
 				// DUDE: during a level load, queue the decode for LoadPendingParallel() instead of
 				// decoding inline here (pendingDecode dedups repeat references); otherwise load now.
 				if ( insideLevelLoad ) {
@@ -143,7 +144,7 @@ idSoundSample *idSoundCache::FindSound( const idStr& filename, bool loadOnDemand
 	def->onDemand = loadOnDemandOnly;
 	def->purged = true;
 
-	if ( !loadOnDemandOnly ) {
+	if ( !loadOnDemandOnly && !registerOnly ) {
 		// DUDE: during a level load, queue for the parallel decode pass; otherwise load inline.
 		// this may make it a default sound if it can't be loaded
 		if ( insideLevelLoad ) {

@@ -1715,9 +1715,11 @@ DUDE: parse every decl of every type (or of one type) and report the ones whose 
 failed. "lintDecls" lists the first few failures per type, "lintDecls all" every one,
 "lintDecls material" one type. A gate check for a game title's data (docs/quake4-port.md
 section 7): headless as  +lintDecls +quit. Images register without loading their pixels
-while it runs, so it costs parse time only.
+and sound samples register without decoding while it runs, so it costs parse time only.
 ===================
 */
+extern void Sound_RegisterSamplesOnly( bool registerOnly );		// sound/snd_system.cpp
+
 void idDeclManagerLocal::LintDecls_f( const idCmdArgs &args ) {
 	const char *onlyType = NULL;
 	bool listAll = false;
@@ -1731,6 +1733,7 @@ void idDeclManagerLocal::LintDecls_f( const idCmdArgs &args ) {
 
 	const bool preload = cvarSystem->GetCVarBool( "image_preload" );
 	cvarSystem->SetCVarBool( "image_preload", false );
+	Sound_RegisterSamplesOnly( true );
 
 	int totalChecked = 0, totalFailed = 0;
 	common->Printf( "----- lintDecls -----\n" );
@@ -1772,6 +1775,7 @@ void idDeclManagerLocal::LintDecls_f( const idCmdArgs &args ) {
 	common->Printf( "lintDecls: %d decls, %d failed\n", totalChecked, totalFailed );
 
 	cvarSystem->SetCVarBool( "image_preload", preload );
+	Sound_RegisterSamplesOnly( false );
 }
 
 /*
