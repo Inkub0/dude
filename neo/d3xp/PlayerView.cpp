@@ -490,10 +490,14 @@ void idPlayerView::SingleView( idUserInterface *hud, const renderView_t *view ) 
 	hackedView.viewaxis = hackedView.viewaxis * ShakeAxis();
 
 #ifdef _D3XP
-	if ( gameLocal.portalSkyEnt.GetEntity() && gameLocal.IsPortalSkyAcive() && g_enablePortalSky.GetBool() ) {
-		renderView_t	portalView = hackedView;
-		portalView.vieworg = gameLocal.portalSkyEnt.GetEntity()->GetPhysics()->GetOrigin();
-
+	// DUDE: the renderer draws the portal sky, as a subview of the player's view (R_PortalSkyRender),
+	// and captures it into _currentRender for the portal_sky surfaces itself. RoE rendered it here
+	// as a second top-level view of the game world and captured that: the temporal and RT passes
+	// (FSR2, NRD, ReSTIR, the once-per-frame RT staging) then took the sky camera's view for the
+	// player's, and Vulkan's merged prepass left the sky under lit geometry.
+	const bool portalSky = gameLocal.portalSkyEnt.GetEntity() && gameLocal.IsPortalSkyAcive() && g_enablePortalSky.GetBool();
+	gameRenderWorld->SetPortalSkyCamera( portalSky, portalSky ? gameLocal.portalSkyEnt.GetEntity()->GetPhysics()->GetOrigin() : vec3_origin );
+	if ( portalSky ) {
 		// setup global fixup projection vars
 		if ( 1 ) {
 			int vidWidth, vidHeight;
@@ -513,11 +517,8 @@ void idPlayerView::SingleView( idUserInterface *hud, const renderView_t *view ) 
 			hackedView.shaderParms[4] = shiftScale.x;
 			hackedView.shaderParms[5] = shiftScale.y;
 		}
-
-		gameRenderWorld->RenderScene( &portalView );
-		renderSystem->CaptureRenderToImage( "_currentRender" );
-
-		hackedView.forceUpdate = true;				// FIX: for smoke particles not drawing when portalSky present
+		// (no hackedView.forceUpdate: it made the smoke particles update again for this view after
+		// the sky view had taken this time's update; the sky subview now comes after this view)
 	}
 
 	// process the frame

@@ -647,7 +647,11 @@ per-area sky number, Quake 4's `HasSkybox` rule), captures it into `_portalSky` 
 far plane right after its world (`RB_RHI_PortalSkyComposite`), so the sky fills only what the
 world left empty and never reaches the temporal / RT passes. Rendering it as a second
 top-level view, as the games' own player views do, fed the sky camera into FSR2 / NRD /
-ReSTIR on the RT tiers (double exposure, black surfaces). Q5's `RF_PORTAL_SKY` maps onto this. Offline, an emulation
+ReSTIR on the RT tiers (double exposure, black surfaces). Q5's `RF_PORTAL_SKY` maps onto this.
+RoE's and Lost Mission's own player views (`neo/d3xp`, `neo/d3le` `PlayerView.cpp`) use it too
+since 2026-10-23 (branch `fix/roe-portal-sky-subview`): their top-level sky view also took the
+frame's once-per-frame RT staging (the anim-caster slot was claimed even by a non-qualifying
+view; fixed separately, `fix/rt-anim-caster-frame-claim`). Offline, an emulation
 of the same rules resolved every model key on seven Doom 3 / RoE maps, and all 2679 Doom 3
 and 2233 Quake 4 `.md5anim` files have the layout the frame-0 reader expects. Doom 3 itself
 is untouched: only the null game library changed. It validates every engine-side phase (§6) **without** the SDK — load any
