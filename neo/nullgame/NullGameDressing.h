@@ -35,6 +35,9 @@ void		Spawn( const idMapFile &mapFile, idRenderWorld *renderWorld, int gameTime 
 // reset (a new map was loaded into it), so only the bookkeeping is dropped.
 void		Clear( idRenderWorld *renderWorld );
 
+// listDressing: the MD5 entities placed, their animation frame and heads.
+void		List( void );
+
 }
 
 #endif /* !__NULLGAMEDRESSING_H__ */

@@ -21,9 +21,11 @@ Doom 3 GPL Source Code (see ArbProgram.h for license header)
 #include "ui/UserInterface.h"
 #include "nullgame/NullGameDressing.h"
 
-static idCVar nullgame_dressing( "nullgame_dressing", "1", CVAR_GAME | CVAR_BOOL,
-	"null game: when a map loads, add its lights, models, MD5 models (frozen on their start "
-	"animation) and entity GUIs, render-only; 0 = the world geometry alone" );
+static idCVar nullgame_dressing( "nullgame_dressing", "1", CVAR_GAME | CVAR_INTEGER,
+	"null game, applied when a map loads: 0 = the world geometry alone; 1 = add the map's lights, "
+	"models, MD5 models (frozen on their start animation) and entity GUIs as the game spawns them; "
+	"2 = also what the game hides at spawn for its scripts to reveal (hidden or cinematic "
+	"characters, switched-off lights and emitters)", 0, 2 );
 
 namespace {
 
@@ -50,6 +52,17 @@ struct counts_t {
 idList<qhandle_t>		entityHandles;
 idList<qhandle_t>		lightHandles;
 idList<idJointMat *>	jointFrames;	// the renderer reads them every frame they are drawn
+
+// what listDressing reports: every MD5 entity placed and what happened to its head
+struct dressedMd5_t {
+	idStr		name;
+	idStr		classname;
+	idStr		model;
+	idStr		anim;			// "" = bind pose
+	idVec3		origin;
+	idStr		head;			// "" = the entity has no head
+};
+idList<dressedMd5_t>	dressedMd5;
 
 /*
 ================
@@ -251,6 +264,16 @@ bool LoadAnimFrame0( const char *fileName, const idRenderModel *model, idJointQu
 	return ok;
 }
 
+// a joint whose transform comes from elsewhere (a Quake 4 head's copy_joint), the way
+// idAnimator applies JOINTMOD_LOCAL_OVERRIDE (parent-relative, before the hierarchy) and
+// JOINTMOD_WORLD_OVERRIDE (model space, children follow it)
+struct jointOverride_t {
+	int			joint;
+	bool		modelSpace;
+	idMat3		axis;
+	idVec3		origin;
+};
+
 /*
 ================
 PoseModel
@@ -261,7 +284,8 @@ remove_origin_offset: the root sits at the model def's offset, children follow t
 parents. Fills the render entity's joints and bounds.
 ================
 */
-bool PoseModel( idRenderModel *model, const char *animFile, const idVec3 &offset, renderEntity_t &re ) {
+bool PoseModel( idRenderModel *model, const char *animFile, const idVec3 &offset, renderEntity_t &re,
+				const idList<jointOverride_t> *overrides = NULL ) {
 	const int numJoints = model->NumJoints();
 	const idMD5Joint *md5Joints = model->GetJoints();
 	const idJointQuat *defaultPose = model->GetDefaultPose();
@@ -288,14 +312,35 @@ bool PoseModel( idRenderModel *model, const char *animFile, const idVec3 &offset
 	}
 	const idVec3 rootFrom = pose[0].t;
 
+	idList<const jointOverride_t *> modelSpace;
+	modelSpace.SetNum( numJoints );
+	for ( int i = 0; i < numJoints; i++ ) {
+		modelSpace[i] = NULL;
+	}
+	for ( int k = 0; overrides != NULL && k < overrides->Num(); k++ ) {
+		const jointOverride_t &o = (*overrides)[k];
+		if ( o.joint < 0 || o.joint >= numJoints ) {
+			continue;
+		}
+		if ( o.modelSpace ) {
+			modelSpace[o.joint] = &o;
+		} else {
+			pose[o.joint].q = o.axis.ToQuat();
+			pose[o.joint].t = o.origin;
+		}
+	}
+
 	idJointMat *mats = (idJointMat *)Mem_Alloc16( numJoints * sizeof( idJointMat ) );
 	for ( int i = 0; i < numJoints; i++ ) {
 		mats[i].SetRotation( pose[i].q.ToMat3() );
 		mats[i].SetTranslation( pose[i].t );
 	}
 	mats[0].SetTranslation( offset );
-	for ( int i = 1; i < numJoints; i++ ) {
-		if ( md5Joints[i].parent != NULL ) {
+	for ( int i = 0; i < numJoints; i++ ) {
+		if ( modelSpace[i] != NULL ) {
+			mats[i].SetRotation( modelSpace[i]->axis );
+			mats[i].SetTranslation( modelSpace[i]->origin );
+		} else if ( i > 0 && md5Joints[i].parent != NULL ) {
 			const int parent = md5Joints[i].parent - md5Joints;
 			if ( parent >= 0 && parent < i ) {
 				mats[i] *= mats[parent];
@@ -485,6 +530,15 @@ void AddModel( idRenderWorld *rw, int entityNum, const idDict &args, const idMat
 	}
 	entityHandles.Append( rw->AddEntityDef( &re ) );
 	counts.models++;
+	dressedMd5_t *record = NULL;
+	if ( re.joints != NULL ) {
+		record = &dressedMd5.Alloc();
+		record->name = args.GetString( "name" );
+		record->classname = args.GetString( "classname" );
+		record->model = modelName;
+		record->anim = AnimFileFor( args, def );
+		record->origin = re.origin;
+	}
 
 	// the head, frozen the same way on the body's head joint. Doom 3 (idActor::SetupHead,
 	// idAFAttachment::SetBody): "def_head" names the head's model, at "head_joint", on the
@@ -495,14 +549,17 @@ void AddModel( idRenderWorld *rw, int entityNum, const idDict &args, const idMat
 	if ( headName[0] == '\0' || re.joints == NULL ) {
 		return;
 	}
-	const jointHandle_t joint = model->GetJointHandle( args.GetString( quake4 ? "joint_head" : "head_joint" ) );
+	const char *jointName = args.GetString( quake4 ? "joint_head" : "head_joint" );
+	const jointHandle_t joint = model->GetJointHandle( jointName );
 	if ( joint < 0 || joint >= re.numJoints ) {
+		record->head = va( "%s: no joint '%s' on the body", headName, jointName );
 		return;
 	}
 	idDict headArgs;
 	if ( quake4 ) {
 		const idDeclEntityDef *headDef = static_cast<const idDeclEntityDef *>( declManager->FindType( DECL_ENTITYDEF, headName, false ) );
 		if ( headDef == NULL ) {
+			record->head = va( "%s: no such entity def", headName );
 			counts.missing++;
 			return;
 		}
@@ -513,6 +570,7 @@ void AddModel( idRenderWorld *rw, int entityNum, const idDict &args, const idMat
 	bool haveHeadDef = false;
 	idRenderModel *headModel = FindModel( headName, headModelDef, haveHeadDef );
 	if ( headModel == NULL || headModel->NumJoints() <= 0 ) {
+		record->head = va( "head model '%s' did not load as an MD5", headName );
 		counts.missing++;
 		return;
 	}
@@ -525,9 +583,57 @@ void AddModel( idRenderWorld *rw, int entityNum, const idDict &args, const idMat
 	// re.origin already carries offsetModel; the joints are model-space
 	head.origin = re.origin + re.joints[joint].ToVec3() * re.axis;
 	head.axis = quake4 ? re.joints[joint].ToMat3() * re.axis : re.axis;
-	PoseModel( headModel, AnimFileFor( headArgs, headModelDef ), headModelDef.offset, head );
+
+	// Quake 4 drives the head's listed joints from the body (idAFAttachment::InitCopyJoints /
+	// CopyJointsFromBody): "copy_joint*" on the head names a head joint; it takes the body
+	// joint of that name ("copy_joint <name>" on the body renames it) parent-relative, or, when
+	// the body has "copy_joint_world <name>", in world space
+	idList<jointOverride_t> copies;
+	if ( quake4 ) {
+		const idMD5Joint *bodyJoints = model->GetJoints();
+		for ( const idKeyValue *kv = headArgs.MatchPrefix( "copy_joint", NULL ); kv != NULL; kv = headArgs.MatchPrefix( "copy_joint", kv ) ) {
+			const char *headJoint = kv->GetValue();
+			if ( headJoint[0] == '\0' ) {
+				continue;
+			}
+			const char *bodyJoint = NULL;
+			const bool world = args.GetString( va( "copy_joint_world %s", headJoint ), headJoint, &bodyJoint );
+			if ( !world ) {
+				args.GetString( va( "copy_joint %s", headJoint ), headJoint, &bodyJoint );
+			}
+			jointOverride_t o;
+			o.joint = headModel->GetJointHandle( headJoint );
+			const int from = model->GetJointHandle( bodyJoint );
+			if ( o.joint < 0 || from < 0 || from >= re.numJoints ) {
+				continue;
+			}
+			o.modelSpace = world;
+			const idMat3 fromAxis = re.joints[from].ToMat3();
+			const idVec3 fromOrigin = re.joints[from].ToVec3();
+			if ( world ) {
+				// the body joint in world space, into the head's model space
+				const idMat3 headAxisT = head.axis.Transpose();
+				o.origin = ( re.origin + fromOrigin * re.axis - head.origin ) * headAxisT;
+				o.axis = fromAxis * re.axis * headAxisT;
+			} else if ( bodyJoints[from].parent != NULL ) {
+				// the body joint relative to its parent (idAnimator::GetJointLocalTransform)
+				const int parent = bodyJoints[from].parent - bodyJoints;
+				const idMat3 parentAxisT = re.joints[parent].ToMat3().Transpose();
+				o.origin = ( fromOrigin - re.joints[parent].ToVec3() ) * parentAxisT;
+				o.axis = fromAxis * parentAxisT;
+			} else {
+				o.origin = fromOrigin;
+				o.axis = fromAxis;
+			}
+			copies.Append( o );
+		}
+	}
+	const bool headPosed = PoseModel( headModel, AnimFileFor( headArgs, headModelDef ), headModelDef.offset, head, &copies );
 	entityHandles.Append( rw->AddEntityDef( &head ) );
 	counts.heads++;
+	const idVec3 local = ( head.origin - re.origin ) * re.axis.Transpose();
+	record->head = va( "%s (%s) on '%s' at body-local (%s), %s, %d copied joints, bounds (%s)-(%s)", headName, headModel->Name(), jointName,
+		local.ToString( 1 ), headPosed ? "posed" : "bind pose", copies.Num(), head.bounds[0].ToString( 0 ), head.bounds[1].ToString( 0 ) );
 }
 
 /*
@@ -614,9 +720,11 @@ NullGameDressing::Spawn
 */
 void NullGameDressing::Spawn( const idMapFile &mapFile, idRenderWorld *rw, int gameTime ) {
 	Clear( NULL );
-	if ( rw == NULL || !nullgame_dressing.GetBool() || mapFile.GetNumEntities() == 0 ) {
+	if ( rw == NULL || nullgame_dressing.GetInteger() <= 0 || mapFile.GetNumEntities() == 0 ) {
 		return;
 	}
+	// 2: include what the scripts reveal later - with no scripts, it never would be
+	const bool revealHidden = nullgame_dressing.GetInteger() >= 2;
 
 	counts_t counts;
 	memset( &counts, 0, sizeof( counts ) );
@@ -637,10 +745,11 @@ void NullGameDressing::Spawn( const idMapFile &mapFile, idRenderWorld *rw, int g
 		// what does not show when it spawns: hidden until triggered (idEntity::Spawn), AI
 		// waiting for a cinematic, a trigger or a teleport (each title's idAI::Spawn),
 		// switched off, triggers, statics dmap merged into the world (idStaticEntity::Spawn)
-		if ( args.GetBool( "hide" ) ) {
+		if ( revealHidden ) {
+			// keep only the rules below that are not about being hidden at spawn
+		} else if ( args.GetBool( "hide" ) ) {
 			continue;
-		}
-		if ( quake4 ) {
+		} else if ( quake4 ) {
 			// Quake 4's actors: idAI and Raven's rvAI* / rvMonster* classes; any trigger_anim hides
 			const bool isAI = idStr::Icmpn( spawnclass, "idAI", 4 ) == 0 || idStr::Icmpn( spawnclass, "rvAI", 4 ) == 0
 							|| idStr::Icmpn( spawnclass, "rvMonster", 9 ) == 0;
@@ -667,10 +776,11 @@ void NullGameDressing::Spawn( const idMapFile &mapFile, idRenderWorld *rw, int g
 
 		const idMaterial *lightShader = NULL;
 		const bool isLight = idStr::Icmp( spawnclass, "idLight" ) == 0 || idStr::Icmp( classname, "light" ) == 0;
-		if ( isLight && !args.GetBool( "start_off" ) ) {
+		const bool startOff = args.GetBool( "start_off" ) && !revealHidden;
+		if ( isLight && !startOff ) {
 			lightShader = AddLight( rw, args, counts, gameTime );
 		}
-		if ( !isLight && args.GetBool( "start_off" ) ) {		// emitters, smoke
+		if ( !isLight && startOff ) {		// emitters, smoke
 			continue;
 		}
 		if ( args.GetString( "model" )[0] != '\0' ) {
@@ -702,4 +812,25 @@ void NullGameDressing::Clear( idRenderWorld *rw ) {
 		Mem_Free16( jointFrames[i] );
 	}
 	jointFrames.Clear();
+	dressedMd5.Clear();
+}
+
+/*
+================
+NullGameDressing::List
+
+The listDressing command: every MD5 entity the dressing placed, the animation it is frozen
+on, and its head - where it sits relative to the body, or why there is none.
+================
+*/
+void NullGameDressing::List( void ) {
+	for ( int i = 0; i < dressedMd5.Num(); i++ ) {
+		const dressedMd5_t &d = dressedMd5[i];
+		common->Printf( "%s (%s) model %s, %s, at (%s)\n", d.name.c_str(), d.classname.c_str(), d.model.c_str(),
+			d.anim.Length() ? d.anim.c_str() : "bind pose", d.origin.ToString( 0 ) );
+		if ( d.head.Length() ) {
+			common->Printf( "    head %s\n", d.head.c_str() );
+		}
+	}
+	common->Printf( "%d MD5 entities, %d entities and %d lights dressed\n", dressedMd5.Num(), entityHandles.Num(), lightHandles.Num() );
 }

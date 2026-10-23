@@ -19,7 +19,7 @@ Doom 3 GPL Source Code (see ArbProgram.h for license header)
 // Selected automatically when the active title's game library is missing and the title
 // allows it (GameTitle nullGameFallback), or explicitly with  +set fs_game nullgame.
 //
-// Console commands: getviewpos, setviewpos x y z [yaw [pitch]].
+// Console commands: getviewpos, setviewpos x y z [yaw [pitch]], listDressing.
 
 #include "sys/platform.h"
 #include "idlib/Lib.h"
@@ -30,6 +30,7 @@ Doom 3 GPL Source Code (see ArbProgram.h for license header)
 #include "framework/CVarSystem.h"
 #include "framework/FileSystem.h"
 #include "framework/DeclManager.h"
+#include "framework/DeclEntityDef.h"
 #include "framework/Game.h"
 #include "renderer/RenderSystem.h"
 #include "renderer/RenderWorld.h"
@@ -56,6 +57,14 @@ idCVar *					idCVar::staticVars = NULL;
 // without checking that it exists, so register it as the Doom 3 game libraries do
 // (gamesys/SysCvar.cpp).
 idCVar ui_name( "ui_name", "Player", CVAR_GAME | CVAR_USERINFO | CVAR_ARCHIVE, "player name" );
+
+// as RoE's d3xp/PlayerView.cpp: the smallest power of two >= num
+static int MakePowerOfTwo( int num ) {
+	int pot;
+	for ( pot = 1; pot < num; pot <<= 1 ) {
+	}
+	return pot;
+}
 
 static const float	NULLGAME_FLY_SPEED		= 320.0f;	// units per second, doubled while running
 static const float	NULLGAME_BASE_FOV		= 90.0f;	// horizontal at 4:3, widened for the screen aspect
@@ -120,6 +129,7 @@ public:
 private:
 	gameReturn_t				EmptyReturn( void ) const;
 	void						FindPlayerStart( const idMapFile *mapFile, const char *mapName );
+	void						FindPortalSky( const idMapFile &mapFile );
 	idMat3						ViewAxis( void ) const;
 
 	idRenderWorld *				renderWorld;
@@ -133,6 +143,13 @@ private:
 	idAngles					viewAngles;			// what is drawn
 	idAngles					deltaViewAngles;	// view = usercmd angles + delta, so the start yaw sticks
 	short						lastCmdAngles[3];
+
+	// the map's portal sky camera, rendered before the view: RoE's idPortalSky (its
+	// portalSky surfaces show the capture) or Quake 4's rvCameraPortalSky (its sky is
+	// where the world draws nothing)
+	bool						hasPortalSky;
+	bool						portalSkyCapture;
+	idVec3						portalSkyOrigin;
 };
 
 static idNullGame		nullGame;
@@ -152,6 +169,9 @@ idNullGame::idNullGame( void ) {
 	viewAngles.Zero();
 	deltaViewAngles.Zero();
 	lastCmdAngles[0] = lastCmdAngles[1] = lastCmdAngles[2] = 0;
+	hasPortalSky = false;
+	portalSkyCapture = false;
+	portalSkyOrigin.Zero();
 }
 
 /*
@@ -164,6 +184,10 @@ static void NullGame_GetViewPos_f( const idCmdArgs &args ) {
 	idAngles angles;
 	nullGame.GetViewPos( origin, angles );
 	common->Printf( "(%s) %.1f %.1f\n", origin.ToString( 1 ), angles.yaw, angles.pitch );
+}
+
+static void NullGame_ListDressing_f( const idCmdArgs &args ) {
+	NullGameDressing::List();
 }
 
 static void NullGame_SetViewPos_f( const idCmdArgs &args ) {
@@ -220,6 +244,7 @@ void idNullGame::Init( void ) {
 
 	cmdSystem->AddCommand( "getviewpos", NullGame_GetViewPos_f, CMD_FL_GAME, "prints the null game camera position and angles" );
 	cmdSystem->AddCommand( "setviewpos", NullGame_SetViewPos_f, CMD_FL_GAME, "moves the null game camera: setviewpos x y z [yaw [pitch]]" );
+	cmdSystem->AddCommand( "listDressing", NullGame_ListDressing_f, CMD_FL_GAME, "lists the null game's dressed MD5 entities, their animation frame and heads" );
 }
 
 /*
@@ -342,8 +367,44 @@ void idNullGame::InitFromNewMap( const char *mapName, idRenderWorld *rw, idSound
 	idMapFile mapFile;
 	const bool parsed = mapFile.Parse( mapName );
 	FindPlayerStart( parsed ? &mapFile : NULL, mapName );
+	hasPortalSky = false;
 	if ( parsed ) {
+		FindPortalSky( mapFile );
 		NullGameDressing::Spawn( mapFile, renderWorld, gameTime );
+	}
+}
+
+/*
+================
+idNullGame::FindPortalSky
+
+RoE: an idPortalSky (info_portalSky) without "triggered" makes itself the sky after it
+spawns, so the last such one wins. Quake 4: a single rvCameraPortalSky
+(func_camera_portalsky).
+================
+*/
+void idNullGame::FindPortalSky( const idMapFile &mapFile ) {
+	for ( int i = 1; i < mapFile.GetNumEntities(); i++ ) {
+		const idDict &epairs = mapFile.GetEntity( i )->epairs;
+		const char *spawnclass = epairs.GetString( "spawnclass" );
+		if ( spawnclass[0] == '\0' ) {
+			const idDecl *decl = declManager->FindType( DECL_ENTITYDEF, epairs.GetString( "classname" ), false );
+			if ( decl != NULL ) {
+				spawnclass = static_cast<const idDeclEntityDef *>( decl )->dict.GetString( "spawnclass" );
+			}
+		}
+		const bool roe = idStr::Icmp( spawnclass, "idPortalSky" ) == 0;
+		if ( roe && epairs.GetBool( "triggered" ) ) {
+			continue;		// RoE: inactive until a trigger makes it current
+		}
+		if ( roe || idStr::Icmp( spawnclass, "rvCameraPortalSky" ) == 0 ) {
+			hasPortalSky = true;
+			portalSkyCapture = roe;
+			portalSkyOrigin = epairs.GetVector( "origin" );
+		}
+	}
+	if ( hasPortalSky ) {
+		common->Printf( "null game: portal sky camera at %s\n", portalSkyOrigin.ToString( 0 ) );
 	}
 }
 
@@ -477,6 +538,26 @@ bool idNullGame::Draw( int clientNum ) {
 	view.viewaxis = ViewAxis();
 	view.time = gameTime;
 	view.globalMaterial = NULL;
+
+	// the portal sky first, from its camera with the view's direction (RoE idPlayerView::
+	// SingleView, Quake 4's the same without the capture): RoE's portalSky surfaces then show
+	// the capture, Quake 4's sky is wherever the view itself draws nothing
+	if ( hasPortalSky ) {
+		renderView_t skyView = view;
+		skyView.vieworg = portalSkyOrigin;
+		if ( portalSkyCapture ) {
+			// RoE's power-of-two fix-up for sampling the capture
+			int vidWidth, vidHeight;
+			renderSystem->GetGLSettings( vidWidth, vidHeight );
+			view.shaderParms[4] = (float)vidWidth / MakePowerOfTwo( vidWidth );
+			view.shaderParms[5] = (float)vidHeight / MakePowerOfTwo( vidHeight );
+		}
+		renderWorld->RenderScene( &skyView );
+		if ( portalSkyCapture ) {
+			renderSystem->CaptureRenderToImage( "_currentRender" );
+		}
+		view.forceUpdate = true;
+	}
 
 	renderWorld->RenderScene( &view );
 	return true;
