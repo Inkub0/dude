@@ -346,7 +346,8 @@ void idRenderWorldLocal::ParseInterAreaPortals( idLexer *src ) {
 		}
 
 		// DUDE: Quake 4's optional portal fade, ( fadeImage distanceNear distanceFar ); the next
-		// portal starts with a number, so a "(" here can only be this
+		// portal starts with a number, so a "(" here can only be this. The image's implicit
+		// material ("blend blend", "colored") draws it - AddPortalFade
 		if ( src->CheckTokenString( "(" ) ) {
 			idToken image;
 			src->ReadToken( &image );

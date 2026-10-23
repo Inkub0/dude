@@ -470,7 +470,15 @@ Version-tolerant parsing, both formats through one code path:
   performance step): Quake 4 only** —
   Doom 3's maps carry no fade data, a global cut-off would black out doorways (a fidelity
   change), portal culling already drops what cannot be seen, and the RT tiers trace the whole
-  world regardless of portals.
+  world regardless of portals. **As built (Q3, 2026-10-23):** `idRenderWorldLocal::AddPortalFade`,
+  called from the view flood (`FloodViewThroughArea_r`) for a visible portal with fade data:
+  by the view's distance to the portal plane, transparent up to `distanceNear`, opaque from
+  `distanceFar` (alpha ramps between), drawn as a translucent quad over the whole portal with the
+  fade image's implicit material (`blend blend`, `colored`: alpha from `shaderParm3`; no game
+  defines a `_black` material), once per view, both windings. Past `distanceFar` the flood
+  stops at the portal - it is opaque, nothing behind it can show. Doom 3 portals have no fade
+  data, so the path never runs for them. Behaviour as idTech4A++ (its routine is compiled out)
+  and OpenQ4 read it - read for the semantics only.
 - `.cm` — **as built (Q3, 2026-10-23)**, one parser for all titles (`neo/cm/CollisionModel_files.cpp`),
   the extra fields read by file revision (`quake4FileRevision`) rather than guessed from the next
   token: `"1.00"` Doom 3; `"3"` Quake 4 maps and models — a number after the model name, two-count

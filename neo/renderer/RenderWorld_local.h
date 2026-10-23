@@ -63,6 +63,7 @@ typedef struct doublePortal_s {
 	const idMaterial *		fadeMaterial;
 	float					fadeNear;
 	float					fadeFar;
+	int						fadeViewCount;	// tr.viewCount of the view that last drew the fade
 } doublePortal_t;
 
 
@@ -220,6 +221,7 @@ public:
 	idScreenRect			ScreenRectFromWinding( const idWinding *w, viewEntity_t *space );
 	bool					PortalIsFoggedOut( const portal_t *p );
 	void					FloodViewThroughArea_r( const idVec3 origin, int areaNum, const struct portalStack_s *ps );
+	void					AddPortalFade( const portal_t *p, float distance );		// DUDE: Quake 4
 	void					FlowViewThroughPortals( const idVec3 origin, int numPlanes, const idPlane *planes );
 	void					FloodLightThroughArea_r( idRenderLightLocal *light, int areaNum, const struct portalStack_s *ps );
 	void					FlowLightThroughPortals( idRenderLightLocal *light );

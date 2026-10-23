@@ -31,6 +31,7 @@ If you have questions concerning this license or the applicable additional terms
 #include "framework/Session.h"
 #include "renderer/RenderWorld_local.h"
 #include "renderer/ImmediateMode.h"
+#include "renderer/VertexCache.h"
 
 #include "renderer/tr_local.h"
 
@@ -227,6 +228,16 @@ void idRenderWorldLocal::FloodViewThroughArea_r( const idVec3 origin, int areaNu
 			continue;
 		}
 
+		// DUDE: Quake 4 portal fade - past fadeNear the portal fades to its fade image; past
+		// fadeFar it is opaque, so nothing behind it can show and the flood stops there
+		const doublePortal_t *dp = p->doublePortal;
+		if ( dp->fadeMaterial != NULL && d > dp->fadeNear ) {
+			AddPortalFade( p, d );
+			if ( d >= dp->fadeFar ) {
+				continue;
+			}
+		}
+
 		// go through this portal
 		newStack.p = p;
 		newStack.next = ps;
@@ -273,6 +284,68 @@ void idRenderWorldLocal::FloodViewThroughArea_r( const idVec3 origin, int areaNu
 
 		FloodViewThroughArea_r( origin, p->intoArea, &newStack );
 	}
+}
+
+/*
+===================
+AddPortalFade
+
+DUDE: Quake 4's portal fade. A portal the .proc gives "( fadeImage distanceNear distanceFar )"
+- in the retail data nine doorways of mcc_1 / mcc_2, "_black" over 150..200 or 256..512 units -
+is covered by its fade image as the view moves away: transparent up to distanceNear, opaque
+from distanceFar, by the view's distance to the portal plane. Drawn as a translucent quad over
+the whole portal with the fade image's implicit material ("blend blend", "colored": colour and
+alpha from the shader parms), once per view however many flood paths reach the portal. Both
+windings are emitted, so either side faces the view.
+===================
+*/
+void idRenderWorldLocal::AddPortalFade( const portal_t *p, float distance ) {
+	doublePortal_t *dp = p->doublePortal;
+	if ( dp->fadeViewCount == tr.viewCount ) {
+		return;
+	}
+	dp->fadeViewCount = tr.viewCount;
+
+	const float range = dp->fadeFar - dp->fadeNear;
+	const float alpha = range > 0.0f ? idMath::ClampFloat( 0.0f, 1.0f, ( distance - dp->fadeNear ) / range ) : 1.0f;
+	const idWinding *w = p->w;
+	if ( alpha <= 0.0f || w == NULL || w->GetNumPoints() < 3 ) {
+		return;
+	}
+
+	const int numVerts = w->GetNumPoints();
+	srfTriangles_t *tri = (srfTriangles_t *)R_ClearedFrameAlloc( sizeof( *tri ) );
+	tri->numVerts = numVerts;
+	tri->numIndexes = ( numVerts - 2 ) * 6;
+	tri->indexes = (glIndex_t *)R_FrameAlloc( tri->numIndexes * sizeof( tri->indexes[0] ) );
+	idDrawVert *verts = (idDrawVert *)_alloca16( numVerts * sizeof( idDrawVert ) );
+	tri->bounds.Clear();
+	for ( int i = 0; i < numVerts; i++ ) {
+		verts[i].Clear();
+		verts[i].xyz = (*w)[i].ToVec3();
+		verts[i].color[0] = verts[i].color[1] = verts[i].color[2] = verts[i].color[3] = 255;
+		tri->bounds.AddPoint( verts[i].xyz );
+	}
+	int n = 0;
+	for ( int i = 1; i < numVerts - 1; i++ ) {
+		tri->indexes[n++] = 0;
+		tri->indexes[n++] = i;
+		tri->indexes[n++] = i + 1;
+		tri->indexes[n++] = 0;
+		tri->indexes[n++] = i + 1;
+		tri->indexes[n++] = i;
+	}
+	tri->ambientCache = vertexCache.AllocFrameTemp( verts, numVerts * sizeof( idDrawVert ) );
+	if ( !tri->ambientCache ) {
+		return;
+	}
+
+	renderEntity_t *parms = (renderEntity_t *)R_ClearedFrameAlloc( sizeof( *parms ) );
+	parms->shaderParms[SHADERPARM_RED] = 1.0f;
+	parms->shaderParms[SHADERPARM_GREEN] = 1.0f;
+	parms->shaderParms[SHADERPARM_BLUE] = 1.0f;
+	parms->shaderParms[SHADERPARM_ALPHA] = alpha;
+	R_AddDrawSurf( tri, &tr.viewDef->worldSpace, parms, dp->fadeMaterial, tr.viewDef->scissor );
 }
 
 /*
