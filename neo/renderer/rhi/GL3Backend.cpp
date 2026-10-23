@@ -1219,6 +1219,7 @@ private:
 			case GLS_SRCBLEND_DST_ALPHA:			srcFactor = GL_DST_ALPHA; break;
 			case GLS_SRCBLEND_ONE_MINUS_DST_ALPHA:	srcFactor = GL_ONE_MINUS_DST_ALPHA; break;
 			case GLS_SRCBLEND_ALPHA_SATURATE:		srcFactor = GL_SRC_ALPHA_SATURATE; break;
+			case GLS_SRCBLEND_SRC_COLOR:			srcFactor = GL_SRC_COLOR; break;
 			default:								srcFactor = GL_ONE; break;
 			}
 			switch ( stateBits & GLS_DSTBLEND_BITS ) {

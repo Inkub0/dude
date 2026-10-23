@@ -36,7 +36,9 @@ Q4BASE="/path/to/Quake 4/q4base" python3 tools/quake4/q4_inventory.py > /tmp/q4_
 - `q4_material_census.py <expanded materials dir>` — lists every material/stage keyword in the
   guide-expanded `.mtr` files (the `out/materials` of `test_guides.sh`) that
   `neo/renderer/Material.cpp` does not know; an unknown keyword defaults the whole material.
-  After Q2 it lists none (`snap` is a false positive: a `table` option).
+  Also lists image-program functions (`map downsize( x, 1 )`) that
+  `neo/renderer/Image_program.cpp` does not know. After Q2 it lists none (`snap` is a false
+  positive: a `table` option; `fp20Program` is in Raven's own test material).
 - `q4_sound_census.py [q4base] [language]` — parses every sound shader with the grammar
   `neo/sound/snd_shader.cpp` accepts for Quake 4, resolves every sample the way the engine does
   (bare names, `sound/vo/` → `sound/vo_<language>/`), and checks every `maps/**/*.reverb` area

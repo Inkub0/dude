@@ -837,7 +837,16 @@ void idMaterial::ParseDecalInfo( idLexer &src ) {
 	idToken token;
 
 	decalInfo.stayTime = src.ParseFloat() * 1000;
+	// DUDE: Quake 4 also writes "decalInfo <stay>" and "decalInfo <stay>, <fade>"; what it
+	// leaves out keeps the defaults from CommonInit. Doom 3's full form parses as before.
+	src.CheckTokenString( "," );
+	if ( !src.PeekTokenType( TT_NUMBER, 0, &token ) ) {
+		return;
+	}
 	decalInfo.fadeTime = src.ParseFloat() * 1000;
+	if ( !src.PeekTokenString( "(" ) ) {
+		return;
+	}
 	float	start[4], end[4];
 	src.Parse1DMatrix( 4, start );
 	src.Parse1DMatrix( 4, end );
@@ -1260,6 +1269,8 @@ int idMaterial::NameToSrcBlendMode( const idStr &name ) {
 		return GLS_SRCBLEND_ONE_MINUS_DST_ALPHA;
 	} else if ( !name.Icmp( "GL_SRC_ALPHA_SATURATE" ) ) {
 		return GLS_SRCBLEND_ALPHA_SATURATE;
+	} else if ( !name.Icmp( "GL_SRC_COLOR" ) ) {		// DUDE: Quake 4's napalm gun glass
+		return GLS_SRCBLEND_SRC_COLOR;
 	}
 
 	common->Warning( "unknown blend mode '%s' in material '%s'", name.c_str(), GetName() );
@@ -2521,14 +2532,13 @@ void idMaterial::ParseMaterial( idLexer &src ) {
 			continue;
 		}
 		else if ( !token.Icmp( "materialImage" ) ) {
-			// Raven's per-texel hit map (<name>_hit.tga); loaded by whoever queries it
-			src.ReadTokenOnLine( &token );
-			materialImageName = token.c_str();
+			// Raven's per-texel hit map (<name>_hit.tga), an image program like a stage's map
+			// ("downsize( x_hit.tga, 2 )"); loaded by whoever queries it
+			materialImageName = R_ParsePastImageProgram( src );
 			continue;
 		}
 		else if ( !token.Icmp( "portalImage" ) ) {
-			src.ReadTokenOnLine( &token );
-			portalImageName = token.c_str();
+			portalImageName = R_ParsePastImageProgram( src );
 			continue;
 		}
 		else if ( !token.Icmp( "portalDistanceNear" ) ) {

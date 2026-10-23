@@ -375,6 +375,12 @@ the title profile, so a Doom 3 run parses exactly as before):
   (`glslProgram` / `shaderParm` / `shaderTexture`) are parsed and dropped: each has a
   `glslPrograms == 0` fallback stage, and most of the `.glsl` files they name are not in the
   paks. `glslPrograms`, `IsMultiplayer`, `DecalLife`, `VertexRandomizer` evaluate to 0.
+  Raven's image-program function `downsize( <image>, <levels> )` (404 uses, also in
+  `materialImage`) loads the image unchanged — Quake 4 at its highest texture quality; the
+  short `decalInfo <stay>[, <fade>]` forms, a table's trailing comma and `gl_src_color` as a
+  source blend factor (`GLS_SRCBLEND_SRC_COLOR`, GL3 + Vulkan) are accepted. Left failing, as in
+  retail: Raven's test materials in `test.mtr` (`POTCorrectionX`, `watermove`, `fp20Program`),
+  `guisurf entity4..6` (Quake 4's own `MAX_RENDERENTITY_GUI` is 3 too).
 - *Decl types* — `materialType` (`.mtt`), `lipSync`, `playback`, `effect` (brace-checked
   only; the BSE grammar is Q4) and `playerModel`, in `neo/framework/DeclQuake4.{h,cpp}`, with
   enum values appended after Doom 3's. The null game registers the game-side types and folders
@@ -607,7 +613,7 @@ a **gate** that is automated or a user-verified run — nothing advances on "it 
 | Q4 | **BSE effects** | §5.5: own implementation from grammar + docs, decompile-derived code as last-resort reference, re-expressed in our C++ | All 1180 effects parse; `testEffect` plays each particle type; `bseSweep` plays every effect once without errors; user visual check of ~20 representative effects vs retail; OpenQ4 parity data passes where applicable | **5–7** |
 | Q5 | **Game library** | §5.4 interfaces (API 37 union, render/sound/collision/decl/UI additions), §5.6 repo + build script, idlib shim, `playback`/`lipSync` consumers, `rvClientEffect` bridge, ASAN pass | `airdefense1` **playable**: spawn, HUD, weapons, AI, scripts, triggers, VO + lipsync, cinematic (`md5camera`), save + load round-trip; transition to `airdefense2` | 5–7 |
 | Q6 | **Campaign pass** | Per-map issue log seeded from idTech4A++'s fixes (§4); vehicles (`convoy1/2`, `walker`), tram (`tram1/1b`), MCC sequences, Strogg-ification (`medlabs`), hub, `core1/2` ending; difficulty, objectives, loading screens | User completes the campaign start to finish on one backend, then the other; every logged issue closed or explicitly deferred | 3–5 |
-| Q7 | **DUDE enhancements on Quake 4** | Presets (Potato = faithful); PBR classifier calibration on Raven textures; parallax/tess gating; RT: world + animated BLAS from Q4 content, RTAO/RTGI/ReSTIR DI tiers; FSR2 motion vectors for BSE; perf pass (`r_vkGpuTime`) | Ultra Nightmare runs `airdefense1` within ±25 % of the Doom 3 reference budget; fidelity-note policy applied to every new toggle; user screenshots per tier | 2–3 |
+| Q7 | **DUDE enhancements on Quake 4** | Presets (Potato = faithful); textures: Quake 4 ships 2010 precompressed DXT `.dds` (`progimg/`, `dds/`) — offer DUDE's own upload compression instead where the source image exists (dhewm3's `image_useCompression 2` = BC7/BPTC), opt-in (user note 2026-10-23); PBR classifier calibration on Raven textures; parallax/tess gating; RT: world + animated BLAS from Q4 content, RTAO/RTGI/ReSTIR DI tiers; FSR2 motion vectors for BSE; perf pass (`r_vkGpuTime`) | Ultra Nightmare runs `airdefense1` within ±25 % of the Doom 3 reference budget; fidelity-note policy applied to every new toggle; user screenshots per tier | 2–3 |
 | Q8 | **Packaging** | Steam/GOG path auto-detect inside the engine (Q1's `run-q4.sh` already scans Steam libraries); ship `nullgame.so`/`.dll` with the release (`build-win.sh` already copies every `.dll`; check `build-linux-release.sh`); Windows cross-build of the engine (`build-win.sh`) and `q4base.dll` via the same script under mingw; README/docs; release notes; `dist/` layout as 0.9.x | Clean-machine install test on Linux + Windows following only the README | 1–2 |
 | Q9 | **Later / optional** | Multiplayer (`mpgame`, `q4mp` paks, bots), Q4 mods (Awakening, Hardqore — OpenQ4/idTech4A++ run them), Prey (2006) via the same title profile | — | — |
 
