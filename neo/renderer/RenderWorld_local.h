@@ -61,6 +61,7 @@ typedef struct doublePortal_s {
 	// fadeFar from the view the portal is drawn opaque with fadeMaterial and closes; between
 	// fadeNear and fadeFar it fades in. NULL fadeMaterial: an ordinary portal.
 	const idMaterial *		fadeMaterial;
+	idVec3					fadeColor;		// tints fadeMaterial (shader parms 0-2)
 	float					fadeNear;
 	float					fadeFar;
 	int						fadeViewCount;	// tr.viewCount of the view that last drew the fade

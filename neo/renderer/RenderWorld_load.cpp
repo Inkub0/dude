@@ -351,7 +351,15 @@ void idRenderWorldLocal::ParseInterAreaPortals( idLexer *src ) {
 		if ( src->CheckTokenString( "(" ) ) {
 			idToken image;
 			src->ReadToken( &image );
-			doublePortals[i].fadeMaterial = declManager->FindMaterial( image );
+			if ( image.Icmp( "_black" ) == 0 ) {
+				// this engine generates _black with zero alpha (R_BlackImage), which "blend
+				// blend" would never show: a black fade is _white, tinted black
+				doublePortals[i].fadeMaterial = declManager->FindMaterial( "_white" );
+				doublePortals[i].fadeColor.Zero();
+			} else {
+				doublePortals[i].fadeMaterial = declManager->FindMaterial( image );
+				doublePortals[i].fadeColor.Set( 1.0f, 1.0f, 1.0f );
+			}
 			doublePortals[i].fadeNear = src->ParseFloat();
 			doublePortals[i].fadeFar = src->ParseFloat();
 			src->ExpectTokenString( ")" );

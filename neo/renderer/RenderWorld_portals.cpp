@@ -295,8 +295,9 @@ DUDE: Quake 4's portal fade. A portal the .proc gives "( fadeImage distanceNear 
 is covered by its fade image as the view moves away: transparent up to distanceNear, opaque
 from distanceFar, by the view's distance to the portal plane. Drawn as a translucent quad over
 the whole portal with the fade image's implicit material ("blend blend", "colored": colour and
-alpha from the shader parms), once per view however many flood paths reach the portal. Both
-windings are emitted, so either side faces the view.
+alpha from the shader parms; "_black" is drawn as _white tinted black, see the .proc loader),
+once per view however many flood paths reach the portal. Both windings are emitted, so either
+side faces the view.
 ===================
 */
 void idRenderWorldLocal::AddPortalFade( const portal_t *p, float distance ) {
@@ -341,9 +342,9 @@ void idRenderWorldLocal::AddPortalFade( const portal_t *p, float distance ) {
 	}
 
 	renderEntity_t *parms = (renderEntity_t *)R_ClearedFrameAlloc( sizeof( *parms ) );
-	parms->shaderParms[SHADERPARM_RED] = 1.0f;
-	parms->shaderParms[SHADERPARM_GREEN] = 1.0f;
-	parms->shaderParms[SHADERPARM_BLUE] = 1.0f;
+	parms->shaderParms[SHADERPARM_RED] = dp->fadeColor.x;
+	parms->shaderParms[SHADERPARM_GREEN] = dp->fadeColor.y;
+	parms->shaderParms[SHADERPARM_BLUE] = dp->fadeColor.z;
 	parms->shaderParms[SHADERPARM_ALPHA] = alpha;
 	R_AddDrawSurf( tri, &tr.viewDef->worldSpace, parms, dp->fadeMaterial, tr.viewDef->scissor );
 }
