@@ -625,9 +625,13 @@ void NullGameDressing::Spawn( const idMapFile &mapFile, idRenderWorld *rw, int g
 		}
 		const char *spawnclass = args.GetString( "spawnclass" );
 
-		// what does not show when it spawns: hidden until triggered, switched off,
-		// teleported in later, triggers, statics dmap merged into the world (idStaticEntity)
+		// what does not show when it spawns: hidden until triggered (idEntity::Spawn), AI
+		// waiting for a cinematic, a trigger or a teleport (idAI::Spawn), switched off,
+		// triggers, statics dmap merged into the world (idStaticEntity::Spawn)
 		if ( args.GetBool( "hide" ) || args.GetBool( "teleport" ) ) {
+			continue;
+		}
+		if ( idStr::Icmpn( spawnclass, "idAI", 4 ) == 0 && ( args.GetInt( "num_cinematics" ) || args.GetBool( "trigger_anim" ) ) ) {
 			continue;
 		}
 		if ( idStr::Icmpn( spawnclass, "idTrigger", 9 ) == 0 || idStr::Icmpn( classname, "trigger_", 8 ) == 0 ) {

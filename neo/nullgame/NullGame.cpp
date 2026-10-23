@@ -52,6 +52,11 @@ idAASFileManager *			AASFileManager = NULL;
 idCollisionModelManager *	collisionModelManager = NULL;
 idCVar *					idCVar::staticVars = NULL;
 
+// Game cvars the engine itself relies on. The settings menu (F10) reads the player name
+// without checking that it exists, so register it as the Doom 3 game libraries do
+// (gamesys/SysCvar.cpp).
+idCVar ui_name( "ui_name", "Player", CVAR_GAME | CVAR_USERINFO | CVAR_ARCHIVE, "player name" );
+
 static const float	NULLGAME_FLY_SPEED		= 320.0f;	// units per second, doubled while running
 static const float	NULLGAME_BASE_FOV		= 90.0f;	// horizontal at 4:3, widened for the screen aspect
 static const int	NULLGAME_LISTENER_ID	= 1;
