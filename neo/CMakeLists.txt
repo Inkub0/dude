@@ -932,6 +932,7 @@ set(src_framework
 	framework/DeclAF.cpp
 	framework/DeclEntityDef.cpp
 	framework/DeclFX.cpp
+	framework/DeclGuides.cpp
 	framework/DeclManager.cpp
 	framework/DeclParticle.cpp
 	framework/DeclPDA.cpp

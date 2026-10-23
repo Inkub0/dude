@@ -45,6 +45,8 @@ If you have questions concerning this license or the applicable additional terms
 #include "sound/sound.h"
 
 #include "framework/DeclManager.h"
+#include "framework/DeclGuides.h"
+#include "framework/GameTitle.h"
 
 /*
 
@@ -636,6 +638,18 @@ int idDeclFile::LoadAndParse() {
 		return 0;
 	}
 
+	// DUDE: Quake 4 material guides - "guide <material> <template>(args)" and inlineGuide
+	// become ordinary material text before the file is split into declarations
+	if ( DeclGuides::Num() > 0 && fileName.CheckExtension( ".mtr" ) ) {
+		idStr expanded;
+		if ( DeclGuides::Expand( buffer, length, fileName, expanded ) ) {
+			Mem_Free( buffer );
+			length = expanded.Length();
+			buffer = (char *)Mem_Alloc( length + 1 );
+			memcpy( buffer, expanded.c_str(), length + 1 );
+		}
+	}
+
 	if ( !src.LoadMemory( buffer, length, fileName ) ) {
 		common->Error( "Couldn't parse %s", fileName.c_str() );
 		Mem_Free( buffer );
@@ -835,6 +849,9 @@ void idDeclManagerLocal::Init( void ) {
 	RegisterDeclType( "video",				DECL_VIDEO,			idDeclAllocator<idDeclVideo> );
 	RegisterDeclType( "audio",				DECL_AUDIO,			idDeclAllocator<idDeclAudio> );
 
+	// DUDE: Quake 4's material templates, before the materials that use them
+	DeclGuides::Load();
+
 	RegisterDeclFolder( "materials",		".mtr",				DECL_MATERIAL );
 	RegisterDeclFolder( "skins",			".skin",			DECL_SKIN );
 	RegisterDeclFolder( "sound",			".sndshd",			DECL_SOUND );
@@ -912,6 +929,8 @@ void idDeclManagerLocal::Shutdown( void ) {
 	declTypes.DeleteContents( true );
 	declFolders.DeleteContents( true );
 
+	DeclGuides::Clear();	// DUDE
+
 #ifdef USE_COMPRESSED_DECLS
 	ShutdownHuffman();
 #endif
@@ -923,6 +942,7 @@ idDeclManagerLocal::Reload
 ===================
 */
 void idDeclManagerLocal::Reload( bool force ) {
+	DeclGuides::Load();		// DUDE: an edited template applies to the materials reloaded below
 	for ( int i = 0; i < loadedFiles.Num(); i++ ) {
 		loadedFiles[i]->Reload( force );
 	}
@@ -1012,11 +1032,16 @@ void idDeclManagerLocal::RegisterDeclFolder( const char *folder, const char *ext
 	}
 
 	// scan for decl files
-	fileList = fileSystem->ListFiles( declFolder->folder, declFolder->extension, true );
+	// DUDE: Quake 4 keeps decl files in subfolders too (materials/effects/*.mtr, every effect
+	// material) and its engine scans decl folders recursively; Doom 3 keeps the flat scan.
+	// The tree listing returns paths that already start with the folder.
+	const bool recursive = GameTitle::Get().recursiveDeclFolders;
+	fileList = recursive ? fileSystem->ListFilesTree( declFolder->folder, declFolder->extension, true )
+						 : fileSystem->ListFiles( declFolder->folder, declFolder->extension, true );
 
 	// load and parse decl files
 	for ( i = 0; i < fileList->GetNumFiles(); i++ ) {
-		fileName = declFolder->folder + "/" + fileList->GetFile( i );
+		fileName = recursive ? idStr( fileList->GetFile( i ) ) : declFolder->folder + "/" + fileList->GetFile( i );
 
 		// check whether this file has already been loaded
 		for ( j = 0; j < loadedFiles.Num(); j++ ) {

@@ -35,6 +35,7 @@ typedef struct gameTitleProfile_s {
 	const char *	probeFile;			// a file only this title ships, relative to baseGameDir (autodetection)
 	bool			doom3Layout;		// base/ + d3xp/ + demo/ conventions: RoE detection, demo fallback, mod list
 	bool			nullGameFallback;	// run the null game when the title's own game library is not built yet
+	bool			recursiveDeclFolders;	// decl files also live in subfolders (Quake 4: materials/effects/...)
 
 	// engine-owned assets whose names differ per title
 	const char *	charsetMaterial;	// console / small-string bitmap font
