@@ -595,7 +595,22 @@ sound listener, renders the session's world with a hor+ 90 degree view, and offe
 outside the editors (GUI `renderDef` windows, the worldspawn lookup at map load). It loads
 automatically when a title allows it and its own library is missing (Quake 4 until Q5), or on
 request with `+set fs_game nullgame` on any title. Collision loading is added in Q3, once the
-`.cm 3` loader exists. It validates every engine-side phase (§6) **without** the SDK — load any
+`.cm 3` loader exists.
+
+**Map dressing (Q3 step 0, `neo/nullgame/NullGameDressing.cpp`):** a bare world says little
+about whether a map renders right, so the null game adds, render-only, what the map's
+entities show when they spawn — lights (Doom 3's `ParseSpawnArgsToRenderLight` plus the
+`_prelight_` shadow model), static and brush models, particle models, entity GUIs, and MD5
+models frozen on frame 0 of their start animation (the entity's `anim`, else `idle`, else
+`af_pose`, else the bind pose), with actors' `def_head` heads on their `head_joint`. Spawn
+arguments are the map's keys over the entity def's, as the game merges them; what does not
+show at spawn is skipped (`hide`, `teleport`, `start_off`, triggers, player starts, inline
+statics). Model defs and `.md5anim` frame 0 are parsed by the null game itself — the
+animation system is game code — using only engine interfaces (the library still imports
+nothing from the engine). `nullgame_dressing 0` shows the world alone. Offline, an emulation
+of the same rules resolved every model key on seven Doom 3 / RoE maps, and all 2679 Doom 3
+and 2233 Quake 4 `.md5anim` files have the layout the frame-0 reader expects. Doom 3 itself
+is untouched: only the null game library changed. It validates every engine-side phase (§6) **without** the SDK — load any
 title's map, render it, play effects with `testEffect`, exercise loaders and parsers, run the
 smoke harness (§7) — and stays as a permanent diagnostics tool for Doom 3 itself.
 
@@ -611,7 +626,7 @@ a **gate** that is automated or a user-verified run — nothing advances on "it 
 | Q0 | **Preparation** — **DONE 2026-10-22** | Decisions taken (§9); reference trees cloned outside the repo to `~/quake4-refs/` as blobless sparse checkouts (idTech4A++ `ce49510` 39 MB, OpenQ4 `29c8103` 123 MB, SDK mirror `Xanz/Quake4SDK` `5077f68` 14 MB; the mirror dropped its EULA, OpenQ4 carries it in `LICENSES/QUAKE-4-SDK-EULA.rtf`); `tools/quake4/` audit. The separate game repository moves to Q5, where it is first needed: `openQ4-game` was archived on 2026-10-01 and its code now lives in OpenQ4's `src/game` / `src/mpgame` | Trees on disk | 0.5 |
 | Q1 | **Title profile + boot** — **BUILT 2026-10-22, gate pending** | §5.1 profile; `.fontdat` loader (float glyph metrics + left bearing, Doom 3 fonts unchanged); `run-q4.sh` (Steam library autodetect or `Q4DIR`, then `+set com_title quake4 +set fs_basepath "<Quake 4 dir>"`); null game. Decl registration moved to Q2, where the new decl types land: Quake 4 uses the same `materials/`, `skins/` and `sound/` folders Doom 3 registers, so Q1 had nothing to change there | `./run-q4.sh` boots on both backends, lists the 36 paks, draws the console with the Quake 4 fonts, `exec default.cfg` runs without errors | 1 |
 | Q2 | **Decl/material/GUI/sound parity** — **BUILT 2026-10-23; `lintDecls` gate PASSED (17085 decls, 3 retail quirks), menu verified on GL3; Vulkan + Doom 3 regression pending** | §5.2 guide preprocessor, keywords, new decl types, EFX mapping, UI API additions (as built: §5.2) | `lintDecls` (new console cmd) reports **0 failures** over every material / sound shader / effect / lipSync / playback / materialType / entity decl, except the retail data quirks listed in §1.4 and `tools/quake4/README.md` (GUIs are not decls: `q4_gui_census.py` offline, the menu run by the user); `mainmenu.gui` renders and is navigable (user screenshot); Doom 3 menu, sound and materials unchanged | 2 |
-| Q3 | **World formats** | §5.3 `.map 3` (incl. `func_group` resolve + entity filter), `.proc 4` (incl. coloured verts, portal fade data), `.cm 3`, `.aas 1.08` (incl. dummy-file detection); collision API additions | Null game loads **all 31 SP maps** and renders them; `cm`/`aas` self-checks (counts match file headers); user screenshot of `airdefense1` on GL3 and VK | 1.5–2 |
+| Q3 | **World formats** | step 0: null-game map dressing (§5.7); §5.3 `.map 3` (incl. `func_group` resolve + entity filter), `.proc 4` (incl. coloured verts, portal fade data), `.cm 3`, `.aas 1.08` (incl. dummy-file detection); collision API additions | Null game loads **all 31 SP maps** and renders them; `cm`/`aas` self-checks (counts match file headers); user screenshot of `airdefense1` on GL3 and VK | 1.5–2 |
 | Q4 | **BSE effects** | §5.5: own implementation from grammar + docs, decompile-derived code as last-resort reference, re-expressed in our C++ | All 1180 effects parse; `testEffect` plays each particle type; `bseSweep` plays every effect once without errors; user visual check of ~20 representative effects vs retail; OpenQ4 parity data passes where applicable | **5–7** |
 | Q5 | **Game library** | §5.4 interfaces (API 37 union, render/sound/collision/decl/UI additions), §5.6 repo + build script, idlib shim, `playback`/`lipSync` consumers, `rvClientEffect` bridge, ASAN pass | `airdefense1` **playable**: spawn, HUD, weapons, AI, scripts, triggers, VO + lipsync, cinematic (`md5camera`), save + load round-trip; transition to `airdefense2` | 5–7 |
 | Q6 | **Campaign pass** | Per-map issue log seeded from idTech4A++'s fixes (§4); vehicles (`convoy1/2`, `walker`), tram (`tram1/1b`), MCC sequences, Strogg-ification (`medlabs`), hub, `core1/2` ending; difficulty, objectives, loading screens | User completes the campaign start to finish on one backend, then the other; every logged issue closed or explicitly deferred | 3–5 |
