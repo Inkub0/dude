@@ -776,7 +776,8 @@ idCVar r_gl3ReflectionScale( "r_gl3ReflectionScale", "0.7", CVAR_RENDERER | CVAR
 // additive "texgen reflect" cube stage) so blood reads wet — but it also turns every splat and
 // dirt stain into chrome under any light. Blood decals scale both sources by r_decalBloodSheen;
 // every other translucent decal (dirt, stains, drips) goes matte with r_decalMatte. Inert on the
-// stock assets: their overlay decals carry neither a specularmap nor a cube stage.
+// stock assets: their overlay decals carry neither a specularmap nor a cube stage. Glass is not a
+// decal although id and Raven sort window panes "sort decal" (R_DecalSheenScale).
 idCVar r_decalBloodSheen( "r_decalBloodSheen", "0.35", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "sheen (specular highlight + cube reflection) on blood decals: 0 = matte, 1 = as authored by the material (non-vanilla, opengl3/Vulkan only; only mod-pack decals have any sheen to scale)", 0.0f, 1.0f );
 idCVar r_decalMatte( "r_decalMatte", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "translucent non-blood decals (dirt, stains, drips) get no specular highlight and no cube reflection (non-vanilla, opengl3/Vulkan only; 0 = as authored by the material)" );
 
@@ -800,6 +801,11 @@ R_DecalSheenScale
 1 for everything that is not an overlay decal. Blood is told apart by the "blood" content flag
 or by name (the packs tag only some of their blood materials). Opaque non-blood decals are left
 alone: those are vents, wires, posters and bullet holes — real objects whose shine is intended.
+Glass is left alone too: window panes are "sort decal" + translucent in the stock data (Doom 3's
+outdoor_glass1, RoE's grid glass, 52 Quake 4 panes such as marineglass*), and their reflect-cube
+stage, masked by their own makealpha smudges, IS the visible pane - r_decalMatte took it away.
+They carry the "glass" surface type or, for a few Quake 4 ones ("materialType glass" only, and
+RoE's d3exglass), "glass" in the name.
 ===================
 */
 bool R_DecalIsBlood( const idMaterial *material ) {
@@ -814,6 +820,9 @@ bool R_DecalIsBlood( const idMaterial *material ) {
 
 float R_DecalSheenScale( const idMaterial *material ) {
 	if ( material == NULL || material->GetSort() != SS_DECAL ) {
+		return 1.0f;
+	}
+	if ( material->GetSurfaceType() == SURFTYPE_GLASS || idStr::FindText( material->GetName(), "glass", false ) >= 0 ) {
 		return 1.0f;
 	}
 	if ( R_DecalIsBlood( material ) ) {

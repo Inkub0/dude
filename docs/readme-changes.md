@@ -88,7 +88,12 @@ fidelity impact.
   specular modifier, and the reflect-cube stage (stage colour for `environment`,
   `u_localParam0.w` for `bumpyenvironment`, which ignores stage colour like vanilla).
   Every other *translucent* decal goes fully matte with `r_decalMatte` (default **1**).
-  Opaque decals (vents, wires, posters, bullet holes) are untouched.
+  Opaque decals (vents, wires, posters, bullet holes) are untouched, and so is **glass**:
+  id and Raven sort some window panes `sort decal` + `translucent` (Doom 3's
+  `outdoor_glass1`, RoE's grid glass, 52 Quake 4 panes such as `marineglass*`), and their
+  reflect-cube stage - masked by the pane's own `makealpha` smudges - is the visible pane.
+  Until 2026-10-23 `r_decalMatte` removed it; a material with the `glass` surface type or
+  "glass" in its name is now never scaled.
 - **Fidelity impact:** none on the stock assets (their overlay decals have neither a
   specularmap nor a cube stage). With a mod pack the decals are deliberately less shiny
   than authored; `r_decalBloodSheen 1; r_decalMatte 0` restores the pack's look.
