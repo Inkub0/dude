@@ -1975,7 +1975,6 @@ static void R_RtStageAnimCasters( void ) {
 	if ( tr.frameCount == lastFrame ) {
 		return;						// subviews re-enter R_RenderView; once per frame is enough
 	}
-	lastFrame = tr.frameCount;
 
 	// once/sec lifecycle readout, shared with the cube-cache + rtTlas debug
 	if ( r_shadowMapCacheDebug.GetBool() ) {
@@ -2003,6 +2002,10 @@ static void R_RtStageAnimCasters( void ) {
 		s_rtStagedAnimCasters = false;
 		return;
 	}
+	// only the view that stages claims the frame, as R_RtRefreshInstances (which runs only for
+	// the scene world) does: claimed above the world test, a GUI or menu world rendered before
+	// the player's view took the frame and left it with no casters
+	lastFrame = tr.frameCount;
 
 	// pass 1: count eligible casters + their GPU-skinned casting surfaces
 	int nCaster = 0, nGeom = 0;
