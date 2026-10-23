@@ -421,6 +421,7 @@ typedef struct viewDef_s {
 	// clears the frame colour; the view that drew it composites _portalSky behind its world.
 	bool				isPortalSkyView;
 	bool				drewPortalSky;
+	bool				seesSkyArea;			// DUDE: this view's portal flood reached an area that shows the portal sky
 	// DUDE: this world view covers the whole window -- THE primary scene view. Set once by
 	// RenderScene, against the WINDOW and before any FSR2 sub-native scaling; it is the one view
 	// RenderScene scales to the FSR2 render size and the only one the full-screen scene passes

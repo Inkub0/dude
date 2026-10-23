@@ -595,14 +595,8 @@ bool R_PortalSkyRender( void ) {
 	if ( world == NULL || !world->portalSkyCameraSet ) {
 		return false;
 	}
-	if ( world->areaSkies.Num() > 0 ) {
-		bool skyVisible = false;
-		for ( int i = 0; i < world->numPortalAreas && i < world->areaSkies.Num() && !skyVisible; i++ ) {
-			skyVisible = world->areaSkies[i] != 0 && world->portalAreas[i].viewCount == tr.viewCount;
-		}
-		if ( !skyVisible ) {
-			return false;
-		}
+	if ( world->areaSkies.Num() > 0 && !parent->seesSkyArea ) {
+		return false;		// recorded during the view's portal flood (AddAreaRefs)
 	}
 
 	viewDef_t *parms = (viewDef_t *)R_FrameAlloc( sizeof( *parms ) );

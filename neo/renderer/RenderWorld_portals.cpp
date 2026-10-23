@@ -773,6 +773,13 @@ void idRenderWorldLocal::AddAreaRefs( int areaNum, const portalStack_t *ps ) {
 	// considered portals
 	portalAreas[ areaNum ].viewCount = tr.viewCount;
 
+	// DUDE: R_PortalSkyRender's test. Kept on the view: the area marks above do not survive the
+	// view - entity and light reference updates later in the view bump tr.viewCount and re-mark
+	// the areas they touch (PushVolumeIntoTree_r)
+	if ( areaNum < areaSkies.Num() && areaSkies[areaNum] != 0 ) {
+		tr.viewDef->seesSkyArea = true;
+	}
+
 	// add the models and lights, using more precise culling to the planes
 	AddAreaEntityRefs( areaNum, ps );
 	AddAreaLightRefs( areaNum, ps );
@@ -859,6 +866,7 @@ void idRenderWorldLocal::FindViewLightsAndEntities( void ) {
 	// bump the view count, invalidating all
 	// visible areas
 	tr.viewCount++;
+	tr.viewDef->seesSkyArea = false;		// DUDE: set by AddAreaRefs during the flood below
 
 	// flow through all the portals and add models / lights
 	if ( r_singleArea.GetBool() ) {
