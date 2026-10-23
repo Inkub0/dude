@@ -353,8 +353,11 @@ void idRenderWorldLocal::ParseInterAreaPortals( idLexer *src ) {
 			src->ReadToken( &image );
 			if ( image.Icmp( "_black" ) == 0 ) {
 				// this engine generates _black with zero alpha (R_BlackImage), which "blend
-				// blend" would never show: a black fade is _white, tinted black
-				doublePortals[i].fadeMaterial = declManager->FindMaterial( "_white" );
+				// blend" would never show: a black fade is white, tinted black. Not the "_white"
+				// material itself - the GUI device context sorts that one SS_GUI (Quake 4's
+				// guiWhiteMaterial), which drew the fade before the world; "_white.tga" is its
+				// own implicit material on the same built-in image (ImageFromFile drops ".tga")
+				doublePortals[i].fadeMaterial = declManager->FindMaterial( "_white.tga" );
 				doublePortals[i].fadeColor.Zero();
 			} else {
 				doublePortals[i].fadeMaterial = declManager->FindMaterial( image );

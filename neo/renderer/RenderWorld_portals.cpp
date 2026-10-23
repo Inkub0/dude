@@ -295,7 +295,7 @@ DUDE: Quake 4's portal fade. A portal the .proc gives "( fadeImage distanceNear 
 is covered by its fade image as the view moves away: transparent up to distanceNear, opaque
 from distanceFar, by the view's distance to the portal plane. Drawn as a translucent quad over
 the whole portal with the fade image's implicit material ("blend blend", "colored": colour and
-alpha from the shader parms; "_black" is drawn as _white tinted black, see the .proc loader),
+alpha from the shader parms; "_black" is drawn white tinted black, see the .proc loader),
 once per view however many flood paths reach the portal. Both windings are emitted, so either
 side faces the view.
 ===================
