@@ -193,6 +193,7 @@ void idCollisionModelManagerLocal::Clear( void ) {
 	mapName.Clear();
 	mapFileTime = 0;
 	loaded = 0;
+	quake4FileRevision = 0;
 	checkCount = 0;
 	maxModels = 0;
 	numModels = 0;

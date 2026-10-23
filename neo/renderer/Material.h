@@ -326,6 +326,7 @@ typedef enum {
 	CONTENTS_FLYCLIP			= BIT(22),	// DUDE: Quake 4 - solid to flying vehicles and creatures
 	CONTENTS_ITEMCLIP			= BIT(23),	// DUDE: Quake 4 - solid to items
 	CONTENTS_PROJECTILECLIP		= BIT(24),	// DUDE: Quake 4 - solid to projectiles but not hitscans
+	CONTENTS_SHOTCLIP			= BIT(25),	// DUDE: Quake 4 - blocks shots but not players or monsters
 
 	CONTENTS_REMOVE_UTIL		= ~(CONTENTS_AREAPORTAL|CONTENTS_NOCSG)
 } contentsFlags_t;

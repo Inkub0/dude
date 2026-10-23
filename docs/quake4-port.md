@@ -29,7 +29,8 @@ decisions the plan hinged on were taken by the user on 2026-10-15 and are record
   byte-compatible (`MD5Version 10`, identical grammar across all 234 meshes). `.map` bumps
   `Version 2 → 3` only. `.proc` `mapProcFile003 → PROC "4"` adds a CRC line, an optional RGBA
   colour on vertices (12 floats instead of 8, ~10 % of vertices) and an optional portal-fade
-  tuple. `.cm` `"1.00" → "3"` adds per-polygon texture data and a surface-type id. AAS
+  tuple. `.cm` `"1.00" → "3"` adds per-polygon texture coordinates and each row's map
+  primitive number. AAS
   `1.07 → 1.08` adds two area fields and a tactical-features section, in five sizes per map.
   Fonts are a different (smaller) binary. Materials, GUIs and sound shaders gain a few dozen
   keywords and a macro preprocessor (`guide`). Measured lists in §1.
@@ -76,7 +77,7 @@ Install: `/mnt/linux-data/SteamLibrary/steamapps/common/Quake 4/q4base`. Reprodu
 | `.md5mesh` / `.md5anim` / `.md5camera` | `MD5Version 10` | `MD5Version 10` | **none** — identical keyword set across all 234 meshes, 2233 anims, 19 cameras | `neo/renderer/Model_md5.cpp:1899` |
 | `.map` | `Version 2` | `Version 3` | same `brushDef3` / `patchDef2` / `patchDef3` primitives; brush sides **drop** Doom 3's trailing `0 0 0` ints; patches carry no per-primitive key/values; **`func_group` entities stay in the file with their primitives** (418 in `airdefense1.map`) and are folded in at load (`idMapFile::Resolve`); one `.map` can hold several levels selected by an **entity filter** (`map game/process1 first` → mapDef `process1_first`, `si_entityFilter`) | `neo/idlib/MapFile.cpp:752` (`CURRENT_MAP_VERSION`), `idMapEntity::Parse`, `Session` map command |
 | `.proc` | `mapProcFile003` | `PROC "4"` + map-geometry CRC line | same sections (`model`, `shadowModel`, `interAreaPortals`, `nodes`); **vertices are 8 or 12 floats** (`xyz st normal [r g b a]`, 95 k of 904 k verts in `pak002` carry colour); IAP rows gain optional `( fadeImage distanceNear distanceFar )`; the SDK header also allows an optional per-model `hasSky` int (portal sky) — **not present** in the 657 model headers of `airdefense1.proc`, so parse it as optional | `neo/renderer/RenderWorld_load.cpp:547` (`PROC_FILE_ID`), `ParseModel`, `ParseInterAreaPortals` |
-| `.cm` | `CM "1.00"` | `CM "3"` | `collisionModel "name" <int> {` extra count; polygon rows gain `( s t ) ( s t ) ( s t ) <surfaceId>` after the material; brush rows gain `<surfaceId>` after the contents string; Raven contents names (`"aas_solid"`) | `neo/cm/CollisionModel_files.cpp:572` (`CM_FILEVERSION`), `ParsePolygons`, `ParseBrushes`, `ContentsFromString` |
+| `.cm` | `CM "1.00"` | `CM "3"` (+ `"2"` on 4 pak019 models) | `collisionModel "name" <int> {` = the model's primitive count; polygon rows gain `( s t ) ( s t ) ( s t ) <primitive>` after the material; brush rows gain `<primitive>` after the contents string; block headers give counts, not bytes; Raven contents names (`"aas_solid"`, `"shotClip"`) | `neo/cm/CollisionModel_files.cpp:572` (`CM_FILEVERSION`), `ParsePolygons`, `ParseBrushes`, `ContentsFromString` |
 | `.aas*` | `DewmAAS "1.07"`, one `.aas48` per map | `DewmAAS "1.08"`, **five** per map (`.aas32/.aas48/.aas96/.aas128/.aas250`, named in `def/aas.def` `aas_types`); unused sizes are **dummy files** (settings only, e.g. `airdefense1.aas250` = 628 B; `idAASFile::IsDummyFile`) | `settings` gains `generateTacticalFeatures`, `tt_*`; `areas` rows 6 → 8 (adds `ceiling`, `numFeatures`, `firstFeature`); new `features` (12-byte `aasFeature_t`: cover/corner/pinch/vantage flags for tactical AI) + `featureIndex` sections | `neo/tools/compilers/aas/AASFile.cpp:1123`; `idAASFile` layout must match the SDK's `aas/AASFile.h`; `idAASFileManager` gains `CreateNew/CreateAASSettings/CreateReachability/FromParser` |
 | `.lwo` / `.ase` | LWO2 / ASE | same (962 LWO, 47 ASE) | none expected | `Model_lwo.cpp`, `Model_ase.cpp` |
 | Textures | `.tga`, `dds/` precompressed | `.tga` + sibling `.dds` (8454); `progimg/` = 2401 precomputed image-program outputs (`addnormals`, `heightmap`, `makealpha`, `downsize`) | loaders unchanged; `progimg/` is an optional load-time accelerator | `Image_load.cpp` |
@@ -453,9 +454,33 @@ Version-tolerant parsing, both formats through one code path:
   Doom 3's maps carry no fade data, a global cut-off would black out doorways (a fidelity
   change), portal culling already drops what cannot be seen, and the RT tiers trace the whole
   world regardless of portals.
-- `.cm` — accept `CM "3"`; per-model leading int; per-polygon trailing `3×(s t)` + surface
-  id; per-brush trailing surface id; Raven contents names in `ContentsFromString`. Keep the
-  surface id — it is the `materialType` the game and BSE `impact` query.
+- `.cm` — **as built (Q3, 2026-10-23)**, one parser for all titles (`neo/cm/CollisionModel_files.cpp`),
+  the extra fields read by file revision (`quake4FileRevision`) rather than guessed from the next
+  token: `"1.00"` Doom 3; `"3"` Quake 4 maps and models — a number after the model name, two-count
+  block headers (`numPolygons numPolygonEdges`, `numBrushes numBrushPlanes`, turned into the same
+  byte reservation Doom 3's single number gives), per polygon three `( s t )` pairs plus a
+  primitive number, per brush a primitive number (kept in `cm_brush_t::primitiveNum`, Doom 3's
+  own field); `"2"` — four models of the last patch (pak019) — texture pairs only, byte-count
+  headers. The trailing integer is **not** a surface/material-type id as first assumed: in
+  `airdefense1` it runs 0–10233 and the number after `worldMap` is 10234, exactly the
+  worldspawn + `func_group` primitive count of the `.map`. The texture pairs are read past for
+  now; they belong to Q5's hit-map lookup (a material's `materialImage`, sampled where a trace
+  lands), which will keep them. Raven's contents names join `cm_contentsNameByIndex` after
+  Doom 3's (`sightclip` … `projectileclip`, and `shotclip`: "block bullets but not players or
+  monsters", baked into 22 brushes of 8 MP maps, so `shot_clip`'s material keyword now sets
+  `CONTENTS_SHOTCLIP` = bit 25 too). A Quake 4 file's CRC is taken as current (Raven's tools
+  wrote it; a mismatch would make the engine rebuild collision from the `.map`).
+  **Verification:** `tools/quake4/test_cm_parse.sh` runs the loader's own code (copied out of
+  `neo/cm/` verbatim) with the real `idLexer` over every retail file — Quake 4 944/944,
+  Doom 3 + RoE + LM 112/112, no warnings; `q4_cm_check.py` is the Python replica. A negative
+  control (an earlier lookahead version of the brush trailer, which `UnreadToken` after a
+  `PeekTokenString` silently broke) fails 47 of 83 Doom 3 base files, so the test catches that
+  class of bug. **Doom 3 finding:** Doom 3's byte-count headers were written by 32-bit builds,
+  whose `cm_polygon_t`/`cm_brush_t` are 4 bytes smaller, so on 64-bit the last rows of most
+  models miss their block and were allocated one by one but never freed (`FreePolygon` /
+  `FreeBrush` skipped every row of a model with a block) — ~12 MB over all Doom 3/RoE/LM
+  files, up to 387 KB per map load (`le_enpro2`); fixed on its own branch
+  (`fix/cm-block-fallback-leak`).
 - `.aas` — accept `1.08`: extended `settings`, 8-int `areas`, `features`/`featureIndex` into
   `idAASFile` with the layout the SDK's `aas/AASFile.h` declares (the game reads it through
   `idAASFileManager`). The engine loads whatever extension the game's `aas_types` asks for.
@@ -601,8 +626,8 @@ sound listener, renders the session's world with a hor+ 90 degree view, and offe
 `getviewpos` / `setviewpos`. Every `idGameEdit` method is stubbed because the engine calls some
 outside the editors (GUI `renderDef` windows, the worldspawn lookup at map load). It loads
 automatically when a title allows it and its own library is missing (Quake 4 until Q5), or on
-request with `+set fs_game nullgame` on any title. Collision loading is added in Q3, once the
-`.cm 3` loader exists.
+request with `+set fs_game nullgame` on any title. Collision loading follows in Q3 now that
+the `.cm 3` loader exists (§5.3).
 
 **Map dressing (Q3 step 0, `neo/nullgame/NullGameDressing.cpp`):** a bare world says little
 about whether a map renders right, so the null game adds, render-only, what the map's
@@ -667,7 +692,8 @@ Every layer is checkable independently of the layers above it. Build these as yo
 1. **`tools/quake4/q4_keywords.py` as regression** — after each parser extension the `*`
    markers for that file type must be gone. Offline, cheap, already written. Q2 added the
    per-format checks `q4_material_census.py`, `q4_gui_census.py`, `q4_sound_census.py` and the
-   guide differential test `test_guides.sh`.
+   guide differential test `test_guides.sh`; Q3 the loader replicas `q4_proc_check.py`,
+   `q4_cm_check.py` and `test_cm_parse.sh`, which runs the engine's own `.cm` parse code.
 2. **`lintDecls` console command** (Q2) — parse every decl of every registered type, print
    per-type error counts; headless via `+lintDecls +quit`. Goes on the Doom 3 release
    checklist too.
@@ -740,12 +766,12 @@ Doom 3:  CM "1.00"           Quake 4:  CM "3"
          3487335092                    4236787096
          collisionModel "worldMap" {   collisionModel "worldMap" 10234 {
 ```
-**`.cm` polygon row** — Quake 4 appends three `( s t )` pairs and a surface id:
+**`.cm` polygon row** — Quake 4 appends three `( s t )` pairs and the map primitive number:
 ```
 D3: 4 ( -6169 -6166 -6163 -6171 ) ( 0 0 1 ) 26704 ( 6144 8352 26704 ) ( 7456 9472 26704 ) "textures/sfx/black"
 Q4: 4 ( -19429 19438 -19433 -19437 ) ( 0 1 0 ) 9024 ( 14784 9024 -192 ) ( 25472 9024 2816 ) "textures/editor/aassolid" ( 430 6 ) ( 96.0000076294 -88 ) ( 96 6 ) 1944
 ```
-**`.cm` brush trailer** — Raven contents names plus a surface id:
+**`.cm` brush trailer** — Raven contents names plus the map primitive number:
 ```
 D3: } ( 6128 8336 26688 ) ( 6144 9488 27312 ) "solid,opaque"
 Q4: } ( 14784 -1664 -192 ) ( 25472 9024 2816 ) "aas_solid" 1944

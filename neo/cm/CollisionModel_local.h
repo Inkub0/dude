@@ -504,6 +504,9 @@ private:			// collision map data
 	idStr			mapName;
 	ID_TIME_T			mapFileTime;
 	int				loaded;
+					// DUDE: revision of the Quake 4 .cm being parsed (2 or 3; 0 = Doom 3's "1.00"),
+					// whose polygon and brush rows carry more fields (ParsePolygons, ParseBrushes)
+	int				quake4FileRevision;
 					// for multi-check avoidance
 	int				checkCount;
 					// models

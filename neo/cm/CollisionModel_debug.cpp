@@ -68,6 +68,15 @@ const char *cm_contentsNameByIndex[] = {
 	"aas_solid",					// 12
 	"aas_obstacle",					// 13
 	"flashlight_trigger",			// 14
+	// DUDE: Quake 4's names (.cm "3" brush contents), appended so the indices above hold
+	"sightclip",					// 15
+	"largeshotclip",				// 16
+	"notacticalfeatures",			// 17
+	"vehicleclip",					// 18
+	"flyclip",						// 19
+	"itemclip",						// 20
+	"projectileclip",				// 21
+	"shotclip",						// 22
 	NULL
 };
 
@@ -87,6 +96,14 @@ int cm_contentsFlagByIndex[] = {
 	CONTENTS_AAS_SOLID,				// 12
 	CONTENTS_AAS_OBSTACLE,			// 13
 	CONTENTS_FLASHLIGHT_TRIGGER,	// 14
+	CONTENTS_SIGHTCLIP,				// 15
+	CONTENTS_LARGESHOTCLIP,			// 16
+	CONTENTS_NOTACTICALFEATURES,	// 17
+	CONTENTS_VEHICLECLIP,			// 18
+	CONTENTS_FLYCLIP,				// 19
+	CONTENTS_ITEMCLIP,				// 20
+	CONTENTS_PROJECTILECLIP,		// 21
+	CONTENTS_SHOTCLIP,				// 22
 	0
 };
 
