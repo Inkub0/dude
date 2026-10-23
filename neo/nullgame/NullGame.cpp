@@ -57,6 +57,8 @@ idCVar *					idCVar::staticVars = NULL;
 // without checking that it exists, so register it as the Doom 3 game libraries do
 // (gamesys/SysCvar.cpp).
 idCVar ui_name( "ui_name", "Player", CVAR_GAME | CVAR_USERINFO | CVAR_ARCHIVE, "player name" );
+// RoE's switch for the portal sky (d3xp gamesys/SysCvar.cpp), honoured for Quake 4's too
+idCVar g_enablePortalSky( "g_enablePortalSky", "1", CVAR_GAME | CVAR_BOOL, "enables the portal sky" );
 
 // as RoE's d3xp/PlayerView.cpp: the smallest power of two >= num
 static int MakePowerOfTwo( int num ) {
@@ -542,7 +544,7 @@ bool idNullGame::Draw( int clientNum ) {
 	// the portal sky first, from its camera with the view's direction (RoE idPlayerView::
 	// SingleView, Quake 4's the same without the capture): RoE's portalSky surfaces then show
 	// the capture, Quake 4's sky is wherever the view itself draws nothing
-	if ( hasPortalSky ) {
+	if ( hasPortalSky && g_enablePortalSky.GetBool() ) {
 		renderView_t skyView = view;
 		skyView.vieworg = portalSkyOrigin;
 		if ( portalSkyCapture ) {
