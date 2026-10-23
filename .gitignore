@@ -86,3 +86,6 @@ vkpipelinecache.bin
 /-l
 /Modelfile
 /tfphobos
+
+# DUDE: tools/quake4/smoke-maps.sh sweep logs
+/logs/

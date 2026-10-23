@@ -69,4 +69,13 @@ Q4BASE="/path/to/Quake 4/q4base" python3 tools/quake4/q4_inventory.py > /tmp/q4_
   table against the presets in `efxs/default.efx`. After Q2: one broken retail shader
   (`leadin_test`), 539 samples absent from the retail paks, 0 reverb problems.
 
+- `smoke-maps.sh [vulkan|opengl3|legacy] [map ...]` (+ `smoke_summary.py`) — the null-game
+  map sweep (docs/quake4-port.md §7 item 3): starts `run-q4.sh` once per campaign map
+  (Appendix C; `process1_first` → `map game/process1 first`), waits `WAIT` frames, quits, and
+  keeps each run's console output in `logs/q4-sweep-<renderer>-<date>/`. The summary lists per
+  map the load result and time, lights/models dressed, AAS areas, `.cm` header mismatches,
+  warnings and errors, then every distinct warning/error with its maps. It runs the game - it is
+  the user's to start. Settings come from a copy of `~/.config/dude/q4base`, so the sweep's
+  `+set`s never reach the real `dude.cfg`; `SHOTS=1` adds a screenshot per map.
+
 Nothing here touches the install: the scripts only read the `.pk4` zip archives.
