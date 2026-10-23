@@ -451,7 +451,7 @@ One render entity for an entity's model key; for an actor with "def_head", the h
 placed on the body's head joint as idActor::SetupHead does.
 ================
 */
-void AddModel( idRenderWorld *rw, int entityNum, const idDict &args, const idMaterial *referenceShader, counts_t &counts, int gameTime ) {
+void AddModel( idRenderWorld *rw, int entityNum, const idDict &args, const idMaterial *referenceShader, bool quake4, counts_t &counts, int gameTime ) {
 	const char *modelName = args.GetString( "model" );
 	modelDef_t def;
 	bool haveDef = false;
@@ -486,39 +486,46 @@ void AddModel( idRenderWorld *rw, int entityNum, const idDict &args, const idMat
 	entityHandles.Append( rw->AddEntityDef( &re ) );
 	counts.models++;
 
-	// the head: "def_head" names its model (idAFAttachment::SetBody -> SetModel), frozen
-	// the same way and placed on the body's head joint at the body's axis
-	const char *headModelName = args.GetString( "def_head" );
-	if ( headModelName[0] == '\0' || re.joints == NULL ) {
+	// the head, frozen the same way on the body's head joint. Doom 3 (idActor::SetupHead,
+	// idAFAttachment::SetBody): "def_head" names the head's model, at "head_joint", on the
+	// body's axis, as a fresh entity with only sound keys. Quake 4: "override_head" or
+	// "def_head" names an entity def spawned as the head (its "model", skin, colour), at
+	// "joint_head", bound with the joint's orientation.
+	const char *headName = quake4 ? args.GetString( "override_head", args.GetString( "def_head" ) ) : args.GetString( "def_head" );
+	if ( headName[0] == '\0' || re.joints == NULL ) {
 		return;
 	}
-	const jointHandle_t joint = model->GetJointHandle( args.GetString( "head_joint" ) );
+	const jointHandle_t joint = model->GetJointHandle( args.GetString( quake4 ? "joint_head" : "head_joint" ) );
 	if ( joint < 0 || joint >= re.numJoints ) {
 		return;
 	}
+	idDict headArgs;
+	if ( quake4 ) {
+		const idDeclEntityDef *headDef = static_cast<const idDeclEntityDef *>( declManager->FindType( DECL_ENTITYDEF, headName, false ) );
+		if ( headDef == NULL ) {
+			counts.missing++;
+			return;
+		}
+		headArgs = headDef->dict;
+		headName = headArgs.GetString( "model" );
+	}
 	modelDef_t headModelDef;
 	bool haveHeadDef = false;
-	idRenderModel *headModel = FindModel( headModelName, headModelDef, haveHeadDef );
+	idRenderModel *headModel = FindModel( headName, headModelDef, haveHeadDef );
 	if ( headModel == NULL || headModel->NumJoints() <= 0 ) {
 		counts.missing++;
 		return;
 	}
-	// a fresh entity with only sound keys: default shader parms and shadows, the model
-	// def's skin, its idle animation
 	renderEntity_t head;
 	memset( &head, 0, sizeof( head ) );
 	head.hModel = headModel;
 	head.entityNum = entityNum;
-	if ( haveHeadDef && headModelDef.skin.Length() ) {
-		head.customSkin = declManager->FindSkin( headModelDef.skin );
-	}
-	head.shaderParms[ SHADERPARM_RED ] = head.shaderParms[ SHADERPARM_GREEN ] = head.shaderParms[ SHADERPARM_BLUE ] = 1.0f;
-	head.shaderParms[ 3 ] = 1.0f;
+	// the head entity's own keys (none for Doom 3's): skin, shader, colour, shadow flags
+	ParseRenderEntityParms( headArgs, haveHeadDef ? &headModelDef : NULL, head, counts, gameTime );
 	// re.origin already carries offsetModel; the joints are model-space
 	head.origin = re.origin + re.joints[joint].ToVec3() * re.axis;
-	head.axis = re.axis;
-	const idDict noArgs;
-	PoseModel( headModel, AnimFileFor( noArgs, headModelDef ), headModelDef.offset, head );
+	head.axis = quake4 ? re.joints[joint].ToMat3() * re.axis : re.axis;
+	PoseModel( headModel, AnimFileFor( headArgs, headModelDef ), headModelDef.offset, head );
 	entityHandles.Append( rw->AddEntityDef( &head ) );
 	counts.heads++;
 }
@@ -613,6 +620,8 @@ void NullGameDressing::Spawn( const idMapFile &mapFile, idRenderWorld *rw, int g
 
 	counts_t counts;
 	memset( &counts, 0, sizeof( counts ) );
+	// a game library cannot ask GameTitle; the resolved title is in com_title
+	const bool quake4 = idStr::Icmp( cvarSystem->GetCVarString( "com_title" ), "quake4" ) == 0;
 	const bool inlineAllStatics = mapFile.GetEntity( 0 )->epairs.GetBool( "inlineAllStatics" );
 
 	for ( int i = 1; i < mapFile.GetNumEntities(); i++ ) {		// 0 is worldspawn
@@ -626,12 +635,24 @@ void NullGameDressing::Spawn( const idMapFile &mapFile, idRenderWorld *rw, int g
 		const char *spawnclass = args.GetString( "spawnclass" );
 
 		// what does not show when it spawns: hidden until triggered (idEntity::Spawn), AI
-		// waiting for a cinematic, a trigger or a teleport (idAI::Spawn), switched off,
-		// triggers, statics dmap merged into the world (idStaticEntity::Spawn)
-		if ( args.GetBool( "hide" ) || args.GetBool( "teleport" ) ) {
+		// waiting for a cinematic, a trigger or a teleport (each title's idAI::Spawn),
+		// switched off, triggers, statics dmap merged into the world (idStaticEntity::Spawn)
+		if ( args.GetBool( "hide" ) ) {
 			continue;
 		}
-		if ( idStr::Icmpn( spawnclass, "idAI", 4 ) == 0 && ( args.GetInt( "num_cinematics" ) || args.GetBool( "trigger_anim" ) ) ) {
+		if ( quake4 ) {
+			// Quake 4's actors: idAI and Raven's rvAI* / rvMonster* classes; any trigger_anim hides
+			const bool isAI = idStr::Icmpn( spawnclass, "idAI", 4 ) == 0 || idStr::Icmpn( spawnclass, "rvAI", 4 ) == 0
+							|| idStr::Icmpn( spawnclass, "rvMonster", 9 ) == 0;
+			if ( isAI && args.FindKey( "trigger_anim" ) != NULL ) {
+				continue;
+			}
+		} else if ( idStr::Icmpn( spawnclass, "idAI", 4 ) == 0
+					&& ( args.GetInt( "num_cinematics" ) || args.GetBool( "hide" ) || args.GetBool( "teleport" ) || args.GetBool( "trigger_anim" ) ) ) {
+			continue;
+		}
+		// Quake 4 keeps func_group in its .map; dmap merged its brushes into the world
+		if ( idStr::Icmp( classname, "func_group" ) == 0 ) {
 			continue;
 		}
 		if ( idStr::Icmpn( spawnclass, "idTrigger", 9 ) == 0 || idStr::Icmpn( classname, "trigger_", 8 ) == 0 ) {
@@ -653,7 +674,7 @@ void NullGameDressing::Spawn( const idMapFile &mapFile, idRenderWorld *rw, int g
 			continue;
 		}
 		if ( args.GetString( "model" )[0] != '\0' ) {
-			AddModel( rw, i, args, lightShader, counts, gameTime );
+			AddModel( rw, i, args, lightShader, quake4, counts, gameTime );
 		}
 	}
 
