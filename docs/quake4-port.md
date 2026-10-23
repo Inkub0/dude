@@ -515,9 +515,19 @@ Version-tolerant parsing, both formats through one code path:
   own field); `"2"` — four models of the last patch (pak019) — texture pairs only, byte-count
   headers. The trailing integer is **not** a surface/material-type id as first assumed: in
   `airdefense1` it runs 0–10233 and the number after `worldMap` is 10234, exactly the
-  worldspawn + `func_group` primitive count of the `.map`. The texture pairs are read past for
-  now; they belong to Q5's hit-map lookup (a material's `materialImage`, sampled where a trace
-  lands), which will keep them. Raven's contents names join `cm_contentsNameByIndex` after
+  worldspawn + `func_group` primitive count of the `.map`. **The texture pairs** (measured
+  2026-10-23, `tools/quake4/q4_cm_texcoords.py`, against the brush side each polygon's primitive
+  names): the face's exact texture coordinates at three points of its plane - but the points
+  themselves are not stored. For 84% (`airdefense1`) / 78% (`mcc_1`) of brush polygons they are
+  three of the vertices, always a diagonal pair plus a third corner of a quad in no fixed order
+  ((0,2,1), (1,3,0), (0,2,3), (1,3,2) …); for the rest they lie inside the polygon, points of a
+  piece the compiler merged away. So the file cannot place a hit-map (`materialImage`) sample
+  for every polygon, and Raven's closed engine is the only source of how it did (decompile-only,
+  §3 rule 1). They are read past: a trace's material type is the polygon material's own
+  `materialType`, as idTech4A++ does (it calls the pairs "unknown" and drops them). What that
+  loses is small: of the 1.45 M polygons of the 29 campaign `.cm` files, 14 800 (1%) use a
+  hit-map material - 12 056 of them one material, `textures/terminal/t_window_alpha_02` - while
+  67 840 have a whole-material type and the rest none. Raven's contents names join `cm_contentsNameByIndex` after
   Doom 3's (`sightclip` … `projectileclip`, and `shotclip`: "block bullets but not players or
   monsters", baked into 22 brushes of 8 MP maps, so `shot_clip`'s material keyword now sets
   `CONTENTS_SHOTCLIP` = bit 25 too). A Quake 4 file's CRC is taken as current (Raven's tools
@@ -616,7 +626,11 @@ Verified from the SDK-mirroring headers in idTech4A++ (`_RAVEN` blocks) and the 
   `DrawModel`, `ModelInfo`, `LoadMap(mapFile, forceCreateMap)`; an `idCollisionModel`
   accessor interface (`GetName/GetBounds/GetContents/GetNumPolygons/GetPolygon/
   GetPolygonMaterial/GetBrushPlane/…`); `materialType` in trace results (the 606 named
-  models per `.cm` are why).
+  models per `.cm` are why). **Scoped to Q5 (2026-10-23):** all of it is game-facing, so it is
+  built with the game that calls it; Q3 found nothing more for the engine to read (the
+  per-polygon texture pairs cannot drive a hit map, §5.3 `.cm`), so the trace's `materialType`
+  is the material's own. It must not grow `contactInfo_t` for Doom 3's libraries (game DLLs
+  hold `contactInfo_t` arrays for `Contacts()`): a Quake 4-only result type behind the facade.
 - **UI:** `RegisterIcon(code, shader, …)` (the `defineIcon` keyword), `SetInteractive`,
   `GetMaxTextIndex`, `GetLightColor`, `SetStateVec4`, `ClearState`, `DeleteState`,
   `GetDesktop`; manager `RunAlwaysThinkGUIs`, `ClearGameGuis`, `FlushGUIs`; session-side menu
@@ -749,9 +763,9 @@ a **gate** that is automated or a user-verified run — nothing advances on "it 
 | Q0 | **Preparation** — **DONE 2026-10-22** | Decisions taken (§9); reference trees cloned outside the repo to `~/quake4-refs/` as blobless sparse checkouts (idTech4A++ `ce49510` 39 MB, OpenQ4 `29c8103` 123 MB, SDK mirror `Xanz/Quake4SDK` `5077f68` 14 MB; the mirror dropped its EULA, OpenQ4 carries it in `LICENSES/QUAKE-4-SDK-EULA.rtf`); `tools/quake4/` audit. The separate game repository moves to Q5, where it is first needed: `openQ4-game` was archived on 2026-10-01 and its code now lives in OpenQ4's `src/game` / `src/mpgame` | Trees on disk | 0.5 |
 | Q1 | **Title profile + boot** — **BUILT 2026-10-22, gate pending** | §5.1 profile; `.fontdat` loader (float glyph metrics + left bearing, Doom 3 fonts unchanged); `run-q4.sh` (Steam library autodetect or `Q4DIR`, then `+set com_title quake4 +set fs_basepath "<Quake 4 dir>"`); null game. Decl registration moved to Q2, where the new decl types land: Quake 4 uses the same `materials/`, `skins/` and `sound/` folders Doom 3 registers, so Q1 had nothing to change there | `./run-q4.sh` boots on both backends, lists the 36 paks, draws the console with the Quake 4 fonts, `exec default.cfg` runs without errors | 1 |
 | Q2 | **Decl/material/GUI/sound parity** — **BUILT 2026-10-23; `lintDecls` gate PASSED (17085 decls, 3 retail quirks), menu verified on GL3; Vulkan + Doom 3 regression pending** | §5.2 guide preprocessor, keywords, new decl types, EFX mapping, UI API additions (as built: §5.2) | `lintDecls` (new console cmd) reports **0 failures** over every material / sound shader / effect / lipSync / playback / materialType / entity decl, except the retail data quirks listed in §1.4 and `tools/quake4/README.md` (GUIs are not decls: `q4_gui_census.py` offline, the menu run by the user); `mainmenu.gui` renders and is navigable (user screenshot); Doom 3 menu, sound and materials unchanged | 2 |
-| Q3 | **World formats** | step 0: null-game map dressing (§5.7); §5.3 `.map 3` (incl. `func_group` resolve + entity filter), `.proc 4` (incl. coloured verts, portal fade data), `.cm 3`, `.aas 1.08` (incl. dummy-file detection); collision API additions | Null game loads **all 31 SP maps** and renders them; `cm`/`aas` self-checks (counts match file headers); user screenshot of `airdefense1` on GL3 and VK | 1.5–2 |
+| Q3 | **World formats** | step 0: null-game map dressing (§5.7); §5.3 `.map 3` (incl. `func_group` resolve + entity filter), `.proc 4` (incl. coloured verts, portal fade data), `.cm 3`, `.aas 1.08` (incl. dummy-file detection); ~~collision API additions~~ → Q5 (game-facing; the `.cm` texture pairs cannot drive a hit map, §5.3) | Null game loads **all 31 SP maps** and renders them; `cm`/`aas` self-checks (counts match file headers); user screenshot of `airdefense1` on GL3 and VK | 1.5–2 |
 | Q4 | **BSE effects** | §5.5: own implementation from grammar + docs, decompile-derived code as last-resort reference, re-expressed in our C++ | All 1180 effects parse; `testEffect` plays each particle type; `bseSweep` plays every effect once without errors; user visual check of ~20 representative effects vs retail; OpenQ4 parity data passes where applicable | **5–7** |
-| Q5 | **Game library** | §5.4 interfaces (API 37 union, render/sound/collision/decl/UI additions), §5.6 repo + build script, idlib shim, `playback`/`lipSync` consumers, `rvClientEffect` bridge, ASAN pass | `airdefense1` **playable**: spawn, HUD, weapons, AI, scripts, triggers, VO + lipsync, cinematic (`md5camera`), save + load round-trip; transition to `airdefense2` | 5–7 |
+| Q5 | **Game library** | §5.4 interfaces (API 37 union, render/sound/collision/decl/UI additions - collision incl. map-scoped handles, the `idCollisionModel` accessors and `materialType` in traces, moved from Q3), §5.6 repo + build script, idlib shim, `playback`/`lipSync` consumers, `rvClientEffect` bridge, ASAN pass | `airdefense1` **playable**: spawn, HUD, weapons, AI, scripts, triggers, VO + lipsync, cinematic (`md5camera`), save + load round-trip; transition to `airdefense2` | 5–7 |
 | Q6 | **Campaign pass** | Per-map issue log seeded from idTech4A++'s fixes (§4); vehicles (`convoy1/2`, `walker`), tram (`tram1/1b`), MCC sequences, Strogg-ification (`medlabs`), hub, `core1/2` ending; difficulty, objectives, loading screens | User completes the campaign start to finish on one backend, then the other; every logged issue closed or explicitly deferred | 3–5 |
 | Q7 | **DUDE enhancements on Quake 4** | Presets (Potato = faithful); textures: Quake 4 ships 2010 precompressed DXT `.dds` (`progimg/`, `dds/`) — offer DUDE's own upload compression instead where the source image exists (dhewm3's `image_useCompression 2` = BC7/BPTC), opt-in (user note 2026-10-23); PBR classifier calibration on Raven textures; parallax/tess gating; RT: world + animated BLAS from Q4 content, RTAO/RTGI/ReSTIR DI tiers; FSR2 motion vectors for BSE; perf pass (`r_vkGpuTime`) | Ultra Nightmare runs `airdefense1` within ±25 % of the Doom 3 reference budget; fidelity-note policy applied to every new toggle; user screenshots per tier | 2–3 |
 | Q8 | **Packaging** | Steam/GOG path auto-detect inside the engine (Q1's `run-q4.sh` already scans Steam libraries); ship `nullgame.so`/`.dll` with the release (`build-win.sh` already copies every `.dll`; check `build-linux-release.sh`); Windows cross-build of the engine (`build-win.sh`) and `q4base.dll` via the same script under mingw; README/docs; release notes; `dist/` layout as 0.9.x | Clean-machine install test on Linux + Windows following only the README | 1–2 |

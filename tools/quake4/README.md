@@ -63,6 +63,11 @@ Q4BASE="/path/to/Quake 4/q4base" python3 tools/quake4/q4_inventory.py > /tmp/q4_
 - `q4_cm_check.py <pk4 glob>[,<glob>...]` — the Python replica of the same loader: also checks
   that a Quake 4 block header's counts match the rows and that every brush contents name is
   one `cm_contentsNameByIndex` knows.
+- `q4_cm_texcoords.py <q4base> [map ...]` — what a revision-3 polygon's three `( s t )` pairs
+  are: inverts them through the brush side its primitive names (`.map` texture matrix) and
+  reports whether the points are polygon vertices (in which order) or not, plus the polygons
+  whose material has a hit map. Result (Q3): exact face coordinates at three unstored points -
+  vertices in no fixed order for ~80%, merged-away interior points for the rest.
 - `q4_sound_census.py [q4base] [language]` — parses every sound shader with the grammar
   `neo/sound/snd_shader.cpp` accepts for Quake 4, resolves every sample the way the engine does
   (bare names, `sound/vo/` → `sound/vo_<language>/`), and checks every `maps/**/*.reverb` area

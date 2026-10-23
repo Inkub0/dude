@@ -479,10 +479,13 @@ void idCollisionModelManagerLocal::ParsePolygons( idLexer *src, cm_model_t *mode
 		p->material = declManager->FindMaterial( token );
 		p->contents = p->material->GetContentFlags();
 		p->checkcount = 0;
-		// DUDE: Quake 4 adds the texture coordinates of three of the polygon's points - for a
-		// material's hit map (materialImage), sampled where a trace lands - and, from revision 3,
-		// its primitive number: "( s t ) ( s t ) ( s t ) 1944". Read past for now: the hit-map
-		// lookup belongs to the game's trace results (docs/quake4-port.md Q5), which will keep them.
+		// DUDE: Quake 4 adds three texture coordinates and, from revision 3, the polygon's
+		// primitive number: "( s t ) ( s t ) ( s t ) 1944". Measured against the .map brush
+		// faces (tools/quake4/q4_cm_texcoords.py) they are the face's exact coordinates at three
+		// points, but which points is not stored: three of the vertices in no fixed order for
+		// ~80% of the polygons, points of a piece merged away for the rest - so they cannot place
+		// a hit-map (materialImage) sample here. Read past; a trace's material type is the
+		// material's own (docs/quake4-port.md §5.3, as idTech4A++ does).
 		if ( quake4FileRevision >= 2 ) {
 			for ( i = 0; i < 3; i++ ) {
 				idVec2 st;
