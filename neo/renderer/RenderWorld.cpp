@@ -142,6 +142,8 @@ idRenderWorldLocal::idRenderWorldLocal() {
 
 	doublePortals = NULL;
 	numInterAreaPortals = 0;
+	procVersion = 3;
+	procMapCrc = 0;
 
 	interactionTable = 0;
 	interactionTableWidth = 0;

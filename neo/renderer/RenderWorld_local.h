@@ -56,6 +56,13 @@ typedef struct doublePortal_s {
 	// fog volume over each portal.
 	idRenderLightLocal *		fogLight;
 	struct doublePortal_s *	nextFoggedPortal;
+
+	// DUDE: Quake 4 portal fade (.proc "( fadeImage distanceNear distanceFar )"): farther than
+	// fadeFar from the view the portal is drawn opaque with fadeMaterial and closes; between
+	// fadeNear and fadeFar it fades in. NULL fadeMaterial: an ordinary portal.
+	const idMaterial *		fadeMaterial;
+	float					fadeNear;
+	float					fadeFar;
 } doublePortal_t;
 
 
@@ -153,6 +160,11 @@ public:
 
 	doublePortal_t *		doublePortals;
 	int						numInterAreaPortals;
+
+	// DUDE: the loaded .proc's format: 3 = Doom 3 "mapProcFile003", 4 = Quake 4 PROC "4"
+	// (optional vertex colours, portal fades, the map's CRC after the version)
+	int						procVersion;
+	unsigned int			procMapCrc;
 
 	idList<idRenderModel *>	localModels;
 

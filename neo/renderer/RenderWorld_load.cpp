@@ -155,7 +155,21 @@ idRenderModel *idRenderWorldLocal::ParseModel( idLexer *src ) {
 		for ( j = 0 ; j < tri->numVerts ; j++ ) {
 			float	vec[8];
 
-			src->Parse1DMatrix( 8, vec );
+			// ( x y z s t nx ny nz ), as Parse1DMatrix( 8 ) reads it; DUDE: a Quake 4 .proc
+			// may add the vertex colour, ( ... r g b a ) in 0-255, and its uncoloured
+			// vertices are white, as model loaders leave a mesh without colours
+			src->ExpectTokenString( "(" );
+			for ( int k = 0; k < 8; k++ ) {
+				vec[k] = src->ParseFloat();
+			}
+			if ( !src->CheckTokenString( ")" ) ) {
+				for ( int k = 0; k < 4; k++ ) {
+					tri->verts[j].color[k] = (byte)idMath::ClampInt( 0, 255, idMath::FtoiFast( src->ParseFloat() ) );
+				}
+				src->ExpectTokenString( ")" );
+			} else if ( procVersion >= 4 ) {
+				tri->verts[j].color[0] = tri->verts[j].color[1] = tri->verts[j].color[2] = tri->verts[j].color[3] = 255;
+			}
 
 			tri->verts[j].xyz[0] = vec[0];
 			tri->verts[j].xyz[1] = vec[1];
@@ -311,6 +325,17 @@ void idRenderWorldLocal::ParseInterAreaPortals( idLexer *src ) {
 			// no texture coordinates
 			(*w)[j][3] = 0;
 			(*w)[j][4] = 0;
+		}
+
+		// DUDE: Quake 4's optional portal fade, ( fadeImage distanceNear distanceFar ); the next
+		// portal starts with a number, so a "(" here can only be this
+		if ( src->CheckTokenString( "(" ) ) {
+			idToken image;
+			src->ReadToken( &image );
+			doublePortals[i].fadeMaterial = declManager->FindMaterial( image );
+			doublePortals[i].fadeNear = src->ParseFloat();
+			doublePortals[i].fadeFar = src->ParseFloat();
+			src->ExpectTokenString( ")" );
 		}
 
 		// add the portal to a1
@@ -544,7 +569,22 @@ bool idRenderWorldLocal::InitFromMap( const char *name ) {
 		WriteLoadMap();
 	}
 
-	if ( !src->ReadToken( &token ) || token.Icmp( PROC_FILE_ID ) ) {
+	// DUDE: Doom 3 writes "mapProcFile003"; Quake 4 writes PROC "4" and the map's CRC
+	procVersion = 3;
+	procMapCrc = 0;
+	if ( !src->ReadToken( &token ) ) {
+		token.Clear();
+	}
+	if ( !token.Icmp( "PROC" ) ) {
+		idToken version, crc;
+		if ( !src->ReadToken( &version ) || version != "4" || !src->ReadToken( &crc ) || crc.type != TT_NUMBER ) {
+			common->Printf( "idRenderWorldLocal::InitFromMap: unsupported PROC version '%s'\n", version.c_str() );
+			delete src;
+			return false;
+		}
+		procVersion = 4;
+		procMapCrc = crc.GetUnsignedIntValue();
+	} else if ( token.Icmp( PROC_FILE_ID ) ) {
 		common->Printf( "idRenderWorldLocal::InitFromMap: bad id '%s' instead of '%s'\n", token.c_str(), PROC_FILE_ID );
 		delete src;
 		return false;

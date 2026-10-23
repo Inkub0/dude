@@ -127,7 +127,18 @@ void idCollisionModelManagerLocal::LoadProcBSP( const char *name ) {
 		return;
 	}
 
-	if ( !src->ReadToken( &token ) || token.Icmp( PROC_FILE_ID ) ) {
+	if ( !src->ReadToken( &token ) ) {
+		token.Clear();
+	}
+	if ( !token.Icmp( "PROC" ) ) {
+		// DUDE: Quake 4's header, PROC "4" <map crc>; the sections read below are Doom 3's
+		idToken version, crc;
+		if ( !src->ReadToken( &version ) || version != "4" || !src->ReadToken( &crc ) ) {
+			common->Warning( "idCollisionModelManagerLocal::LoadProcBSP: unsupported PROC version '%s'", version.c_str() );
+			delete src;
+			return;
+		}
+	} else if ( token.Icmp( PROC_FILE_ID ) ) {
 		common->Warning( "idCollisionModelManagerLocal::LoadProcBSP: bad id '%s' instead of '%s'", token.c_str(), PROC_FILE_ID );
 		delete src;
 		return;
