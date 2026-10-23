@@ -492,6 +492,20 @@ Version-tolerant parsing, both formats through one code path:
   offset, blood film, probe `skipDecals`) and the SSR split (`> SS_DECAL`) see it as opaque-side.
   Known limit: decals and translucents beyond a partially faded portal draw after it and are not
   dimmed; once the fade is opaque the flood no longer reaches them.
+  **The pane itself never drew (2026-10-23, `fix/flat-entity-portal-plane-link`), an idTech 4 bug
+  that Doom 3 shares:** the window's glass (`func_static_53722`, a zero-thickness patch) lies
+  exactly in the portal plane (y 104). `PushVolumeIntoTree_r` counts distance 0 as the front side,
+  so the pane was linked only into the area behind the portal (22; the viewer's corridor is 24),
+  and from 24 that area is seen through a portal stack whose last plane is the portal itself, where
+  `R_CornerCullLocalBox` culls a box with no corner at distance < 0 - the pane was culled even with
+  the room visible, and past `fadeFar` that area is not flooded at all. `R_CreateEntityRefs` now
+  gives a flat axis a quarter unit of thickness for the area links only (culling keeps the true
+  bounds), so the pane is also referenced from the area it faces. Scan of the shipped maps (flat
+  inline entity in the plane of an axial portal it overlaps): Quake 4 9 (the 7 fading windows of
+  `mcc_1` / `mcc_2`, 2 steel panels in `dispersal`); **Doom 3 22** glass panes (alphalabs3/4, cpu,
+  delta1-4) and **RoE 45** (44 in phobos2, mostly breakable `func_fracture` windows) - all culled
+  from one side in vanilla too. Separately `r_decalMatte` had been stripping the reflection of
+  `sort decal` glass on GL3/Vulkan (`fix/decal-matte-spares-glass`, readme-changes §1.5).
 - `.cm` — **as built (Q3, 2026-10-23)**, one parser for all titles (`neo/cm/CollisionModel_files.cpp`),
   the extra fields read by file revision (`quake4FileRevision`) rather than guessed from the next
   token: `"1.00"` Doom 3; `"3"` Quake 4 maps and models — a number after the model name, two-count
