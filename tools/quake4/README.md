@@ -45,6 +45,18 @@ Q4BASE="/path/to/Quake 4/q4base" python3 tools/quake4/q4_inventory.py > /tmp/q4_
   titles after touching the loader. (A field-by-field check passed while an area model's sky
   number - a token the loader did not expect - stopped `airdefense1` loading; only a walk in
   the loader's order catches that.)
+- `test_cm_parse.sh` (+ `tests/cm_extract.py`, `tests/cm_parse_test.cpp`) — collision files:
+  copies the engine's `.cm` loader out of `neo/cm/` verbatim (every function from
+  `LoadCollisionModelFile` down, the contents-name tables, the block allocators), compiles it
+  with the real `idLexer` from `build/libidlib.a`, and loads every `.cm` of the Quake 4 paks and
+  of Doom 3 + RoE + Lost Mission (`D3PAKS` overrides). Reports failures, counts, the contents
+  bits seen and how well each model's preallocated block fits its rows. Needs a configured
+  `build/`. Run it after touching `neo/cm/CollisionModel_files.cpp`: a replica cannot see lexer
+  mechanics (an `UnreadToken` after a `PeekTokenString` drops a token; the replica passed it,
+  this test fails 47 of 83 Doom 3 files on it).
+- `q4_cm_check.py <pk4 glob>[,<glob>...]` — the Python replica of the same loader: also checks
+  that a Quake 4 block header's counts match the rows and that every brush contents name is
+  one `cm_contentsNameByIndex` knows.
 - `q4_sound_census.py [q4base] [language]` — parses every sound shader with the grammar
   `neo/sound/snd_shader.cpp` accepts for Quake 4, resolves every sample the way the engine does
   (bare names, `sound/vo/` → `sound/vo_<language>/`), and checks every `maps/**/*.reverb` area

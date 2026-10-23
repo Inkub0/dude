@@ -21,50 +21,8 @@
 #include <sys/stat.h>
 #include <vector>
 
-static int warnings = 0;
+#include "common_stub.h"
 
-class idCommonStub : public idCommon {
-public:
-	virtual void			Init( int argc, char **argv ) {}
-	virtual void			Shutdown( void ) {}
-	virtual void			Quit( void ) {}
-	virtual bool			IsInitialized( void ) const { return true; }
-	virtual void			Frame( void ) {}
-	virtual void			GUIFrame( bool execCmd, bool network ) {}
-	virtual void			Async( void ) {}
-	virtual void			StartupVariable( const char *match, bool once ) {}
-	virtual void			InitTool( const toolFlag_t tool, const idDict *dict ) {}
-	virtual void			ActivateTool( bool active ) {}
-	virtual void			WriteConfigToFile( const char *filename ) {}
-	virtual void			WriteFlaggedCVarsToFile( const char *filename, int flags, const char *setCmd ) {}
-	virtual void			BeginRedirect( char *buffer, int buffersize, void (*flush)( const char * ) ) {}
-	virtual void			EndRedirect( void ) {}
-	virtual void			SetRefreshOnPrint( bool set ) {}
-	virtual void			Printf( const char *fmt, ... ) { va_list a; va_start( a, fmt ); vprintf( fmt, a ); va_end( a ); }
-	virtual void			VPrintf( const char *fmt, va_list arg ) { vprintf( fmt, arg ); }
-	virtual void			DPrintf( const char *fmt, ... ) {}
-	virtual void			Warning( const char *fmt, ... ) {
-		va_list a; va_start( a, fmt ); fprintf( stderr, "WARNING: " ); vfprintf( stderr, fmt, a ); fprintf( stderr, "\n" ); va_end( a );
-		warnings++;
-	}
-	virtual void			DWarning( const char *fmt, ... ) {}
-	virtual void			PrintWarnings( void ) {}
-	virtual void			ClearWarnings( const char *reason ) {}
-	virtual void			Error( const char *fmt, ... ) { va_list a; va_start( a, fmt ); vfprintf( stderr, fmt, a ); va_end( a ); exit( 2 ); }
-	virtual void			FatalError( const char *fmt, ... ) { va_list a; va_start( a, fmt ); vfprintf( stderr, fmt, a ); va_end( a ); exit( 2 ); }
-	virtual const idLangDict *GetLanguageDict( void ) { return NULL; }
-	virtual const char *	KeysFromBinding( const char *bind ) { return ""; }
-	virtual const char *	BindingFromKey( const char *key ) { return ""; }
-	virtual int				ButtonState( int key ) { return 0; }
-	virtual int				KeyState( int key ) { return 0; }
-	virtual bool			SetCallback( CallbackType cbt, FunctionPointer cb, void *userArg ) { return false; }
-	virtual bool			GetAdditionalFunction( FunctionType ft, FunctionPointer *out_fnptr, void **out_userArg ) { return false; }
-	virtual float			GetTicInterpolation( void ) { return 0.0f; }
-	virtual void			GetPendingViewAngleDelta( float &yaw, float &pitch ) { yaw = pitch = 0.0f; }
-};
-
-static idCommonStub		commonStub;
-idCommon *				common = &commonStub;
 idFileSystem *			fileSystem = NULL;		// DeclGuides::Load is not used: templates are fed directly
 
 // files under dir (recursively, like the Quake 4 decl folder scan), relative to dir
@@ -143,7 +101,7 @@ int main( int argc, char **argv ) {
 			o.write( text.data(), text.size() );
 		}
 	}
-	printf( "mtr files: %d, with guides: %d, warnings: %d\n", files, expandedFiles, warnings );
+	printf( "mtr files: %d, with guides: %d, warnings: %d\n", files, expandedFiles, stubWarnings );
 	idLib::ShutDown();
-	return warnings ? 3 : 0;
+	return stubWarnings ? 3 : 0;
 }
