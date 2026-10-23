@@ -445,7 +445,14 @@ Version-tolerant parsing, both formats through one code path:
 - `.map` — accept `Version 3` in `idMapFile::Parse`; nothing else changes.
 - `.proc` — accept `PROC "4"` + CRC; vertices with 8 **or** 12 floats (store the RGBA in
   `idDrawVert::color` — DUDE already consumes per-vertex colour for terrain blends); IAP fade
-  tuple into `portal_t` (`fadeImage`, `near`, `far`) for `RenderPortalFades`.
+  tuple into `portal_t` (`fadeImage`, `near`, `far`) for `RenderPortalFades`. Measured
+  2026-10-23: 9 of the 3527 portals in the 63 retail maps fade (`mcc_1` 6, `mcc_2` 3; near/far
+  150/200 and 256/512, black) — a designer effect on chosen doorways, not a draw-distance
+  system. **Assessment (2026-10-23, on the user's question whether Doom 3 should get them as a
+  performance step): Quake 4 only** —
+  Doom 3's maps carry no fade data, a global cut-off would black out doorways (a fidelity
+  change), portal culling already drops what cannot be seen, and the RT tiers trace the whole
+  world regardless of portals.
 - `.cm` — accept `CM "3"`; per-model leading int; per-polygon trailing `3×(s t)` + surface
   id; per-brush trailing surface id; Raven contents names in `ContentsFromString`. Keep the
   surface id — it is the `materialType` the game and BSE `impact` query.
