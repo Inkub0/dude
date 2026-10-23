@@ -144,6 +144,8 @@ idRenderWorldLocal::idRenderWorldLocal() {
 	numInterAreaPortals = 0;
 	procVersion = 3;
 	procMapCrc = 0;
+	portalSkyCameraSet = false;
+	portalSkyCameraOrigin.Zero();
 
 	interactionTable = 0;
 	interactionTableWidth = 0;

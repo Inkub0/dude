@@ -79,6 +79,7 @@ void idRenderWorldLocal::FreeWorld() {
 		numInterAreaPortals = 0;
 	}
 	areaSkies.Clear();
+	portalSkyCameraSet = false;		// DUDE: the game sets it again for the new map
 
 	if ( areaNodes ) {
 		R_StaticFree( areaNodes );
@@ -747,6 +748,18 @@ void idRenderWorldLocal::AddWorldModelEntities() {
 
 		AddEntityRefToArea( def, &portalAreas[i] );
 	}
+}
+
+/*
+=====================
+idRenderWorldLocal::SetPortalSkyCamera
+
+DUDE: see RenderWorld.h; R_PortalSkyRender consumes it.
+=====================
+*/
+void idRenderWorldLocal::SetPortalSkyCamera( bool enable, const idVec3 &origin ) {
+	portalSkyCameraSet = enable;
+	portalSkyCameraOrigin = origin;
 }
 
 /*

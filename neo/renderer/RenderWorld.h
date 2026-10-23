@@ -430,6 +430,14 @@ public:
 
 	// Text drawing for debug visualization.
 	virtual void			DrawText( const char *text, const idVec3 &origin, float scale, const idVec4 &color, const idMat3 &viewAxis, const int align = 1, const int lifetime = 0, bool depthTest = false ) = 0;
+
+	// DUDE (appended, so game libraries built against the original interface keep their
+	// vtable): the map's portal sky camera. While set, the primary view renders the sky from
+	// there as its own subview whenever an area it can see shows sky (a Quake 4 .proc marks
+	// them; a map without that data always qualifies) and fills what its world leaves empty
+	// with it. A new map clears it. Doom 3's games never call this: RoE draws its portal sky
+	// itself.
+	virtual void			SetPortalSkyCamera( bool enable, const idVec3 &origin ) = 0;
 };
 
 #endif /* !__RENDERWORLD_H__ */

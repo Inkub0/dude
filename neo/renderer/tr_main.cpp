@@ -6470,6 +6470,10 @@ void R_RenderView( viewDef_t *parms ) {
 	// sort all the ambient surfaces for translucency ordering
 	R_SortDrawSurfs();
 
+	// DUDE: the portal sky, if the world has a sky camera and this primary view sees sky; its
+	// draw command goes in before every other subview's and this view's (see R_PortalSkyRender)
+	R_PortalSkyRender();
+
 	// generate any subviews (mirrors, cameras, etc) before adding this view
 	if ( R_GenerateSubViews() ) {
 		// if we are debugging subviews, allow the skipping of the

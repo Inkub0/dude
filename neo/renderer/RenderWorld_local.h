@@ -103,6 +103,7 @@ public:
 	virtual const renderLight_t *GetRenderLight( qhandle_t lightHandle ) const;
 
 	virtual bool			CheckAreaForPortalSky( int areaNum );
+	virtual void			SetPortalSkyCamera( bool enable, const idVec3 &origin );	// DUDE
 
 	virtual	void			GenerateAllInteractions();
 	virtual void			RegenerateWorld();
@@ -165,7 +166,11 @@ public:
 	// (optional vertex colours, portal fades, the map's CRC after the version)
 	int						procVersion;
 	unsigned int			procMapCrc;
-	idList<int>				areaSkies;			// Quake 4: each area's sky index (0 = the map's first sky)
+	idList<int>				areaSkies;			// Quake 4: per area, non-zero = the area shows the portal sky (HasSkybox)
+
+	// DUDE: SetPortalSkyCamera
+	bool					portalSkyCameraSet;
+	idVec3					portalSkyCameraOrigin;
 
 	idList<idRenderModel *>	localModels;
 

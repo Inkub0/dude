@@ -416,6 +416,11 @@ typedef struct viewDef_s {
 	bool				isSubview;				// true if this view is not the main view
 	bool				isMirror;				// the portal is a mirror, invert the face culling
 	bool				isXraySubview;
+	// DUDE portal sky (R_PortalSkyRender): the sky camera's view rendered as a subview of the
+	// primary view, so the temporal / RT passes never see it. It captures into _portalSky and
+	// clears the frame colour; the view that drew it composites _portalSky behind its world.
+	bool				isPortalSkyView;
+	bool				drewPortalSky;
 	// DUDE: this world view covers the whole window -- THE primary scene view. Set once by
 	// RenderScene, against the WINDOW and before any FSR2 sub-native scaling; it is the one view
 	// RenderScene scales to the FSR2 render size and the only one the full-screen scene passes
@@ -2097,6 +2102,7 @@ SUBVIEW
 
 bool	R_PreciseCullSurface( const drawSurf_t *drawSurf, idBounds &ndcBounds );
 bool	R_GenerateSubViews( void );
+bool	R_PortalSkyRender( void );		// DUDE: the primary view's portal sky subview
 
 /*
 ============================================================

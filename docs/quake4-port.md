@@ -614,7 +614,15 @@ arguments are the map's keys over the entity def's, as the game merges them; wha
 show at spawn is skipped (`hide`, `teleport`, `start_off`, triggers, player starts, inline
 statics). Model defs and `.md5anim` frame 0 are parsed by the null game itself — the
 animation system is game code — using only engine interfaces (the library still imports
-nothing from the engine). `nullgame_dressing 0` shows the world alone. Offline, an emulation
+nothing from the engine). `nullgame_dressing 0` shows the world alone. Portal skies (Quake 4's `func_camera_portalsky`, RoE's `info_portalSky`) go to the
+renderer through `idRenderWorld::SetPortalSkyCamera` (appended virtual): the primary view
+renders the sky camera as its own **subview** when an area it reached shows sky (the `.proc`
+per-area sky number, Quake 4's `HasSkybox` rule), captures it into `_portalSky` (and
+`_currentRender` for RoE's `portalSky` surfaces), clears the colour, and composites it at the
+far plane right after its world (`RB_RHI_PortalSkyComposite`), so the sky fills only what the
+world left empty and never reaches the temporal / RT passes. Rendering it as a second
+top-level view, as the games' own player views do, fed the sky camera into FSR2 / NRD /
+ReSTIR on the RT tiers (double exposure, black surfaces). Q5's `RF_PORTAL_SKY` maps onto this. Offline, an emulation
 of the same rules resolved every model key on seven Doom 3 / RoE maps, and all 2679 Doom 3
 and 2233 Quake 4 `.md5anim` files have the layout the frame-0 reader expects. Doom 3 itself
 is untouched: only the null game library changed. It validates every engine-side phase (§6) **without** the SDK — load any

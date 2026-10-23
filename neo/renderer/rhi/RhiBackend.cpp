@@ -1790,6 +1790,7 @@ static rhi::ImageHandle RB_RHI_BindStageImage( const shaderStage_t *pStage, cons
 			return globalImages->blackImage->rhiHandle;
 		}
 		if ( texture->image == globalImages->currentRenderImage
+		     || texture->image == globalImages->portalSkyImage
 		     || texture->image == globalImages->currentDepthImage
 		     || texture->image == globalImages->scratchImage
 		     || texture->image == globalImages->scratchImage2
@@ -3522,6 +3523,116 @@ bool RB_RHI_CinematicView( void ) {
 	return rhiCinematicView;
 }
 
+/*
+=============
+RB_RHI_PortalSkyCapture
+
+DUDE: the end of a portal sky subview (R_PortalSkyRender). Its picture is kept in _portalSky
+(and in _currentRender, which RoE's portalSky surfaces sample, as RoE captures it), then the
+frame's colour is cleared again: the views of this frame share one colour target, and
+Vulkan's merged normal prepass never writes scene colour, so sky left there would show under
+the primary view's lit geometry. Called with the view's pass open; leaves the clear pass open
+for the caller's EndPass.
+=============
+*/
+static void RB_RHI_PortalSkyCapture( rhi::RHI *r, const viewDef_t *viewDef ) {
+	const int x = viewDef->viewport.x1;
+	const int y = viewDef->viewport.y1;
+	const int w = viewDef->viewport.x2 - viewDef->viewport.x1 + 1;
+	const int h = viewDef->viewport.y2 - viewDef->viewport.y1 + 1;
+	globalImages->portalSkyImage->CopyFramebuffer( x, y, w, h, true );
+	globalImages->currentRenderImage->CopyFramebuffer( x, y, w, h, true );
+
+	r->EndPass();
+	// GL clears follow the scissor; Vulkan clears the whole target, which this frame has
+	// drawn nothing else into yet (the sky is its first world view)
+	r->SetScissor( tr.viewportOffset[0] + x, tr.viewportOffset[1] + y, w, h );
+	rhi::ClearArgs clear;
+	clear.color = true;
+	clear.depth = true;
+	clear.stencil = true;
+	clear.rgba[0] = clear.rgba[1] = clear.rgba[2] = 0.0f;
+	clear.rgba[3] = 1.0f;
+	clear.stencilValue = (unsigned char)( 1 << ( glConfig.stencilBits - 1 ) );
+	r->BeginPass( &clear );
+}
+
+/*
+=============
+RB_RHI_PortalSkyComposite
+
+DUDE: the portal sky behind the primary view's world. One fullscreen quad through the
+portalsky program (RoE's portal-sky shader): it pins the quad to the far plane (z = w) and
+samples _portalSky by screen position, so with depth-LEQUAL and no depth write it fills only
+the pixels the world left empty - Quake 4's sky, where skycaulk brushes left no surfaces.
+Runs right after the world, before SSR, the RT applies (which skip far-depth pixels), FSR2's
+opaque snapshot, fog and the post-process surfaces. Screen parameters as the screen texgen
+stage computes them (RB_RHI_RenderTexgenStage, TG_SCREEN).
+=============
+*/
+static void RB_RHI_PortalSkyComposite( rhi::RHI *r, const viewDef_t *viewDef ) {
+	if ( !viewDef->drewPortalSky ) {
+		return;
+	}
+	idImage *img = globalImages->portalSkyImage;
+	const bool vkMode = rhi::GetActiveBackendType() == rhi::BT_VULKAN;
+	if ( vkMode && ( !img->rhiCaptured || img->rhiHandle == 0 ) ) {
+		return;
+	}
+	rhi::ShaderHandle prog = r->LoadShader( "portalsky" );
+	if ( !prog ) {
+		return;
+	}
+
+	const int w = viewDef->viewport.x2 - viewDef->viewport.x1 + 1;
+	const int h = viewDef->viewport.y2 - viewDef->viewport.y1 + 1;
+	const int potW = img->uploadWidth > 0 ? img->uploadWidth : w;
+	const int potH = img->uploadHeight > 0 ? img->uploadHeight : h;
+	rhi::RenderParams parms;
+	memset( &parms, 0, sizeof( parms ) );
+	parms.mvpMatrix[0] = parms.mvpMatrix[5] = parms.mvpMatrix[10] = parms.mvpMatrix[15] = 1.0f;
+	parms.screenCorrection[0] = (float)w / potW;
+	parms.screenCorrection[1] = (float)h / potH;
+	parms.windowCoord[0] = 1.0f / w;
+	parms.windowCoord[1] = 1.0f / h;
+	if ( vkMode ) {
+		parms.windowCoord[1] = -1.0f / h;	// top-down gl_FragCoord vs the GL-layout capture
+		parms.windowCoord[3] = 1.0f;
+	}
+
+	rhi::BufferHandle vb, ib, ub;
+	int vertOfs, idxOfs;
+	RB_RHI_AllocFullscreenQuad( r, &vb, &vertOfs, &ib, &idxOfs );
+	const int uniOfs = r->AllocUniforms( &parms, sizeof( parms ), &ub );
+
+	rhi::PipelineDesc pd;
+	pd.stateBits = GLS_DEPTHMASK;			// depth-LEQUAL, no depth write, opaque
+	pd.shader = prog;
+	pd.vertexLayout = rhi::VL_DRAWVERT;
+	pd.cullType = CT_TWO_SIDED;
+	r->BindPipeline( pd );
+
+	rhi::DrawArgs da;
+	memset( &da, 0, sizeof( da ) );
+	if ( vkMode ) {
+		da.textures[0] = img->rhiHandle;
+	} else {
+		rhi::gl3ActiveTexture( GL_TEXTURE0 );
+		backEnd.glState.currenttmu = 0;
+		img->Bind();
+	}
+	da.vertexBuffer = vb;
+	da.vertexOffset = vertOfs;
+	da.indexBuffer = ib;
+	da.firstIndex = idxOfs / (int)sizeof( glIndex_t );
+	da.indexCount = 6;
+	da.uniformBuffer = ub;
+	da.uniformOffset = uniOfs;
+	da.uniformSize = sizeof( parms );
+	r->Draw( da );
+	backEnd.pc.c_drawElements++;
+}
+
 static void RB_RHI_DrawView( rhi::RHI *r, viewDef_t *viewDef ) {
 	backEnd.viewDef = viewDef;	// engine helpers (cinematics, counters) read this
 
@@ -3570,6 +3681,12 @@ static void RB_RHI_DrawView( rhi::RHI *r, viewDef_t *viewDef ) {
 		r->GpuScopeBegin( "restir.di.apply" );
 		RB_RHI_ReStirDIApply( r, viewDef );
 		r->GpuScopeEnd();
+		// DUDE: the portal sky subview's picture behind everything the world drew
+		if ( viewDef->drewPortalSky ) {
+			r->GpuScopeBegin( "portalsky" );
+			RB_RHI_PortalSkyComposite( r, viewDef );
+			r->GpuScopeEnd();
+		}
 	} else {
 		// 2D view (menu/console/HUD/loading): draw over existing contents
 		r->BeginPass( NULL );
@@ -3820,6 +3937,11 @@ static void RB_RHI_DrawView( rhi::RHI *r, viewDef_t *viewDef ) {
 	// RB_RenderDebugTools runs the qgl-safe subset.)
 	if ( viewDef->viewEntitys ) {
 		RB_RenderDebugTools( (drawSurf_t **)&viewDef->drawSurfs[0], viewDef->numDrawSurfs );
+	}
+
+	// DUDE: a portal sky subview hands its picture to the view that drew it
+	if ( viewDef->isPortalSkyView ) {
+		RB_RHI_PortalSkyCapture( r, viewDef );
 	}
 
 	r->EndPass();

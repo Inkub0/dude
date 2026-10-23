@@ -60,14 +60,6 @@ idCVar ui_name( "ui_name", "Player", CVAR_GAME | CVAR_USERINFO | CVAR_ARCHIVE, "
 // RoE's switch for the portal sky (d3xp gamesys/SysCvar.cpp), honoured for Quake 4's too
 idCVar g_enablePortalSky( "g_enablePortalSky", "1", CVAR_GAME | CVAR_BOOL, "enables the portal sky" );
 
-// as RoE's d3xp/PlayerView.cpp: the smallest power of two >= num
-static int MakePowerOfTwo( int num ) {
-	int pot;
-	for ( pot = 1; pot < num; pot <<= 1 ) {
-	}
-	return pot;
-}
-
 static const float	NULLGAME_FLY_SPEED		= 320.0f;	// units per second, doubled while running
 static const float	NULLGAME_BASE_FOV		= 90.0f;	// horizontal at 4:3, widened for the screen aspect
 static const int	NULLGAME_LISTENER_ID	= 1;
@@ -146,11 +138,10 @@ private:
 	idAngles					deltaViewAngles;	// view = usercmd angles + delta, so the start yaw sticks
 	short						lastCmdAngles[3];
 
-	// the map's portal sky camera, rendered before the view: RoE's idPortalSky (its
-	// portalSky surfaces show the capture) or Quake 4's rvCameraPortalSky (its sky is
-	// where the world draws nothing)
+	// the map's portal sky camera, handed to the renderer: RoE's idPortalSky (its portalSky
+	// surfaces show the capture) or Quake 4's rvCameraPortalSky (its sky is where the world
+	// draws nothing)
 	bool						hasPortalSky;
-	bool						portalSkyCapture;
 	idVec3						portalSkyOrigin;
 };
 
@@ -172,7 +163,6 @@ idNullGame::idNullGame( void ) {
 	deltaViewAngles.Zero();
 	lastCmdAngles[0] = lastCmdAngles[1] = lastCmdAngles[2] = 0;
 	hasPortalSky = false;
-	portalSkyCapture = false;
 	portalSkyOrigin.Zero();
 }
 
@@ -401,7 +391,6 @@ void idNullGame::FindPortalSky( const idMapFile &mapFile ) {
 		}
 		if ( roe || idStr::Icmp( spawnclass, "rvCameraPortalSky" ) == 0 ) {
 			hasPortalSky = true;
-			portalSkyCapture = roe;
 			portalSkyOrigin = epairs.GetVector( "origin" );
 		}
 	}
@@ -541,25 +530,10 @@ bool idNullGame::Draw( int clientNum ) {
 	view.time = gameTime;
 	view.globalMaterial = NULL;
 
-	// the portal sky first, from its camera with the view's direction (RoE idPlayerView::
-	// SingleView, Quake 4's the same without the capture): RoE's portalSky surfaces then show
-	// the capture, Quake 4's sky is wherever the view itself draws nothing
-	if ( hasPortalSky && g_enablePortalSky.GetBool() ) {
-		renderView_t skyView = view;
-		skyView.vieworg = portalSkyOrigin;
-		if ( portalSkyCapture ) {
-			// RoE's power-of-two fix-up for sampling the capture
-			int vidWidth, vidHeight;
-			renderSystem->GetGLSettings( vidWidth, vidHeight );
-			view.shaderParms[4] = (float)vidWidth / MakePowerOfTwo( vidWidth );
-			view.shaderParms[5] = (float)vidHeight / MakePowerOfTwo( vidHeight );
-		}
-		renderWorld->RenderScene( &skyView );
-		if ( portalSkyCapture ) {
-			renderSystem->CaptureRenderToImage( "_currentRender" );
-		}
-		view.forceUpdate = true;
-	}
+	// the portal sky: the renderer draws it as a subview of this view and puts it behind the
+	// world (idRenderWorld::SetPortalSkyCamera), as Quake 4's renderer does for RF_PORTAL_SKY -
+	// a second top-level view here would feed the temporal and RT passes the sky camera
+	renderWorld->SetPortalSkyCamera( hasPortalSky && g_enablePortalSky.GetBool(), portalSkyOrigin );
 
 	renderWorld->RenderScene( &view );
 	return true;
