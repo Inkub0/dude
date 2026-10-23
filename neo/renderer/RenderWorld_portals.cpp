@@ -291,13 +291,15 @@ void idRenderWorldLocal::FloodViewThroughArea_r( const idVec3 origin, int areaNu
 AddPortalFade
 
 DUDE: Quake 4's portal fade. A portal the .proc gives "( fadeImage distanceNear distanceFar )"
-- in the retail data nine doorways of mcc_1 / mcc_2, "_black" over 150..200 or 256..512 units -
-is covered by its fade image as the view moves away: transparent up to distanceNear, opaque
-from distanceFar, by the view's distance to the portal plane. Drawn as a translucent quad over
-the whole portal with the fade image's implicit material ("blend blend", "colored": colour and
-alpha from the shader parms; "_black" is drawn white tinted black, see the .proc loader),
-once per view however many flood paths reach the portal. Both windings are emitted, so either
-side faces the view.
+- in the retail data nine glass windows of mcc_1 / mcc_2, "_black" over 150..200 or 256..512
+units - is covered by its fade image as the view moves away: transparent up to distanceNear,
+opaque from distanceFar, by the view's distance to the portal plane. Drawn as a translucent quad
+over the whole portal with the fade image's implicit material ("blend blend", "colored": colour
+and alpha from the shader parms; "_black" is an opaque image tinted black, sorted before the
+decals so the window's glass pane draws over it - see the .proc loader), once per view however
+many flood paths reach the portal. Both windings are emitted, so either side faces the view.
+Decals and translucents beyond the portal also sort after it, so they are not dimmed while the
+fade is partial; once it is opaque the flood no longer reaches them.
 ===================
 */
 void idRenderWorldLocal::AddPortalFade( const portal_t *p, float distance ) {
@@ -346,7 +348,29 @@ void idRenderWorldLocal::AddPortalFade( const portal_t *p, float distance ) {
 	parms->shaderParms[SHADERPARM_GREEN] = dp->fadeColor.y;
 	parms->shaderParms[SHADERPARM_BLUE] = dp->fadeColor.z;
 	parms->shaderParms[SHADERPARM_ALPHA] = alpha;
-	R_AddDrawSurf( tri, &tr.viewDef->worldSpace, parms, dp->fadeMaterial, tr.viewDef->scissor );
+
+	// the flood runs before R_AddModelSurfaces, which starts the view's surface list afresh:
+	// keep the quad until R_AddPortalFadeSurfaces adds it
+	portalFade_t *fade = (portalFade_t *)R_FrameAlloc( sizeof( *fade ) );
+	fade->tri = tri;
+	fade->parms = parms;
+	fade->material = dp->fadeMaterial;
+	fade->next = tr.viewDef->portalFades;
+	tr.viewDef->portalFades = fade;
+}
+
+/*
+===================
+R_AddPortalFadeSurfaces
+
+DUDE: adds the Quake 4 portal fades this view's flood found (AddPortalFade) to its surfaces.
+Called right after R_AddModelSurfaces, which starts the list.
+===================
+*/
+void R_AddPortalFadeSurfaces( void ) {
+	for ( const portalFade_t *fade = tr.viewDef->portalFades; fade != NULL; fade = fade->next ) {
+		R_AddDrawSurf( fade->tri, &tr.viewDef->worldSpace, fade->parms, fade->material, tr.viewDef->scissor );
+	}
 }
 
 /*
@@ -941,6 +965,7 @@ void idRenderWorldLocal::FindViewLightsAndEntities( void ) {
 	// visible areas
 	tr.viewCount++;
 	tr.viewDef->seesSkyArea = false;		// DUDE: set by AddAreaRefs during the flood below
+	tr.viewDef->portalFades = NULL;			// DUDE: AddPortalFade, during the flood below (a subview's copy starts empty)
 
 	// flow through all the portals and add models / lights
 	if ( r_singleArea.GetBool() ) {

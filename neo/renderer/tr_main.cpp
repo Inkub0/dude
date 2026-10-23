@@ -6444,6 +6444,9 @@ void R_RenderView( viewDef_t *parms ) {
 	// lists
 	R_AddModelSurfaces();
 
+	// DUDE: Quake 4 portal fades the flood above found (R_AddModelSurfaces starts the list afresh)
+	R_AddPortalFadeSurfaces();
+
 	// GPU cull validation (docs/gpu-offload-plan.md): once/sec, frustum-cull an object set on the
 	// GPU and diff against R_CullLocalBox. No draw; front-end (tr.viewDef live, frustum constrained,
 	// no backend pass open, so DispatchSync is safe). Vulkan only; both self-gate when off.

@@ -353,11 +353,18 @@ void idRenderWorldLocal::ParseInterAreaPortals( idLexer *src ) {
 			src->ReadToken( &image );
 			if ( image.Icmp( "_black" ) == 0 ) {
 				// this engine generates _black with zero alpha (R_BlackImage), which "blend
-				// blend" would never show: a black fade is white, tinted black. Not the "_white"
-				// material itself - the GUI device context sorts that one SS_GUI (Quake 4's
-				// guiWhiteMaterial), which drew the fade before the world; "_white.tga" is its
-				// own implicit material on the same built-in image (ImageFromFile drops ".tga")
-				doublePortals[i].fadeMaterial = declManager->FindMaterial( "_white.tga" );
+				// blend" would never show: a black fade is the opaque white "_portalFade"
+				// built-in tinted black by the shader parms, so only its alpha (255) counts.
+				// Its own decl, as "_white" is sorted SS_GUI by the GUI device context and
+				// "_flat" has alpha 128 unless image_useNormalCompression is 1.
+				// Sorted just before the decals: every retail fade portal has a "sort decal"
+				// glass pane in its plane, whose reflection stays on top of the darkened view
+				// (the image's default SS_MEDIUM drew the fade over it). Below SS_DECAL, not
+				// at it, so the decal-only paths (polygon offset, blood film) leave it alone;
+				// set again on every load, since BeginLevelLoad purges the decl
+				const idMaterial *fade = declManager->FindMaterial( "_portalFade" );
+				fade->SetSort( SS_DECAL - 0.5f );
+				doublePortals[i].fadeMaterial = fade;
 				doublePortals[i].fadeColor.Zero();
 			} else {
 				doublePortals[i].fadeMaterial = declManager->FindMaterial( image );
