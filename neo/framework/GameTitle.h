@@ -41,6 +41,7 @@ typedef struct gameTitleProfile_s {
 	const char *	splashMaterial;		// startup splash screen
 	const char *	guiWhiteMaterial;	// GUI solid fills
 	const char *	guiArtPrefix;		// GUI cursor + scrollbar art: <prefix>guicursor_arrow.tga, <prefix>scrollbarh.tga, ...
+	const char *	guiListArtPrefix;	// list/edit window scrollbar art (Doom 3 keeps a second copy under guis/assets/)
 	const char *	defaultFont;		// first font every GUI device context registers
 	const char *	overlayFont;		// FPS / stats overlay font
 	const char *	loadingGui;			// map loading screen

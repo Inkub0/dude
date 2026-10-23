@@ -27,6 +27,7 @@ static const gameTitleProfile_t titleProfiles[GAME_TITLE_COUNT] = {
 		"splashScreen",
 		"guis/assets/white.tga",
 		"ui/assets/",
+		"guis/assets/",
 		"fonts",						// resolves to fonts/<lang>/fontImage_<pt>.dat
 		"fonts/bank",
 		"guis/map/loading.gui",
@@ -39,6 +40,7 @@ static const gameTitleProfile_t titleProfiles[GAME_TITLE_COUNT] = {
 		"gfx/2d/bigchars",
 		"gfx/splashScreen",
 		"_white",						// Quake 4 ships no guis/assets/white.tga
+		"gfx/guis/",
 		"gfx/guis/",
 		"fonts/chain",					// resolves to fonts/<lang>/chain_<pt>.fontdat
 		"fonts/profont",				// Quake 4's BankGothic-style face, the counterpart of fonts/bank
