@@ -478,7 +478,20 @@ Version-tolerant parsing, both formats through one code path:
   defines a `_black` material), once per view, both windings. Past `distanceFar` the flood
   stops at the portal - it is opaque, nothing behind it can show. Doom 3 portals have no fade
   data, so the path never runs for them. Behaviour as idTech4A++ (its routine is compiled out)
-  and OpenQ4 read it - read for the semantics only.
+  and OpenQ4 read it - read for the semantics only. **Draw fixes (2026-10-23, `fix/quake4-portal-fade-draw`):**
+  (1) the flood runs before `R_AddModelSurfaces`, which restarts the view's surface list, so the
+  quad is recorded on the view (`viewDef_t::portalFades`) and added by `R_AddPortalFadeSurfaces`
+  right after the models; (2) `_black` draws with `_portalFade`, an opaque white built-in tinted
+  black by the parms (DUDE's `_black` has alpha 0, `_white` is sorted `SS_GUI` by the GUI, `_flat`
+  has alpha 128 unless `image_useNormalCompression 1`); (3) every retail fade portal has a
+  `sort decal` glass pane in its plane (`textures/glass/marineglass*`: alpha-mask stage, then the
+  cubemap added by destination alpha), and retail shows that reflection over the darkened view
+  (user screenshots at `setviewpos -1536 -71 160 90`, 175 units: half-dimmed; `-1536 -116 160 90`,
+  220: a dark pane with the smudged reflection). `_portalFade` is therefore sorted `SS_DECAL - 0.5`,
+  between the opaque world and the decals, below `SS_DECAL` so the decal-only paths (polygon
+  offset, blood film, probe `skipDecals`) and the SSR split (`> SS_DECAL`) see it as opaque-side.
+  Known limit: decals and translucents beyond a partially faded portal draw after it and are not
+  dimmed; once the fade is opaque the flood no longer reaches them.
 - `.cm` — **as built (Q3, 2026-10-23)**, one parser for all titles (`neo/cm/CollisionModel_files.cpp`),
   the extra fields read by file revision (`quake4FileRevision`) rather than guessed from the next
   token: `"1.00"` Doom 3; `"3"` Quake 4 maps and models — a number after the model name, two-count
