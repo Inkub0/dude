@@ -252,6 +252,14 @@ void idNullGame::Shutdown( void ) {
 	MapShutdown();
 	collisionModelManager->FreeMap();		// as idGameLocal::Shutdown
 	cmdSystem->RemoveFlaggedCommands( CMD_FL_GAME );
+	// the dicts keep their keys and values in idDict's global string pools, which idLib::ShutDown
+	// frees: empty them first, as idGameLocal::Clear does, or their destructors - run when the
+	// engine unloads this library - hand strings back to freed pools (an assert on every quit)
+	serverInfo.Clear();
+	for ( int i = 0; i < MAX_ASYNC_CLIENTS; i++ ) {
+		userInfo[i].Clear();
+		persistentPlayerInfo[i].Clear();
+	}
 	idLib::ShutDown();
 }
 
