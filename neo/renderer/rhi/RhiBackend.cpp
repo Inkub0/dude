@@ -3600,6 +3600,14 @@ static void RB_RHI_PortalSkyComposite( rhi::RHI *r, const viewDef_t *viewDef ) {
 		parms.windowCoord[3] = 1.0f;
 	}
 
+	// the light loop left the scissor on the last light's screen rect: back to the view's own,
+	// as RB_RHI_DrawView set it at the start
+	r->SetScissor( tr.viewportOffset[0] + viewDef->viewport.x1 + viewDef->scissor.x1,
+	               tr.viewportOffset[1] + viewDef->viewport.y1 + viewDef->scissor.y1,
+	               viewDef->scissor.x2 + 1 - viewDef->scissor.x1,
+	               viewDef->scissor.y2 + 1 - viewDef->scissor.y1 );
+	backEnd.currentScissor = viewDef->scissor;
+
 	rhi::BufferHandle vb, ib, ub;
 	int vertOfs, idxOfs;
 	RB_RHI_AllocFullscreenQuad( r, &vb, &vertOfs, &ib, &idxOfs );
