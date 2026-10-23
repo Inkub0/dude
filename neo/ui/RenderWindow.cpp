@@ -225,8 +225,13 @@ bool idRenderWindow::ParseInternalVar(const char *_name, idParser *src) {
 	// models and lights are drawn with the multiplayer work (docs/quake4-port.md Q9).
 	if ( ( idStr::Icmpn(_name, "lightOrigin", 11) == 0 || idStr::Icmpn(_name, "lightColor", 10) == 0 )
 		&& _name[ idStr::Length(_name) - 1 ] >= '0' && _name[ idStr::Length(_name) - 1 ] <= '9' ) {
-		idVec4 unused;
-		ParseVec4(src, unused);
+		// ParseFloat, not ParseVec4: the values are negative ("-100" is two tokens)
+		for ( int i = 0; i < 4; i++ ) {
+			if ( i > 0 && !src->ExpectTokenString( "," ) ) {
+				break;
+			}
+			src->ParseFloat();
+		}
 		return true;
 	}
 	return idWindow::ParseInternalVar(_name, src);

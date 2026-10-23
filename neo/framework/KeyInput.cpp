@@ -191,6 +191,15 @@ static const keyname_t keynames[] =
 	{"R_CTRL",			K_RIGHT_CTRL, 		""}, // DG: added this one
 	{"R_SHIFT",			K_RIGHT_SHIFT,		""}, // DG: added this one
 
+	// DUDE: Quake 4's names for the modifiers (its default.cfg binds them). Read-only aliases:
+	// a key prints as the first entry that matches it, so configs keep the names above.
+	{"LEFTALT",			K_ALT,				""},
+	{"RIGHTALT",		K_RIGHT_ALT,		""},
+	{"LEFTCTRL",		K_CTRL,				""},
+	{"RIGHTCTRL",		K_RIGHT_CTRL,		""},
+	{"LEFTSHIFT",		K_SHIFT,			""},
+	{"RIGHTSHIFT",		K_RIGHT_SHIFT,		""},
+
 	// TODO: controller stuff
 
 	{NULL,				0,					NULL}
