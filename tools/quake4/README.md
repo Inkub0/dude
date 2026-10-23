@@ -39,6 +39,12 @@ Q4BASE="/path/to/Quake 4/q4base" python3 tools/quake4/q4_inventory.py > /tmp/q4_
   Also lists image-program functions (`map downsize( x, 1 )`) that
   `neo/renderer/Image_program.cpp` does not know. After Q2 it lists none (`snap` is a false
   positive: a `table` option; `fp20Program` is in Raven's own test material).
+- `q4_proc_check.py <pk4 glob>[,<glob>...]` — a replica of the engine's .proc loader
+  (`neo/renderer/RenderWorld_load.cpp`): walks every file token by token in the loader's order,
+  every Expect and count, for Doom 3's `mapProcFile003` and Quake 4's `PROC "4"`. Run it on both
+  titles after touching the loader. (A field-by-field check passed while an area model's sky
+  number - a token the loader did not expect - stopped `airdefense1` loading; only a walk in
+  the loader's order catches that.)
 - `q4_sound_census.py [q4base] [language]` — parses every sound shader with the grammar
   `neo/sound/snd_shader.cpp` accepts for Quake 4, resolves every sample the way the engine does
   (bare names, `sound/vo/` → `sound/vo_<language>/`), and checks every `maps/**/*.reverb` area

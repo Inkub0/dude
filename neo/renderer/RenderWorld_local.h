@@ -165,6 +165,7 @@ public:
 	// (optional vertex colours, portal fades, the map's CRC after the version)
 	int						procVersion;
 	unsigned int			procMapCrc;
+	idList<int>				areaSkies;			// Quake 4: each area's sky index (0 = the map's first sky)
 
 	idList<idRenderModel *>	localModels;
 

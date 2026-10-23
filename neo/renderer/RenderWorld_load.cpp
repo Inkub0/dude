@@ -78,6 +78,7 @@ void idRenderWorldLocal::FreeWorld() {
 		doublePortals = NULL;
 		numInterAreaPortals = 0;
 	}
+	areaSkies.Clear();
 
 	if ( areaNodes ) {
 		R_StaticFree( areaNodes );
@@ -134,6 +135,22 @@ idRenderModel *idRenderWorldLocal::ParseModel( idLexer *src ) {
 	int numSurfaces = src->ParseInt();
 	if ( numSurfaces < 0 ) {
 		src->Error( "R_ParseModel: bad numSurfaces" );
+	}
+
+	// DUDE: a Quake 4 area model names the area's sky after its surface count:
+	// "_area0" /* numSurfaces = */ 1 /* sky */ 0
+	idToken skyToken;
+	if ( procVersion >= 4 && src->PeekTokenType( TT_NUMBER, 0, &skyToken ) ) {
+		const int sky = src->ParseInt();
+		if ( !idStr::Icmpn( model->Name(), "_area", 5 ) ) {
+			const int area = atoi( model->Name() + 5 );
+			if ( area >= 0 ) {
+				while ( areaSkies.Num() <= area ) {
+					areaSkies.Append( 0 );
+				}
+				areaSkies[area] = sky;
+			}
+		}
 	}
 
 	for ( i = 0 ; i < numSurfaces ; i++ ) {
