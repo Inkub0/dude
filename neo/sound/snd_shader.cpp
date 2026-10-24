@@ -452,19 +452,31 @@ bool idSoundShader::CheckShakesAndOgg( void ) const {
 	int i;
 	bool ret = false;
 
+	// DUDE: the check runs every time such a sound starts (snd_emitter.cpp); warn once per shader,
+	// not on every play - Quake 4 starts shaking OGG sounds constantly (airdefense1's cannons)
+	static idList<const idSoundShader *> warnedShaders;
+	const bool warn = warnedShaders.FindIndex( this ) < 0;
+
 	for ( i = 0; i < numLeadins; i++ ) {
 		if ( leadins[ i ]->objectInfo.wFormatTag == WAVE_FORMAT_TAG_OGG ) {
-			common->Warning( "sound shader '%s' has shakes and uses OGG file '%s'",
-								GetName(), leadins[ i ]->name.c_str() );
+			if ( warn ) {
+				common->Warning( "sound shader '%s' has shakes and uses OGG file '%s'",
+									GetName(), leadins[ i ]->name.c_str() );
+			}
 			ret = true;
 		}
 	}
 	for ( i = 0; i < numEntries; i++ ) {
 		if ( entries[ i ]->objectInfo.wFormatTag == WAVE_FORMAT_TAG_OGG ) {
-			common->Warning( "sound shader '%s' has shakes and uses OGG file '%s'",
-								GetName(), entries[ i ]->name.c_str() );
+			if ( warn ) {
+				common->Warning( "sound shader '%s' has shakes and uses OGG file '%s'",
+									GetName(), entries[ i ]->name.c_str() );
+			}
 			ret = true;
 		}
+	}
+	if ( ret && warn ) {
+		warnedShaders.Append( this );
 	}
 	return ret;
 }
