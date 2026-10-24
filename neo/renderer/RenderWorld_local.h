@@ -175,6 +175,9 @@ public:
 	int						procVersion;
 	unsigned int			procMapCrc;
 	idList<int>				areaSkies;			// Quake 4: per area, non-zero = the area shows the portal sky (HasSkybox)
+								// Quake 4's HasSkybox: a map without the .proc data shows sky everywhere,
+								// as R_PortalSkyRender treats it
+	bool					AreaShowsSky( int areaNum ) const { return areaSkies.Num() == 0 || ( areaNum >= 0 && areaNum < areaSkies.Num() && areaSkies[areaNum] != 0 ); }
 
 	// DUDE: SetPortalSkyCamera
 	bool					portalSkyCameraSet;

@@ -21,6 +21,8 @@ Doom 3 GPL Source Code (see ArbProgram.h for license header)
 #include "framework/Common.h"
 #include "framework/DeclQuake4.h"
 #include "renderer/Material.h"
+#include "renderer/tr_local.h"
+#include "renderer/RenderWorld_local.h"
 
 #include "quake4/EngineQ4.h"
 
@@ -355,8 +357,17 @@ void idRenderWorldQ4Local::RenderScene( const renderView_t *renderView, int rend
 	renderWorld->RenderScene( renderView );
 }
 
+/*
+===============
+idRenderWorldQ4Local::HasSkybox
+
+The area shows the portal sky by the map's own per-area data (.proc), not RoE's
+CheckAreaForPortalSky (entities whose materials ask for the sky): the game renders its sky
+camera only when a visible area answers true.
+===============
+*/
 bool idRenderWorldQ4Local::HasSkybox( int areaNum ) {
-	return renderWorld->CheckAreaForPortalSky( areaNum );
+	return static_cast<idRenderWorldLocal *>( renderWorld )->AreaShowsSky( areaNum );
 }
 
 /*
