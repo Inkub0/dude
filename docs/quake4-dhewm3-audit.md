@@ -1,4 +1,4 @@
-# dhewm3's game-code fixes vs Raven's Quake 4 game — audit (2026-10-24)
+# dhewm3's game-code fixes vs Raven's Quake 4 game — audit (2026-10-24, play-tested)
 
 Raven built Quake 4's game on id's 2004–2005 Doom 3 game code, so it lacks every fix dhewm3 made
 to that code since id's GPL release (`fb1609f5`). This audit went through the **112 upstream
@@ -42,10 +42,10 @@ the dhewm3 commit, so mods built on the SDK can follow them (see
   compiled with `-Wall` and every remaining warning read: nothing needs a silent fix (cosmetic,
   multiplayer-only - Q9 - or unreachable).
 
-## Found on the way, left as retail (candidates for opt-in fixes)
+## Found on the way, kept as retail
 
-Real logic slips that retail Quake 4 shipped with. Fixing them changes gameplay, so per the
-fidelity rule they are opt-in candidates, not silent fixes:
+Real logic slips that retail Quake 4 shipped with. Fixing them would change gameplay from vanilla,
+so they stay as they are (decided 2026-10-24, not even as opt-in):
 
 - `ai/AI_Move.cpp:4298` — `!reach->fromAreaNum != myMove->myArea` (and three more) compare 0/1
   with an area number: the "edge touches the start or goal area" test is always true, so AI path
