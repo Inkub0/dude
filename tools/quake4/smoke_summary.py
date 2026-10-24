@@ -41,7 +41,8 @@ def main():
         lines = read(path)
         tail = first(lines, r'=== smoke-maps: exit (\d+), ([\d.]+) s ===')
         rc = int(tail.group(1)) if tail else None
-        load = first(lines, r'^\s*(\d+) msec to load (\S+)')
+        # the session's map line (Session.cpp ExecuteMapChange), not the earlier '... msec to load collision data.'
+        load = first(lines, r'^\s*(\d+) msec to load (?!collision data)(\S+)')
         dressed = first(lines, r'null game: dressed the map with (\d+) lights, (\d+) models')
         aas = [l for l in lines if re.search(r'null game: \S+\.aas\w*: ', l) or 'is a dummy' in l or 'did not load' in l]
         cmhdr = [l for l in lines if 'its header says' in l]
