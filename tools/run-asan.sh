@@ -34,6 +34,7 @@ fi
 
 make -C "$ASAN_BUILD" -j"$(nproc)" dude shaders_spv base d3xp d3le nullgame
 if [ "$QUAKE4" = 1 ]; then
+	[ -x "$DUDE/tools/quake4/build-q4game.sh" ] || { echo "run-asan.sh: --q4 needs the Quake 4 game library build (tools/quake4/build-q4game.sh, docs/quake4-port.md 5.6)" >&2; exit 1; }
 	DUDE_BUILD=build-asan "$DUDE/tools/quake4/build-q4game.sh"
 fi
 
