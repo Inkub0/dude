@@ -794,7 +794,9 @@ ID_INLINE void idStr::Append( const char *text, int l ) {
 	if ( text && l ) {
 		newLen = len + l;
 		EnsureAlloced( newLen + 1 );
-		for ( i = 0; text[ i ] && i < l; i++ ) {
+		// DUDE: the length first - id tested text[ i ] first and so read one byte past a text
+		// without a terminator inside l (ASAN, the Vulkan shader-file loader)
+		for ( i = 0; i < l && text[ i ]; i++ ) {
 			data[ len + i ] = text[ i ];
 		}
 		len = newLen;
