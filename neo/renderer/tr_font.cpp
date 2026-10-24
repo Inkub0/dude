@@ -29,6 +29,7 @@ If you have questions concerning this license or the applicable additional terms
 #include "sys/platform.h"
 
 #include "renderer/tr_local.h"
+#include "renderer/FontInternal.h"
 
 #define FILESIZE_fontInfo_t (20548)
 
@@ -276,7 +277,7 @@ both the drawn quad (imageWidth/Height) and the glyph height. Returns the talles
 and widest advance, rounded up to whole pixels, for the font's layout metrics.
 ============
 */
-static void R_ParseRavenFontSheet( const char *fontName, int pointSize, fontInfo_t *outFont, int &maxHeight, int &maxWidth ) {
+static void R_ParseRavenFontSheet( const char *fontName, int pointSize, dudeFontInfo_t *outFont, int &maxHeight, int &maxWidth ) {
 	const idMaterial *sheet = declManager->FindMaterial( va( "%s_%i.tga", fontName, pointSize ) );
 	sheet->SetSort( SS_GUI );
 
@@ -289,7 +290,7 @@ static void R_ParseRavenFontSheet( const char *fontName, int pointSize, fontInfo
 
 	float mh = 0.0f, mw = 0.0f;
 	for ( int i = 0; i < GLYPHS_PER_FONT; i++ ) {
-		glyphInfo_t &g = outFont->glyphs[i];
+		dudeGlyphInfo_t &g = outFont->glyphs[i];
 		const float width		= readFloat();
 		const float height		= readFloat();
 		const float advance		= readFloat();
@@ -329,22 +330,13 @@ static void R_ParseRavenFontSheet( const char *fontName, int pointSize, fontInfo
 
 /*
 ============
-RegisterFont
+R_RegisterEngineFont
 
-Loads 3 point sizes, 12, 24, and 48
+Loads 3 point sizes, 12, 24, and 48, into the engine's float-metric font
+(renderer/FontInternal.h): id's fontImage_<pt>.dat or Raven's <font>_<pt>.fontdat.
 ============
 */
-bool idRenderSystemLocal::RegisterFont( const char *fontName, fontInfoEx_t &font ) {
-#ifdef BUILD_FREETYPE
-	FT_Face face;
-	int j, k, xOut, yOut, lastStart, imageNumber;
-	int scaledSize, newSize, maxHeight, left, satLevels;
-	unsigned char *out, *imageBuff;
-	glyphInfo_t *glyph;
-	idImage *image;
-	idMaterial *h;
-	float max;
-#endif
+bool R_RegisterEngineFont( const char *fontName, dudeFontInfoEx_t &font ) {
 	void *faceData;
 	ID_TIME_T ftime;
 	int i, len, fontCount;
@@ -397,7 +389,7 @@ bool idRenderSystemLocal::RegisterFont( const char *fontName, fontInfoEx_t &font
 			}
 		}
 
-		fontInfo_t *outFont;
+		dudeFontInfo_t *outFont;
 		if ( fontCount == 0 ) {
 			outFont = &font.fontInfoSmall;
 		}
@@ -487,9 +479,84 @@ bool idRenderSystemLocal::RegisterFont( const char *fontName, fontInfoEx_t &font
 	//memcpy( &registeredFont[registeredFontCount++], &font, sizeof( fontInfoEx_t ) );
 
 	return true ;
+}
+
+/*
+============
+R_GlyphMetricToInt
+
+DUDE: a float glyph metric in the public, whole-pixel glyphInfo_t; exact for id's fonts
+============
+*/
+static int R_GlyphMetricToInt( float v ) {
+	return (int)( v >= 0.0f ? v + 0.5f : v - 0.5f );
+}
+
+static void R_FontInfoToPublic( const dudeFontInfo_t &in, fontInfo_t &out ) {
+	for ( int i = 0; i < GLYPHS_PER_FONT; i++ ) {
+		const dudeGlyphInfo_t &g = in.glyphs[i];
+		glyphInfo_t &o = out.glyphs[i];
+		o.height		= R_GlyphMetricToInt( g.height );
+		o.top			= R_GlyphMetricToInt( g.top );
+		o.bottom		= R_GlyphMetricToInt( g.bottom );
+		o.pitch			= R_GlyphMetricToInt( g.pitch );
+		o.xSkip			= R_GlyphMetricToInt( g.xSkip );
+		o.imageWidth	= R_GlyphMetricToInt( g.imageWidth );
+		o.imageHeight	= R_GlyphMetricToInt( g.imageHeight );
+		o.s				= g.s;
+		o.t				= g.t;
+		o.s2			= g.s2;
+		o.t2			= g.t2;
+		o.glyph			= g.glyph;
+		memcpy( o.shaderName, g.shaderName, sizeof( o.shaderName ) );
+	}
+	out.glyphScale = in.glyphScale;
+	memcpy( out.name, in.name, sizeof( out.name ) );
+}
+
+/*
+============
+RegisterFont
+
+Loads 3 point sizes, 12, 24, and 48
+============
+*/
+bool idRenderSystemLocal::RegisterFont( const char *fontName, fontInfoEx_t &font ) {
+#ifdef BUILD_FREETYPE
+	FT_Face face;
+	int j, k, xOut, yOut, lastStart, imageNumber;
+	int scaledSize, newSize, maxHeight, left, satLevels;
+	unsigned char *out, *imageBuff;
+	glyphInfo_t *glyph;
+	idImage *image;
+	idMaterial *h;
+	float max;
+#endif
+
+	// DUDE: the font loads into the engine's float-metric form (R_RegisterEngineFont); a game
+	// library gets dhewm3's whole-pixel layout of it (tools/check_dhewm3_abi.py)
+	dudeFontInfoEx_t *engineFont = (dudeFontInfoEx_t *)Mem_ClearedAlloc( sizeof( *engineFont ) );
+	const bool loaded = R_RegisterEngineFont( fontName, *engineFont );
+	memset( &font, 0, sizeof( font ) );
+	if ( loaded ) {
+		R_FontInfoToPublic( engineFont->fontInfoSmall, font.fontInfoSmall );
+		R_FontInfoToPublic( engineFont->fontInfoMedium, font.fontInfoMedium );
+		R_FontInfoToPublic( engineFont->fontInfoLarge, font.fontInfoLarge );
+		font.maxHeight = engineFont->maxHeight;
+		font.maxWidth = engineFont->maxWidth;
+		font.maxHeightSmall = engineFont->maxHeightSmall;
+		font.maxWidthSmall = engineFont->maxWidthSmall;
+		font.maxHeightMedium = engineFont->maxHeightMedium;
+		font.maxWidthMedium = engineFont->maxWidthMedium;
+		font.maxHeightLarge = engineFont->maxHeightLarge;
+		font.maxWidthLarge = engineFont->maxWidthLarge;
+		memcpy( font.name, engineFont->name, sizeof( font.name ) );
+	}
+	Mem_Free( engineFont );
+	return loaded;
 
 #ifndef BUILD_FREETYPE
-	common->Warning( "RegisterFont: couldn't load FreeType code %s", name );
+	common->Warning( "RegisterFont: couldn't load FreeType code %s", fontName );
 #else
 
 	if (ftLibrary == NULL) {

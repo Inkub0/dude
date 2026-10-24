@@ -210,8 +210,8 @@ recompiled from source against dude needs **~zero header reconciliation.**
 | Header | Change | Recompile impact |
 |---|---|---|
 | `framework/Game.h` | **clean** — `gameImport_t`/`gameExport_t`/`GAME_API_VERSION=9`/`idGame`/`idGameEdit` untouched | none — this is the only surface the mod *implements* |
-| `renderer/RenderWorld.h` | `idRenderWorld::Trace()` gained `bool skipDecals=false` | default arg, call sites unchanged |
-| `renderer/RenderSystem.h` | 4 fields appended to `glConfig` (`maxCubeMapSize`, `vidMemMB`, `coreProfile`, `rhiBackend`) | additive struct fields |
+| `renderer/RenderWorld.h` | `idRenderWorld::Trace()` gained `bool skipDecals=false` | default arg, call sites unchanged on recompile - **but a binary break** (a dhewm3 build never passes it); undone 2026-10-24, §7.4 |
+| `renderer/RenderSystem.h` | 4 fields added to `glConfig` (`maxCubeMapSize`, `vidMemMB`, `coreProfile`, `rhiBackend`) | two of them were inserted mid-struct, not appended; moved to the end 2026-10-24, §7.4 |
 | `renderer/Material.h` | `SL_OCCLUSION` enum value + PBR/parallax getters, fields, `pbrCategory_t` | additive |
 | `framework/Common.h` | new **pure-virtual** `idCommon::GetTicInterpolation()`; `dude_preset` extern; dhewm3→DUDE comment renames | engine implements `idCommon`, game only calls it → extra vtable slot, harmless on recompile |
 
@@ -260,6 +260,36 @@ A1 → A2 → C1 → C2 → C3 is the spine that lands Phobos on dude. B and A3 
 parallel/independent. D and C4 are follow-ons. **This is general infrastructure**
 — Phobos is the *first* consumer, not the only one; any GPL-source mod (LibreCoop,
 Classic Doom 3, …) reuses A2/A3 unchanged.
+
+### 7.4 Binary compatibility with dhewm3 builds (2026-10-24)
+
+**Rule (user):** DUDE's main strength is running what runs on dhewm3, so a game library
+**built for dhewm3** - not only one recompiled against DUDE - must load and run unchanged.
+`GAME_API_VERSION` stays 9; no layout, enum value, vtable slot or virtual signature that a
+dhewm3 game library compiles against may change. Allowed: enum values and virtuals appended at
+the end of engine-implemented interfaces, fields appended to objects the engine allocates and
+the game reaches through pointers (`idMaterial`, `idSoundShader`, `srfTriangles_t`,
+`idAASFile` …), new headers / free functions / non-virtual methods. New titles (Quake 4) get
+their own interfaces instead of growing these (`docs/quake4-port.md` §5.6).
+
+**Checker:** `tools/check_dhewm3_abi.py [ref]` compiles the 93 headers dhewm3's own game code
+includes against dhewm3's tree (default `upstream/master` = 1.5.5) and DUDE's, as a game library
+(clang, `-DGAME_DLL`), and compares every record layout, every vtable and every enumerator
+value; appended fields are allowed only on its list of engine-allocated objects. First run:
+543 records / 64 vtables / 851 enumerators, **4 breaks**, all from DUDE's own renderer work, all
+fixed (`fix/dhewm3-abi-restore`): `shaderStage_t` had grown (the inline `idMaterial::GetStage(i)`
+of a dhewm3 build strides by the old size - dhewm3's `Player.cpp` PDA-video loop reads stage
+1+); `idRenderWorld::Trace`'s 7th parameter (now the appended `TraceExt`); `glconfig_s`
+mid-struct fields; `glyphInfo_t` int → float metrics (the engine's GUI now uses its own
+`dudeGlyphInfo_t`, `renderer/FontInternal.h`). Run it before merging anything that touches a
+game-visible header.
+
+**Live test:** dhewm3 1.5.5's own `base.so` / `d3xp.so`, built from its source with its own
+headers, loaded into DUDE with `+set fs_gameDllPath <dir>` (searched first, not archived).
+
+**Later (user idea):** a DUDE that is also binary-compatible with mods built against id's
+original SDK (`GAME_API_VERSION` 8, §4) would cover every Doom 3 mod. That is a larger, separate
+step (retail binaries are also 32-bit, Phase 4 above); not started.
 
 ## 8. Ecosystem & distribution (forward-looking)
 

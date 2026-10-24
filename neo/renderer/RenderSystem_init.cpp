@@ -1837,7 +1837,7 @@ const idMaterial *R_PbrPickCrosshairMaterial( void ) {
 	// in front of the wall and isn't lit, so editing its PBR does nothing — land on
 	// the lit surface behind it. Fall back to a normal trace if the ray hits only
 	// decals (a standalone decal with nothing behind), so it's still selectable.
-	if ( tr.primaryWorld->Trace( mt, start, end, 0.0f, false, false, true ) ) {
+	if ( tr.primaryWorld->TraceExt( mt, start, end, 0.0f, false, false, true ) ) {
 		return mt.material;
 	}
 	if ( tr.primaryWorld->Trace( mt, start, end, 0.0f, false ) ) {
@@ -1901,12 +1901,12 @@ static void R_ListParallaxMaps_f( const idCmdArgs &args ) {
 			continue;
 		}
 		for ( int s = 0; s < mat->GetNumStages(); s++ ) {
-			const shaderStage_t *st = mat->GetStage( s );
-			if ( !st->parallaxImage ) {
+			const shaderStageExtra_t &extra = mat->GetStageExtra( mat->GetStage( s ) );
+			if ( !extra.parallaxImage ) {
 				continue;
 			}
-			common->Printf( "%-44s scale %4.1f  %s\n", mat->GetName(), st->parallaxScale,
-							st->parallaxImage->imgName.c_str() );
+			common->Printf( "%-44s scale %4.1f  %s\n", mat->GetName(), extra.parallaxScale,
+							extra.parallaxImage->imgName.c_str() );
 			withParallax++;
 		}
 	}

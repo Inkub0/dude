@@ -383,9 +383,7 @@ public:
 	virtual bool			ModelTrace( modelTrace_t &trace, qhandle_t entityHandle, const idVec3 &start, const idVec3 &end, const float radius ) const = 0;
 
 	// Traces vs the whole rendered world. FIXME: we need some kind of material flags.
-	// skipDecals ignores SS_DECAL surfaces (grime/scorch overlays coplanar with the
-	// wall) so a picker lands on the surface behind them (DUDE PBR material editor).
-	virtual bool			Trace( modelTrace_t &trace, const idVec3 &start, const idVec3 &end, const float radius, bool skipDynamic = true, bool skipPlayer = false, bool skipDecals = false ) const = 0;
+	virtual bool			Trace( modelTrace_t &trace, const idVec3 &start, const idVec3 &end, const float radius, bool skipDynamic = true, bool skipPlayer = false ) const = 0;
 
 	// Traces vs the world model bsp tree.
 	virtual bool			FastWorldTrace( modelTrace_t &trace, const idVec3 &start, const idVec3 &end ) const = 0;
@@ -438,6 +436,11 @@ public:
 	// with it. A new map clears it. Doom 3's games never call this: RoE draws its portal sky
 	// itself.
 	virtual void			SetPortalSkyCamera( bool enable, const idVec3 &origin ) = 0;
+
+	// DUDE (appended, like SetPortalSkyCamera): Trace() that can also ignore SS_DECAL surfaces
+	// (grime/scorch overlays coplanar with the wall), so a picker lands on the surface behind
+	// them (the PBR material editor). A separate call because Trace() keeps dhewm3's signature.
+	virtual bool			TraceExt( modelTrace_t &trace, const idVec3 &start, const idVec3 &end, const float radius, bool skipDynamic, bool skipPlayer, bool skipDecals ) const = 0;
 };
 
 #endif /* !__RENDERWORLD_H__ */

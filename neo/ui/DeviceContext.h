@@ -34,6 +34,7 @@ If you have questions concerning this license or the applicable additional terms
 
 #include "renderer/Material.h"
 #include "renderer/RenderSystem.h"
+#include "renderer/FontInternal.h"	// DUDE: the GUI draws from the float-metric engine fonts
 #include "ui/Rectangle.h"
 
 const int VIRTUAL_WIDTH = 640;
@@ -183,8 +184,8 @@ private:
 	const idMaterial	*cursorImages[CURSOR_COUNT];
 	const idMaterial	*scrollBarImages[SCROLLBAR_COUNT];
 	const idMaterial	*whiteImage;
-	fontInfoEx_t		*activeFont;
-	fontInfo_t			*useFont;
+	dudeFontInfoEx_t		*activeFont;
+	dudeFontInfo_t			*useFont;
 	idStr				fontName;
 	float				xScale;
 	float				yScale;
@@ -202,7 +203,7 @@ private:
 
 	idList<idRectangle>	clipRects;
 
-	static idList<fontInfoEx_t> fonts;
+	static idList<dudeFontInfoEx_t> fonts;
 	idStr fontLang;
 
 	bool				enableClipping;

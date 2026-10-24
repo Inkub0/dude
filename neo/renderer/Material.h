@@ -223,22 +223,27 @@ typedef struct {
 	float				privatePolygonOffset;	// a per-stage polygon offset
 
 	newShaderStage_t	*newStage;			// vertex / fragment program based stage
+} shaderStage_t;
 
-	// DUDE: parallax occlusion mapping height source (non-vanilla; Vulkan enhancement).
-	// Lives on the SL_BUMP stage: auto-captured from a `heightmap(x, N)` operand in the
-	// bump's image program, or set explicitly via the `parallaxmap` keyword. NULL unless
-	// r_parallax was set when the material was parsed (off = zero extra resident textures).
-	// Consumed only by the enhancement backends; see docs/parallax.md.
+// DUDE: per-stage data of the enhancement backends, kept OUT of shaderStage_t: a game library
+// built for dhewm3 walks idMaterial::GetStage()'s array with dhewm3's sizeof( shaderStage_t ),
+// so that struct must keep its layout (tools/check_dhewm3_abi.py). Read through
+// idMaterial::GetStageExtra().
+typedef struct {
+	// parallax occlusion mapping height source (non-vanilla; Vulkan enhancement). On the
+	// SL_BUMP stage: auto-captured from a `heightmap(x, N)` operand in the bump's image
+	// program, or set explicitly via the `parallaxmap` keyword. NULL unless r_parallax was set
+	// when the material was parsed (off = zero extra resident textures); docs/parallax.md.
 	idImage *			parallaxImage;
 	float				parallaxScale;
 
-	// DUDE: SIGNED height source for tessellation displacement (docs/tessellation.md).
-	// Also lives on the SL_BUMP stage. 0.5 = flat, >0.5 raised, <0.5 recessed -- unlike
-	// parallaxImage this is re-centred to a zero mean, so the tess shader uses a fixed
-	// zero point. Prefers the authored `_h`; otherwise integrated from the normal map.
-	// NULL unless r_tessellation was set when the material was parsed.
+	// SIGNED height source for tessellation displacement (docs/tessellation.md), also on the
+	// SL_BUMP stage. 0.5 = flat, >0.5 raised, <0.5 recessed -- unlike parallaxImage this is
+	// re-centred to a zero mean, so the tess shader uses a fixed zero point. Prefers the
+	// authored `_h`; otherwise integrated from the normal map. NULL unless r_tessellation was
+	// set when the material was parsed.
 	idImage *			tessHeightImage;
-} shaderStage_t;
+} shaderStageExtra_t;
 
 typedef enum {
 	MC_BAD,
@@ -421,6 +426,10 @@ public:
 						// occlusion mapping. NULL on stock assets / with r_parallax off
 						// (docs/parallax.md).
 	const shaderStage_t *GetParallaxStage( void ) const;
+
+						// DUDE: the enhancement data of one of this material's stages (all NULL /
+						// 0 for a stage that is not one of them)
+	const shaderStageExtra_t &GetStageExtra( const shaderStage_t *stage ) const;
 
 						// DUDE PBR (docs/pbr-materials.md Phase B): per-material metalness /
 						// roughness from the generated pbr/pbr_materials.cfg table (merged
@@ -792,6 +801,8 @@ private:
 	idStr				portalImageName;
 	float				portalDistanceNear;
 	float				portalDistanceFar;
+
+	shaderStageExtra_t *stageExtras;		// DUDE: numStages entries next to stages (GetStageExtra)
 };
 
 // DUDE PBR: the main material classes the generated table tags entries with.

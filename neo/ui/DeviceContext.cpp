@@ -50,7 +50,7 @@ idCVar gui_mediumFontLimit( "gui_mediumFontLimit", "0.60", CVAR_GUI | CVAR_ARCHI
 idCVar gui_hiResFonts( "gui_hiResFonts", "1", CVAR_GUI | CVAR_ARCHIVE | CVAR_BOOL, "Use higher-resolution font atlases on displays taller than 720p (crisper GUI text, same size). 0 = vanilla scale-based selection" );
 
 
-idList<fontInfoEx_t> idDeviceContext::fonts;
+idList<dudeFontInfoEx_t> idDeviceContext::fonts;
 
 int idDeviceContext::FindFont( const char *name ) {
 	int c = fonts.Num();
@@ -64,9 +64,9 @@ int idDeviceContext::FindFont( const char *name ) {
 	idStr fileName = name;
 	fileName.Replace("fonts", va("fonts/%s", fontLang.c_str()) );
 
-	fontInfoEx_t fontInfo = {}; // DG: initialize this
+	dudeFontInfoEx_t fontInfo = {}; // DG: initialize this
 	int index = fonts.Append( fontInfo );
-	if ( renderSystem->RegisterFont( fileName, fonts[index] ) ){
+	if ( R_RegisterEngineFont( fileName, fonts[index] ) ){
 		idStr::Copynz( fonts[index].name, name, sizeof( fonts[index].name ) );
 		return index;
 	} else {
@@ -796,7 +796,7 @@ void idDeviceContext::PaintChar(float x,float y,float width,float height,float s
 
 // DUDE: vanilla sheet selection - picks the 12/24/48 pt atlas for a selection
 // scale and hands back that sheet's layout metrics (tallest glyph / widest advance).
-static void SelectFontSheet( fontInfoEx_t *font, float scale, fontInfo_t *&sheet, int &maxHeight, int &maxWidth ) {
+static void SelectFontSheet( dudeFontInfoEx_t *font, float scale, dudeFontInfo_t *&sheet, int &maxHeight, int &maxWidth ) {
 	if (scale <= gui_smallFontLimit.GetFloat()) {
 		sheet = &font->fontInfoSmall;
 		maxHeight = font->maxHeightSmall;
@@ -815,7 +815,7 @@ static void SelectFontSheet( fontInfoEx_t *font, float scale, fontInfo_t *&sheet
 void idDeviceContext::SetFontByScale(float scale) {
 	// the vanilla pick decides the layout: every caller places text from these
 	// metrics (line height = baseline offset, max char width = cursor skip)
-	fontInfo_t *sheet;
+	dudeFontInfo_t *sheet;
 	int maxHeight, maxWidth;
 	SelectFontSheet( activeFont, scale, sheet, maxHeight, maxWidth );
 
@@ -833,7 +833,7 @@ void idDeviceContext::SetFontByScale(float scale) {
 		const float baseHeight = 720.0f;
 		float h = renderSystem->GetScreenHeight();
 		if ( h > baseHeight ) {
-			fontInfo_t *hiSheet;
+			dudeFontInfo_t *hiSheet;
 			int hiMaxHeight, hiMaxWidth;
 			SelectFontSheet( activeFont, scale * ( h / baseHeight ), hiSheet, hiMaxHeight, hiMaxWidth );
 			if ( hiSheet != sheet ) {
@@ -855,7 +855,7 @@ void idDeviceContext::SetFontByScale(float scale) {
 int idDeviceContext::DrawText(float x, float y, float scale, idVec4 color, const char *text, float adjust, int limit, int style, int cursor) {
 	int			len, count;
 	idVec4		newColor;
-	const glyphInfo_t *glyph;
+	const dudeGlyphInfo_t *glyph;
 	float		useScale;
 	SetFontByScale(scale);
 	useScale = scale * useFont->glyphScale;
@@ -1114,10 +1114,10 @@ void idDeviceContext::CstSetSize(int anchor, int anchorTo, float factor) {
 //#modified-fva; END
 
 int idDeviceContext::CharWidth( const char c, float scale ) {
-	glyphInfo_t *glyph;
+	dudeGlyphInfo_t *glyph;
 	float		useScale;
 	SetFontByScale(scale);
-	fontInfo_t	*font = useFont;
+	dudeFontInfo_t	*font = useFont;
 	useScale = scale * font->glyphScale;
 	glyph = &font->glyphs[(const unsigned char)c];
 	return idMath::FtoiFast( glyph->xSkip * useScale );
@@ -1128,7 +1128,7 @@ int idDeviceContext::TextWidth( const char *text, float scale, int limit ) {
 	float width;	// DUDE: float - Raven fonts have fractional advances (id's sum exactly)
 
 	SetFontByScale( scale );
-	const glyphInfo_t *glyphs = useFont->glyphs;
+	const dudeGlyphInfo_t *glyphs = useFont->glyphs;
 
 	if ( text == NULL ) {
 		return 0;
@@ -1158,11 +1158,11 @@ int idDeviceContext::TextWidth( const char *text, float scale, int limit ) {
 int idDeviceContext::TextHeight(const char *text, float scale, int limit) {
 	int			len, count;
 	float		max;
-	glyphInfo_t *glyph;
+	dudeGlyphInfo_t *glyph;
 	float		useScale;
 	const char	*s = text;
 	SetFontByScale(scale);
-	fontInfo_t	*font = useFont;
+	dudeFontInfo_t	*font = useFont;
 
 	useScale = scale * font->glyphScale;
 	max = 0;
@@ -1289,7 +1289,7 @@ void idDeviceContext::DrawEditCursor( float x, float y, float scale ) {
 	}
 	SetFontByScale(scale);
 	float useScale = scale * useFont->glyphScale;
-	const glyphInfo_t *glyph2 = &useFont->glyphs[overStrikeMode ? int('_') : int('|')];
+	const dudeGlyphInfo_t *glyph2 = &useFont->glyphs[overStrikeMode ? int('_') : int('|')];
 	float	yadj = useScale * glyph2->top;
 	PaintChar(x + useScale * glyph2->left, y - yadj,glyph2->imageWidth,glyph2->imageHeight,useScale,glyph2->s,glyph2->t,glyph2->s2,glyph2->t2,glyph2->glyph);
 }

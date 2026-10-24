@@ -1217,7 +1217,12 @@ const char* playerMaterialExcludeList[] = {
 	NULL
 };
 
-bool idRenderWorldLocal::Trace( modelTrace_t &trace, const idVec3 &start, const idVec3 &end, const float radius, bool skipDynamic, bool skipPlayer /*_D3XP*/, bool skipDecals ) const {
+bool idRenderWorldLocal::Trace( modelTrace_t &trace, const idVec3 &start, const idVec3 &end, const float radius, bool skipDynamic, bool skipPlayer /*_D3XP*/ ) const {
+	return TraceExt( trace, start, end, radius, skipDynamic, skipPlayer, false );
+}
+
+// DUDE: Trace() with skipDecals (RenderWorld.h); Trace() itself keeps dhewm3's signature
+bool idRenderWorldLocal::TraceExt( modelTrace_t &trace, const idVec3 &start, const idVec3 &end, const float radius, bool skipDynamic, bool skipPlayer, bool skipDecals ) const {
 	areaReference_t * ref;
 	idRenderEntityLocal *def;
 	portalArea_t * area;
