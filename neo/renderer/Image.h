@@ -511,6 +511,7 @@ public:
 	idImage *			scratchImage2;
 	idImage *			accumImage;
 	idImage *			currentRenderImage;			// for SS_POST_PROCESS shaders
+	idImage *			portalSkyImage;				// DUDE: the portal sky subview's capture (R_PortalSkyRender)
 	idImage *			scratchCubeMapImage;
 	idImage *			specularTableImage;			// 1D intensity texture with our specular function
 	idImage *			specular2DTableImage;		// 2D intensity texture with our specular function with variable specularity

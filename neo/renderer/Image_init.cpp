@@ -2079,6 +2079,7 @@ void idImageManager::Init() {
 	normalCubeMapImage = ImageFromFunction( "_normalCubeMap", makeNormalizeVectorCubeMap );
 	noFalloffImage = ImageFromFunction( "_noFalloff", R_CreateNoFalloffImage );
 	ImageFromFunction( "_quadratic", R_QuadraticImage );
+	ImageFromFunction( "_portalFade", R_WhiteImage );	// DUDE: Quake 4's "_black" portal fades (RenderWorld_load.cpp)
 
 	// cinematicImage is used for cinematic drawing
 	// scratchImage is used for screen wipes/doublevision etc..
@@ -2088,6 +2089,7 @@ void idImageManager::Init() {
 	accumImage = ImageFromFunction("_accum", R_RGBA8Image );
 	scratchCubeMapImage = ImageFromFunction("_scratchCubeMap", makeNormalizeVectorCubeMap );
 	currentRenderImage = ImageFromFunction("_currentRender", R_RGBA8Image );
+	portalSkyImage = ImageFromFunction( "_portalSky", R_RGBA8Image );	// DUDE: captured by the portal sky subview
 	currentDepthImage = ImageFromFunction( "_currentDepth", R_DepthImage ); // #3877. Allow shaders to access scene depth
 	worldDepthImage = ImageFromFunction( "_worldDepth", R_DepthImage );	// DUDE ReSTIR DI: world-only depth (weapon deferred)
 

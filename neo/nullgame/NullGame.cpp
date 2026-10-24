@@ -19,7 +19,7 @@ Doom 3 GPL Source Code (see ArbProgram.h for license header)
 // Selected automatically when the active title's game library is missing and the title
 // allows it (GameTitle nullGameFallback), or explicitly with  +set fs_game nullgame.
 //
-// Console commands: getviewpos, setviewpos x y z [yaw [pitch]].
+// Console commands: getviewpos, setviewpos x y z [yaw [pitch]], listDressing.
 
 #include "sys/platform.h"
 #include "idlib/Lib.h"
@@ -30,7 +30,11 @@ Doom 3 GPL Source Code (see ArbProgram.h for license header)
 #include "framework/CVarSystem.h"
 #include "framework/FileSystem.h"
 #include "framework/DeclManager.h"
+#include "framework/DeclEntityDef.h"
 #include "framework/Game.h"
+#include "cm/CollisionModel.h"
+#include "tools/compilers/aas/AASFile.h"
+#include "tools/compilers/aas/AASFileManager.h"
 #include "renderer/RenderSystem.h"
 #include "renderer/RenderWorld.h"
 #include "sound/sound.h"
@@ -56,6 +60,8 @@ idCVar *					idCVar::staticVars = NULL;
 // without checking that it exists, so register it as the Doom 3 game libraries do
 // (gamesys/SysCvar.cpp).
 idCVar ui_name( "ui_name", "Player", CVAR_GAME | CVAR_USERINFO | CVAR_ARCHIVE, "player name" );
+// RoE's switch for the portal sky (d3xp gamesys/SysCvar.cpp), honoured for Quake 4's too
+idCVar g_enablePortalSky( "g_enablePortalSky", "1", CVAR_GAME | CVAR_BOOL, "enables the portal sky" );
 
 static const float	NULLGAME_FLY_SPEED		= 320.0f;	// units per second, doubled while running
 static const float	NULLGAME_BASE_FOV		= 90.0f;	// horizontal at 4:3, widened for the screen aspect
@@ -119,7 +125,9 @@ public:
 
 private:
 	gameReturn_t				EmptyReturn( void ) const;
-	void						FindPlayerStart( const idMapFile *mapFile, const char *mapName );
+	void						FindPlayerStart( const idMapFile *mapFile, const char *mapName, const char *entityFilter );
+	void						FindPortalSky( const idMapFile &mapFile );
+	void						CheckAAS( const idMapFile &mapFile );
 	idMat3						ViewAxis( void ) const;
 
 	idRenderWorld *				renderWorld;
@@ -133,6 +141,12 @@ private:
 	idAngles					viewAngles;			// what is drawn
 	idAngles					deltaViewAngles;	// view = usercmd angles + delta, so the start yaw sticks
 	short						lastCmdAngles[3];
+
+	// the map's portal sky camera, handed to the renderer: RoE's idPortalSky (its portalSky
+	// surfaces show the capture) or Quake 4's rvCameraPortalSky (its sky is where the world
+	// draws nothing)
+	bool						hasPortalSky;
+	idVec3						portalSkyOrigin;
 };
 
 static idNullGame		nullGame;
@@ -152,6 +166,8 @@ idNullGame::idNullGame( void ) {
 	viewAngles.Zero();
 	deltaViewAngles.Zero();
 	lastCmdAngles[0] = lastCmdAngles[1] = lastCmdAngles[2] = 0;
+	hasPortalSky = false;
+	portalSkyOrigin.Zero();
 }
 
 /*
@@ -164,6 +180,10 @@ static void NullGame_GetViewPos_f( const idCmdArgs &args ) {
 	idAngles angles;
 	nullGame.GetViewPos( origin, angles );
 	common->Printf( "(%s) %.1f %.1f\n", origin.ToString( 1 ), angles.yaw, angles.pitch );
+}
+
+static void NullGame_ListDressing_f( const idCmdArgs &args ) {
+	NullGameDressing::List();
 }
 
 static void NullGame_SetViewPos_f( const idCmdArgs &args ) {
@@ -220,6 +240,7 @@ void idNullGame::Init( void ) {
 
 	cmdSystem->AddCommand( "getviewpos", NullGame_GetViewPos_f, CMD_FL_GAME, "prints the null game camera position and angles" );
 	cmdSystem->AddCommand( "setviewpos", NullGame_SetViewPos_f, CMD_FL_GAME, "moves the null game camera: setviewpos x y z [yaw [pitch]]" );
+	cmdSystem->AddCommand( "listDressing", NullGame_ListDressing_f, CMD_FL_GAME, "lists the null game's dressed MD5 entities, their animation frame and heads" );
 }
 
 /*
@@ -229,7 +250,16 @@ idNullGame::Shutdown
 */
 void idNullGame::Shutdown( void ) {
 	MapShutdown();
+	collisionModelManager->FreeMap();		// as idGameLocal::Shutdown
 	cmdSystem->RemoveFlaggedCommands( CMD_FL_GAME );
+	// the dicts keep their keys and values in idDict's global string pools, which idLib::ShutDown
+	// frees: empty them first, as idGameLocal::Clear does, or their destructors - run when the
+	// engine unloads this library - hand strings back to freed pools (an assert on every quit)
+	serverInfo.Clear();
+	for ( int i = 0; i < MAX_ASYNC_CLIENTS; i++ ) {
+		userInfo[i].Clear();
+		persistentPlayerInfo[i].Clear();
+	}
 	idLib::ShutDown();
 }
 
@@ -288,10 +318,11 @@ idNullGame::FindPlayerStart
 
 Where to put the camera: the first info_player_start (or, failing that, any player
 start) of the parsed .map, at the eye height of a standing player. mapFile is NULL when
-the .map did not parse.
+the .map did not parse. A start of another level the .map holds is skipped (Quake 4's entity
+filter).
 ================
 */
-void idNullGame::FindPlayerStart( const idMapFile *mapFile, const char *mapName ) {
+void idNullGame::FindPlayerStart( const idMapFile *mapFile, const char *mapName, const char *entityFilter ) {
 	viewOrigin.Zero();
 	idAngles start( 0.0f, 0.0f, 0.0f );
 
@@ -301,13 +332,15 @@ void idNullGame::FindPlayerStart( const idMapFile *mapFile, const char *mapName 
 		const idMapEntity *best = NULL;
 		for ( int i = 0; i < mapFile->GetNumEntities() && best == NULL; i++ ) {
 			const idMapEntity *ent = mapFile->GetEntity( i );
-			if ( idStr::Icmp( ent->epairs.GetString( "classname" ), "info_player_start" ) == 0 ) {
+			if ( idStr::Icmp( ent->epairs.GetString( "classname" ), "info_player_start" ) == 0
+				 && !NullGameDressing::EntityFilteredOut( ent->epairs, entityFilter ) ) {
 				best = ent;
 			}
 		}
 		for ( int i = 0; i < mapFile->GetNumEntities() && best == NULL; i++ ) {
 			const idMapEntity *ent = mapFile->GetEntity( i );
-			if ( idStr::Icmpn( ent->epairs.GetString( "classname" ), "info_player_", 12 ) == 0 ) {
+			if ( idStr::Icmpn( ent->epairs.GetString( "classname" ), "info_player_", 12 ) == 0
+				 && !NullGameDressing::EntityFilteredOut( ent->epairs, entityFilter ) ) {
 				best = ent;
 			}
 		}
@@ -341,9 +374,88 @@ void idNullGame::InitFromNewMap( const char *mapName, idRenderWorld *rw, idSound
 
 	idMapFile mapFile;
 	const bool parsed = mapFile.Parse( mapName );
-	FindPlayerStart( parsed ? &mapFile : NULL, mapName );
+	// Quake 4: which of the levels the .map holds ("map game/process1 first")
+	const char *entityFilter = serverInfo.GetString( "si_entityFilter" );
+	if ( entityFilter[0] != '\0' ) {
+		common->Printf( "null game: entity filter '%s'\n", entityFilter );
+	}
+	FindPlayerStart( parsed ? &mapFile : NULL, mapName, entityFilter );
+	hasPortalSky = false;
 	if ( parsed ) {
-		NullGameDressing::Spawn( mapFile, renderWorld, gameTime );
+		// the collision map, as the Doom 3 game loads it (idGameLocal::LoadMap): nothing here
+		// traces against it yet, but loading it runs every map's .cm through the loader and
+		// prints its statistics; the manager drops the previous map's when the map changes
+		collisionModelManager->LoadMap( &mapFile );
+		CheckAAS( mapFile );
+		FindPortalSky( mapFile );
+		NullGameDressing::Spawn( mapFile, renderWorld, gameTime, entityFilter );
+	}
+}
+
+/*
+================
+idNullGame::CheckAAS
+
+Loads the map's navigation files the way the Doom 3 game does (idGameLocal::LoadMap: one per
+"type" of the aas_types entityDef, with the map's geometry CRC), reports each and frees it:
+nothing routes in the null game, but every map's files go through the loader. Quake 4 lists
+five sizes; a size the map has no use for is a dummy file (settings, no areas).
+================
+*/
+void idNullGame::CheckAAS( const idMapFile &mapFile ) {
+	const idDecl *decl = declManager->FindType( DECL_ENTITYDEF, "aas_types", false );
+	if ( decl == NULL ) {
+		return;
+	}
+	const idDict &types = static_cast<const idDeclEntityDef *>( decl )->dict;
+	for ( const idKeyValue *kv = types.MatchPrefix( "type" ); kv != NULL; kv = types.MatchPrefix( "type", kv ) ) {
+		idStr fileName = mapFile.GetName();
+		fileName.SetFileExtension( kv->GetValue() );
+		idAASFile *file = AASFileManager->LoadAAS( fileName, mapFile.GetGeometryCRC() );
+		if ( file == NULL ) {
+			common->Printf( "null game: %s did not load\n", fileName.c_str() );
+			continue;
+		}
+		if ( file->IsDummyFile() ) {
+			common->Printf( "null game: %s is a dummy (no areas)\n", fileName.c_str() );
+		} else {
+			common->Printf( "null game: %s: %d areas, %d clusters, %d tactical features\n", fileName.c_str(),
+				file->GetNumAreas(), file->GetNumClusters(), file->GetNumFeatures() );
+		}
+		AASFileManager->FreeAAS( file );
+	}
+}
+
+/*
+================
+idNullGame::FindPortalSky
+
+RoE: an idPortalSky (info_portalSky) without "triggered" makes itself the sky after it
+spawns, so the last such one wins. Quake 4: a single rvCameraPortalSky
+(func_camera_portalsky).
+================
+*/
+void idNullGame::FindPortalSky( const idMapFile &mapFile ) {
+	for ( int i = 1; i < mapFile.GetNumEntities(); i++ ) {
+		const idDict &epairs = mapFile.GetEntity( i )->epairs;
+		const char *spawnclass = epairs.GetString( "spawnclass" );
+		if ( spawnclass[0] == '\0' ) {
+			const idDecl *decl = declManager->FindType( DECL_ENTITYDEF, epairs.GetString( "classname" ), false );
+			if ( decl != NULL ) {
+				spawnclass = static_cast<const idDeclEntityDef *>( decl )->dict.GetString( "spawnclass" );
+			}
+		}
+		const bool roe = idStr::Icmp( spawnclass, "idPortalSky" ) == 0;
+		if ( roe && epairs.GetBool( "triggered" ) ) {
+			continue;		// RoE: inactive until a trigger makes it current
+		}
+		if ( roe || idStr::Icmp( spawnclass, "rvCameraPortalSky" ) == 0 ) {
+			hasPortalSky = true;
+			portalSkyOrigin = epairs.GetVector( "origin" );
+		}
+	}
+	if ( hasPortalSky ) {
+		common->Printf( "null game: portal sky camera at %s\n", portalSkyOrigin.ToString( 0 ) );
 	}
 }
 
@@ -477,6 +589,11 @@ bool idNullGame::Draw( int clientNum ) {
 	view.viewaxis = ViewAxis();
 	view.time = gameTime;
 	view.globalMaterial = NULL;
+
+	// the portal sky: the renderer draws it as a subview of this view and puts it behind the
+	// world (idRenderWorld::SetPortalSkyCamera), as Quake 4's renderer does for RF_PORTAL_SKY -
+	// a second top-level view here would feed the temporal and RT passes the sky camera
+	renderWorld->SetPortalSkyCamera( hasPortalSky && g_enablePortalSky.GetBool(), portalSkyOrigin );
 
 	renderWorld->RenderScene( &view );
 	return true;

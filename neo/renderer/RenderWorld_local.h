@@ -56,6 +56,15 @@ typedef struct doublePortal_s {
 	// fog volume over each portal.
 	idRenderLightLocal *		fogLight;
 	struct doublePortal_s *	nextFoggedPortal;
+
+	// DUDE: Quake 4 portal fade (.proc "( fadeImage distanceNear distanceFar )"): farther than
+	// fadeFar from the view the portal is drawn opaque with fadeMaterial and closes; between
+	// fadeNear and fadeFar it fades in. NULL fadeMaterial: an ordinary portal.
+	const idMaterial *		fadeMaterial;
+	idVec3					fadeColor;		// tints fadeMaterial (shader parms 0-2)
+	float					fadeNear;
+	float					fadeFar;
+	int						fadeViewCount;	// tr.viewCount of the view that last drew the fade
 } doublePortal_t;
 
 
@@ -96,6 +105,7 @@ public:
 	virtual const renderLight_t *GetRenderLight( qhandle_t lightHandle ) const;
 
 	virtual bool			CheckAreaForPortalSky( int areaNum );
+	virtual void			SetPortalSkyCamera( bool enable, const idVec3 &origin );	// DUDE
 
 	virtual	void			GenerateAllInteractions();
 	virtual void			RegenerateWorld();
@@ -154,6 +164,16 @@ public:
 	doublePortal_t *		doublePortals;
 	int						numInterAreaPortals;
 
+	// DUDE: the loaded .proc's format: 3 = Doom 3 "mapProcFile003", 4 = Quake 4 PROC "4"
+	// (optional vertex colours, portal fades, the map's CRC after the version)
+	int						procVersion;
+	unsigned int			procMapCrc;
+	idList<int>				areaSkies;			// Quake 4: per area, non-zero = the area shows the portal sky (HasSkybox)
+
+	// DUDE: SetPortalSkyCamera
+	bool					portalSkyCameraSet;
+	idVec3					portalSkyCameraOrigin;
+
 	idList<idRenderModel *>	localModels;
 
 	idList<idRenderEntityLocal*>	entityDefs;
@@ -202,6 +222,7 @@ public:
 	idScreenRect			ScreenRectFromWinding( const idWinding *w, viewEntity_t *space );
 	bool					PortalIsFoggedOut( const portal_t *p );
 	void					FloodViewThroughArea_r( const idVec3 origin, int areaNum, const struct portalStack_s *ps );
+	void					AddPortalFade( const portal_t *p, float distance );		// DUDE: Quake 4
 	void					FlowViewThroughPortals( const idVec3 origin, int numPlanes, const idPlane *planes );
 	void					FloodLightThroughArea_r( idRenderLightLocal *light, int areaNum, const struct portalStack_s *ps );
 	void					FlowLightThroughPortals( idRenderLightLocal *light );

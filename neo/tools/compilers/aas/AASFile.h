@@ -43,6 +43,7 @@ If you have questions concerning this license or the applicable additional terms
 
 #define AAS_FILEID					"DewmAAS"
 #define AAS_FILEVERSION				"1.07"
+#define AAS_FILEVERSION_QUAKE4		"1.08"		// DUDE: read only - this engine writes 1.07
 
 // travel flags
 #define TFL_INVALID					BIT(0)		// not valid
@@ -170,6 +171,27 @@ typedef struct aasArea_s {
 	idReachability *			rev_reach;			// reachabilities that lead to this area
 } aasArea_t;
 
+// DUDE: Quake 4 (DewmAAS 1.08) tactical feature - a cover, corner, pinch or vantage spot for the
+// AI's tactical search, in the layout of Raven's aasFeature_t (12 bytes). A file row holds flags,
+// height, normalx, normaly, x, y, z; the weight is not stored.
+typedef struct aasFeature_s {
+	short						x;					// position
+	short						y;
+	short						z;
+	unsigned short				flags;				// what the spot offers (cover, corner, ...)
+	unsigned char				normalx;			// facing, 0..254 for -1..1 (127 = 0)
+	unsigned char				normaly;
+	unsigned char				height;				// 72 standing / 48 crouched in the retail files
+	unsigned char				weight;
+} aasFeature_t;
+
+// DUDE: a Quake 4 area's run in the feature index - Raven's aasArea_t numFeatures / firstFeature,
+// kept beside the areas because Doom 3 game libraries read aasArea_t inline
+typedef struct aasAreaFeatures_s {
+	unsigned short				numFeatures;
+	unsigned short				firstFeature;
+} aasAreaFeatures_t;
+
 // nodes of the bsp tree
 typedef struct aasNode_s {
 	unsigned short				planeNum;			// number of the plane that splits the subspace at this node
@@ -239,6 +261,9 @@ public:
 	int							tt_startCrouching;
 	int							tt_waterJump;
 	int							tt_startWalkOffLedge;
+								// DUDE: Quake 4 - the file has tactical features (appended: an idAASFile's
+								// settings are read inline by game libraries, and it is that class's last member)
+	bool						generateTacticalFeatures;
 
 public:
 								idAASSettings( void );
@@ -315,6 +340,23 @@ public:
 
 	const idAASSettings &		GetSettings( void ) const { return settings; }
 
+	// DUDE: Quake 4 (DewmAAS 1.08). A dummy file stands for a size the map has no use for: its
+	// settings and empty sections (a real one always has area 0); Raven's game frees it. The
+	// tactical features: an area's run in the feature index, which points into the features.
+	bool						IsDummyFile( void ) const { return areas.Num() == 0; }
+	int							GetNumFeatures( void ) const { return features.Num(); }
+	const aasFeature_t &		GetFeature( int index ) const { return features[index]; }
+	int							GetNumFeatureIndexes( void ) const { return featureIndex.Num(); }
+	const aasIndex_t &			GetFeatureIndex( int index ) const { return featureIndex[index]; }
+	void						GetAreaFeatures( int areaNum, int &firstFeature, int &numFeatures ) const {
+									if ( areaNum >= 0 && areaNum < areaFeatures.Num() ) {
+										firstFeature = areaFeatures[areaNum].firstFeature;
+										numFeatures = areaFeatures[areaNum].numFeatures;
+									} else {
+										firstFeature = numFeatures = 0;		// a Doom 3 file
+									}
+								}
+
 	void						SetPortalMaxTravelTime( int index, int time ) { portals[index].maxAreaTravelTime = time; }
 	void						SetAreaTravelFlag( int index, int flag ) { areas[index].travelFlags |= flag; }
 	void						RemoveAreaTravelFlag( int index, int flag ) { areas[index].travelFlags &= ~flag; }
@@ -350,6 +392,10 @@ protected:
 	idList<aasIndex_t>			portalIndex;
 	idList<aasCluster_t>		clusters;
 	idAASSettings				settings;
+	// DUDE: Quake 4, after every member Doom 3 game libraries read inline; empty for a Doom 3 file
+	idList<aasAreaFeatures_t>	areaFeatures;		// per area, parallel to areas
+	idList<aasIndex_t>			featureIndex;
+	idList<aasFeature_t>		features;
 };
 
 #endif /* !__AASFILE_H__ */

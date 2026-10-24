@@ -57,6 +57,12 @@ static void GL_SelectTextureNoClient( int unit ) {
 	qglActiveTextureARB( GL_TEXTURE0_ARB + unit );
 }
 
+// DUDE: the loaded glprogs/interaction.vfp takes the vertex colour factors packed into one
+// parameter - Quake 4's: "MAD result.color, vertex.color, program.env[16].x, program.env[16].y" -
+// where Doom 3's reads env[16] (modulate) and env[17] (add) as vectors. Set by R_LoadARBProgram
+// from the program text, so any title or mod shipping either form is fed the one it reads.
+static bool interactionPackedVertexColor = false;
+
 /*
 ==================
 RB_ARB2_DrawInteraction
@@ -87,7 +93,15 @@ void	RB_ARB2_DrawInteraction( const drawInteraction_t *din ) {
 	static const float one[4] = { 1, 1, 1, 1 };
 	static const float negOne[4] = { -1, -1, -1, -1 };
 
-	switch ( din->vertexColor ) {
+	if ( interactionPackedVertexColor ) {
+		// modulate in .x, add in .y (fed Doom 3's layout, every surface without vertex colour -
+		// modulate 0, add 1 - came out black under Quake 4's program)
+		static const float ignore[4] = { 0, 1, 0, 0 };
+		static const float modulate[4] = { 1, 0, 0, 0 };
+		static const float inverseModulate[4] = { -1, 1, 0, 0 };
+		qglProgramEnvParameter4fvARB( GL_VERTEX_PROGRAM_ARB, PP_COLOR_MODULATE,
+			din->vertexColor == SVC_MODULATE ? modulate : din->vertexColor == SVC_INVERSE_MODULATE ? inverseModulate : ignore );
+	} else switch ( din->vertexColor ) {
 	case SVC_IGNORE:
 		qglProgramEnvParameter4fvARB( GL_VERTEX_PROGRAM_ARB, PP_COLOR_MODULATE, zero );
 		qglProgramEnvParameter4fvARB( GL_VERTEX_PROGRAM_ARB, PP_COLOR_ADD, one );
@@ -594,6 +608,13 @@ void R_LoadARBProgram( int progIndex ) {
 		return;
 	}
 	end[3] = 0;
+
+	if ( progs[progIndex].ident == VPROG_INTERACTION ) {
+		interactionPackedVertexColor = strstr( start, "program.env[16].x" ) != NULL;
+		if ( interactionPackedVertexColor ) {
+			common->Printf( " (vertex colour factors packed in env[16].xy)" );
+		}
+	}
 
 	// DG: hack gamma correction into shader
 	if ( r_gammaInShader.GetBool() && progs[progIndex].target == GL_FRAGMENT_PROGRAM_ARB

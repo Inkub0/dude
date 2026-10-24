@@ -182,6 +182,7 @@ public:
 
 	void				ScrubSaveGameFileName( idStr &saveFileName ) const;
 	idStr				GetAutoSaveName( const char *mapName ) const;
+	const idDeclEntityDef *	FindMapDef( const char *mapName ) const;		// DUDE: honours a Quake 4 entity filter
 
 	bool				LoadGame(const char *saveName);
 	// DG: added saveFileName so we can set a sensible filename for autosaves (see comment in MoveToNewMap())

@@ -29,6 +29,7 @@ If you have questions concerning this license or the applicable additional terms
 #include "sys/platform.h"
 
 #include "renderer/tr_local.h"
+#include "renderer/RenderWorld_local.h"
 
 typedef struct {
 	idVec3		origin;
@@ -221,6 +222,8 @@ static viewDef_t *R_MirrorViewBySurface( drawSurf_t *drawSurf ) {
 
 	parms->isSubview = true;
 	parms->isMirror = true;
+	parms->isPortalSkyView = false;	// DUDE: a mirror inside the sky room is not the sky
+	parms->drewPortalSky = false;
 
 	// create plane axis for the portal we are seeing
 	R_PlaneForSurface( drawSurf->geo, originalPlane );
@@ -274,6 +277,8 @@ static viewDef_t *R_XrayViewBySurface( drawSurf_t *drawSurf ) {
 
 	parms->isSubview = true;
 	parms->isXraySubview = true;
+	parms->isPortalSkyView = false;
+	parms->drewPortalSky = false;
 
 	return parms;
 }
@@ -302,6 +307,8 @@ static void R_RemoteRender( drawSurf_t *surf, textureStage_t *stage ) {
 
 	parms->isSubview = true;
 	parms->isMirror = false;
+	parms->isPortalSkyView = false;
+	parms->drewPortalSky = false;
 
 	parms->renderView = *surf->space->entityDef->parms.remoteRenderView;
 	parms->renderView.viewID = 0;	// clear to allow player bodies to show up, and suppress view weapons
@@ -558,6 +565,60 @@ bool	R_GenerateSurfaceSubview( drawSurf_t *drawSurf ) {
 	// generate render commands for it
 	R_RenderView( parms );
 
+	return true;
+}
+
+/*
+================
+R_PortalSkyRender
+
+DUDE: the portal sky as a subview of the primary view. A game that sets a sky camera
+(idRenderWorld::SetPortalSkyCamera; the null game does, for Quake 4 and RoE maps) gets the
+sky rendered from there with the primary view's direction and field of view, as Quake 4's
+idPlayerView::SingleView renders it - but nested in this view rather than as a second
+top-level view, so the temporal and RT passes (FSR2, NRD, ReSTIR, the once-per-frame RT
+staging) only ever see the player's view. The backend captures the sky into _portalSky (and
+_currentRender, for RoE's portalSky surfaces), clears the colour again, and this view puts it
+behind its world (RB_RHI_PortalSkyComposite).
+
+Rendered only when an area this view reached shows sky (Quake 4's idGameLocal test through
+HasSkybox; a map without the .proc data always qualifies). Called after the view's RT
+staging, so the sky never takes the frame's once-per-frame slots.
+================
+*/
+bool R_PortalSkyRender( void ) {
+	viewDef_t *parent = tr.viewDef;
+	// the player's view, and a glass probe face (bakeGlassProbe: six tile-sized top-level views
+	// that are not window views) - else the probe's sky directions show whatever _currentRender
+	// last held through RoE's portal_sky surfaces, a stale picture of the player's view
+	if ( parent == NULL || parent->isSubview || ( !parent->isWindowView && !tr.takingEnvProbe )
+	     || parent->viewEntitys == NULL ) {
+		return false;
+	}
+	idRenderWorldLocal *world = static_cast<idRenderWorldLocal *>( parent->renderWorld );
+	if ( world == NULL || !world->portalSkyCameraSet ) {
+		return false;
+	}
+	if ( world->areaSkies.Num() > 0 && !parent->seesSkyArea ) {
+		return false;		// recorded during the view's portal flood (AddAreaRefs)
+	}
+
+	viewDef_t *parms = (viewDef_t *)R_FrameAlloc( sizeof( *parms ) );
+	*parms = *parent;
+	parms->renderView.viewID = 0;		// like every subview: no view weapons, no per-player emissive sets
+	parms->renderView.vieworg = world->portalSkyCameraOrigin;
+	parms->initialViewAreaOrigin = world->portalSkyCameraOrigin;
+	parms->isSubview = true;
+	parms->isXraySubview = false;
+	parms->isPortalSkyView = true;
+	parms->drewPortalSky = false;
+	parms->numClipPlanes = 0;
+	parms->superView = parent;
+	parms->subviewSurface = NULL;
+
+	R_RenderView( parms );
+
+	parent->drewPortalSky = true;
 	return true;
 }
 

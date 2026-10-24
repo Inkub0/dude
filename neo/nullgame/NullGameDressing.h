@@ -22,18 +22,28 @@ Doom 3 GPL Source Code (see ArbProgram.h for license header)
 #ifndef __NULLGAMEDRESSING_H__
 #define __NULLGAMEDRESSING_H__
 
+class idDict;
 class idMapFile;
 class idRenderWorld;
 
 namespace NullGameDressing {
 
 // Adds the map's entities to the render world. Call once the session has loaded the
-// map's render world (idGame::InitFromNewMap).
-void		Spawn( const idMapFile &mapFile, idRenderWorld *renderWorld, int gameTime );
+// map's render world (idGame::InitFromNewMap). entityFilter: the serverinfo si_entityFilter.
+void		Spawn( const idMapFile &mapFile, idRenderWorld *renderWorld, int gameTime, const char *entityFilter );
+
+// Quake 4's entity filter (idGameLocal::InhibitEntitySpawn): with a filter chosen ("map
+// game/process1 first" sets si_entityFilter), an entity that names any filter_* key spawns only
+// if it names filter_<filter>. Entities without such keys, and all of them when no filter is
+// chosen (every Doom 3 map), spawn.
+bool		EntityFilteredOut( const idDict &spawnArgs, const char *entityFilter );
 
 // Removes what Spawn added. With renderWorld NULL the render world has already been
 // reset (a new map was loaded into it), so only the bookkeeping is dropped.
 void		Clear( idRenderWorld *renderWorld );
+
+// listDressing: the MD5 entities placed, their animation frame and heads.
+void		List( void );
 
 }
 

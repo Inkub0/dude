@@ -88,6 +88,8 @@ private:
 	bool						ParseNodes( idLexer &src );
 	bool						ParsePortals( idLexer &src );
 	bool						ParseClusters( idLexer &src );
+	bool						ParseFeatures( idLexer &src );		// DUDE: Quake 4
+	void						CheckFeatures( void ) const;
 
 private:
 	int							BoundsReachableAreaNum_r( int nodeNum, const idBounds &bounds, const int areaFlags, const int excludeTravelFlags ) const;
@@ -96,6 +98,9 @@ private:
 	int							AreaContentsTravelFlags( int areaNum ) const;
 	idVec3						AreaReachableGoal( int areaNum ) const;
 	int							NumReachabilities( void ) const;
+
+private:
+	bool						quake4File;		// DUDE: the file being loaded is Quake 4's DewmAAS 1.08
 };
 
 #endif /* !__AASFILELOCAL_H__ */

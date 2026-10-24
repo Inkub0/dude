@@ -6444,6 +6444,9 @@ void R_RenderView( viewDef_t *parms ) {
 	// lists
 	R_AddModelSurfaces();
 
+	// DUDE: Quake 4 portal fades the flood above found (R_AddModelSurfaces starts the list afresh)
+	R_AddPortalFadeSurfaces();
+
 	// GPU cull validation (docs/gpu-offload-plan.md): once/sec, frustum-cull an object set on the
 	// GPU and diff against R_CullLocalBox. No draw; front-end (tr.viewDef live, frustum constrained,
 	// no backend pass open, so DispatchSync is safe). Vulkan only; both self-gate when off.
@@ -6472,6 +6475,10 @@ void R_RenderView( viewDef_t *parms ) {
 
 	// sort all the ambient surfaces for translucency ordering
 	R_SortDrawSurfs();
+
+	// DUDE: the portal sky, if the world has a sky camera and this primary view sees sky; its
+	// draw command goes in before every other subview's and this view's (see R_PortalSkyRender)
+	R_PortalSkyRender();
 
 	// generate any subviews (mirrors, cameras, etc) before adding this view
 	if ( R_GenerateSubViews() ) {

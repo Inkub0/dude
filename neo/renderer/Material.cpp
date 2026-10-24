@@ -721,9 +721,7 @@ static const infoParm_t	infoParms[] = {
 	{"flyclip",				0,	0,	CONTENTS_FLYCLIP },
 	{"itemclip",			0,	0,	CONTENTS_ITEMCLIP },
 	{"projectileclip",		0,	0,	CONTENTS_PROJECTILECLIP },
-	// textures/common/shot_clip: no game mask tests a shot-clip bit and no retail .cm file
-	// contains one (dmap bakes brush contents into the .cm), so it carries no flag
-	{"shotclip",			0,	0,	0 },
+	{"shotclip",			0,	0,	CONTENTS_SHOTCLIP },		// textures/common/shot_clip, trigshotclip
 
 	// material types for particle, sound, footstep feedback
 	{"metal",		0,  SURFTYPE_METAL,		0 },	// metal

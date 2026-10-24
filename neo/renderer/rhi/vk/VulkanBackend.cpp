@@ -187,6 +187,7 @@ public:
 
 	// ---- frame ----
 	virtual void	BeginFrame( int windowWidth, int windowHeight );
+	virtual int		SceneImageHeight();
 	virtual void	EndFrame();
 	virtual void	SetFramePresent( bool present );
 
@@ -3008,6 +3009,19 @@ uint64_t VulkanBackend::ComputeGfxCfgSignature() const {
 	mixI( r_rtLightGridSlots ); mixI( r_rtLightGridRes ); mixI( r_rtLightGridCascades );
 	mixB( r_rtEmissiveLighting ); mixB( r_rtEmissiveBounce ); mixB( r_rtEmissiveTable ); mixI( r_rtEmissiveGridSlots );		// E2: the emitter rows enter / leave the scene-light buffer and the grid with these (idle the device on the flip)
 	return h;
+}
+
+/*
+====================
+VulkanBackend::SceneImageHeight
+
+DUDE: the image the scene pass draws into this frame - the frame target (HDR / post
+buffer) when one is routed, else the scene image - the height every GL->VK row flip uses.
+====================
+*/
+int VulkanBackend::SceneImageHeight() {
+	const RenderTarget *ft = ( frameTarget != 0 ) ? LookupTarget( frameTarget ) : NULL;
+	return ( ft != NULL && ft->colorTarget ) ? ft->h : (int)sceneExtent.height;
 }
 
 /*

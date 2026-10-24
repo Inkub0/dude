@@ -115,6 +115,26 @@ void Session_RescanSI_f( const idCmdArgs &args ) {
 
 #ifndef	ID_DEDICATED
 /*
+===============
+Session_SetEntityFilter
+
+DUDE: Quake 4 keeps more than one level in some .map files (process1, storage1): "map
+game/process1 first" spawns the entities marked "filter_first" plus those that name no
+filter_* key. The game reads the choice from serverinfo si_entityFilter - a console map
+rebuilds serverinfo from the CVAR_SERVERINFO cvars, a game-issued map change keeps it - and
+the session finds the level's mapDef as <map>_<filter> (FindMapDef). Always set, so one map's
+filter never carries into the next; a title without entity filters (Doom 3) never gets it.
+===============
+*/
+static void Session_SetEntityFilter( const char *filter ) {
+	if ( !GameTitle::Get().entityFilters ) {
+		return;
+	}
+	cvarSystem->SetCVarString( "si_entityFilter", filter, CVAR_SERVERINFO );
+	sessLocal.mapSpawnData.serverInfo.Set( "si_entityFilter", filter );
+}
+
+/*
 ==================
 Session_Map_f
 
@@ -152,12 +172,16 @@ static void Session_Map_f( const idCmdArgs &args ) {
 		common->Printf( "map %s is in an addon pak - reloading\n", string.c_str() );
 		rl_args.AppendArg( "map" );
 		rl_args.AppendArg( map );
+		if ( GameTitle::Get().entityFilters && args.Argv( 2 )[0] != '\0' ) {
+			rl_args.AppendArg( args.Argv( 2 ) );
+		}
 		cmdSystem->SetupReloadEngine( rl_args );
 		return;
 	default:
 		break;
 	}
 
+	Session_SetEntityFilter( args.Argv( 2 ) );
 	cvarSystem->SetCVarBool( "developer", false );
 	sessLocal.StartNewGame( map, true );
 }
@@ -193,12 +217,16 @@ static void Session_DevMap_f( const idCmdArgs &args ) {
 		common->Printf( "map %s is in an addon pak - reloading\n", string.c_str() );
 		rl_args.AppendArg( "devmap" );
 		rl_args.AppendArg( map );
+		if ( GameTitle::Get().entityFilters && args.Argv( 2 )[0] != '\0' ) {
+			rl_args.AppendArg( args.Argv( 2 ) );
+		}
 		cmdSystem->SetupReloadEngine( rl_args );
 		return;
 	default:
 		break;
 	}
 
+	Session_SetEntityFilter( args.Argv( 2 ) );
 	cvarSystem->SetCVarBool( "developer", true );
 	sessLocal.StartNewGame( map, true );
 }
@@ -1518,12 +1546,31 @@ void idSessionLocal::StartNewGame( const char *mapName, bool devmap ) {
 
 /*
 ===============
+idSessionLocal::FindMapDef
+
+DUDE: the mapDef of the level being played: <map>_<filter> when a Quake 4 entity filter picks
+one of the levels the .map holds (Session_SetEntityFilter), else <map>.
+===============
+*/
+const idDeclEntityDef *idSessionLocal::FindMapDef( const char *mapName ) const {
+	const idDecl *mapDecl = NULL;
+	const char *entityFilter = mapSpawnData.serverInfo.GetString( "si_entityFilter" );
+	if ( GameTitle::Get().entityFilters && entityFilter[0] != '\0' ) {
+		mapDecl = declManager->FindType( DECL_MAPDEF, va( "%s_%s", mapName, entityFilter ), false );
+	}
+	if ( mapDecl == NULL ) {
+		mapDecl = declManager->FindType( DECL_MAPDEF, mapName, false );
+	}
+	return static_cast<const idDeclEntityDef *>( mapDecl );
+}
+
+/*
+===============
 idSessionLocal::GetAutoSaveName
 ===============
 */
 idStr idSessionLocal::GetAutoSaveName( const char *mapName ) const {
-	const idDecl *mapDecl = declManager->FindType( DECL_MAPDEF, mapName, false );
-	const idDeclEntityDef *mapDef = static_cast<const idDeclEntityDef *>( mapDecl );
+	const idDeclEntityDef *mapDef = FindMapDef( mapName );
 	if ( mapDef ) {
 		mapName = common->GetLanguageDict()->GetString( mapDef->dict.GetString( "name", mapName ) );
 	}
@@ -1539,8 +1586,7 @@ DUDE: display name of an Ultra Nightmare checkpoint (the .txt description line)
 ===============
 */
 idStr idSessionLocal::GetUltraNightmareSaveName( const char *mapName ) const {
-	const idDecl *mapDecl = declManager->FindType( DECL_MAPDEF, mapName, false );
-	const idDeclEntityDef *mapDef = static_cast<const idDeclEntityDef *>( mapDecl );
+	const idDeclEntityDef *mapDef = FindMapDef( mapName );
 	if ( mapDef ) {
 		mapName = common->GetLanguageDict()->GetString( mapDef->dict.GetString( "name", mapName ) );
 	}
@@ -1613,6 +1659,12 @@ void idSessionLocal::MoveToNewMap( const char *mapName ) {
 		//      dots and everything behind them was cut off as "file extension".. see #305)
 		idStr saveFileName = "Autosave_";
 		saveFileName += mapName;
+		// DUDE: Quake 4's two levels in one .map need their own autosaves
+		const char *entityFilter = mapSpawnData.serverInfo.GetString( "si_entityFilter" );
+		if ( GameTitle::Get().entityFilters && entityFilter[0] != '\0' ) {
+			saveFileName += "_";
+			saveFileName += entityFilter;
+		}
 		SaveGame( GetAutoSaveName( mapName ), true, saveFileName );
 	}
 
@@ -1839,6 +1891,14 @@ void idSessionLocal::LoadLoadingGui( const char *mapName ) {
 		guiLoading = uiManager->FindGui( GameTitle::Get().loadingGui, true, false, true );
 	}
 	guiLoading->SetStateFloat( "map_loading", 0.0f );
+	// DUDE: Quake 4's loading screen (guis/loading/generic.gui) shows the level's picture and
+	// name from its mapDef; Doom 3's mapDefs have no loadimage and its per-map GUIs carry both
+	const idDeclEntityDef *mapDef = FindMapDef( mapName );
+	if ( mapDef != NULL && mapDef->dict.GetString( "loadimage" )[0] != '\0' ) {
+		guiLoading->SetStateString( "loading_bkgnd", mapDef->dict.GetString( "loadimage" ) );
+		guiLoading->SetStateString( "loading_levelname",
+			common->GetLanguageDict()->GetString( mapDef->dict.GetString( "name", mapName ) ) );
+	}
 }
 
 /*
@@ -1847,8 +1907,7 @@ idSessionLocal::GetBytesNeededForMapLoad
 ===============
 */
 int idSessionLocal::GetBytesNeededForMapLoad( const char *mapName ) {
-	const idDecl *mapDecl = declManager->FindType( DECL_MAPDEF, mapName, false );
-	const idDeclEntityDef *mapDef = static_cast<const idDeclEntityDef *>( mapDecl );
+	const idDeclEntityDef *mapDef = FindMapDef( mapName );
 	if ( mapDef ) {
 		return mapDef->dict.GetInt( va("size%d", Max( 0, com_machineSpec.GetInteger() ) ) );
 	} else {
@@ -1866,8 +1925,7 @@ idSessionLocal::SetBytesNeededForMapLoad
 ===============
 */
 void idSessionLocal::SetBytesNeededForMapLoad( const char *mapName, int bytesNeeded ) {
-	idDecl *mapDecl = const_cast<idDecl *>(declManager->FindType( DECL_MAPDEF, mapName, false ));
-	idDeclEntityDef *mapDef = static_cast<idDeclEntityDef *>( mapDecl );
+	idDeclEntityDef *mapDef = const_cast<idDeclEntityDef *>( FindMapDef( mapName ) );
 
 	if ( com_updateLoadSize.GetBool() && mapDef ) {
 		// we assume that if com_updateLoadSize is true then the file is writable
@@ -3429,10 +3487,12 @@ void idSessionLocal::RunGameTic() {
 			// won't get the map testing items
 			mapSpawnData.serverInfo.Delete( "devmap" );
 
-			// go to the next map
+			// go to the next map (Quake 4's target_endLevel adds the level's entity filter)
+			Session_SetEntityFilter( args.Argv( 2 ) );
 			MoveToNewMap( args.Argv(1) );
 		} else if ( !idStr::Icmp( args.Argv(0), "devmap" ) ) {
 			mapSpawnData.serverInfo.Set( "devmap", "1" );
+			Session_SetEntityFilter( args.Argv( 2 ) );
 			MoveToNewMap( args.Argv(1) );
 		} else if ( !idStr::Icmp( args.Argv(0), "died" ) ) {
 			// DUDE: Ultra Nightmare — death ends the run: erase its checkpoint. The player then gets

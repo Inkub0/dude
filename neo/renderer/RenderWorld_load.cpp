@@ -78,6 +78,8 @@ void idRenderWorldLocal::FreeWorld() {
 		doublePortals = NULL;
 		numInterAreaPortals = 0;
 	}
+	areaSkies.Clear();
+	portalSkyCameraSet = false;		// DUDE: the game sets it again for the new map
 
 	if ( areaNodes ) {
 		R_StaticFree( areaNodes );
@@ -136,6 +138,22 @@ idRenderModel *idRenderWorldLocal::ParseModel( idLexer *src ) {
 		src->Error( "R_ParseModel: bad numSurfaces" );
 	}
 
+	// DUDE: a Quake 4 area model names the area's sky after its surface count:
+	// "_area0" /* numSurfaces = */ 1 /* sky */ 0
+	idToken skyToken;
+	if ( procVersion >= 4 && src->PeekTokenType( TT_NUMBER, 0, &skyToken ) ) {
+		const int sky = src->ParseInt();
+		if ( !idStr::Icmpn( model->Name(), "_area", 5 ) ) {
+			const int area = atoi( model->Name() + 5 );
+			if ( area >= 0 ) {
+				while ( areaSkies.Num() <= area ) {
+					areaSkies.Append( 0 );
+				}
+				areaSkies[area] = sky;
+			}
+		}
+	}
+
 	for ( i = 0 ; i < numSurfaces ; i++ ) {
 		src->ExpectTokenString( "{" );
 
@@ -155,7 +173,21 @@ idRenderModel *idRenderWorldLocal::ParseModel( idLexer *src ) {
 		for ( j = 0 ; j < tri->numVerts ; j++ ) {
 			float	vec[8];
 
-			src->Parse1DMatrix( 8, vec );
+			// ( x y z s t nx ny nz ), as Parse1DMatrix( 8 ) reads it; DUDE: a Quake 4 .proc
+			// may add the vertex colour, ( ... r g b a ) in 0-255, and its uncoloured
+			// vertices are white, as model loaders leave a mesh without colours
+			src->ExpectTokenString( "(" );
+			for ( int k = 0; k < 8; k++ ) {
+				vec[k] = src->ParseFloat();
+			}
+			if ( !src->CheckTokenString( ")" ) ) {
+				for ( int k = 0; k < 4; k++ ) {
+					tri->verts[j].color[k] = (byte)idMath::ClampInt( 0, 255, idMath::FtoiFast( src->ParseFloat() ) );
+				}
+				src->ExpectTokenString( ")" );
+			} else if ( procVersion >= 4 ) {
+				tri->verts[j].color[0] = tri->verts[j].color[1] = tri->verts[j].color[2] = tri->verts[j].color[3] = 255;
+			}
 
 			tri->verts[j].xyz[0] = vec[0];
 			tri->verts[j].xyz[1] = vec[1];
@@ -311,6 +343,36 @@ void idRenderWorldLocal::ParseInterAreaPortals( idLexer *src ) {
 			// no texture coordinates
 			(*w)[j][3] = 0;
 			(*w)[j][4] = 0;
+		}
+
+		// DUDE: Quake 4's optional portal fade, ( fadeImage distanceNear distanceFar ); the next
+		// portal starts with a number, so a "(" here can only be this. The image's implicit
+		// material ("blend blend", "colored") draws it - AddPortalFade
+		if ( src->CheckTokenString( "(" ) ) {
+			idToken image;
+			src->ReadToken( &image );
+			if ( image.Icmp( "_black" ) == 0 ) {
+				// this engine generates _black with zero alpha (R_BlackImage), which "blend
+				// blend" would never show: a black fade is the opaque white "_portalFade"
+				// built-in tinted black by the shader parms, so only its alpha (255) counts.
+				// Its own decl, as "_white" is sorted SS_GUI by the GUI device context and
+				// "_flat" has alpha 128 unless image_useNormalCompression is 1.
+				// Sorted just before the decals: every retail fade portal has a "sort decal"
+				// glass pane in its plane, whose reflection stays on top of the darkened view
+				// (the image's default SS_MEDIUM drew the fade over it). Below SS_DECAL, not
+				// at it, so the decal-only paths (polygon offset, blood film) leave it alone;
+				// set again on every load, since BeginLevelLoad purges the decl
+				const idMaterial *fade = declManager->FindMaterial( "_portalFade" );
+				fade->SetSort( SS_DECAL - 0.5f );
+				doublePortals[i].fadeMaterial = fade;
+				doublePortals[i].fadeColor.Zero();
+			} else {
+				doublePortals[i].fadeMaterial = declManager->FindMaterial( image );
+				doublePortals[i].fadeColor.Set( 1.0f, 1.0f, 1.0f );
+			}
+			doublePortals[i].fadeNear = src->ParseFloat();
+			doublePortals[i].fadeFar = src->ParseFloat();
+			src->ExpectTokenString( ")" );
 		}
 
 		// add the portal to a1
@@ -544,7 +606,22 @@ bool idRenderWorldLocal::InitFromMap( const char *name ) {
 		WriteLoadMap();
 	}
 
-	if ( !src->ReadToken( &token ) || token.Icmp( PROC_FILE_ID ) ) {
+	// DUDE: Doom 3 writes "mapProcFile003"; Quake 4 writes PROC "4" and the map's CRC
+	procVersion = 3;
+	procMapCrc = 0;
+	if ( !src->ReadToken( &token ) ) {
+		token.Clear();
+	}
+	if ( !token.Icmp( "PROC" ) ) {
+		idToken version, crc;
+		if ( !src->ReadToken( &version ) || version != "4" || !src->ReadToken( &crc ) || crc.type != TT_NUMBER ) {
+			common->Printf( "idRenderWorldLocal::InitFromMap: unsupported PROC version '%s'\n", version.c_str() );
+			delete src;
+			return false;
+		}
+		procVersion = 4;
+		procMapCrc = crc.GetUnsignedIntValue();
+	} else if ( token.Icmp( PROC_FILE_ID ) ) {
 		common->Printf( "idRenderWorldLocal::InitFromMap: bad id '%s' instead of '%s'\n", token.c_str(), PROC_FILE_ID );
 		delete src;
 		return false;
@@ -690,6 +767,18 @@ void idRenderWorldLocal::AddWorldModelEntities() {
 
 		AddEntityRefToArea( def, &portalAreas[i] );
 	}
+}
+
+/*
+=====================
+idRenderWorldLocal::SetPortalSkyCamera
+
+DUDE: see RenderWorld.h; R_PortalSkyRender consumes it.
+=====================
+*/
+void idRenderWorldLocal::SetPortalSkyCamera( bool enable, const idVec3 &origin ) {
+	portalSkyCameraSet = enable;
+	portalSkyCameraOrigin = origin;
 }
 
 /*

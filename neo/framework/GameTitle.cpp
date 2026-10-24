@@ -24,6 +24,7 @@ static const gameTitleProfile_t titleProfiles[GAME_TITLE_COUNT] = {
 		true,							// doom3Layout
 		false,							// nullGameFallback: a missing base.so stays a fatal error
 		false,							// recursiveDeclFolders: Doom 3 keeps its flat scan
+		false,							// entityFilters
 		1.0f,							// soundUnitsToMeters
 		false,							// bareSampleNames: a Doom 3 path without .wav/.ogg stays an error (as shipped)
 		NULL,							// voLanguagePrefix
@@ -43,6 +44,7 @@ static const gameTitleProfile_t titleProfiles[GAME_TITLE_COUNT] = {
 		false,							// doom3Layout
 		true,							// nullGameFallback: q4base.so comes from the separate game repository (Q5)
 		true,							// recursiveDeclFolders: 34 of 96 .mtr files live in subfolders
+		true,							// entityFilters: process1 and storage1 each hold a "first" and a "second" level
 		0.0254f,						// soundUnitsToMeters: inches (DOOM_TO_METERS), "maxDistance 1181" = 30 m
 		true,							// bareSampleNames: sound/null plays sound/null.ogg
 		"sound/vo_",					// voLanguagePrefix: sound/vo_english/...

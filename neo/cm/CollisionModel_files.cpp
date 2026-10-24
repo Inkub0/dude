@@ -44,6 +44,10 @@ If you have questions concerning this license or the applicable additional terms
 #define CM_FILE_EXT			"cm"
 #define CM_FILEID			"CM"
 #define CM_FILEVERSION		"1.00"
+// DUDE: Quake 4's revisions (read only; this engine writes "1.00"): "3" for maps and most models,
+// "2" for a few models of its last patch (pak019)
+#define CM_FILEVERSION_QUAKE4		"3"
+#define CM_FILEVERSION_QUAKE4_OLD	"2"
 
 /*
 ===============================================================================
@@ -390,6 +394,50 @@ cm_node_t *idCollisionModelManagerLocal::ParseNodes( idLexer *src, cm_model_t *m
 
 /*
 ================
+ParseBlockSize
+
+DUDE: the memory to reserve for a polygons / brushes block, from its header. Doom 3 writes
+the byte count (polygons, a comment naming polygonMemory, 123456, {); Quake 4 writes the
+element and sub-element counts (numPolygons 41470 and numPolygonEdges 163348, each after a
+comment naming it), from which the same byte count follows. 0 = no header numbers (allocate
+one by one). The counts, when the header gives them, go to numElements / numSubElements
+(else -1) for the caller's check against the rows it reads.
+================
+*/
+static int ParseBlockSize( idLexer *src, int elementSize, int subElementSize, int &numElements, int &numSubElements ) {
+	idToken first, second;
+	numElements = numSubElements = -1;
+	if ( !src->CheckTokenType( TT_NUMBER, 0, &first ) ) {
+		return 0;
+	}
+	if ( !src->CheckTokenType( TT_NUMBER, 0, &second ) ) {
+		return first.GetIntValue();
+	}
+	numElements = first.GetIntValue();
+	numSubElements = second.GetIntValue();
+	// each element's struct already holds one sub-element (edges[1] / planes[1])
+	return numElements * ( elementSize - subElementSize ) + numSubElements * subElementSize;
+}
+
+/*
+================
+CheckBlockCounts
+
+DUDE: a Quake 4 block header counts its rows; one that disagrees with what was read means a
+file this loader misreads (or a damaged one), so say so - the load itself goes on, as the
+rows are what the collision uses.
+================
+*/
+static void CheckBlockCounts( idLexer *src, const cm_model_t *model, const char *what, const char *subWhat,
+		int headerCount, int headerSubCount, int count, int subCount ) {
+	if ( headerCount >= 0 && ( headerCount != count || headerSubCount != subCount ) ) {
+		common->Warning( "%s: collision model '%s' has %d %s and %d %s, its header says %d and %d",
+			src->GetFileName(), model->name.c_str(), count, what, subCount, subWhat, headerCount, headerSubCount );
+	}
+}
+
+/*
+================
 idCollisionModelManagerLocal::ParsePolygons
 ================
 */
@@ -399,16 +447,21 @@ void idCollisionModelManagerLocal::ParsePolygons( idLexer *src, cm_model_t *mode
 	idVec3 normal;
 	idToken token;
 
-	if ( src->CheckTokenType( TT_NUMBER, 0, &token ) ) {
-		model->polygonBlock = (cm_polygonBlock_t *) Mem_Alloc( sizeof( cm_polygonBlock_t ) + token.GetIntValue() );
-		model->polygonBlock->bytesRemaining = token.GetIntValue();
+	int headerPolygons, headerEdges;
+	const int blockSize = ParseBlockSize( src, sizeof( cm_polygon_t ), sizeof( p->edges[0] ), headerPolygons, headerEdges );
+	if ( blockSize > 0 ) {
+		model->polygonBlock = (cm_polygonBlock_t *) Mem_Alloc( sizeof( cm_polygonBlock_t ) + blockSize );
+		model->polygonBlock->bytesRemaining = blockSize;
 		model->polygonBlock->next = ( (byte *) model->polygonBlock ) + sizeof( cm_polygonBlock_t );
 	}
 
+	int numRead = 0, numEdgesRead = 0;
 	src->ExpectTokenString( "{" );
 	while ( !src->CheckTokenString( "}" ) ) {
 		// parse polygon
 		numEdges = src->ParseInt();
+		numRead++;
+		numEdgesRead += numEdges;
 		p = AllocPolygon( model, numEdges );
 		p->numEdges = numEdges;
 		src->ExpectTokenString( "(" );
@@ -426,9 +479,26 @@ void idCollisionModelManagerLocal::ParsePolygons( idLexer *src, cm_model_t *mode
 		p->material = declManager->FindMaterial( token );
 		p->contents = p->material->GetContentFlags();
 		p->checkcount = 0;
+		// DUDE: Quake 4 adds three texture coordinates and, from revision 3, the polygon's
+		// primitive number: "( s t ) ( s t ) ( s t ) 1944". Measured against the .map brush
+		// faces (tools/quake4/q4_cm_texcoords.py) they are the face's exact coordinates at three
+		// points, but which points is not stored: three of the vertices in no fixed order for
+		// ~80% of the polygons, points of a piece merged away for the rest - so they cannot place
+		// a hit-map (materialImage) sample here. Read past; a trace's material type is the
+		// material's own (docs/quake4-port.md §5.3, as idTech4A++ does).
+		if ( quake4FileRevision >= 2 ) {
+			for ( i = 0; i < 3; i++ ) {
+				idVec2 st;
+				src->Parse1DMatrix( 2, st.ToFloatPtr() );
+			}
+			if ( quake4FileRevision >= 3 ) {
+				src->ParseInt();
+			}
+		}
 		// filter polygon into tree
 		R_FilterPolygonIntoTree( model, model->node, NULL, p );
 	}
+	CheckBlockCounts( src, model, "polygons", "edges", headerPolygons, headerEdges, numRead, numEdgesRead );
 }
 
 /*
@@ -442,16 +512,21 @@ void idCollisionModelManagerLocal::ParseBrushes( idLexer *src, cm_model_t *model
 	idVec3 normal;
 	idToken token;
 
-	if ( src->CheckTokenType( TT_NUMBER, 0, &token ) ) {
-		model->brushBlock = (cm_brushBlock_t *) Mem_Alloc( sizeof( cm_brushBlock_t ) + token.GetIntValue() );
-		model->brushBlock->bytesRemaining = token.GetIntValue();
+	int headerBrushes, headerPlanes;
+	const int blockSize = ParseBlockSize( src, sizeof( cm_brush_t ), sizeof( b->planes[0] ), headerBrushes, headerPlanes );
+	if ( blockSize > 0 ) {
+		model->brushBlock = (cm_brushBlock_t *) Mem_Alloc( sizeof( cm_brushBlock_t ) + blockSize );
+		model->brushBlock->bytesRemaining = blockSize;
 		model->brushBlock->next = ( (byte *) model->brushBlock ) + sizeof( cm_brushBlock_t );
 	}
 
+	int numRead = 0, numPlanesRead = 0;
 	src->ExpectTokenString( "{" );
 	while ( !src->CheckTokenString( "}" ) ) {
 		// parse brush
 		numPlanes = src->ParseInt();
+		numRead++;
+		numPlanesRead += numPlanes;
 		b = AllocBrush( model, numPlanes );
 		b->numPlanes = numPlanes;
 		src->ExpectTokenString( "{" );
@@ -471,9 +546,14 @@ void idCollisionModelManagerLocal::ParseBrushes( idLexer *src, cm_model_t *model
 		}
 		b->checkcount = 0;
 		b->primitiveNum = 0;
+		// DUDE: Quake 4 revision 3 ends the row with the brush's primitive number ("aas_solid" 1944)
+		if ( quake4FileRevision >= 3 ) {
+			b->primitiveNum = src->ParseInt();
+		}
 		// filter brush into tree
 		R_FilterBrushIntoTree( model, model->node, NULL, b );
 	}
+	CheckBlockCounts( src, model, "brushes", "planes", headerBrushes, headerPlanes, numRead, numPlanesRead );
 }
 
 /*
@@ -495,6 +575,8 @@ bool idCollisionModelManagerLocal::ParseCollisionModel( idLexer *src ) {
 	// parse the file
 	src->ExpectTokenType( TT_STRING, 0, &token );
 	model->name = token;
+	// DUDE: Quake 4 writes a number after the name (collisionModel "worldMap" 10234 {)
+	src->CheckTokenType( TT_NUMBER, 0, &token );
 	src->ExpectTokenString( "{" );
 	while ( !src->CheckTokenString( "}" ) ) {
 
@@ -575,7 +657,18 @@ bool idCollisionModelManagerLocal::LoadCollisionModelFile( const char *name, uns
 		return false;
 	}
 
-	if ( !src->ReadToken( &token ) || token != CM_FILEVERSION ) {
+	// DUDE: Doom 3's "1.00" or Quake 4's "2" / "3" - the same sections, with Quake 4's additions
+	// read where they appear (ParseCollisionModel, ParsePolygons, ParseBrushes)
+	if ( !src->ReadToken( &token ) ) {
+		token = "";
+	}
+	if ( token == CM_FILEVERSION_QUAKE4 ) {
+		quake4FileRevision = 3;
+	} else if ( token == CM_FILEVERSION_QUAKE4_OLD ) {
+		quake4FileRevision = 2;
+	} else if ( token == CM_FILEVERSION ) {
+		quake4FileRevision = 0;
+	} else {
 		common->Warning( "%s has version %s instead of %s", fileName.c_str(), token.c_str(), CM_FILEVERSION );
 		delete src;
 		return false;
@@ -587,8 +680,11 @@ bool idCollisionModelManagerLocal::LoadCollisionModelFile( const char *name, uns
 		return false;
 	}
 
+	// a Quake 4 file's CRC comes from Raven's tools, which this engine's map CRC need not
+	// reproduce; it ships with its .map, so it is taken as current (a stale one would make the
+	// engine rebuild the collision from the .map, which Quake 4's brushes are not meant for)
 	crc = token.GetUnsignedIntValue();
-	if ( mapFileCRC && crc != mapFileCRC ) {
+	if ( mapFileCRC && crc != mapFileCRC && quake4FileRevision == 0 ) {
 		common->Printf( "%s is out of date\n", fileName.c_str() );
 		delete src;
 		return false;

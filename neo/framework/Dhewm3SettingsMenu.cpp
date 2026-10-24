@@ -1170,7 +1170,8 @@ static void InitBindingEntries()
 	const idDict* playerDict = GetEntityDefDict( "player_doommarine" );
 	const idDict* playerDictMP = GetEntityDefDict( "player_doommarine_mp" );
 	bool impulse27used = false;
-	for ( int i = 0; i <= 13; ++i ) {
+	// DUDE: a title without Doom 3's player def (Quake 4) gets no weapon entries here
+	for ( int i = 0; playerDict != nullptr && i <= 13; ++i ) {
 		int weapNum = i;
 		int impulseNum = i;
 		if (i == 13) {
