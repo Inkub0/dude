@@ -782,6 +782,30 @@ performance** as the goals; repository `~/dude-quake4-game` (local git, never pu
      include architecture above, and a compile-error inventory tool (errors grouped by missing
      symbol / header), so the remaining work is a measured list. Gate: the build runs end to
      end and the inventory is recorded here.
+     **Built 2026-10-24.** Game repo: `CMakeLists.txt` (sources = Raven's `game.vcproj`, 159;
+     includes = DUDE's `neo/` + `build/` only; DUDE's game-library flags; `Q4SDK` as Raven's
+     SDK build had it; links DUDE's `libidlib.a`) and `source/idlib/precompiled.h` replaced by
+     the adapter. DUDE: `tools/quake4/build-q4game.sh` (reads `base.so`'s flags from `build/`,
+     keeps only external include paths - never `neo/game` -, builds, copies `q4base.so` next to
+     `build/dude`; `--inventory`) and `tools/quake4/q4game_inventory.py` (syntax-only pass over
+     the compile database, errors de-duplicated across sources and grouped). **First inventory:**
+     159/159 sources fail, 4214 distinct errors, no missing header. By owner:
+
+     | Work package | Largest items (distinct errors) |
+     |---|---|
+     | **Raven `game/Game.h`** - game-side definitions the adapter no longer pulls in (split it: game-side part stays in the game repo, interface part comes from DUDE) | `SND_CHANNEL_*` 286, `debugInfoProc_t` 113, `demoState_t` 34, `userOrigin_t` 22, `ClientStats_t` 12; plus the Quake 4 `idGame`/`idGameEdit` entries the game defines (68 + 12 definitions without declaration) |
+     | **Raven idlib layer** (Q5.2) | `RV_*` heap macros 140, `MA_*` / `MEM_*` allocation tags 128, `rvPair` 73, `rvRandom` 42, `idBitMsg` / `idBitMsgDelta` (`WriteLong`/`ReadLong` …) 152, `idVec3` 45 / `idBounds` 14 extras, template arity 82, `Lexer` (LexerFactory) 34, `idCVarHelp` 33 |
+     | **Engine: common / cvars / files / network** | `idCommon` 312 (`GetLocalizedString` …), `CVAR_*` 41, `idFile` 28, `idNetworkSystem` 25 |
+     | **Engine: sound** (`worldId`, emitter handles, Raven channel names) | `idSoundSystem` 79, `refSound_t` 88, `SOUNDWORLD_*` 62 |
+     | **Engine: collision** | `idCollisionModel` 156, `idCollisionModelManager` 18, `contactInfo_t` 28 (`materialType`) |
+     | **Engine: effects / BSE** (no-op manager until Q4) | `rvClientEffect` 116, `PlayEffect` 82, `renderEffect` / `renderEffect_t` 123, `effectCategory_t` 16 |
+     | **Engine: decls** (Q2's types under Raven's class names) | `rvDeclMatType` 68, `rvDeclPlayback` / `Data` 68, `rvDeclLipSync` 25, `rvDeclPlayerModel` 15, `idDeclManager` 58 |
+     | **Engine: renderer / UI / input** | `RF_*` 26, `idRenderWorld` 16, `idRenderSystem` 10, `SHADERPARM_*` 15, `idUserInterface` 9, `IMPULSE_*` 46 |
+     | **64-bit cleanliness** | 47 pointer-to-int casts |
+     | **Cascades** (game classes that failed to parse because of the above; expected to vanish) | `idGameLocal` 89, `idClipModel` 42, MP stats (`rankedPlayers`, `statQueue`) …, 412 unclassified |
+
+     Order: the `game/Game.h` split and the idlib layer first (they cascade the most), then the
+     engine packages one by one, re-running the inventory after each.
   2. **Q5.2 idlib layer** - every idlib error gone. Gate: `idlib`-attributed errors 0.
   3. **Q5.3 engine interfaces** - the union, item by item from the inventory, Doom 3 libraries
      rebuilt and unchanged in behaviour, the ABI diff against dhewm3 1.5.5 clean. Gate:
