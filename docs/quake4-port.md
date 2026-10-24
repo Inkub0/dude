@@ -6,7 +6,8 @@ self-checks clean, `airdefense1` user-verified on both renderers; the collision 
 moved to Q5). **Q5 (game library) started 2026-10-24** (user: Q5 before Q4, BSE later),
 plan in §5.6: Q5.0 (dhewm3 ABI) merged, Q5.1 (build + inventory) and Q5.2 (idlib layer, 4214
 -> 2349 errors, 0 in idlib) done on `feat/quake4-game-library`; Q5.3 (engine interfaces) in
-progress: 68 errors left, all but a few 64-bit cleanliness. Goal: **DUDE runs the retail Quake 4 (2005,
+progress: the game library compiles and links (q4base.so); the Doom 3 + RoE smoke test is the
+gate left, then Q5.4 (engine facades and the Quake 4 loader). Goal: **DUDE runs the retail Quake 4 (2005,
 Raven Software, idTech4) single-player campaign natively** — its own `q4base/*.pk4` assets,
 its own game logic, on DUDE's GL3 and Vulkan backends, with DUDE's enhancement tiers
 (PBR, tessellation, RT) available as opt-in on top. Multiplayer is out of scope for v1 (§9).
@@ -886,9 +887,17 @@ performance** as the goals; repository `~/dude-quake4-game` (local git, never pu
      - **Recorded gaps** (interface in place, behaviour to come): `RunAlwaysThinkGUIs`, the
        script full-screen effects (medlabs' blur), `^i` text icons, multiplayer and voice
        entries (Q9), editor bits.
-     Inventory: 2349 -> 1756 (shared interfaces) -> 68 (the Quake 4 layer); what remains is
-     64-bit cleanliness of the event and script system, done next by applying dhewm3's own
-     x86_64 fixes of the same id code (`d92d4ba8`, `506ea7b3`, `ce976c47`, ... ) hunk by hunk.
+     Inventory: 2349 -> 1756 (shared interfaces) -> 68 (the Quake 4 layer) -> 0: the 64-bit
+     cleanliness of the event and script system came from dhewm3's own x86_64 fixes of the
+     same id code (`d92d4ba8`, `506ea7b3`, `ce976c47`, `db4aca78`, `4244436d`, `fb3f0cc2`,
+     `76a9fdce`, `3ad384a0`), applied hunk by hunk to Raven's copies (game repo `bcff329`).
+     **All 160 sources compile and `q4base.so` links** (game repo `bcff329`, DUDE this
+     commit): its undefined symbols are libc and the C++ runtime only, `GetGameAPI` its
+     export - `idDeclTable::TableLookup` (vehicle hover physics) moved inline for that.
+     **Gate remaining: the Doom 3 + RoE smoke test** (the engine headers both game libraries
+     build against changed: appended virtuals, cvar flags, decl and idlib additions).
+     Silent 64-bit risks the compiler cannot see (Raven's own additions to the script system,
+     `long` in its code) are a Q5.5 check.
   4. **Q5.4 load** - `q4base.so` replaces the null game under `run-q4.sh`: `GetGameAPI`,
      `Init`, main menu with the game's cvars (the sweep's `mainmenu.gui` cvar warnings gone),
      clean quit. Gate: boot + quit on both backends, no new warnings.
