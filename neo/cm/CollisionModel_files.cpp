@@ -546,6 +546,11 @@ void idCollisionModelManagerLocal::ParseBrushes( idLexer *src, cm_model_t *model
 		}
 		b->checkcount = 0;
 		b->primitiveNum = 0;
+		// DUDE: a .cm brush names no material (a brush built from a .map does, CM_CreateBrush), and
+		// the block it comes from is not cleared: id left it unset, so a trace starting inside the
+		// brush (TestTrmVertsInBrush, the start-in-solid test) reported a garbage
+		// contact material. Quake 4's facade crashed reading it; Doom 3's game reads it too.
+		b->material = NULL;
 		// DUDE: Quake 4 revision 3 ends the row with the brush's primitive number ("aas_solid" 1944)
 		if ( quake4FileRevision >= 3 ) {
 			b->primitiveNum = src->ParseInt();

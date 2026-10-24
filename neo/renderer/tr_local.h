@@ -1694,6 +1694,8 @@ void R_ListRenderEntityDefs_f( const idCmdArgs &args );
 
 bool R_IssueEntityDefCallback( idRenderEntityLocal *def );
 idRenderModel *R_EntityDefDynamicModel( idRenderEntityLocal *def );
+// DUDE: apply the fill-light frees / moves R_UpdateEmissiveLights queued (end of frame, after the back end)
+void R_FlushEmissiveLightChanges( void );
 
 viewEntity_t *R_SetEntityDefViewEntity( idRenderEntityLocal *def );
 viewLight_t *R_SetLightDefViewLight( idRenderLightLocal *def );

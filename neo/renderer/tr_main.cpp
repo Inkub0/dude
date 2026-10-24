@@ -2912,14 +2912,18 @@ static void R_RtEmissiveMatTableLoad( void ) {
 		// skip a comment line: '//' is consumed by the lexer already; a stray '#' (legacy save) is read as a token
 		if ( tok.Length() > 0 && tok[0] == '#' ) { lex.SkipRestOfLine(); continue; }
 		if ( tok.Icmp( "light" ) == 0 ) {										// a per-fixture override: light <idhex> scale r g b profile two ind
-			if ( !lex.ReadToken( &tok ) ) { continue; }
+			// the rest of the line as text: the lexer would read an id that starts with digits as a
+			// number ("16e9a41f..." -> 16e9, then a name), dropping the override
+			idStr rest;
+			lex.ReadRestOfLine( rest );
 			rtEmissiveLightEntry_t e;
-			e.id = (unsigned long long)strtoull( tok.c_str(), NULL, 16 );
-			e.scale = lex.ParseFloat();
-			e.tint[0] = lex.ParseFloat(); e.tint[1] = lex.ParseFloat(); e.tint[2] = lex.ParseFloat();
-			e.profile = idMath::ClampInt( 0, 2, lex.ParseInt() );
-			e.twoSided = lex.ParseInt() != 0;
-			e.indicator = lex.ParseInt() != 0;
+			int profile = 0, twoSided = 0, indicator = 0;
+			if ( sscanf( rest.c_str(), "%llx %f %f %f %f %d %d %d", &e.id, &e.scale, &e.tint[0], &e.tint[1], &e.tint[2], &profile, &twoSided, &indicator ) != 8 ) {
+				continue;
+			}
+			e.profile = idMath::ClampInt( 0, 2, profile );
+			e.twoSided = twoSided != 0;
+			e.indicator = indicator != 0;
 			if ( e.id != 0 ) { s_rtEmissiveLightTable.Append( e ); }
 			continue;
 		}
