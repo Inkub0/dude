@@ -45,5 +45,8 @@ if [ "${1:-}" = "--inventory" ]; then
 fi
 
 cmake --build "$OUT" -j"$(nproc)"
-cp "$OUT/q4base.so" "$DUDE/build/q4base.so"
+# a new file renamed into place, never written over the old one: a running game keeps executing
+# its mapped copy (cp truncates it in place -> SIGBUS in the running game)
+cp "$OUT/q4base.so" "$DUDE/build/q4base.so.new"
+mv -f "$DUDE/build/q4base.so.new" "$DUDE/build/q4base.so"
 echo "build-q4game.sh: $DUDE/build/q4base.so"
