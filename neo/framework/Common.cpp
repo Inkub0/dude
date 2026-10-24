@@ -257,6 +257,7 @@ public:
 
 	// localization
 	void						InitLanguageDict( void );
+	void						AddEngineStringFallbacks( void );	// DUDE
 	void						LocalizeGui( const char *fileName, idLangDict &langDict );
 	void						LocalizeMapData( const char *fileName, idLangDict &langDict );
 	void						LocalizeSpecificMapData( const char *fileName, idLangDict &langDict, const idLangDict &replaceArgs );
@@ -1940,7 +1941,92 @@ void idCommonLocal::InitLanguageDict( void ) {
 
 	fileSystem->FreeFileList(langFiles);
 
+	AddEngineStringFallbacks();
+
 	Sys_InitScanTable();
+}
+
+/*
+===============
+idCommonLocal::AddEngineStringFallbacks
+
+DUDE: the engine's own text - loading messages, message-box buttons, key names, the settings
+menu's control names - is looked up by Doom 3's "#str_" ids in the game's string tables.
+Quake 4's tables hold most of them renumbered (idLangDict::FindString), but not all, and a few
+of the renumbered ones mean something else. Those get the English here: an id neither table
+form has is added, and the misnumbered ones are added under Doom 3's id so they win over
+Quake 4's. Doom 3's tables carry every id but the two RoE ones (base Doom 3 lacked them), so
+nothing else changes there. tools/quake4/check_engine_strings.py checks this list against the
+ids the engine uses and both titles' tables.
+===============
+*/
+void idCommonLocal::AddEngineStringFallbacks( void ) {
+	static const struct {
+		const char *	id;
+		const char *	text;
+		bool			replaceOtherNumbering;	// Quake 4's renumbered string is a different message
+	} fallbacks[] = {
+		// loading messages, message boxes, network
+		{ "#str_04344", "INITIALIZING EVENTS...", false },
+		{ "#str_04345", "EXECUTING STARTUP COMMANDS...", false },
+		{ "#str_04320", "Disconnected from server", false },
+		{ "#str_04304", "The CD Key is printed on the game's packaging.", true },
+		{ "#str_07195", "Expansion CD Key is invalid", false },
+		{ "#str_07202", "Both;Game;Expansion", false },
+		{ "#str_07232", "Cannot enable EAX: no suitable hardware found.", true },
+		{ "#str_07233", "EAX is not available on this platform.", true },
+		{ "#str_00100625", "A dedicated server is recommended for internet games with more than 4 players. Continue as a listen server?", false },
+		{ "#str_00100626", "Poor Network Performance", false },
+		// control names of the settings menu's bindings
+		{ "#str_01416", "Weapons", false },
+		{ "#str_02068", "Chat", false },
+		{ "#str_02100", "Forward", false },
+		{ "#str_02101", "Backpedal", false },
+		{ "#str_02102", "Move Left", false },
+		{ "#str_02103", "Move Right", false },
+		{ "#str_02104", "Jump", false },
+		{ "#str_02105", "Crouch", false },
+		{ "#str_02106", "Turn Left", false },
+		{ "#str_02107", "Turn Right", false },
+		{ "#str_02108", "Strafe", false },
+		{ "#str_02109", "Sprint", false },
+		{ "#str_02112", "Attack", false },
+		{ "#str_02113", "Prev. Weapon", false },
+		{ "#str_02114", "Next Weapon", false },
+		{ "#str_02115", "Reload", false },
+		{ "#str_02116", "Look Up", false },
+		{ "#str_02117", "Look Down", false },
+		{ "#str_02119", "Center View", false },
+		{ "#str_02120", "Zoom View", false },
+		{ "#str_02122", "Team Chat", false },
+		{ "#str_02125", "Spectate", false },
+		{ "#str_02126", "Ready", false },
+		{ "#str_02127", "Vote Yes", false },
+		{ "#str_02128", "Vote No", false },
+		{ "#str_02403", "Look", false },
+		{ "#str_02404", "Move", false },
+		{ "#str_02406", "Misc", false },
+		{ "#str_04064", "Other", false },
+		{ "#str_04066", "PDA / Score", false },
+		{ "#str_04067", "Quick Save", false },
+		{ "#str_04068", "Quick Load", false },
+		{ "#str_04069", "Screenshot", false },
+		{ "#str_04070", "Toggle team", false },
+		{ "#str_04071", "Drop Weapon", false },
+	};
+
+	int added = 0;
+	for ( int i = 0; i < (int)( sizeof( fallbacks ) / sizeof( fallbacks[0] ) ); i++ ) {
+		// a misnumbered one counts as missing unless Doom 3's own id is there: added under
+		// Doom 3's id, the exact lookup finds it before Quake 4's renumbered form
+		if ( languageDict.FindString( fallbacks[i].id, fallbacks[i].replaceOtherNumbering ) == NULL ) {
+			languageDict.AddKeyVal( fallbacks[i].id, fallbacks[i].text );
+			added++;
+		}
+	}
+	if ( added > 0 ) {
+		Printf( "%d engine strings not in the string tables, using English\n", added );
+	}
 }
 
 /*

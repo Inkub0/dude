@@ -58,6 +58,9 @@ public:
 
 	const char *			AddString( const char *str );
 	const char *			GetString( const char *str ) const;
+							// DUDE: GetString's lookup without its warning - NULL when the id is unknown;
+							// exactOnly skips Quake 4's renumbered form of a Doom 3 id
+	const char *			FindString( const char *str, bool exactOnly = false ) const;
 
 							// adds the value and key as passed (doesn't generate a "#str_xxxxx" key or ensure the key/value pair is unique)
 	void					AddKeyVal( const char *key, const char *val );

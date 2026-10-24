@@ -60,6 +60,11 @@ Q4BASE="/path/to/Quake 4/q4base" python3 tools/quake4/q4_inventory.py > /tmp/q4_
   (`DewmAAS "1.08"`) and of Doom 3 + RoE + Lost Mission (`1.07`). Reports failures and warnings
   (the loader's feature self-check included), areas, clusters, dummy files, tactical features.
   Needs a configured `build/`.
+- `check_engine_strings.py [q4base]` — every `#str_` id the engine source uses, resolved as the
+  engine does (exact, Quake 4's `#str_1…` renumbering, the English fallbacks of
+  `AddEngineStringFallbacks`) against Doom 3's and Quake 4's tables: unresolved ids per title
+  (exit 1), unused fallbacks, and the renumbered texts that read differently, for review. Run it
+  after adding a `#str_` lookup to engine code.
 - `test_dds_decode.sh` (+ `tests/dds_decode_test.cpp`) — the engine's DDS source decoder (`LoadDDS`,
   `neo/renderer/Image_files.cpp`, `R_LoadImage`'s last resort for a texture that exists only as a
   `.dds`): compiles its lines verbatim with stub file I/O and compares the RGBA it decodes with

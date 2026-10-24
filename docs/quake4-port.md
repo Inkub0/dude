@@ -415,7 +415,16 @@ on that page (`si_*`, `ui_*`, `g_*`) come with the game library (Q5); `deform re
 billboards like `sprite` (two multiplayer materials, Q9).
 
 Engine strings: Quake 4 ships the engine's strings as `#str_1` + Doom 3's digits
-(`#str_104343` LOADING...); `idLangDict::GetString` tries that form after a miss. Quake 4's
+(`#str_104343` LOADING...); `idLangDict::GetString` tries that form after a miss. Measured
+2026-10-24 (`tools/quake4/check_engine_strings.py`, after the Q3 map sweep warned of
+`#str_04344`/`04345` on every map): of the 223 ids the engine uses, 148 read the same either way and
+~30 differ only in wording (`Quake 4 is up to date…`, `LEFT ALT`, keypad keys without `KP_`), but 7
+engine ids (two loading messages, network / CD-key lines) and 35 control names of DUDE's settings
+menu are in neither form, and 3 renumbered ones are different messages (`#str_107232`/`07233`
+"EAX Reverb" for the EAX errors, `#str_104304` a different CD-key message).
+`idCommonLocal::AddEngineStringFallbacks` adds English for those after the tables load - only
+where neither form exists, or under Doom 3's id for the 3 misnumbered ones - so Quake 4's own
+(localised) text is used everywhere else; Doom 3 gains only the two RoE-only ids. Quake 4's
 `default.cfg` binds `LEFTCTRL` / `RIGHTSHIFT` …, read as aliases of Doom 3's key names.
 
 - **Guide preprocessor.** `guide <material> <macro>( args… )` and `inlineGuide` expand
