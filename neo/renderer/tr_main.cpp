@@ -3060,7 +3060,7 @@ unsigned long long R_RtEmissivePickFixture( const idMaterial **matOut, idVec3 *p
 	// walking the ray past flares and any non-drawn / collision hit until it lands near an emitter triangle.
 	for ( int hit = 0; hit < 8; hit++ ) {
 		modelTrace_t mt;
-		if ( !world->Trace( mt, start, start + dir * 4096.0f, 0.0f, false, true, false ) ) { return 0; }
+		if ( !world->Trace( mt, start, start + dir * 4096.0f, 0.0f, false, true ) ) { return 0; }
 		// the nearest table triangle to the hit point, then the row holding it
 		int bestT = -1; float bestD = 1e30f;
 		for ( int ri = 0; ri < s_rtEmissiveRows.Num(); ri++ ) {
@@ -4757,7 +4757,7 @@ void R_RtEmissiveProbe_f( const idCmdArgs &args ) {
 	idVec3 start = eye;
 	for ( int hit = 0; hit < 6; hit++ ) {
 	modelTrace_t mt;
-	if ( !world->Trace( mt, start, eye + dir * 4096.0f, 0.0f, false, true, false ) || mt.material == NULL ) {
+	if ( !world->Trace( mt, start, eye + dir * 4096.0f, 0.0f, false, true ) || mt.material == NULL ) {
 		common->Printf( hit == 0 ? "rtEmissiveProbe: nothing hit within 4096 units\n" : "rtEmissiveProbe: nothing further along the ray\n" );
 		return;
 	}

@@ -54,8 +54,6 @@ typedef struct glconfig_s {
 
 
 	int					maxTextureSize;			// queried from GL
-	int					maxCubeMapSize;			// GL_MAX_CUBE_MAP_TEXTURE_SIZE (>=1024 in GL 3.3)
-	int					vidMemMB;				// total VRAM in MB via vendor ext, 0 if unknown
 	int					maxTextureUnits;
 	int					maxTextureCoords;
 	int					maxTextureImageUnits;
@@ -101,16 +99,6 @@ typedef struct glconfig_s {
 
 	bool				haveDebugContext;
 
-	// DUDE: true when running the GL 3.3 core profile backend (r_graphicsAPI
-	// opengl3); the legacy fixed-function/ARB draw paths must not run then
-	bool				coreProfile;
-
-	// DUDE: true when the frontend routes through the RHI executor
-	// (RB_RHI_ExecuteBackEndCommands) — opengl3 today, vulkan later. Distinct
-	// from coreProfile, which specifically means "a GL core context is live";
-	// under Vulkan rhiBackend is true while coreProfile stays false.
-	bool				rhiBackend;
-
 	// For some reason people decided that we need displays with ultra small pixels,
 	// so everything rendered on them must be scaled up to be legible.
 	// unfortunately, this bullshit feature was "improved" upon by deciding that the best
@@ -127,6 +115,19 @@ typedef struct glconfig_s {
 	//  and you get one that's much bigger and doesn't fit on the screen?)
 
 	float				winWidth, winHeight;	// logical window size (different to vidWidth/height in HighDPI cases)
+
+	// DUDE: appended after dhewm3's fields, which keep their offsets (tools/check_dhewm3_abi.py)
+	int					maxCubeMapSize;			// GL_MAX_CUBE_MAP_TEXTURE_SIZE (>=1024 in GL 3.3)
+	int					vidMemMB;				// total VRAM in MB via vendor ext, 0 if unknown
+
+	// true when running the GL 3.3 core profile backend (r_graphicsAPI opengl3); the legacy
+	// fixed-function/ARB draw paths must not run then
+	bool				coreProfile;
+
+	// true when the frontend routes through the RHI executor (RB_RHI_ExecuteBackEndCommands) -
+	// opengl3 and vulkan. Distinct from coreProfile, which specifically means "a GL core
+	// context is live"; under Vulkan rhiBackend is true while coreProfile stays false.
+	bool				rhiBackend;
 } glconfig_t;
 
 
@@ -137,24 +138,20 @@ const int GLYPH_CHARSTART		= 32;
 const int GLYPH_CHAREND			= 127;
 const int GLYPHS_PER_FONT		= GLYPH_END - GLYPH_START + 1;
 
-// DUDE: the metrics are float. id's fontImage_*.dat stores whole pixels as ints (read
-// into these floats exactly, so Doom 3 text is unchanged); Raven's Quake 4 .fontdat
-// stores fractional pixels (an 8.562 px advance is typical), and rounding those per
-// glyph would accumulate visible spacing error along a string. Engine-only struct: no
-// game library uses it (checked against game/, d3xp/, d3le/).
+// DUDE: dhewm3's layout, kept for game libraries (tools/check_dhewm3_abi.py); the engine's
+// GUI draws from the float-metric dudeGlyphInfo_t of renderer/FontInternal.h
 typedef struct {
-	float				height;			// number of scan lines
-	float				top;			// top of glyph in buffer
-	float				bottom;			// bottom of glyph in buffer
-	float				pitch;			// width for copying
-	float				xSkip;			// x adjustment
-	float				imageWidth;		// width of actual image
-	float				imageHeight;	// height of actual image
+	int					height;			// number of scan lines
+	int					top;			// top of glyph in buffer
+	int					bottom;			// bottom of glyph in buffer
+	int					pitch;			// width for copying
+	int					xSkip;			// x adjustment
+	int					imageWidth;		// width of actual image
+	int					imageHeight;	// height of actual image
 	float				s;				// x offset in image where glyph starts
 	float				t;				// y offset in image where glyph starts
 	float				s2;
 	float				t2;
-	float				left;			// DUDE: horizontal bearing (pen to glyph left edge); Raven fonts only, 0 for id fonts
 	const idMaterial *	glyph;			// shader with the glyph
 	char				shaderName[32];
 } glyphInfo_t;

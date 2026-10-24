@@ -69,6 +69,7 @@ typedef struct mtrParsingData_s {
 	float			shaderRegisters[MAX_EXPRESSION_REGISTERS];
 	expOp_t			shaderOps[MAX_EXPRESSION_OPS];
 	shaderStage_t	parseStages[MAX_SHADER_STAGES];
+	shaderStageExtra_t	parseStageExtras[MAX_SHADER_STAGES];	// DUDE: in step with parseStages
 
 	bool			registersAreConstant;
 	bool			forceOverlays;
@@ -98,6 +99,7 @@ void idMaterial::CommonInit() {
 	numStages = 0;
 	numAmbientStages = 0;
 	stages = NULL;
+	stageExtras = NULL;
 	editorImage = NULL;
 	lightFalloffImage = NULL;
 	shouldCreateBackSides = false;
@@ -617,6 +619,10 @@ void idMaterial::FreeData() {
 		}
 		R_StaticFree( stages );
 		stages = NULL;
+	}
+	if ( stageExtras ) {
+		R_StaticFree( stageExtras );
+		stageExtras = NULL;
 	}
 	if ( expressionRegisters != NULL ) {
 		R_StaticFree( expressionRegisters );
@@ -1236,11 +1242,9 @@ void idMaterial::ClearStage( shaderStage_t *ss ) {
 	ss->color.registers[2] =
 	ss->color.registers[3] = GetExpressionConstant( 1 );
 	// DUDE: parseStages[] is reused across every material, and ClearStage does not memset,
-	// so the parallax fields must be reset explicitly or a stage inherits a stale height
-	// pointer from a previously parsed material (docs/parallax.md).
-	ss->parallaxImage = NULL;
-	ss->parallaxScale = 0.0f;
-	ss->tessHeightImage = NULL;		// same stale-pointer hazard (docs/tessellation.md)
+	// so the stage's enhancement data must be reset explicitly or it inherits a stale height
+	// pointer from a previously parsed material (docs/parallax.md, docs/tessellation.md).
+	memset( &pd->parseStageExtras[ ss - pd->parseStages ], 0, sizeof( shaderStageExtra_t ) );
 }
 
 /*
@@ -2233,10 +2237,11 @@ void idMaterial::ParseStage( idLexer &src, const textureRepeat_t trpDefault ) {
 			height = R_CreateParallaxHeightImage( imageName );
 		}
 		if ( height ) {
-			ss->parallaxImage = height;
+			shaderStageExtra_t &extra = pd->parseStageExtras[ ss - pd->parseStages ];
+			extra.parallaxImage = height;
 			// heightmap() bake magnitude if the bump carried one, else a sane default; the
 			// per-material knob feeding r_parallaxScale in the interaction pass.
-			ss->parallaxScale = hasBake ? bakeScale : 5.0f;
+			extra.parallaxScale = hasBake ? bakeScale : 5.0f;
 		}
 	}
 
@@ -2266,7 +2271,7 @@ void idMaterial::ParseStage( idLexer &src, const textureRepeat_t trpDefault ) {
 		const bool generatedNormal = imageName[0]
 			&& idStr::FindText( imageName, "heightmap", false ) >= 0
 			&& idStr::FindText( imageName, "addnormals", false ) < 0;
-		ss->tessHeightImage = R_CreateTessHeightImage( imageName,
+		pd->parseStageExtras[ ss - pd->parseStages ].tessHeightImage = R_CreateTessHeightImage( imageName,
 			generatedNormal ? tessAuthored.c_str() : "" );
 	}
 }
@@ -2461,6 +2466,10 @@ void idMaterial::SortInteractionStages() {
 					temp = pd->parseStages[k];
 					pd->parseStages[k] = pd->parseStages[k+1];
 					pd->parseStages[k+1] = temp;
+
+					const shaderStageExtra_t tempExtra = pd->parseStageExtras[k];
+					pd->parseStageExtras[k] = pd->parseStageExtras[k+1];
+					pd->parseStageExtras[k+1] = tempExtra;
 				}
 			}
 		}
@@ -3035,6 +3044,8 @@ bool idMaterial::Parse( const char *text, const int textLength ) {
 	if (numStages) {
 		stages = (shaderStage_t *)R_StaticAlloc( numStages * sizeof( stages[0] ) );
 		memcpy( stages, pd->parseStages, numStages * sizeof( stages[0] ) );
+		stageExtras = (shaderStageExtra_t *)R_StaticAlloc( numStages * sizeof( stageExtras[0] ) );
+		memcpy( stageExtras, pd->parseStageExtras, numStages * sizeof( stageExtras[0] ) );
 	}
 
 	if ( numOps ) {
@@ -3490,11 +3501,27 @@ NULL on stock assets and with the feature off (docs/parallax.md).
 */
 const shaderStage_t *idMaterial::GetParallaxStage( void ) const {
 	for ( int i = 0 ; i < numStages ; i++ ) {
-		if ( stages[i].lighting == SL_BUMP && stages[i].parallaxImage ) {
+		if ( stages[i].lighting == SL_BUMP && stageExtras != NULL && stageExtras[i].parallaxImage ) {
 			return &stages[i];
 		}
 	}
 	return NULL;
+}
+
+/*
+===================
+idMaterial::GetStageExtra
+
+DUDE: the enhancement data of one of this material's stages (shaderStageExtra_t, kept out of
+shaderStage_t for dhewm3's layout). A stage that is not one of this material's gets zeros.
+===================
+*/
+const shaderStageExtra_t &idMaterial::GetStageExtra( const shaderStage_t *stage ) const {
+	static const shaderStageExtra_t none = {};
+	if ( stage == NULL || stages == NULL || stageExtras == NULL || stage < stages || stage >= stages + numStages ) {
+		return none;
+	}
+	return stageExtras[ stage - stages ];
 }
 
 /*

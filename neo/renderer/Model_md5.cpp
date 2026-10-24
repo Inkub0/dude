@@ -1075,11 +1075,11 @@ void idMD5Mesh::BuildTessTopology( const idJointMat *bindJoints ) {
 	if ( shader ) {
 		for ( int s = 0; s < shader->GetNumStages(); s++ ) {
 			const shaderStage_t *st = shader->GetStage( s );
-			if ( st && st->lighting == SL_BUMP && st->tessHeightImage ) {
+			if ( st && st->lighting == SL_BUMP && shader->GetStageExtra( st ).tessHeightImage ) {
 				// DUDE: the SIGNED height field, NOT the normal map -- the same pixels the
 				// fixed-function tess passes sample, so this pre-deform path displaces
 				// identically (docs/tessellation.md).
-				R_TessHeightPixelsForImage( st->tessHeightImage, &bumpPic, &bumpW, &bumpH );
+				R_TessHeightPixelsForImage( shader->GetStageExtra( st ).tessHeightImage, &bumpPic, &bumpW, &bumpH );
 				break;
 			}
 		}

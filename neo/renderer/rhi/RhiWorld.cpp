@@ -1490,7 +1490,7 @@ idImage *RB_RHI_TessHeightImage( const drawSurf_s *surf, bool tess ) {
 	if ( tess && surf && surf->material ) {
 		const shaderStage_t *bumpStage = surf->material->GetBumpStage();
 		if ( bumpStage ) {
-			height = bumpStage->tessHeightImage;
+			height = surf->material->GetStageExtra( bumpStage ).tessHeightImage;
 		}
 	}
 	return height ? height : R_TessFlatHeightImage();	// mid-grey: (h - 0.5) == 0
@@ -2049,13 +2049,14 @@ static idImage *RB_RHI_FillParallaxParms( rhi::RenderParams &parms, const drawIn
 		const bool worldSurf = redef && redef->parms.hModel
 		    && redef->parms.hModel->IsStaticWorldModel();
 		const shaderStage_t *px = worldSurf ? din->surf->material->GetParallaxStage() : NULL;
-		if ( px && px->parallaxImage ) {
-			parallaxImage = px->parallaxImage;
+		const shaderStageExtra_t &pxExtra = din->surf->material->GetStageExtra( px );
+		if ( px && pxExtra.parallaxImage ) {
+			parallaxImage = pxExtra.parallaxImage;
 			// The material's parallaxScale is the heightmap() bake magnitude (~3..10); convert
 			// to a UV displacement depth. Doom 3's height maps are low-contrast (authored only
 			// to derive normals), so the per-unit factor is generous to make the relief read;
 			// r_parallaxScale is the artist master knob on top (default 1, crank to exaggerate).
-			const float depth = px->parallaxScale * r_parallaxScale.GetFloat() * 0.015f;
+			const float depth = pxExtra.parallaxScale * r_parallaxScale.GetFloat() * 0.015f;
 			parms.parallaxParms[0] = 1.0f;
 			parms.parallaxParms[1] = idMath::ClampFloat( 0.0f, 0.3f, depth );
 			parms.parallaxParms[2] = (float)r_parallaxMinSteps.GetInteger();
