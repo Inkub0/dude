@@ -156,7 +156,12 @@ static void TraceToQ4( const trace_t &src, traceQ4_t &dst ) {
 	dst.fraction = src.fraction;
 	dst.endpos = src.endpos;
 	dst.endAxis = src.endAxis;
-	ContactToQ4( src.c, dst.c );
+	if ( src.fraction < 1.0f ) {
+		ContactToQ4( src.c, dst.c );
+	} else {
+		// the engine leaves the contact unset when nothing was hit: never read it
+		memset( &dst.c, 0, sizeof( dst.c ) );
+	}
 }
 
 // a trace that hit nothing, for a model that is not there
