@@ -28,6 +28,9 @@ Doom 3 GPL Source Code (see ArbProgram.h for license header)
 ===============================================================================
 */
 
+static const cmHandle_t HANDLE_UNRESOLVED	= -1;
+static const cmHandle_t HANDLE_MISSING		= -2;		// not on this map: not looked up again until the next map
+
 class idCollisionModelQ4Local : public idCollisionModel {
 public:
 							idCollisionModelQ4Local( const char *name ) : name( name ), handle( -1 ), trm( NULL ), trmMaterial( NULL ), refCount( 1 ) {}
@@ -44,17 +47,46 @@ public:
 	cmHandle_t				Handle( void ) const;
 
 	idStr					name;
-	cmHandle_t				handle;			// a map model's, -1 when not loaded
+	mutable cmHandle_t		handle;			// a map model's; HANDLE_UNRESOLVED until looked up (again) by name, HANDLE_MISSING when the map has none
 	idTraceModel *			trm;			// a trace model's
 	const idMaterial *		trmMaterial;
 	int						refCount;		// a map model's holders
 };
 
+/*
+===============
+FindEngineModel
+
+The engine's handle for a map model by name, -1 when the map has none. The world is the map's
+first model; the engine answers 0 for "not found" as well.
+===============
+*/
+static cmHandle_t FindEngineModel( const char *modelName ) {
+	const cmHandle_t h = collisionModelManager->LoadModel( modelName, false );
+	if ( h == 0 && idStr::Icmp( modelName, WORLD_MODEL_NAME ) != 0 && idStr::Icmp( modelName, collisionModelManager->GetModelName( 0 ) ) != 0 ) {
+		return -1;
+	}
+	return h;
+}
+
+/*
+===============
+idCollisionModelQ4Local::Handle
+
+A map model's handle is looked up again after the engine changed maps: the Quake 4 game frees
+the collision map only at its shutdown and just loads the next level's, which drops the old
+level's models in the engine (idCollisionModelManagerLocal::LoadMap) under any handle kept.
+===============
+*/
 cmHandle_t idCollisionModelQ4Local::Handle( void ) const {
 	if ( trm != NULL ) {
 		return collisionModelManager->SetupTrmModel( *trm, trmMaterial );
 	}
-	return handle;
+	if ( handle == HANDLE_UNRESOLVED ) {
+		const cmHandle_t h = FindEngineModel( name );
+		handle = h >= 0 ? h : HANDLE_MISSING;
+	}
+	return handle >= 0 ? handle : -1;
 }
 
 bool idCollisionModelQ4Local::GetBounds( idBounds &bounds ) const {
@@ -62,7 +94,8 @@ bool idCollisionModelQ4Local::GetBounds( idBounds &bounds ) const {
 		bounds = trm->bounds;
 		return true;
 	}
-	return handle >= 0 && collisionModelManager->GetModelBounds( handle, bounds );
+	const cmHandle_t h = Handle();
+	return h >= 0 && collisionModelManager->GetModelBounds( h, bounds );
 }
 
 bool idCollisionModelQ4Local::GetContents( int &contents ) const {
@@ -127,9 +160,10 @@ public:
 
 private:
 	idCollisionModelQ4Local *FindMapModel( const char *modelName ) const;
+	void					ForgetHandles( void );
 
-	// the map's models by name; they outlive FreeMap (unloaded, handle -1) because the game may
-	// still hold them, and load again when asked for by name
+	// the map's models by name; they outlive the map (handle -1) because the game may still hold
+	// them, and are looked up again by name when next used
 	idList<idCollisionModelQ4Local *> mapModels;
 };
 
@@ -189,21 +223,25 @@ idCollisionModelQ4Local *idCollisionModelManagerQ4Local::FindMapModel( const cha
 	return NULL;
 }
 
+void idCollisionModelManagerQ4Local::ForgetHandles( void ) {
+	for ( int i = 0; i < mapModels.Num(); i++ ) {
+		mapModels[i]->handle = HANDLE_UNRESOLVED;
+	}
+}
+
 void idCollisionModelManagerQ4Local::LoadMap( const idMapFile *mapFile, bool forceReload ) {
 	if ( forceReload ) {
 		collisionModelManager->FreeMap();
-		for ( int i = 0; i < mapModels.Num(); i++ ) {
-			mapModels[i]->handle = -1;
-		}
 	}
+	// the engine keeps the map's models when it is the same map, else replaces them: either way a
+	// handle is looked up again by name, which finds the same model when it was kept
 	collisionModelManager->LoadMap( mapFile );
+	ForgetHandles();
 }
 
 void idCollisionModelManagerQ4Local::FreeMap( const char *mapName ) {
 	collisionModelManager->FreeMap();
-	for ( int i = 0; i < mapModels.Num(); i++ ) {
-		mapModels[i]->handle = -1;
-	}
+	ForgetHandles();
 }
 
 idCollisionModel *idCollisionModelManagerQ4Local::LoadModel( const char *mapName, const char *modelName ) {
@@ -216,13 +254,8 @@ idCollisionModel *idCollisionModelManagerQ4Local::LoadModel( const char *mapName
 		model->refCount = 0;
 		mapModels.Append( model );
 	}
-	if ( model->handle < 0 ) {
-		// the world is the map's first model; the engine answers 0 for "not found" as well
-		const cmHandle_t h = collisionModelManager->LoadModel( modelName, false );
-		if ( h == 0 && idStr::Icmp( modelName, WORLD_MODEL_NAME ) != 0 && idStr::Icmp( modelName, collisionModelManager->GetModelName( 0 ) ) != 0 ) {
-			return NULL;
-		}
-		model->handle = h;
+	if ( model->Handle() < 0 ) {
+		return NULL;
 	}
 	model->refCount++;
 	return model;
