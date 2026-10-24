@@ -773,7 +773,11 @@ performance** as the goals; repository `~/dude-quake4-game` (local git, never pu
   1.5.5's headers (GCC `-fdump-lang-class`) guards it from then on.
 - **Steps and gates:**
   0. **Q5.0 dhewm3 ABI** - the ABI diff tool, then the three breaks above fixed. Gate: diff
-     clean; Doom 3 + RoE unchanged (user).
+     clean; Doom 3 + RoE unchanged (user). **DONE 2026-10-24, merged (`380e99fa`):**
+     `tools/check_dhewm3_abi.py` found a fourth break (`glconfig_s` mid-struct fields); all
+     four fixed, 0 breaks over 543 records / 64 vtables / 851 enumerators; user-verified with
+     dhewm3 1.5.5's own `base.so` / `d3xp.so` loaded into DUDE (`docs/mod-dll-compatibility.md`
+     §7.4).
   1. **Q5.1 build skeleton** - `tools/quake4/build-q4game.sh` (DUDE) + CMake (game repo), the
      include architecture above, and a compile-error inventory tool (errors grouped by missing
      symbol / header), so the remaining work is a measured list. Gate: the build runs end to
