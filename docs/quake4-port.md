@@ -747,21 +747,41 @@ performance** as the goals; repository `~/dude-quake4-game` (local git, never pu
   facade (`idCollisionModel`, map-scoped; trace `materialType` = the material's own, §5.3), the
   decl accessors of Q2's decl types, UI / common / file-system extras, and a **no-op BSE
   manager** (every effect call accepted, nothing drawn) until Q4 brings the real one.
-  **`GAME_API_VERSION` 9 → 10:** the structs grow, so every game library is rebuilt against
-  the new headers - the in-tree `base.so` / `d3xp.so` / `d3le.so` / `nullgame.so` are; an
-  already-built external mod library (e.g. `tfphobos.so`) is refused until it is rebuilt from
-  source, which is the mod policy (`docs/mod-dll-compatibility.md`: source-recompiled mods).
-  Doom 3 libraries never see a Quake 4 entry point; the engine calls the new ones only for the
-  Quake 4 title.
+  **The dhewm3 game ABI stays frozen (user, 2026-10-24: binary compatibility with dhewm3 mods
+  is DUDE's main strength).** `GAME_API_VERSION` stays 9 and no struct or interface a dhewm3
+  game library compiles against changes layout, vtable order or signatures; a mod built
+  against dhewm3 1.5.5's headers loads and runs unchanged. Quake 4 gets its **own** interface
+  layer instead of growing the shared one: its game library receives the same `gameImport_t`,
+  asks the engine for the Quake 4 interfaces through the existing extension point
+  `idCommon::GetAdditionalFunction` (a new `FunctionType`; dhewm3 added that call exactly so
+  the ABI need not change), and gets **facade objects** - a Quake 4 render world, sound
+  system, collision manager, BSE manager, decl accessors - declared in new DUDE headers of our
+  own (Quake 4-shaped `renderEntity_t` etc. live there, converted to the engine's internal
+  structs by the facade; Doom 3's headers do not grow). The game's `idGame` is a subclass
+  whose Quake 4 entries are appended after Doom 3's, and the engine calls them only for the
+  Quake 4 title. This also means fewer patches to Raven's game code (the facades take Quake
+  4's signatures as they are) - better for fidelity.
+  **Audit (2026-10-24, 93 game-visible headers vs `upstream/master` = dhewm3 1.5.5):** 17
+  changed; the Quake 4 work kept them ABI-safe (appended enum values, appended virtuals on
+  engine-implemented classes, fields appended to engine-allocated objects), but three older
+  DUDE changes break dhewm3 binaries: `shaderStage_t` grew (parallax / tessellation fields), so
+  the inline `idMaterial::GetStage(i)` of a dhewm3 build strides wrongly - dhewm3's own
+  `Player.cpp` PDA-video code does that and would read garbage for stage 1+; `idRenderWorld::
+  Trace` gained a 7th parameter (`skipDecals`), which a dhewm3 caller never passes; and
+  `glyphInfo_t` changed from int to float metrics (Q1, Raven fonts) - unused by game code but
+  part of the public header. They get fixed first, and a layout/vtable diff against dhewm3
+  1.5.5's headers (GCC `-fdump-lang-class`) guards it from then on.
 - **Steps and gates:**
+  0. **Q5.0 dhewm3 ABI** - the ABI diff tool, then the three breaks above fixed. Gate: diff
+     clean; Doom 3 + RoE unchanged (user).
   1. **Q5.1 build skeleton** - `tools/quake4/build-q4game.sh` (DUDE) + CMake (game repo), the
      include architecture above, and a compile-error inventory tool (errors grouped by missing
      symbol / header), so the remaining work is a measured list. Gate: the build runs end to
      end and the inventory is recorded here.
   2. **Q5.2 idlib layer** - every idlib error gone. Gate: `idlib`-attributed errors 0.
   3. **Q5.3 engine interfaces** - the union, item by item from the inventory, Doom 3 libraries
-     rebuilt and unchanged in behaviour. Gate: `q4base.so` compiles and links; Doom 3 + RoE
-     smoke test by the user.
+     rebuilt and unchanged in behaviour, the ABI diff against dhewm3 1.5.5 clean. Gate:
+     `q4base.so` compiles and links; Doom 3 + RoE smoke test by the user.
   4. **Q5.4 load** - `q4base.so` replaces the null game under `run-q4.sh`: `GetGameAPI`,
      `Init`, main menu with the game's cvars (the sweep's `mainmenu.gui` cvar warnings gone),
      clean quit. Gate: boot + quit on both backends, no new warnings.
