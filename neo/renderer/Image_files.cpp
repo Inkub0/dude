@@ -133,6 +133,7 @@ void R_WritePalTGA( const char *filename, const byte *data, const byte *palette,
 static void LoadBMP( const char *name, byte **pic, int *width, int *height, ID_TIME_T *timestamp );
 static void LoadTGA( const char *name, byte **pic, int *width, int *height, ID_TIME_T *timestamp );
 static void LoadJPG( const char *name, byte **pic, int *width, int *height, ID_TIME_T *timestamp );
+static void LoadDDS( const char *name, byte **pic, int *width, int *height, ID_TIME_T *timestamp );
 
 
 /*
@@ -805,6 +806,222 @@ static void LoadJPG( const char *filename, unsigned char **pic, int *width, int 
 	stbi_image_free( decodedImageData );
 }
 
+/*
+=========================================================
+
+DDS LOADING (DUDE)
+
+A source image that exists only as a .dds at its own path, decoded to RGBA on the CPU:
+Quake 4 ships one texture that way (shell_loader_s, which its engine read with
+image_usePrecompressedTextures on), and mods made with Raven's tools may ship more. This
+is not the precompressed path (dds/ tree, GPU upload of the blocks, OpenGL only) - it is a
+last resort for R_LoadImage, so it works on every backend and inside image programs. Top
+mip level only; DXT1/3/5, RXGB (DXT5 with red in alpha, written back to red here, as the
+.tga it stands in for would have it) and uncompressed 24/32-bit with channel masks.
+
+=========================================================
+*/
+
+static void DDS_Color565( unsigned int c, byte out[4] ) {
+	const unsigned int r = ( c >> 11 ) & 31, g = ( c >> 5 ) & 63, b = c & 31;
+	out[0] = (byte)( ( r << 3 ) | ( r >> 2 ) );
+	out[1] = (byte)( ( g << 2 ) | ( g >> 4 ) );
+	out[2] = (byte)( ( b << 3 ) | ( b >> 2 ) );
+	out[3] = 255;
+}
+
+// a BC1 colour block: two 565 endpoints, 2-bit indices. threeColor = DXT1's c0 <= c1 mode
+// (third colour the midpoint, fourth transparent black); DXT3/5 always use four colours
+static void DDS_DecodeColorBlock( const byte *block, byte texels[16][4], bool allowThreeColor ) {
+	const unsigned int c0 = block[0] | ( block[1] << 8 );
+	const unsigned int c1 = block[2] | ( block[3] << 8 );
+	byte palette[4][4];
+	DDS_Color565( c0, palette[0] );
+	DDS_Color565( c1, palette[1] );
+	if ( c0 > c1 || !allowThreeColor ) {
+		for ( int k = 0; k < 3; k++ ) {
+			palette[2][k] = (byte)( ( 2 * palette[0][k] + palette[1][k] ) / 3 );
+			palette[3][k] = (byte)( ( palette[0][k] + 2 * palette[1][k] ) / 3 );
+		}
+		palette[2][3] = palette[3][3] = 255;
+	} else {
+		for ( int k = 0; k < 3; k++ ) {
+			palette[2][k] = (byte)( ( palette[0][k] + palette[1][k] ) / 2 );
+			palette[3][k] = 0;
+		}
+		palette[2][3] = 255;
+		palette[3][3] = 0;
+	}
+	const unsigned int indices = block[4] | ( block[5] << 8 ) | ( block[6] << 16 ) | ( (unsigned int)block[7] << 24 );
+	for ( int i = 0; i < 16; i++ ) {
+		const byte *c = palette[ ( indices >> ( 2 * i ) ) & 3 ];
+		texels[i][0] = c[0];
+		texels[i][1] = c[1];
+		texels[i][2] = c[2];
+		texels[i][3] = c[3];
+	}
+}
+
+// a BC3 alpha block: two 8-bit endpoints, 3-bit indices
+static void DDS_DecodeAlphaBlock( const byte *block, byte texels[16][4] ) {
+	const int a0 = block[0], a1 = block[1];
+	int alphas[8];
+	alphas[0] = a0;
+	alphas[1] = a1;
+	if ( a0 > a1 ) {
+		for ( int i = 1; i < 7; i++ ) {
+			alphas[i + 1] = ( ( 7 - i ) * a0 + i * a1 ) / 7;
+		}
+	} else {
+		for ( int i = 1; i < 5; i++ ) {
+			alphas[i + 1] = ( ( 5 - i ) * a0 + i * a1 ) / 5;
+		}
+		alphas[6] = 0;
+		alphas[7] = 255;
+	}
+	unsigned long long bits = 0;
+	for ( int i = 0; i < 6; i++ ) {
+		bits |= (unsigned long long)block[2 + i] << ( 8 * i );
+	}
+	for ( int i = 0; i < 16; i++ ) {
+		texels[i][3] = (byte)alphas[ ( bits >> ( 3 * i ) ) & 7 ];
+	}
+}
+
+static int DDS_MaskShift( unsigned int mask ) {
+	int shift = 0;
+	while ( mask && !( mask & 1 ) ) {
+		mask >>= 1;
+		shift++;
+	}
+	return shift;
+}
+
+static byte DDS_MaskChannel( unsigned int pixel, unsigned int mask, byte missing ) {
+	if ( !mask ) {
+		return missing;
+	}
+	const int shift = DDS_MaskShift( mask );
+	const unsigned int max = mask >> shift;
+	return (byte)( ( ( ( pixel & mask ) >> shift ) * 255 + max / 2 ) / max );
+}
+
+static void LoadDDS( const char *name, byte **pic, int *width, int *height, ID_TIME_T *timestamp ) {
+	if ( !pic ) {
+		fileSystem->ReadFile( name, NULL, timestamp );
+		return;	// just getting timestamp
+	}
+	*pic = NULL;
+
+	byte *buffer = NULL;
+	const int fileSize = fileSystem->ReadFile( name, (void **)&buffer, timestamp );
+	if ( !buffer ) {
+		return;
+	}
+	const int headerEnd = 4 + (int)sizeof( ddsFileHeader_t );
+	if ( fileSize < headerEnd || LittleInt( *(int *)buffer ) != (int)DDS_MAKEFOURCC( 'D', 'D', 'S', ' ' ) ) {
+		common->Warning( "LoadDDS: %s is not a DDS file", name );
+		fileSystem->FreeFile( buffer );
+		return;
+	}
+	const ddsFileHeader_t *header = (const ddsFileHeader_t *)( buffer + 4 );
+	const int w = LittleInt( header->dwWidth );
+	const int h = LittleInt( header->dwHeight );
+	const unsigned int pfFlags = LittleInt( header->ddspf.dwFlags );
+	const unsigned int fourCC = LittleInt( header->ddspf.dwFourCC );
+	const byte *data = buffer + headerEnd;
+	const int dataSize = fileSize - headerEnd;
+
+	int blockBytes = 0;		// 0 = uncompressed
+	bool threeColor = false, explicitAlpha = false, interpolatedAlpha = false, rxgb = false;
+	if ( pfFlags & DDSF_FOURCC ) {
+		if ( fourCC == DDS_MAKEFOURCC( 'D', 'X', 'T', '1' ) ) {
+			blockBytes = 8;
+			threeColor = true;
+		} else if ( fourCC == DDS_MAKEFOURCC( 'D', 'X', 'T', '3' ) ) {
+			blockBytes = 16;
+			explicitAlpha = true;
+		} else if ( fourCC == DDS_MAKEFOURCC( 'D', 'X', 'T', '5' ) || fourCC == DDS_MAKEFOURCC( 'R', 'X', 'G', 'B' ) ) {
+			blockBytes = 16;
+			interpolatedAlpha = true;
+			rxgb = ( fourCC == DDS_MAKEFOURCC( 'R', 'X', 'G', 'B' ) );
+		} else {
+			common->Warning( "LoadDDS: %s uses a format this loader does not decode", name );
+			fileSystem->FreeFile( buffer );
+			return;
+		}
+	}
+	const int bitCount = LittleInt( header->ddspf.dwRGBBitCount );
+	if ( w < 1 || h < 1 || w > 16384 || h > 16384 || ( !blockBytes && bitCount != 24 && bitCount != 32 ) ) {
+		common->Warning( "LoadDDS: %s has a size or pixel format this loader does not decode", name );
+		fileSystem->FreeFile( buffer );
+		return;
+	}
+	const int needed = blockBytes ? ( ( w + 3 ) / 4 ) * ( ( h + 3 ) / 4 ) * blockBytes : w * h * ( bitCount / 8 );
+	if ( dataSize < needed ) {
+		common->Warning( "LoadDDS: %s is truncated", name );
+		fileSystem->FreeFile( buffer );
+		return;
+	}
+
+	byte *out = (byte *)R_StaticAlloc( w * h * 4 );
+	if ( blockBytes ) {
+		const byte *block = data;
+		for ( int by = 0; by < h; by += 4 ) {
+			for ( int bx = 0; bx < w; bx += 4, block += blockBytes ) {
+				byte texels[16][4];
+				const byte *colorBlock = blockBytes == 16 ? block + 8 : block;
+				DDS_DecodeColorBlock( colorBlock, texels, threeColor );
+				if ( explicitAlpha ) {
+					for ( int i = 0; i < 16; i++ ) {
+						const int nibble = ( block[i / 2] >> ( 4 * ( i & 1 ) ) ) & 15;
+						texels[i][3] = (byte)( nibble * 17 );
+					}
+				} else if ( interpolatedAlpha ) {
+					DDS_DecodeAlphaBlock( block, texels );
+				}
+				for ( int i = 0; i < 16; i++ ) {
+					const int x = bx + ( i & 3 ), y = by + ( i >> 2 );
+					if ( x >= w || y >= h ) {
+						continue;	// the padding of a block past the image edge
+					}
+					byte *dst = out + ( y * w + x ) * 4;
+					if ( rxgb ) {
+						dst[0] = texels[i][3];
+						dst[1] = texels[i][1];
+						dst[2] = texels[i][2];
+						dst[3] = 255;
+					} else {
+						dst[0] = texels[i][0];
+						dst[1] = texels[i][1];
+						dst[2] = texels[i][2];
+						dst[3] = texels[i][3];
+					}
+				}
+			}
+		}
+	} else {
+		const unsigned int rMask = LittleInt( header->ddspf.dwRBitMask );
+		const unsigned int gMask = LittleInt( header->ddspf.dwGBitMask );
+		const unsigned int bMask = LittleInt( header->ddspf.dwBBitMask );
+		const unsigned int aMask = ( pfFlags & 1 ) ? LittleInt( header->ddspf.dwABitMask ) : 0;	// DDPF_ALPHAPIXELS
+		const int bytes = bitCount / 8;
+		for ( int i = 0; i < w * h; i++ ) {
+			const byte *src = data + i * bytes;
+			const unsigned int pixel = src[0] | ( src[1] << 8 ) | ( src[2] << 16 ) | ( bytes == 4 ? (unsigned int)src[3] << 24 : 0 );
+			out[i * 4 + 0] = DDS_MaskChannel( pixel, rMask, 0 );
+			out[i * 4 + 1] = DDS_MaskChannel( pixel, gMask, 0 );
+			out[i * 4 + 2] = DDS_MaskChannel( pixel, bMask, 0 );
+			out[i * 4 + 3] = DDS_MaskChannel( pixel, aMask, 255 );
+		}
+	}
+
+	fileSystem->FreeFile( buffer );
+	*pic = out;
+	*width = w;
+	*height = h;
+}
+
 //===================================================================
 
 /*
@@ -863,6 +1080,12 @@ void R_LoadImage( const char *cname, byte **pic, int *width, int *height, ID_TIM
 			name.StripFileExtension();
 			name.DefaultFileExtension( ".jpg" );
 			LoadJPG( name.c_str(), pic, width, height, timestamp );
+		}
+		// DUDE: then a .dds at the same path, the only copy some Quake 4 textures have (LoadDDS)
+		if ( ( pic && *pic == 0 ) || ( timestamp && *timestamp == FILE_NOT_FOUND_TIMESTAMP ) ) {
+			name.StripFileExtension();
+			name.DefaultFileExtension( ".dds" );
+			LoadDDS( name.c_str(), pic, width, height, timestamp );
 		}
 	} else if ( ext == "pcx" ) {
 		LoadPCX32( name.c_str(), pic, width, height, timestamp );

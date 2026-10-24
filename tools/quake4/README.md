@@ -60,6 +60,11 @@ Q4BASE="/path/to/Quake 4/q4base" python3 tools/quake4/q4_inventory.py > /tmp/q4_
   (`DewmAAS "1.08"`) and of Doom 3 + RoE + Lost Mission (`1.07`). Reports failures and warnings
   (the loader's feature self-check included), areas, clusters, dummy files, tactical features.
   Needs a configured `build/`.
+- `test_dds_decode.sh` (+ `tests/dds_decode_test.cpp`) — the engine's DDS source decoder (`LoadDDS`,
+  `neo/renderer/Image_files.cpp`, `R_LoadImage`'s last resort for a texture that exists only as a
+  `.dds`): compiles its lines verbatim with stub file I/O and compares the RGBA it decodes with
+  Pillow over Quake 4 files of every format in the paks (DXT1/3/5, RXGB, 32-bit). Needs `build/`
+  and Pillow. Result: bit-exact on all 32 samples.
 - `q4_cm_check.py <pk4 glob>[,<glob>...]` — the Python replica of the same loader: also checks
   that a Quake 4 block header's counts match the rows and that every brush contents name is
   one `cm_contentsNameByIndex` knows.
