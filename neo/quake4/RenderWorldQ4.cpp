@@ -11,8 +11,11 @@ Doom 3 GPL Source Code (see ArbProgram.h for license header)
 // Sound handles become the engine's emitters. Quake 4's portal sky view (RF_PORTAL_SKY) is the
 // renderer's portal sky subview (idRenderWorld::SetPortalSkyCamera), as for Doom 3's RoE.
 //
-// Not carried over yet - accepted and dropped, the renderer has no slot for them:
-// suppressSurfaceMask, overlayShader, shadowLODDistance / suppressLOD, a light's detailLevel,
+// Hidden surfaces (suppressSurfaceMask) go to the engine entity and take effect when an MD5 model
+// is posed; an overlayShader is a second engine entity drawing the model with it.
+//
+// Not carried over yet - accepted and dropped, the renderer has no slot for them: a static
+// model's suppressSurfaceMask, shadowLODDistance / suppressLOD, a light's detailLevel,
 // noDynamicShadows and globalLight; the view weapon's depth hack applies in every view, not just
 // weaponDepthHackInViewID's. Effects (Raven's BSE) come with phase Q4: until then AddEffectDef
 // declines every effect.
@@ -99,12 +102,16 @@ private:
 	// a game entity: the game's own description, and the engine handle it lives under
 	struct entityQ4_t {
 		renderEntityQ4_t	parms;
+		qhandle_t			overlayHandle;		// the engine entity drawing parms.overlayShader, -1 for none
 	};
 
 	entityQ4_t *			Entity( qhandle_t entityHandle ) const;
-	void					ToEngine( entityQ4_t *ent, renderEntity_t &out ) const;
+	static void				ToEngine( entityQ4_t *ent, renderEntity_t &out );
+	static void				ToEngineOverlay( entityQ4_t *ent, renderEntity_t &out );
+	void					SyncEngine( qhandle_t entityHandle, entityQ4_t *ent );
 
 	static bool				EntityCallback( renderEntity_s *engineEntity, const renderView_s *view );
+	static bool				OverlayCallback( renderEntity_s *engineEntity, const renderView_s *view );
 
 	idList<entityQ4_t *>	entities;			// by engine entity handle
 
@@ -141,7 +148,7 @@ idRenderWorldQ4Local::ToEngine
 The engine's render entity for a game entity: the trampoline stands in for the game's callback.
 ===============
 */
-void idRenderWorldQ4Local::ToEngine( entityQ4_t *ent, renderEntity_t &out ) const {
+void idRenderWorldQ4Local::ToEngine( entityQ4_t *ent, renderEntity_t &out ) {
 	R_RenderEntityQ4ToEngine( ent->parms, out );
 	if ( ent->parms.callback != NULL ) {
 		out.callback = EntityCallback;
@@ -177,12 +184,74 @@ bool idRenderWorldQ4Local::EntityCallback( renderEntity_s *engineEntity, const r
 
 /*
 ===============
+idRenderWorldQ4Local::ToEngineOverlay
+
+Quake 4 draws an entity's overlayShader (powerup shells) as the model again over itself with
+that material; here that is a second engine entity, posed from the same joints, casting no shadow.
+===============
+*/
+void idRenderWorldQ4Local::ToEngineOverlay( entityQ4_t *ent, renderEntity_t &out ) {
+	R_RenderEntityQ4ToEngine( ent->parms, out );
+	out.customShader = ent->parms.overlayShader;
+	out.customSkin = NULL;
+	out.noShadow = true;
+	out.referenceSound = SoundEmitterForHandleQ4( ent->parms.referenceSoundHandle );
+	if ( ent->parms.callback != NULL ) {
+		// the game's callback runs for the entity itself; the overlay follows what it left
+		out.callback = OverlayCallback;
+		out.callbackData = ent;
+	}
+}
+
+bool idRenderWorldQ4Local::OverlayCallback( renderEntity_s *engineEntity, const renderView_s *view ) {
+	entityQ4_t *ent = static_cast<entityQ4_t *>( engineEntity->callbackData );
+	if ( ent == NULL || ent->parms.hModel == NULL ) {
+		return false;
+	}
+	ToEngineOverlay( ent, *engineEntity );
+	return true;
+}
+
+/*
+===============
+idRenderWorldQ4Local::SyncEngine
+
+After the engine entity is added or updated: its hidden surfaces, and the overlay entity.
+===============
+*/
+void idRenderWorldQ4Local::SyncEngine( qhandle_t entityHandle, entityQ4_t *ent ) {
+	idRenderWorldLocal *world = static_cast<idRenderWorldLocal *>( renderWorld );
+	if ( entityHandle >= 0 && entityHandle < world->entityDefs.Num() && world->entityDefs[entityHandle] != NULL ) {
+		world->entityDefs[entityHandle]->suppressSurfaceMask = ent->parms.suppressSurfaceMask;
+	}
+
+	const bool wantOverlay = ent->parms.overlayShader != NULL && ( ent->parms.hModel != NULL || ent->parms.callback != NULL );
+	if ( wantOverlay ) {
+		renderEntity_t overlay;
+		ToEngineOverlay( ent, overlay );
+		if ( ent->overlayHandle < 0 ) {
+			ent->overlayHandle = renderWorld->AddEntityDef( &overlay );
+		} else {
+			renderWorld->UpdateEntityDef( ent->overlayHandle, &overlay );
+		}
+		if ( ent->overlayHandle >= 0 && ent->overlayHandle < world->entityDefs.Num() && world->entityDefs[ent->overlayHandle] != NULL ) {
+			world->entityDefs[ent->overlayHandle]->suppressSurfaceMask = ent->parms.suppressSurfaceMask;
+		}
+	} else if ( ent->overlayHandle >= 0 ) {
+		renderWorld->FreeEntityDef( ent->overlayHandle );
+		ent->overlayHandle = -1;
+	}
+}
+
+/*
+===============
 entities
 ===============
 */
 qhandle_t idRenderWorldQ4Local::AddEntityDef( const renderEntityQ4_t *re ) {
 	entityQ4_t *ent = new entityQ4_t;
 	ent->parms = *re;
+	ent->overlayHandle = -1;
 
 	renderEntity_t engineEntity;
 	ToEngine( ent, engineEntity );
@@ -199,8 +268,15 @@ qhandle_t idRenderWorldQ4Local::AddEntityDef( const renderEntityQ4_t *re ) {
 			entities[i] = NULL;
 		}
 	}
-	delete entities[handle];
+	if ( entities[handle] != NULL ) {
+		// a stale game entity under a recycled handle (never expected)
+		if ( entities[handle]->overlayHandle >= 0 ) {
+			renderWorld->FreeEntityDef( entities[handle]->overlayHandle );
+		}
+		delete entities[handle];
+	}
 	entities[handle] = ent;
+	SyncEngine( handle, ent );
 	return handle;
 }
 
@@ -218,18 +294,23 @@ void idRenderWorldQ4Local::UpdateEntityDef( qhandle_t entityHandle, const render
 	entityQ4_t *ent = entities[entityHandle];
 	if ( ent == NULL ) {
 		ent = entities[entityHandle] = new entityQ4_t;
+		ent->overlayHandle = -1;
 	}
 	ent->parms = *re;
 
 	renderEntity_t engineEntity;
 	ToEngine( ent, engineEntity );
 	renderWorld->UpdateEntityDef( entityHandle, &engineEntity );
+	SyncEngine( entityHandle, ent );
 }
 
 void idRenderWorldQ4Local::FreeEntityDef( qhandle_t entityHandle ) {
 	renderWorld->FreeEntityDef( entityHandle );
 	entityQ4_t *ent = Entity( entityHandle );
 	if ( ent != NULL ) {
+		if ( ent->overlayHandle >= 0 ) {
+			renderWorld->FreeEntityDef( ent->overlayHandle );
+		}
 		delete ent;
 		entities[entityHandle] = NULL;
 	}

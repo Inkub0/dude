@@ -298,6 +298,11 @@ public:
 	idInteraction *			lastInteraction;
 
 	bool					needsPortalSky;
+
+	// DUDE: Quake 4's renderEntity suppressSurfaceMask, set by its render world facade: bit i hides
+	// an MD5 model's mesh i (idRenderModel::GetSurfaceMask) when the model is posed, so every pass
+	// that draws or shadows the posed model leaves it out. Doom 3 never sets it.
+	int						suppressSurfaceMask;
 };
 
 
@@ -1703,6 +1708,8 @@ void R_ListRenderEntityDefs_f( const idCmdArgs &args );
 
 bool R_IssueEntityDefCallback( idRenderEntityLocal *def );
 idRenderModel *R_EntityDefDynamicModel( idRenderEntityLocal *def );
+// DUDE: the suppressSurfaceMask of the entity whose MD5 model is being posed now (0 otherwise)
+extern int r_instancingSurfaceMask;
 
 viewEntity_t *R_SetEntityDefViewEntity( idRenderEntityLocal *def );
 viewLight_t *R_SetLightDefViewLight( idRenderLightLocal *def );

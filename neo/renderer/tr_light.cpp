@@ -1234,6 +1234,8 @@ Returns the cached dynamic model if present, otherwise creates
 it and any necessary overlays
 ===================
 */
+int r_instancingSurfaceMask = 0;
+
 idRenderModel *R_EntityDefDynamicModel( idRenderEntityLocal *def ) {
 	bool callbackUpdate;
 
@@ -1265,7 +1267,9 @@ idRenderModel *R_EntityDefDynamicModel( idRenderEntityLocal *def ) {
 	if ( !def->dynamicModel ) {
 
 		// instantiate the snapshot of the dynamic model, possibly reusing memory from the cached snapshot
+		r_instancingSurfaceMask = def->suppressSurfaceMask;
 		def->cachedDynamicModel = model->InstantiateDynamicModel( &def->parms, tr.viewDef, def->cachedDynamicModel );
+		r_instancingSurfaceMask = 0;
 
 		if ( def->cachedDynamicModel ) {
 
