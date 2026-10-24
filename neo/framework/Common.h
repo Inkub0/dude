@@ -30,6 +30,7 @@ If you have questions concerning this license or the applicable additional terms
 #define __COMMON_H__
 
 #include "framework/CVarSystem.h"
+#include "idlib/LangDict.h"		// GetLocalizedString reads it inline
 
 /*
 ==============================================================
@@ -301,6 +302,36 @@ public:
 	// motion (e.g. right after a tic consumed the mouse buffer). Appended at the end of the
 	// interface to keep the game-DLL vtable ABI stable.
 	virtual void				GetPendingViewAngleDelta( float &yaw, float &pitch ) = 0;
+
+	// ---- Quake 4 game library -------------------------------------------------------------
+	// What Raven's game code asks of idCommon beyond Doom 3's interface (docs/quake4-port.md
+	// 5.6). Appended at the end, so a dhewm3 game library's vtable is unchanged; the inline
+	// ones need no engine support at all.
+
+								// a "#str_" id looked up in the language dictionary, anything else as it is
+	const char *				GetLocalizedString( const char *token ) { return GetLanguageDict()->GetString( token ); }
+
+								// the script debugger's breakpoint check (FT_UpdateDebugger)
+	void						DebuggerCheckBreakpoint( idInterpreter *interpreter, idProgram *program, int instructionPointer ) {
+									FunctionPointer fn = NULL;
+									if ( GetAdditionalFunction( FT_UpdateDebugger, &fn, NULL ) && fn ) {
+										( (bool (*)( idInterpreter *, idProgram *, int ))fn )( interpreter, program, instructionPointer );
+									}
+								}
+
+								// the rate the game is ticked at
+	virtual int					GetUserCmdHz( void ) const = 0;
+	virtual int					GetUserCmdMSec( void ) const = 0;
+								// true while a tool validates every decl (Raven's); DUDE has none that runs the game
+	virtual bool				DoingDeclValidation( void ) = 0;
+								// the r_mode that suits a com_machineSpec, and asking for a spec (the multiplayer menu)
+	virtual int					GetRModeForMachineSpec( int machineSpec ) const = 0;
+	virtual void				SetDesiredMachineSpec( int machineSpec ) = 0;
+								// run the windows marked "alwaysThink" of every loaded GUI, drawn or not
+	virtual void				RunAlwaysThinkGUIs( int time ) = 0;
+								// Raven's editors (none in DUDE): load them, let the model viewer think
+	virtual void				LoadToolsDLL( void ) = 0;
+	virtual void				ModViewThink( void ) = 0;
 };
 
 extern idCommon *		common;

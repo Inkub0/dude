@@ -103,7 +103,15 @@ typedef enum {
 	CVAR_INIT				= BIT(15),	// can only be set from the command-line
 	CVAR_ROM				= BIT(16),	// display only, cannot be set by user at all
 	CVAR_ARCHIVE			= BIT(17),	// set to cause it to be saved to a config file
-	CVAR_MODIFIED			= BIT(18)	// set when the variable is modified
+	CVAR_MODIFIED			= BIT(18),	// set when the variable is modified
+
+	// Quake 4's (appended; a Doom 3 game library never sets them)
+	CVAR_INFO				= BIT(19),	// sent with the server's message of the day (multiplayer)
+	CVAR_NORESET			= BIT(20),	// keeps its value through cvar_restart
+	CVAR_CASE_SENSITIVE		= BIT(21),	// a change of case alone is a change of value
+	CVAR_SPECIAL_CONCAT		= BIT(22),	// the space the console's tokenizer leaves after a '^' is dropped
+	CVAR_STRIPTRAILING		= BIT(23),	// a trailing '/' is stripped
+	CVAR_REPEATERINFO		= BIT(24)	// sent from repeaters (multiplayer)
 } cvarFlags_t;
 
 

@@ -20,6 +20,8 @@ import subprocess
 import sys
 
 ERROR = re.compile(r'^(.*?):(\d+):(\d+): (fatal error|error): (.*)$')
+HIDDEN = re.compile(r"^(.*?):\d+:\d+: warning: '(.*?)' was hidden")
+HIDDEN_BY = re.compile(r"^(.*?):(\d+):\d+: note: +by '(.*?)'")
 RULES = [
     (r"'([\w:~]+)' was not declared in this scope", 'undeclared name'),
     (r"'([\w:~]+)' does not name a type", 'unknown type'),
@@ -66,7 +68,9 @@ def compile_one(entry, source_root):
         if a in ('-c', '-MD', '-MMD') or a.startswith('-fdiagnostics-color'):
             continue
         out.append(a)
-    out += ['-fsyntax-only', '-fmax-errors=0', '-fdiagnostics-color=never']
+    # -Woverloaded-virtual: a game class whose method has Raven's signature hides DUDE's virtual
+    # instead of overriding it - it compiles, and the engine never calls it
+    out += ['-fsyntax-only', '-fmax-errors=0', '-fdiagnostics-color=never', '-Woverloaded-virtual']
     env = dict(os.environ, LC_ALL='C')        # plain ASCII quotes in the messages
     r = subprocess.run(out, cwd=entry['directory'], capture_output=True, text=True, errors='replace', env=env)
     return entry['file'], r.stderr
@@ -94,9 +98,24 @@ def main():
 
     errors = {}             # (file, line, message) -> set of sources that hit it
     fatal = collections.Counter()
+    hidden = {}             # hiding method -> (hidden base method, where)
     with concurrent.futures.ThreadPoolExecutor(os.cpu_count() or 4) as pool:
         for source, stderr in pool.map(lambda e: compile_one(e, source_root), entries):
+            pending = None
             for line in stderr.splitlines():
+                h = HIDDEN.match(line)
+                if h:
+                    # only a base declared by DUDE matters: Raven's game classes hiding Raven's own
+                    # virtuals are its design
+                    base_path = os.path.normpath(os.path.join(os.path.dirname(source), h.group(1)))
+                    pending = h.group(2) if dude_neo and base_path.startswith(dude_neo + '/') else None
+                    continue
+                b = HIDDEN_BY.match(line)
+                if b and pending:
+                    where = area(os.path.normpath(os.path.join(os.path.dirname(source), b.group(1))), source_root, dude_neo)[1]
+                    hidden.setdefault(b.group(3), (pending, f'{where}:{b.group(2)}'))
+                    pending = None
+                    continue
                 m = ERROR.match(line)
                 if not m:
                     continue
@@ -126,6 +145,9 @@ def main():
     lines += ['', 'by where the error is:'] + [f'  {n:6}  {k}' for k, n in by_area.most_common()]
     if fatal:
         lines += ['', 'fatal (the source stopped there):'] + [f'  {n:4} sources  {p}: {m}' for (p, m), n in fatal.most_common()]
+    if hidden:
+        lines += ['', f'hidden DUDE virtuals ({len(hidden)}: a game method that hides an engine-interface virtual instead of overriding it - compiles, never called):']
+        lines += [f'  {by}  hides  {base}  ({where})' for by, (base, where) in sorted(hidden.items())]
     lines += ['', f'top {top} missing / mismatched things:']
     for (kind, symbol), (n, where, ex) in sorted(by_symbol.items(), key=lambda kv: -kv[1][0])[:top]:
         lines.append(f'  {n:5}  {kind:30} {symbol[:70]:70}  [{", ".join(sorted(where))}]  e.g. {sorted(ex)[0]}')

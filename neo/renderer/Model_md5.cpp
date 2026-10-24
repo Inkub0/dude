@@ -2123,6 +2123,25 @@ const char *idRenderModelMD5::GetJointName( jointHandle_t handle ) const {
 
 /*
 ====================
+idRenderModelMD5::GetSurfaceMask
+====================
+*/
+int idRenderModelMD5::GetSurfaceMask( const char *surface ) const {
+	int mask = 0;
+	if ( surface == NULL || !surface[0] ) {
+		return mask;
+	}
+	for ( int i = 0; i < meshes.Num() && i < 32; i++ ) {
+		const idMaterial *shader = meshes[i].shader;
+		if ( shader != NULL && idStr::Icmp( shader->GetName(), surface ) == 0 ) {
+			mask |= 1 << i;
+		}
+	}
+	return mask;
+}
+
+/*
+====================
 idRenderModelMD5::NearestJoint
 ====================
 */

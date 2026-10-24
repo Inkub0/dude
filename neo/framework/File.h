@@ -115,7 +115,39 @@ public:
 	virtual int				WriteVec4( const idVec4 &vec );
 	virtual int				WriteVec6( const idVec6 &vec );
 	virtual int				WriteMat3( const idMat3 &mat );
+
+	// Quake 4's game code (Raven's idFile): non-virtual, built on the calls above, so the vtable
+	// a dhewm3 game library sees is unchanged
+	int						ReadVec5( idVec5 &vec );
+	int						WriteVec5( const idVec5 &vec );
+							// savegame sync markers: one is written after each object, and a restore
+							// that reads anything else there stops with detail and classname
+	void					WriteSyncId( void ) { WriteInt( SAVEGAME_SYNC_ID ); }
+	void					ReadSyncId( const char *detail = "unspecified", const char *classname = NULL );
+
+private:
+	enum { SAVEGAME_SYNC_ID = 0x51345359 };		// "Q4SY"
 };
+
+ID_INLINE int idFile::ReadVec5( idVec5 &vec ) {
+	int result = Read( &vec, sizeof( vec ) );
+	LittleRevBytes( &vec, sizeof( float ), sizeof( vec ) / sizeof( float ) );
+	return result;
+}
+
+ID_INLINE int idFile::WriteVec5( const idVec5 &vec ) {
+	idVec5 v = vec;
+	LittleRevBytes( &v, sizeof( float ), sizeof( v ) / sizeof( float ) );
+	return Write( &v, sizeof( v ) );
+}
+
+ID_INLINE void idFile::ReadSyncId( const char *detail, const char *classname ) {
+	int id = 0;
+	ReadInt( id );
+	if ( id != SAVEGAME_SYNC_ID ) {
+		common->Error( "savegame out of sync in %s (%s) at offset %d", detail ? detail : "?", classname ? classname : "-", Tell() );
+	}
+}
 
 
 class idFile_Memory : public idFile {

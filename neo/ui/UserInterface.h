@@ -45,6 +45,13 @@ class idFile;
 class idDemoFile;
 
 
+// Quake 4: where a line of text wraps (idUserInterface::GetMaxTextIndex)
+struct wrapInfo_t {
+	int					lastWhitespace;
+	int					maxIndex;
+						wrapInfo_t( void ) { lastWhitespace = -1; maxIndex = -1; }
+};
+
 class idUserInterface {
 public:
 	virtual						~idUserInterface() {};
@@ -118,6 +125,15 @@ public:
 	// DG: making this static so it doesn't change the vtable (and thus ABI)
 	// returns true if the ui's window is *not* being scaled to 4:3
 	static bool					IsUserInterfaceScaledTo43( const idUserInterface* ui );
+
+	// ---- Quake 4 game library (appended; a dhewm3 game library's vtable is unchanged) -----
+	virtual void				SetStateVec4( const char *varName, const idVec4 &vector ) = 0;
+	virtual void				ClearState( void ) = 0;		// every state variable removed
+								// the colour the GUI's surface lights its surroundings with (setLightColor)
+	virtual idVec4				GetLightColor( void ) = 0;
+								// the last index of text that fits windowName's width (wrapInfo: where, and
+								// the last whitespace before it); false when it all fits
+	virtual bool				GetMaxTextIndex( const char *windowName, const char *text, wrapInfo_t &wrapInfo ) const = 0;
 };
 
 
@@ -162,6 +178,10 @@ public:
 
 								// De-allocates a list gui
 	virtual void				FreeListGUI( idListGUI *listgui ) = 0;
+
+	// ---- Quake 4 game library (appended) -------------------------------------------------
+								// the icon a "^i<code>" text escape draws: a material, optionally a part of it
+	virtual void				RegisterIcon( const char *code, const char *shader, int x = -1, int y = -1, int w = -1, int h = -1 ) = 0;
 };
 
 extern idUserInterfaceManager *	uiManager;

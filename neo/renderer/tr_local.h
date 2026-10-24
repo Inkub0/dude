@@ -787,6 +787,15 @@ public:
 	virtual void			CaptureRenderToFile( const char *fileName, bool fixAlpha );
 	virtual void			UnCrop();
 	virtual bool			UploadImage( const char *imageName, const byte *data, int width, int height );
+	virtual void			SetSpecialEffect( ESpecialEffectType which, bool enabled );
+	virtual void			SetSpecialEffectParm( ESpecialEffectType which, int parm, float value );
+	virtual void			ShutdownSpecialEffects( void );
+
+public:
+	// Quake 4's full-screen effects as its scripts set them (SetSpecialEffect); recorded here,
+	// drawn by the post-process passes once they exist (docs/quake4-port.md 5.6)
+	int						specialEffects;			// ESpecialEffectType bits that are on
+	float					specialEffectParms[SPECIAL_EFFECT_MAX][MAX_SPECIAL_EFFECT_PARMS];
 
 public:
 	// internal functions

@@ -168,6 +168,8 @@ idAASSettings::idAASSettings( void ) {
 	tt_waterJump = 100;
 	tt_startWalkOffLedge = 100;
 	generateTacticalFeatures = false;
+	debugColor.Set( 1.0f, 1.0f, 1.0f, 1.0f );
+	debugDraw = true;
 }
 
 /*
@@ -628,6 +630,7 @@ void idAASFileLocal::Clear( void ) {
 	areaFeatures.Clear();
 	featureIndex.Clear();
 	features.Clear();
+	areaCeilings.Clear();
 }
 
 /*
@@ -1186,6 +1189,72 @@ void idAASFileLocal::FinishAreas( void ) {
 		areas[i].center = AreaReachableGoal( i );
 		areas[i].bounds = AreaBounds( i );
 	}
+
+	if ( quake4File ) {
+		FinishAreaCeilings();
+	}
+}
+
+/*
+================
+idAASFileLocal::FinishAreaCeilings
+
+DUDE: Quake 4's area ceiling (Raven's aasArea_t::ceiling, not stored in the file), which its
+game uses to keep flying AI under the roof and to bound tether searches: for a floor area, the
+height where a probe going 500 units up from its centre leaves the area; for any other area,
+its top. (The rule follows OpenQ4's derivation, GPL, github.com/themuffinator/OpenQ4.)
+================
+*/
+void idAASFileLocal::FinishAreaCeilings( void ) {
+	const float FLOOR_PROBE_HEIGHT = 500.0f;
+	const int MAX_PROBE_AREAS = 10;
+
+	areaCeilings.SetNum( areas.Num() );
+	if ( areas.Num() < 2 ) {		// a dummy file: no volume to probe
+		for ( int i = 0; i < areas.Num(); i++ ) {
+			areaCeilings[i] = 0.0f;
+		}
+		return;
+	}
+
+	for ( int i = 0; i < areas.Num(); i++ ) {
+		const aasArea_t &area = areas[i];
+		if ( area.flags & AREA_FLOOR ) {
+			int probeAreas[MAX_PROBE_AREAS];
+			idVec3 probePoints[MAX_PROBE_AREAS];
+			aasTrace_t trace;
+			trace.areas = probeAreas;
+			trace.points = probePoints;
+			trace.maxAreas = MAX_PROBE_AREAS;
+
+			Trace( trace, area.center, area.center + idVec3( 0.0f, 0.0f, FLOOR_PROBE_HEIGHT ) );
+			float ceiling = trace.endpos.z;
+			for ( int j = 0; j < trace.numAreas; j++ ) {
+				if ( trace.areas[j] != i ) {		// where the probe left this area
+					ceiling = trace.points[j].z;
+					break;
+				}
+			}
+			areaCeilings[i] = ceiling;
+		} else {
+			// a point far above, pushed into the area, lands on its top
+			idVec3 top( 0.0f, 0.0f, 131072.0f );
+			PushPointIntoAreaNum( i, top );
+			areaCeilings[i] = top.z;
+		}
+	}
+}
+
+/*
+================
+idAASFileLocal::GetMemorySize
+================
+*/
+size_t idAASFileLocal::GetMemorySize( void ) const {
+	return sizeof( *this ) + planeList.Allocated() + vertices.Allocated() + edges.Allocated() + edgeIndex.Allocated() +
+		faces.Allocated() + faceIndex.Allocated() + areas.Allocated() + nodes.Allocated() + portals.Allocated() +
+		portalIndex.Allocated() + clusters.Allocated() + areaFeatures.Allocated() + featureIndex.Allocated() +
+		features.Allocated() + areaCeilings.Allocated();
 }
 
 /*

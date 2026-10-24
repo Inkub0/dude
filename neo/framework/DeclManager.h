@@ -259,6 +259,11 @@ ID_INLINE idDecl *idDeclAllocator( void ) {
 class idMaterial;
 class idDeclSkin;
 class idSoundShader;
+class idDeclTable;
+class idDeclMaterialType;
+class idDeclLipSync;
+class idDeclPlayback;
+class idDeclEffect;
 
 class idDeclManager {
 public:
@@ -331,6 +336,24 @@ public:
 	virtual const idMaterial *		MaterialByIndex( int index, bool forceParse = true ) = 0;
 	virtual const idDeclSkin *		SkinByIndex( int index, bool forceParse = true ) = 0;
 	virtual const idSoundShader *	SoundByIndex( int index, bool forceParse = true ) = 0;
+
+	// ---- Quake 4 game library (appended; a dhewm3 game library's vtable is unchanged) -----
+									// Raven's forms of FindType and RegisterDeclFolder: DUDE keeps no parsed-decl
+									// cache (noCaching), and its decl folders are searched recursively
+	const idDecl *					FindType( declType_t type, const char *name, bool makeDefault, bool noCaching ) {
+										return FindType( type, name, makeDefault );
+									}
+	void							RegisterDeclFolderWrapper( const char *folder, const char *extension, declType_t defaultType,
+																bool unique = false, bool norecurse = false ) {
+										RegisterDeclFolder( folder, extension, defaultType );
+									}
+									// Quake 4's decl types (framework/DeclQuake4.h), and its table lookup
+	virtual const idDeclTable *			FindTable( const char *name, bool makeDefault = true ) = 0;
+	virtual const idDeclMaterialType *	FindMaterialType( const char *name, bool makeDefault = true ) = 0;
+	virtual const idDeclLipSync *		FindLipSync( const char *name, bool makeDefault = true ) = 0;
+	virtual const idDeclPlayback *		FindPlayback( const char *name, bool makeDefault = true ) = 0;
+	virtual const idDeclEffect *		FindEffect( const char *name, bool makeDefault = true ) = 0;
+	virtual const idDeclPlayback *		PlaybackByIndex( int index, bool forceParse = true ) = 0;
 };
 
 extern idDeclManager *		declManager;

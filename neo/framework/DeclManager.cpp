@@ -235,6 +235,14 @@ public:
 	virtual const idDeclSkin *		SkinByIndex( int index, bool forceParse = true );
 	virtual const idSoundShader *	SoundByIndex( int index, bool forceParse = true );
 
+	// Quake 4 game library
+	virtual const idDeclTable *			FindTable( const char *name, bool makeDefault = true );
+	virtual const idDeclMaterialType *	FindMaterialType( const char *name, bool makeDefault = true );
+	virtual const idDeclLipSync *		FindLipSync( const char *name, bool makeDefault = true );
+	virtual const idDeclPlayback *		FindPlayback( const char *name, bool makeDefault = true );
+	virtual const idDeclEffect *		FindEffect( const char *name, bool makeDefault = true );
+	virtual const idDeclPlayback *		PlaybackByIndex( int index, bool forceParse = true );
+
 public:
 	static void					MakeNameCanonical( const char *name, char *result, int maxLength );
 	idDeclLocal *				FindTypeWithoutParsing( declType_t type, const char *name, bool makeDefault = true );
@@ -1618,6 +1626,38 @@ const idSoundShader *idDeclManagerLocal::FindSound( const char *name, bool makeD
 
 const idSoundShader *idDeclManagerLocal::SoundByIndex( int index, bool forceParse ) {
 	return static_cast<const idSoundShader *>( DeclByIndex( DECL_SOUND, index, forceParse ) );
+}
+
+/*
+===================
+idDeclManagerLocal::FindTable, FindMaterialType, FindLipSync, FindPlayback, FindEffect, PlaybackByIndex
+
+Quake 4's typed lookups (its decl types are registered for that title only, so for Doom 3
+these find nothing, or the default decl when makeDefault asks for one).
+===================
+*/
+const idDeclTable *idDeclManagerLocal::FindTable( const char *name, bool makeDefault ) {
+	return static_cast<const idDeclTable *>( FindType( DECL_TABLE, name, makeDefault ) );
+}
+
+const idDeclMaterialType *idDeclManagerLocal::FindMaterialType( const char *name, bool makeDefault ) {
+	return static_cast<const idDeclMaterialType *>( FindType( DECL_MATERIALTYPE, name, makeDefault ) );
+}
+
+const idDeclLipSync *idDeclManagerLocal::FindLipSync( const char *name, bool makeDefault ) {
+	return static_cast<const idDeclLipSync *>( FindType( DECL_LIPSYNC, name, makeDefault ) );
+}
+
+const idDeclPlayback *idDeclManagerLocal::FindPlayback( const char *name, bool makeDefault ) {
+	return static_cast<const idDeclPlayback *>( FindType( DECL_PLAYBACK, name, makeDefault ) );
+}
+
+const idDeclEffect *idDeclManagerLocal::FindEffect( const char *name, bool makeDefault ) {
+	return static_cast<const idDeclEffect *>( FindType( DECL_EFFECT, name, makeDefault ) );
+}
+
+const idDeclPlayback *idDeclManagerLocal::PlaybackByIndex( int index, bool forceParse ) {
+	return static_cast<const idDeclPlayback *>( DeclByIndex( DECL_PLAYBACK, index, forceParse ) );
 }
 
 /*

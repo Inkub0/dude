@@ -345,6 +345,11 @@ public:
 	// Writing to and reading from a demo file.
 	virtual void				ReadFromDemoFile( class idDemoFile *f ) = 0;
 	virtual void				WriteToDemoFile( class idDemoFile *f ) = 0;
+
+	// Quake 4 game library (appended; a dhewm3 game library's vtable is unchanged): one bit per
+	// surface (an MD5 model: per mesh) drawn with the named material, for hiding surfaces by
+	// name (renderEntity suppressSurfaceMask); surfaces past the 32nd have no bit
+	virtual int					GetSurfaceMask( const char *surface ) const = 0;
 };
 
 #endif /* !__MODEL_H__ */

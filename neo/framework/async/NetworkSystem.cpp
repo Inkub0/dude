@@ -212,3 +212,55 @@ float idNetworkSystem::ClientGetIncomingPacketLoss( void ) {
 	}
 	return 0.0f;
 }
+
+/*
+==================
+idNetworkSystem - Quake 4's multiplayer entries (multiplayer is docs/quake4-port.md Q9)
+==================
+*/
+int idNetworkSystem::ServerGetClientNum( int clientId ) {
+	return clientId;
+}
+
+int idNetworkSystem::ServerGetServerTime( void ) {
+	return 0;
+}
+
+const char *idNetworkSystem::GetServerAddress( void ) {
+	return "";
+}
+
+void idNetworkSystem::AddFriend( int clientNum ) {
+}
+
+void idNetworkSystem::RemoveFriend( int clientNum ) {
+}
+
+const char *idNetworkSystem::GetClientGUID( int clientNum ) {
+	return "";
+}
+
+// the multiplayer loading screen's load info and item icons (guis/loading/mplevel.gui)
+void idNetworkSystem::SetLoadingText( const char *loadingText ) {
+}
+
+void idNetworkSystem::AddLoadingIcon( const char *icon ) {
+}
+
+int idNetworkSystem::GetNumScannedServers( void ) {
+	return 0;
+}
+
+const scannedServer_t *idNetworkSystem::GetScannedServerInfo( int serverNum ) {
+	return NULL;
+}
+
+void idNetworkSystem::AddSortFunction( const sortInfo_t &sortInfo ) {
+}
+
+bool idNetworkSystem::RemoveSortFunction( const sortInfo_t &sortInfo ) {
+	return false;
+}
+
+void idNetworkSystem::UseSortFunction( const sortInfo_t &sortInfo, bool use ) {
+}

@@ -86,6 +86,7 @@ class idList {
 public:
 
 	typedef int		cmp_t( const type *, const type * );
+	typedef int		filter_t( const type * );			// Quake 4's server browser filters
 	typedef type	new_t( void );
 
 					idList( int newgranularity = 16 );

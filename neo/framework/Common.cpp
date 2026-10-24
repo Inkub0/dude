@@ -252,6 +252,16 @@ public:
 
 	// DG end
 
+	// Quake 4 game library (idCommon's appended entries)
+	virtual int					GetUserCmdHz( void ) const { return USERCMD_HZ; }
+	virtual int					GetUserCmdMSec( void ) const { return USERCMD_MSEC; }
+	virtual bool				DoingDeclValidation( void ) { return false; }
+	virtual int					GetRModeForMachineSpec( int machineSpec ) const;
+	virtual void				SetDesiredMachineSpec( int machineSpec );
+	virtual void				RunAlwaysThinkGUIs( int time );
+	virtual void				LoadToolsDLL( void ) {}
+	virtual void				ModViewThink( void ) {}
+
 	void						InitGame( void );
 	void						ShutdownGame( bool reloading );
 
@@ -412,6 +422,38 @@ void idCommonLocal::GetPendingViewAngleDelta( float &yaw, float &pitch ) {
 	if ( usercmdGen != NULL ) {
 		usercmdGen->GetPendingViewAngleDelta( yaw, pitch );
 	}
+}
+
+/*
+==================
+idCommonLocal::GetRModeForMachineSpec, SetDesiredMachineSpec
+
+Quake 4's multiplayer menu: the resolution a machine spec preset picks (Com_SetMachineSpec's),
+and taking the spec the player chose.
+==================
+*/
+int idCommonLocal::GetRModeForMachineSpec( int machineSpec ) const {
+	switch ( machineSpec ) {
+		case 3:	return 5;		// ultra
+		case 2:	return 4;		// high
+		default:	return 3;		// medium, low
+	}
+}
+
+void idCommonLocal::SetDesiredMachineSpec( int machineSpec ) {
+	com_machineSpec.SetInteger( machineSpec );
+}
+
+/*
+==================
+idCommonLocal::RunAlwaysThinkGUIs
+
+Quake 4: GUIs whose windows are marked "alwaysThink" (WIN_ALWAYSTHINK) keep their timelines
+running while not drawn. The flag is parsed; running those windows comes with the in-game GUI
+work (docs/quake4-port.md 5.6, Q5.5) - until then they advance when drawn, as in Doom 3.
+==================
+*/
+void idCommonLocal::RunAlwaysThinkGUIs( int time ) {
 }
 
 /*

@@ -60,6 +60,7 @@ void idUserInterfaceManagerLocal::Init() {
 void idUserInterfaceManagerLocal::Shutdown() {
 	guis.DeleteContents( true );
 	demoGuis.DeleteContents( true );
+	icons.Clear();
 	dc.Shutdown();
 }
 
@@ -230,6 +231,43 @@ idListGUI *	idUserInterfaceManagerLocal::AllocListGUI( void ) const {
 
 void idUserInterfaceManagerLocal::FreeListGUI( idListGUI *listgui ) {
 	delete listgui;
+}
+
+/*
+================
+idUserInterfaceManagerLocal::RegisterIcon, FindIcon
+
+Quake 4's text icons: "^i<code>" in a string draws this material (or the part x, y, w, h of it)
+instead of the characters. Registered here; drawing them in text comes with the in-game GUI
+work (docs/quake4-port.md 5.6).
+================
+*/
+void idUserInterfaceManagerLocal::RegisterIcon( const char *code, const char *shader, int x, int y, int w, int h ) {
+	guiIcon_t *icon = NULL;
+	for ( int i = 0; i < icons.Num(); i++ ) {
+		if ( icons[i].code.Icmp( code ) == 0 ) {
+			icon = &icons[i];
+			break;
+		}
+	}
+	if ( icon == NULL ) {
+		icon = &icons.Alloc();
+		icon->code = code;
+	}
+	icon->material = declManager->FindMaterial( shader );
+	icon->x = x;
+	icon->y = y;
+	icon->w = w;
+	icon->h = h;
+}
+
+const idUserInterfaceManagerLocal::guiIcon_t *idUserInterfaceManagerLocal::FindIcon( const char *code ) const {
+	for ( int i = 0; i < icons.Num(); i++ ) {
+		if ( icons[i].code.Icmp( code ) == 0 ) {
+			return &icons[i];
+		}
+	}
+	return NULL;
 }
 
 /*
@@ -576,6 +614,13 @@ void idUserInterfaceLocal::DeleteStateVar( const char *varName ) {
 
 void idUserInterfaceLocal::SetStateString( const char *varName, const char *value ) {
 	state.Set( varName, value );
+}
+
+// Quake 4: where multiplayer chat lines wrap. Multiplayer is a later phase (docs/quake4-port.md
+// Q9); until then every line fits.
+bool idUserInterfaceLocal::GetMaxTextIndex( const char *windowName, const char *text, wrapInfo_t &wrapInfo ) const {
+	wrapInfo = wrapInfo_t();
+	return false;
 }
 
 void idUserInterfaceLocal::SetStateBool( const char *varName, const bool value ) {
