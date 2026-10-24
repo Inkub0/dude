@@ -399,6 +399,7 @@ void idSessionLocal::Clear() {
 
 	syncNextGameFrame = false;
 	mapSpawned = false;
+	objectiveFailed = false;
 	guiActive = NULL;
 	aviCaptureMode = false;
 	timeDemo = TD_NO;
@@ -1864,6 +1865,7 @@ void idSessionLocal::UnloadMap() {
 	}
 
 	mapSpawned = false;
+	objectiveFailed = false;
 
 	// DG: that state needs to be reset now
 	Sys_SetInteractiveIngameGuiActive( false, NULL );
@@ -2413,6 +2415,11 @@ bool idSessionLocal::SaveGame( const char *saveName, bool autosave, const char* 
 
 	// DUDE: Ultra Nightmare — nothing but the session's own map-start checkpoint may be written
 	// (covers the menu, the savegame command and quicksaves alike).
+	if ( objectiveFailed ) {
+		common->Printf( "Can't save after failing an objective\n" );
+		return false;
+	}
+
 	if ( ultraNightmare && !autosave ) {
 		MessageBox( MSG_OK, "Ultra Nightmare has no manual saves. The run is checkpointed only at the start of each map.", "Unable to save", true );
 		common->Printf( "Saving is disabled in Ultra Nightmare\n" );
@@ -3494,6 +3501,10 @@ void idSessionLocal::RunGameTic() {
 			mapSpawnData.serverInfo.Set( "devmap", "1" );
 			Session_SetEntityFilter( args.Argv( 2 ) );
 			MoveToNewMap( args.Argv(1) );
+		} else if ( !idStr::Icmp( args.Argv(0), "objectiveFailed" ) ) {
+			// DUDE: Quake 4's failed objective ("objectiveFailed <title>"): the game fades out, shows
+			// the title on its objective HUD and sends "died" itself; until then, no saving
+			objectiveFailed = true;
 		} else if ( !idStr::Icmp( args.Argv(0), "died" ) ) {
 			// DUDE: Ultra Nightmare — death ends the run: erase its checkpoint. The player then gets
 			// the very same restart menu as any other death, reduced to its Main Menu row.
@@ -3506,6 +3517,10 @@ void idSessionLocal::RunGameTic() {
 			ConfigureRestartMenu( ultraNightmareDeath );
 			SetGUI(guiRestartMenu, NULL);
 		} else if ( !idStr::Icmp( args.Argv(0), "disconnect" ) ) {
+			cmdSystem->BufferCommandText( CMD_EXEC_INSERT, "stoprecording ; disconnect" );
+		} else if ( !idStr::Icmp( args.Argv(0), "endOfGame" ) || !idStr::Icmp( args.Argv(0), "endOfDemo" ) ) {
+			// DUDE: Quake 4's campaign end (target_endLevel "endOfGame"); Doom 3's game sends
+			// "disconnect" for the same moment
 			cmdSystem->BufferCommandText( CMD_EXEC_INSERT, "stoprecording ; disconnect" );
 		}
 	}

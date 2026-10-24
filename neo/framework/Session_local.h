@@ -256,6 +256,7 @@ public:
 
 	// DUDE: Ultra Nightmare run state
 	bool				ultraNightmare;			// the running game is an Ultra Nightmare run
+	bool				objectiveFailed;		// DUDE: Quake 4's game failed an objective on this map: no saving
 	idStr				ultraNightmareSave;		// file name (no path/extension) of the run's single checkpoint slot
 	bool				restartMenuUltraNightmare;	// the restart (death) menu is up for an Ultra Nightmare death: main menu only
 	bool				restartMenuBannerSaved;		// the menu's own "Restart2" hint line is saved below (it doubles as the GAME OVER banner)
