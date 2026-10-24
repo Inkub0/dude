@@ -17,6 +17,7 @@ Doom 3 GPL Source Code (see ArbProgram.h for license header)
 #include "framework/Common.h"
 #include "framework/Game.h"
 #include "framework/Session.h"
+#include "framework/async/AsyncNetwork.h"
 #include "framework/FileSystem.h"
 #include "framework/async/NetworkSystem.h"
 #include "renderer/RenderSystem.h"
@@ -59,10 +60,24 @@ static void UsercmdToQ4( const usercmd_t &src, usercmdQ4_t &dst ) {
 	dst.sequence = src.sequence;
 }
 
-static void UsercmdsToQ4( const usercmd_t *src, usercmdQ4_t dst[MAX_ASYNC_CLIENTS] ) {
-	for ( int i = 0; i < MAX_ASYNC_CLIENTS; i++ ) {
-		UsercmdToQ4( src[i], dst[i] );
+/*
+===============
+UsercmdsToQ4
+
+The single-player session hands the game one command (its own, Session.cpp RunGameTic); the
+network server and client hand one per client slot. The game keeps the pointer it was given
+(gameLocal.usercmds) past the frame, so the converted commands live here, not on the stack.
+===============
+*/
+static usercmdQ4_t			usercmdsQ4[MAX_ASYNC_CLIENTS];
+
+static const usercmdQ4_t *UsercmdsToQ4( const usercmd_t *src ) {
+	const int num = idAsyncNetwork::IsActive() ? MAX_ASYNC_CLIENTS : 1;
+	memset( usercmdsQ4, 0, sizeof( usercmdsQ4 ) );
+	for ( int i = 0; i < num; i++ ) {
+		UsercmdToQ4( src[i], usercmdsQ4[i] );
 	}
+	return usercmdsQ4;
 }
 
 /*
@@ -99,9 +114,7 @@ public:
 	virtual void				SpawnPlayer( int clientNum ) { gameQ4->SpawnPlayer( clientNum ); }
 
 	virtual gameReturn_t		RunFrame( const usercmd_t *clientCmds ) {
-									usercmdQ4_t cmds[MAX_ASYNC_CLIENTS];
-									UsercmdsToQ4( clientCmds, cmds );
-									return gameQ4->RunFrame( cmds, com_editors, true, 0 );
+									return gameQ4->RunFrame( UsercmdsToQ4( clientCmds ), com_editors, true, 0 );
 								}
 	virtual bool				Draw( int clientNum ) { return gameQ4->Draw( clientNum ); }
 
@@ -129,9 +142,7 @@ public:
 	virtual bool				ClientApplySnapshot( int clientNum, int sequence ) { return gameQ4->ClientApplySnapshot( clientNum, sequence ); }
 	virtual void				ClientProcessReliableMessage( int clientNum, const idBitMsg &msg ) { gameQ4->ClientProcessReliableMessage( clientNum, msg ); }
 	virtual gameReturn_t		ClientPrediction( int clientNum, const usercmd_t *clientCmds, bool lastPredictFrame ) {
-									usercmdQ4_t cmds[MAX_ASYNC_CLIENTS];
-									UsercmdsToQ4( clientCmds, cmds );
-									return gameQ4->ClientPrediction( clientNum, cmds, lastPredictFrame, NULL );
+									return gameQ4->ClientPrediction( clientNum, UsercmdsToQ4( clientCmds ), lastPredictFrame, NULL );
 								}
 
 	// Quake 4 has no time groups (RoE's slow motion): every group runs on the game's clock
