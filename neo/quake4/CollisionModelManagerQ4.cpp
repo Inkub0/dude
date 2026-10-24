@@ -299,7 +299,10 @@ void idCollisionModelManagerQ4Local::Translation( traceQ4_t *results, const idVe
 		EmptyTraceQ4( *results, end, trmAxis );
 		return;
 	}
+	// the engine fills only what the trace found: a start in solid (fraction 0) leaves the
+	// contact's material unset, so start from an empty trace
 	trace_t tr;
+	memset( &tr, 0, sizeof( tr ) );
 	collisionModelManager->Translation( &tr, start, end, trm, trmAxis, contentMask, h, modelOrigin, modelAxis );
 	TraceToQ4( tr, *results );
 }
@@ -313,6 +316,7 @@ void idCollisionModelManagerQ4Local::Rotation( traceQ4_t *results, const idVec3 
 		return;
 	}
 	trace_t tr;
+	memset( &tr, 0, sizeof( tr ) );		// as in Translation
 	collisionModelManager->Rotation( &tr, start, rotation, trm, trmAxis, contentMask, h, modelOrigin, modelAxis );
 	TraceToQ4( tr, *results );
 }
@@ -335,6 +339,7 @@ int idCollisionModelManagerQ4Local::Contacts( contactInfoQ4_t *contacts, const i
 		return 0;
 	}
 	contactInfo_t *engineContacts = (contactInfo_t *)_alloca( maxContacts * sizeof( contactInfo_t ) );
+	memset( engineContacts, 0, maxContacts * sizeof( contactInfo_t ) );
 	const int num = collisionModelManager->Contacts( engineContacts, maxContacts, start, dir, depth, trm, trmAxis, contentMask, h, modelOrigin, modelAxis );
 	for ( int i = 0; i < num; i++ ) {
 		ContactToQ4( engineContacts[i], contacts[i] );
