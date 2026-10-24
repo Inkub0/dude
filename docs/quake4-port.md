@@ -3,7 +3,8 @@
 Status (2026-10-24): **Q0-Q3 done and on master** (Q3, world formats: merge 714881e7 - all 31
 campaign maps load and quit cleanly in the null game on Vulkan and OpenGL3, `cm`/`aas`
 self-checks clean, `airdefense1` user-verified on both renderers; the collision API additions
-moved to Q5). Next: Q4 (BSE) or Q5 (game library), §6. Goal: **DUDE runs the retail Quake 4 (2005,
+moved to Q5). **Q5 (game library) started 2026-10-24** (user: Q5 before Q4, BSE later),
+plan in §5.6. Goal: **DUDE runs the retail Quake 4 (2005,
 Raven Software, idTech4) single-player campaign natively** — its own `q4base/*.pk4` assets,
 its own game logic, on DUDE's GL3 and Vulkan backends, with DUDE's enhancement tiers
 (PBR, tessellation, RT) available as opt-in on top. Multiplayer is out of scope for v1 (§9).
@@ -717,6 +718,59 @@ particles do today).
 4. Output `q4base.so`/`.dll` (named after the title's base folder, like `base.so`) next to
    `build/dude`; `LoadGameDLLbyName` already searches next
    to the binary first (how `d3le.so` is found today).
+
+**Q5 plan (2026-10-24).** Decisions (user): start from the **pristine SDK**, take ideas from
+the other ports (idTech4A++, OpenQ4) where they help, build our own port with **fidelity and
+performance** as the goals; repository `~/dude-quake4-game` (local git, never pushed).
+
+- **Source (done):** `~/dude-quake4-game` commit `94a1fdc` = the SDK 1.4.2 `source/` tree +
+  Raven's `EULA.Development Kit.rtf` + `readme.txt`, unmodified, from the initial import of
+  the full SDK installer in `FriskTheFallenHuman/quake4sdk` (`0682c1b8`); an independent 2015
+  copy (`Reddragoon244/Quake-4-Source-Code`, `de2da6b`) matches all 718 source files byte for
+  byte after line-ending normalisation. Not used: the `Xanz/Quake4SDK` mirror chosen at Q0 -
+  its "formatting fixes" re-braced the whole tree and it changes maths and MP code. That
+  repository's (EULA) README states licence, layout and provenance.
+- **Include architecture:** every SDK game file starts with `#include "../idlib/precompiled.h"`,
+  which pulls in the SDK's copies of the engine interfaces (`framework/`, `renderer/`, `sound/`,
+  `cm/`, `aas/`, `bse/`, `ui/`, `sys/`) and Raven's `game/Game.h`. Those can never be what the
+  library compiles against: every type that crosses the boundary (`idStr`, `idDict`, `idList`,
+  `idVec*`, `idBounds`, `renderEntity_t`, `trace_t`, `usercmd_t` …) must have DUDE's layout. So
+  the game repository turns its engine headers into one-line forwarders to DUDE's (`-I
+  <dude>/neo`, `#include <framework/Common.h>`), replaces `precompiled.h` with an adapter
+  (DUDE's idlib + a Raven idlib layer: Raven-only helpers from the SDK's own idlib where they
+  do not cross the boundary, adapters where they do), and points `game/Game.h` at DUDE's
+  `framework/Game.h`. SP `game/` only; `mpgame/` is Q9.
+- **Engine side (DUDE, GPL, our own declarations):** the §5.4 union, driven by what the SP game
+  actually fails to compile against - nothing speculative: `idGame`/`idGameEdit`/`gameImport`/
+  `gameExport` (Q4 entries with defaults, MP blocks stubbed), `renderEntity_t`/`renderLight_t`
+  fields and the effect calls, the sound facade (`worldId`, emitter handles), the collision
+  facade (`idCollisionModel`, map-scoped; trace `materialType` = the material's own, §5.3), the
+  decl accessors of Q2's decl types, UI / common / file-system extras, and a **no-op BSE
+  manager** (every effect call accepted, nothing drawn) until Q4 brings the real one.
+  **`GAME_API_VERSION` 9 → 10:** the structs grow, so every game library is rebuilt against
+  the new headers - the in-tree `base.so` / `d3xp.so` / `d3le.so` / `nullgame.so` are; an
+  already-built external mod library (e.g. `tfphobos.so`) is refused until it is rebuilt from
+  source, which is the mod policy (`docs/mod-dll-compatibility.md`: source-recompiled mods).
+  Doom 3 libraries never see a Quake 4 entry point; the engine calls the new ones only for the
+  Quake 4 title.
+- **Steps and gates:**
+  1. **Q5.1 build skeleton** - `tools/quake4/build-q4game.sh` (DUDE) + CMake (game repo), the
+     include architecture above, and a compile-error inventory tool (errors grouped by missing
+     symbol / header), so the remaining work is a measured list. Gate: the build runs end to
+     end and the inventory is recorded here.
+  2. **Q5.2 idlib layer** - every idlib error gone. Gate: `idlib`-attributed errors 0.
+  3. **Q5.3 engine interfaces** - the union, item by item from the inventory, Doom 3 libraries
+     rebuilt and unchanged in behaviour. Gate: `q4base.so` compiles and links; Doom 3 + RoE
+     smoke test by the user.
+  4. **Q5.4 load** - `q4base.so` replaces the null game under `run-q4.sh`: `GetGameAPI`,
+     `Init`, main menu with the game's cvars (the sweep's `mainmenu.gui` cvar warnings gone),
+     clean quit. Gate: boot + quit on both backends, no new warnings.
+  5. **Q5.5 airdefense1** - spawn, HUD, weapons, AI, scripts, triggers; then VO + lipsync,
+     cinematics (`md5camera`), save + load, the transition to `airdefense2`; an ASAN pass.
+     Gate: the phase gate (§6).
+- **Performance:** 64-bit, the engine's compiler flags (SSE4.1 baseline), no debug-only cost in
+  release builds; the game's frame cost is measured at Q5.5 (`com_speeds`-style split) and
+  compared with Doom 3's on a comparable map.
 
 ### 5.7 The null game (engine, GPL, small, high leverage)
 
