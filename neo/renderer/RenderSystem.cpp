@@ -880,6 +880,10 @@ void idRenderSystemLocal::EndFrame( int *frontEndMsec, int *backEndMsec ) {
 	// start the back end up again with the new command list
 	R_IssueRenderCommands();
 
+	// DUDE: the GUI-screen / item fill lights retired or moved this frame, now that no view
+	// references them (tr_light.cpp R_UpdateEmissiveLights)
+	R_FlushEmissiveLightChanges();
+
 	// use the other buffers next frame, because another CPU
 	// may still be rendering into the current buffers
 

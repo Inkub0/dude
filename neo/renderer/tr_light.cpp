@@ -1364,6 +1364,43 @@ static idList<emissiveLight_t>	r_emissiveLightList;
 static idRenderWorldLocal *		r_emissiveWorld = NULL;
 static int						r_emissiveWorldGen = -1;	// world->defsGeneration our handles belong to
 
+// DUDE: fill-light frees and moves wait for the end of the frame. They are decided while a view is
+// being built (R_AddModelSurfaces), when that view - and any view queued before it this frame -
+// already holds the light (viewLight_t::lightDef, its interactions); FreeLightDef / UpdateLightDef
+// there left the back end reading freed memory (ASAN: heap-use-after-free in
+// RB_RHI_PointLightShadowEligible, a light reaped as its owner entity was removed). New lights are
+// added at once: no queued view references them. R_FlushEmissiveLightChanges applies the rest
+// after the back end has run (idRenderSystemLocal::EndFrame).
+struct emissiveLightChange_t {
+	qhandle_t		handle;
+	bool			free;			// else update to rl
+	renderLight_t	rl;
+};
+static idList<emissiveLightChange_t>	r_emissiveChanges;
+static idImage *						r_emissiveFadeFalloff = NULL;	// stamped on updated lights
+
+static void R_QueueEmissiveLightChange( qhandle_t handle, const renderLight_t *rl ) {
+	for ( int i = 0; i < r_emissiveChanges.Num(); i++ ) {
+		if ( r_emissiveChanges[i].handle == handle ) {
+			if ( !r_emissiveChanges[i].free ) {
+				// a later update replaces an earlier one; a free stays a free
+				if ( rl != NULL ) {
+					r_emissiveChanges[i].rl = *rl;
+				} else {
+					r_emissiveChanges[i].free = true;
+				}
+			}
+			return;
+		}
+	}
+	emissiveLightChange_t &c = r_emissiveChanges.Alloc();
+	c.handle = handle;
+	c.free = ( rl == NULL );
+	if ( rl != NULL ) {
+		c.rl = *rl;
+	}
+}
+
 // scratch for the per-view budget selection (r_emissiveLightLimit)
 struct emReqScore_t {
 	int		idx;
@@ -1696,11 +1733,46 @@ static void R_FreeAllEmissiveLights( idRenderWorldLocal *world ) {
 			// only free slots that still hold a def — a handle can go stale if the world's
 			// defs were torn down behind our back (same-map reload)
 			if ( h >= 0 && h < world->lightDefs.Num() && world->lightDefs[h] != NULL ) {
-				world->FreeLightDef( h );
+				R_QueueEmissiveLightChange( h, NULL );
 			}
 		}
 	}
 	r_emissiveLightList.Clear();
+}
+
+/*
+=================
+R_FlushEmissiveLightChanges
+
+DUDE: the fill-light frees and moves R_UpdateEmissiveLights decided this frame, applied once no
+view references the lights any more (after the back end ran). Dropped when the world they belong
+to was replaced or reloaded meanwhile - its defs are gone already.
+=================
+*/
+void R_FlushEmissiveLightChanges( void ) {
+	if ( r_emissiveChanges.Num() == 0 ) {
+		return;
+	}
+	idRenderWorldLocal *world = r_emissiveWorld;
+	if ( world != NULL && world->defsGeneration == r_emissiveWorldGen ) {
+		for ( int i = 0; i < r_emissiveChanges.Num(); i++ ) {
+			const emissiveLightChange_t &c = r_emissiveChanges[i];
+			if ( c.handle < 0 || c.handle >= world->lightDefs.Num() || world->lightDefs[c.handle] == NULL ) {
+				continue;
+			}
+			if ( c.free ) {
+				world->FreeLightDef( c.handle );
+			} else {
+				world->UpdateLightDef( c.handle, &c.rl );
+				idRenderLightLocal *ldef = world->lightDefs[c.handle];
+				ldef->dudeFillLight = true;
+				if ( r_emissiveFadeFalloff != NULL ) {
+					ldef->falloffImage = r_emissiveFadeFalloff;
+				}
+			}
+		}
+	}
+	r_emissiveChanges.SetNum( 0, false );
 }
 
 /*
@@ -1787,6 +1859,7 @@ static void R_UpdateEmissiveLights( void ) {
 	// the defs generation too, or the stale handles would double-free ~2s after every load.
 	if ( world != r_emissiveWorld || ( world && world->defsGeneration != r_emissiveWorldGen ) ) {
 		r_emissiveLightList.Clear();
+		r_emissiveChanges.SetNum( 0, false );	// they belonged to the old defs
 		r_emissiveWorld = world;
 		r_emissiveWorldGen = world ? world->defsGeneration : -1;
 	}
@@ -1863,6 +1936,7 @@ static void R_UpdateEmissiveLights( void ) {
 			fadeFalloff = pl->LightFalloffImage();
 		}
 	}
+	r_emissiveFadeFalloff = fadeFalloff;
 
 	for ( int oi = 0; oi < order.Num(); oi++ ) {
 		const emissiveReq_t &req = r_emissiveReqs[ order[oi] ];
@@ -1888,7 +1962,7 @@ static void R_UpdateEmissiveLights( void ) {
 					|| ( el->normal * req.normal ) < 0.999f
 					|| idMath::Fabs( el->radius - req.radius ) > 0.5f
 					|| ( el->color - req.color ).LengthSqr() > 0.01f ) {
-					world->UpdateLightDef( el->handle, &rl );
+					R_QueueEmissiveLightChange( el->handle, &rl );		// at the end of the frame
 					el->center = req.center;
 					el->normal = req.normal;
 					el->radius = req.radius;
@@ -1950,7 +2024,7 @@ static void R_UpdateEmissiveLights( void ) {
 		if ( ownerGone || age > EMISSIVE_LIGHT_TIMEOUT_MS || age < 0 ) {
 			// NULL-slot guard mirrors R_FreeAllEmissiveLights: never free a handle whose def is gone
 			if ( el.handle >= 0 && el.handle < world->lightDefs.Num() && world->lightDefs[el.handle] != NULL ) {
-				world->FreeLightDef( el.handle );
+				R_QueueEmissiveLightChange( el.handle, NULL );		// at the end of the frame
 			}
 			r_emissiveLightList.RemoveIndex( i );
 		}
