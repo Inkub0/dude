@@ -1,7 +1,9 @@
 # Quake 4 on DUDE — milestone plan (draft 2026-10-15)
 
-Status (2026-10-23): **Q0 done; Q1 built on `feat/quake4-title-profile` and Q2 built on
-`feat/quake4-decl-parity` (stacked on it), both awaiting the user's gate run** (§6). Goal: **DUDE runs the retail Quake 4 (2005,
+Status (2026-10-24): **Q0-Q3 done and on master** (Q3, world formats: merge 714881e7 - all 31
+campaign maps load and quit cleanly in the null game on Vulkan and OpenGL3, `cm`/`aas`
+self-checks clean, `airdefense1` user-verified on both renderers; the collision API additions
+moved to Q5). Next: Q4 (BSE) or Q5 (game library), §6. Goal: **DUDE runs the retail Quake 4 (2005,
 Raven Software, idTech4) single-player campaign natively** — its own `q4base/*.pk4` assets,
 its own game logic, on DUDE's GL3 and Vulkan backends, with DUDE's enhancement tiers
 (PBR, tessellation, RT) available as opt-in on top. Multiplayer is out of scope for v1 (§9).
