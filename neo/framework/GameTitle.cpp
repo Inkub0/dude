@@ -45,7 +45,7 @@ static const gameTitleProfile_t titleProfiles[GAME_TITLE_COUNT] = {
 		true,							// nullGameFallback: q4base.so comes from the separate game repository (Q5)
 		true,							// recursiveDeclFolders: 34 of 96 .mtr files live in subfolders
 		true,							// entityFilters: process1 and storage1 each hold a "first" and a "second" level
-		0.0254f,						// soundUnitsToMeters: inches (DOOM_TO_METERS), "maxDistance 1181" = 30 m
+		0.0254f,						// soundUnitsToMeters: inches (DOOM_TO_METERS, SOUND_Q4_UNITS_TO_METERS), "maxDistance 1181" = 30 m
 		true,							// bareSampleNames: sound/null plays sound/null.ogg
 		"sound/vo_",					// voLanguagePrefix: sound/vo_english/...
 		"efxs/default.efx",				// reverbPresets: 23 EAX presets, maps/<map>.reverb picks one per area

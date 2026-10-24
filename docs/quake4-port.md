@@ -6,8 +6,8 @@ self-checks clean, `airdefense1` user-verified on both renderers; the collision 
 moved to Q5). **Q5 (game library) started 2026-10-24** (user: Q5 before Q4, BSE later),
 plan in §5.6: Q5.0 (dhewm3 ABI) merged, Q5.1 (build + inventory) and Q5.2 (idlib layer, 4214
 -> 2349 errors, 0 in idlib) done on `feat/quake4-game-library`; Q5.3 (engine interfaces) in
-progress: the game library compiles and links (q4base.so); the Doom 3 + RoE smoke test is the
-gate left, then Q5.4 (engine facades and the Quake 4 loader). Goal: **DUDE runs the retail Quake 4 (2005,
+done: the game library compiles and links (q4base.so), Doom 3 + RoE smoke test passed
+(user, 2026-10-24); Q5.4 (engine facades and the Quake 4 loader) built, its boot gate pending. Goal: **DUDE runs the retail Quake 4 (2005,
 Raven Software, idTech4) single-player campaign natively** — its own `q4base/*.pk4` assets,
 its own game logic, on DUDE's GL3 and Vulkan backends, with DUDE's enhancement tiers
 (PBR, tessellation, RT) available as opt-in on top. Multiplayer is out of scope for v1 (§9).
@@ -894,13 +894,42 @@ performance** as the goals; repository `~/dude-quake4-game` (local git, never pu
      **All 160 sources compile and `q4base.so` links** (game repo `bcff329`, DUDE this
      commit): its undefined symbols are libc and the C++ runtime only, `GetGameAPI` its
      export - `idDeclTable::TableLookup` (vehicle hover physics) moved inline for that.
-     **Gate remaining: the Doom 3 + RoE smoke test** (the engine headers both game libraries
-     build against changed: appended virtuals, cvar flags, decl and idlib additions).
+     **Gate passed 2026-10-24:** the Doom 3 + RoE smoke test (the engine headers both game
+     libraries build against changed: appended virtuals, cvar flags, decl and idlib additions).
      Silent 64-bit risks the compiler cannot see (Raven's own additions to the script system,
      `long` in its code) are a Q5.5 check.
   4. **Q5.4 load** - `q4base.so` replaces the null game under `run-q4.sh`: `GetGameAPI`,
      `Init`, main menu with the game's cvars (the sweep's `mainmenu.gui` cvar warnings gone),
      clean quit. Gate: boot + quit on both backends, no new warnings.
+     **As built (2026-10-24), `neo/quake4/*.cpp`, engine-only:** `LoadGameDLL` hands the Quake 4
+     title's own library (never the null game, which speaks Doom 3's interface on any title)
+     `gameImportQ4_t` through `GameQ4_Load` (`quake4/GameLoaderQ4.h`) and installs two adapters
+     as the engine's `game` / `gameEdit`: `idGame` onto `idGameQ4` (user commands converted per
+     client, render worlds wrapped, `SaveGame` as `ST_REGULAR`, no time groups - the renderer's
+     time-group clock is the game time) and Doom 3's `idGameEdit` - defined by the engine only
+     here, under `__DOOM_DLL__`, hidden like every engine symbol - onto `idGameEditQ4`. Facades:
+     - **sound** (`SoundSystemQ4.cpp`): world ids resolve to the session's game and menu sound
+       worlds; a handle is the engine emitter's own index, so it survives save games; distances
+       are map units in the game and metres in the engine (`SOUND_Q4_UNITS_TO_METERS`, also in
+       `idSoundShader::GetParms(Q4)`); `CurrentlyPlaying(channel)` reads the emitter's channels.
+     - **collision** (`CollisionModelManagerQ4.cpp`): map models are the engine's handles, kept by
+       name across `FreeMap` (the game may still hold them); trace-model models keep their trace
+       model and take the engine's reusable slot (`SetupTrmModel`) per query, as Doom 3's
+       `idClipModel` does; contacts carry the material's own material type.
+     - **render world** (`RenderWorldQ4.cpp`): the game's `renderEntityQ4_t` is kept per handle
+       (`GetRenderEntity`, deferred callbacks through an engine trampoline that converts the
+       result); sound handles become emitters; `RF_PORTAL_SKY` views become the renderer's portal
+       sky subview of the next view (§5.7); `FindVisibleAreas` = areas connected through
+       view-open portals (the renderer decides sky per view anyway). Area connectivity now floods
+       a fourth attribute, `PS_BLOCK_GRAVITY` (`NUM_PORTAL_ATTRIBUTES_LOCAL`, engine-internal;
+       Doom 3 never sets the bit).
+     - **effects:** `AddEffectDef` declines every effect (the game drops it) until phase Q4.
+     Accepted and dropped for now (no renderer / mixer slot): `suppressSurfaceMask`,
+     `overlayShader`, shadow LOD, light `detailLevel` / `noDynamicShadows` / `globalLight`,
+     per-view weapon depth hack, doppler, pitch shift, wet/dry mix; the game's
+     `SetupLoadingGui` (the session fills Quake 4's loading screen from the mapDef); snapshots
+     and voice (Q9). Builds clean on Linux and the Windows cross-build; `check_dhewm3_abi.py`
+     0 breaks; the Doom 3 libraries are untouched by this step.
   5. **Q5.5 airdefense1** - spawn, HUD, weapons, AI, scripts, triggers; then VO + lipsync,
      cinematics (`md5camera`), save + load, the transition to `airdefense2`; an ASAN pass.
      Gate: the phase gate (§6).

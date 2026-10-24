@@ -68,9 +68,14 @@ typedef struct doublePortal_s {
 } doublePortal_t;
 
 
+// DUDE: the portal attributes area connectivity is flooded for: Doom 3's three (RenderWorld.h
+// NUM_PORTAL_ATTRIBUTES, part of the game interface) and Quake 4's PS_BLOCK_GRAVITY, which
+// separates its gravity zones. Doom 3 never sets that bit, so its fourth flood only follows doors.
+static const int NUM_PORTAL_ATTRIBUTES_LOCAL = 4;
+
 typedef struct portalArea_s {
 	int				areaNum;
-	int				connectedAreaNum[NUM_PORTAL_ATTRIBUTES];	// if two areas have matching connectedAreaNum, they are
+	int				connectedAreaNum[NUM_PORTAL_ATTRIBUTES_LOCAL];	// if two areas have matching connectedAreaNum, they are
 									// not separated by a portal with the apropriate PS_BLOCK_* blockingBits
 	int				viewCount;		// set by R_FindViewLightsAndEntities
 	portal_t *		portals;		// never changes after load

@@ -210,8 +210,9 @@ public:
 	virtual void			UpdateLightDef( qhandle_t lightHandle, const renderLightQ4_t *rlight ) = 0;
 	virtual void			FreeLightDef( qhandle_t lightHandle ) = 0;
 
+							// -1 when the effect cannot play (the game then drops it)
 	virtual qhandle_t		AddEffectDef( const renderEffect_t *reffect, int time ) = 0;
-							// false when the effect has finished
+							// true when the effect has finished (the game then frees it)
 	virtual bool			UpdateEffectDef( qhandle_t effectHandle, const renderEffect_t *reffect, int time ) = 0;
 	virtual void			StopEffectDef( qhandle_t effectHandle ) = 0;		// stops emitting, lets it die out
 	virtual const idRenderEffectQ4 *GetEffectDef( qhandle_t effectHandle ) const = 0;

@@ -256,7 +256,7 @@ private:
 /*
 ===============================================================================
 
-	idDeclPlayerModel - def/*.def
+	idDeclPlayerModel - def/<file>.def
 
 	playerModel model_player_marine {
 		"model"			"model_player_marine"

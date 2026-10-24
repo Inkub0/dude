@@ -1076,7 +1076,7 @@ bool	idRenderWorldLocal::AreasAreConnected( int areaNum1, int areaNum2, portalCo
 		attribute++;
 		intConnection >>= 1;
 	}
-	if ( attribute >= NUM_PORTAL_ATTRIBUTES || ( 1 << attribute ) != (int)connection ) {
+	if ( attribute >= NUM_PORTAL_ATTRIBUTES_LOCAL || ( 1 << attribute ) != (int)connection ) {
 		common->Error( "idRenderWorldLocal::AreasAreConnected: bad connection number: %i\n", (int)connection );
 	}
 
@@ -1107,7 +1107,7 @@ void		idRenderWorldLocal::SetPortalState( qhandle_t portal, int blockTypes ) {
 
 	// leave the connectedAreaGroup the same on one side,
 	// then flood fill from the other side with a new number for each changed attribute
-	for ( int i = 0 ; i < NUM_PORTAL_ATTRIBUTES ; i++ ) {
+	for ( int i = 0 ; i < NUM_PORTAL_ATTRIBUTES_LOCAL ; i++ ) {
 		if ( ( old ^ blockTypes ) & ( 1 << i ) ) {
 			connectedAreaNum++;
 			FloodConnectedAreas( &portalAreas[doublePortals[portal-1].portals[1]->intoArea], i );
