@@ -132,6 +132,13 @@ public:
 	void			Swap( idList<type> &other );						// swap the contents of the lists
 	void			DeleteContents( bool clear );						// delete the contents of the list
 
+	// helpers Quake 4's game code uses (Raven added them to its idlib); not virtual, no data
+	int				TypeSize( void ) const { return sizeof( type ); }	// size of an element
+	void			RemoveNull( void );									// remove every NULL element (pointer lists)
+	void			StackAdd( const type & obj ) { Append( obj ); }		// the list as a stack: push
+	void			StackPop( void ) { RemoveIndex( num - 1 ); }		// pop
+	type &			StackTop( void ) { assert( num > 0 ); return list[ num - 1 ]; }	// top
+
 #if __cplusplus >= 201103L || defined(_MSVC_LANG) && _MSVC_LANG >= 201103L
 	// begin and end allow using C++11 for(ElemType& e : myIdlist) { ... }
 	type* begin() {
@@ -236,6 +243,22 @@ ID_INLINE void idList<type>::DeleteContents( bool clear ) {
 		Clear();
 	} else {
 		memset( list, 0, size * sizeof( type ) );
+	}
+}
+
+/*
+================
+idList<type>::RemoveNull
+
+Removes every NULL element, keeping the order of the rest.
+================
+*/
+template< class type >
+ID_INLINE void idList<type>::RemoveNull( void ) {
+	for ( int i = num - 1; i >= 0; i-- ) {
+		if ( !list[ i ] ) {
+			RemoveIndex( i );
+		}
 	}
 }
 

@@ -423,3 +423,57 @@ void idBounds::ToPoints( idVec3 points[8] ) const {
 		points[i][2] = b[(i>>2)&1][2];
 	}
 }
+
+/*
+============
+idBounds::ShortestDistance
+============
+*/
+float idBounds::ShortestDistance( const idVec3 &point ) const {
+	if ( ContainsPoint( point ) ) {
+		return 0.0f;
+	}
+
+	float distSqr = 0.0f;
+	for ( int i = 0; i < 3; i++ ) {
+		float outside = 0.0f;
+		if ( point[i] < b[0][i] ) {
+			outside = b[0][i] - point[i];
+		} else if ( point[i] > b[1][i] ) {
+			outside = point[i] - b[1][i];
+		}
+		distSqr += outside * outside;
+	}
+	return idMath::Sqrt( distSqr );
+}
+
+/*
+============
+idBounds::FindEdgePoint
+============
+*/
+idVec3 idBounds::FindEdgePoint( const idVec3 &dir ) const {
+	return FindEdgePoint( GetCenter(), dir );
+}
+
+idVec3 idBounds::FindEdgePoint( const idVec3 &start, const idVec3 &dir ) const {
+	// from a point a bounds' radius out along dir, come back along -dir until the bounds are hit
+	const idVec3 outside = start + dir * GetRadius( GetCenter() );
+	float scale = 0.0f;
+
+	RayIntersection( outside, -dir, scale );
+	return outside - dir * scale;
+}
+
+/*
+============
+idBounds::FindVectorToEdge
+============
+*/
+idVec3 idBounds::FindVectorToEdge( const idVec3 &dir ) const {
+	return FindVectorToEdge( GetCenter(), dir );
+}
+
+idVec3 idBounds::FindVectorToEdge( const idVec3 &start, const idVec3 &dir ) const {
+	return FindEdgePoint( start, dir ) - start;
+}

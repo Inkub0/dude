@@ -222,7 +222,7 @@ public:
 
 	int					Find( const char c, int start = 0, int end = -1 ) const;
 	int					Find( const char *text, bool casesensitive = true, int start = 0, int end = -1 ) const;
-	bool				Filter( const char *filter, bool casesensitive ) const;
+	bool				Filter( const char *filter, bool casesensitive = true ) const;
 	int					Last( const char c ) const;						// return the index to the last occurance of 'c', returns -1 if not found
 	const char *		Left( int len, idStr &result ) const;			// store the leftmost 'len' characters in the result
 	const char *		Right( int len, idStr &result ) const;			// store the rightmost 'len' characters in the result
@@ -241,6 +241,7 @@ public:
 	void				StripTrailingWhitespace( void );				// strip trailing white space characters
 	idStr &				StripQuotes( void );							// strip quotes around string
 	void				Replace( const char *old, const char *nw );
+	idStr &				ReplaceChar( const char from, const char to );	// every 'from' becomes 'to' (Quake 4's game code)
 
 	// file name methods
 	int					FileNameHash( void ) const;						// hash key for the filename (skips extension)
@@ -912,6 +913,15 @@ ID_INLINE int idStr::Find( const char *text, bool casesensitive, int start, int 
 
 ID_INLINE bool idStr::Filter( const char *filter, bool casesensitive ) const {
 	return idStr::Filter( filter, data, casesensitive );
+}
+
+ID_INLINE idStr &idStr::ReplaceChar( const char from, const char to ) {
+	for ( int i = 0; i < len; i++ ) {
+		if ( data[i] == from ) {
+			data[i] = to;
+		}
+	}
+	return *this;
 }
 
 ID_INLINE const char *idStr::Left( int len, idStr &result ) const {

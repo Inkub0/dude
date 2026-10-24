@@ -530,6 +530,31 @@ unsigned int idMapBrush::GetGeometryCRC( void ) const {
 }
 
 /*
+===============
+idMapBrush::TranslateSelf
+
+A side's texture coordinate at p is (p + origin) . V + texMat[i][2], V built from texMat[i][0..1]
+and the plane's texture axes. The axes depend on the normal only, so moving the brush keeps V,
+and the texture stays put on the face when the constant drops by delta . V.
+===============
+*/
+void idMapBrush::TranslateSelf( const idVec3 &delta ) {
+	for ( int i = 0; i < GetNumSides(); i++ ) {
+		idMapBrushSide *side = GetSide( i );
+		idVec3 texS, texT;
+
+		side->plane = side->plane.Translate( delta );
+
+		ComputeAxisBase( side->plane.Normal(), texS, texT );
+		const float ds = delta * texS;
+		const float dt = delta * texT;
+		for ( int j = 0; j < 2; j++ ) {
+			side->texMat[j][2] -= side->texMat[j][0] * ds + side->texMat[j][1] * dt;
+		}
+	}
+}
+
+/*
 ================
 idMapEntity::Parse
 ================
@@ -925,6 +950,43 @@ void idMapFile::RemoveEntities( const char *classname ) {
 			i--;
 		}
 	}
+}
+
+/*
+===============
+idMapFile::Resolve
+
+Quake 4's step after Parse(). Raven's Resolve also applied the worldspawn's "removeEntities*",
+"overrideMaterial" and "forceEntityNames" keys, which its Parse() no longer did; id's Parse()
+above still applies them, in the same order, so what is left is the func_groups.
+===============
+*/
+void idMapFile::Resolve( void ) {
+	if ( !hasPrimitiveData || !entities.Num() ) {
+		return;
+	}
+	idMapEntity *world = entities[0];
+
+	// func_groups only group primitives in the editor: theirs move into the worldspawn, from the
+	// group's own space to the world's ("moveFuncGroups" already moved them, untranslated)
+	for ( int i = 1; i < entities.Num(); i++ ) {
+		idMapEntity *ent = entities[i];
+		if ( idStr::Icmp( ent->epairs.GetString( "classname" ), "func_group" ) != 0 ) {
+			continue;
+		}
+		const idVec3 delta = ent->epairs.GetVector( "origin", "0 0 0" );
+		for ( int j = 0; j < ent->primitives.Num(); j++ ) {
+			idMapPrimitive *prim = ent->primitives[j];
+			if ( prim->GetType() == idMapPrimitive::TYPE_BRUSH ) {
+				static_cast<idMapBrush *>( prim )->TranslateSelf( delta );
+			} else if ( prim->GetType() == idMapPrimitive::TYPE_PATCH ) {
+				static_cast<idMapPatch *>( prim )->TranslateSelf( delta );
+			}
+		}
+		world->primitives.Append( ent->primitives );
+		ent->primitives.Clear();
+	}
+	RemoveEntities( "func_group" );
 }
 
 /*

@@ -25,6 +25,8 @@ RULES = [
     (r"'([\w:~]+)' does not name a type", 'unknown type'),
     (r"'([\w:~<>, ]+)' has not been declared", 'undeclared name'),
     (r"'(?:const )?(?:class|struct|union) ([\w:<>, ]+)'(?: \{aka '[^']*'\})? has no member named '(\w+)'", 'missing member'),
+    # a typedef'd type: 'renderEntity_t' {aka 'struct renderEntity_s'}
+    (r"'(?:const )?([\w:<>, ]+)' \{aka '[^']*'\} has no member named '(\w+)'", 'missing member'),
     (r"request for member '(\w+)' in .*non-class type '([^']+)'", 'member of a non-class'),
     (r"cast from '([^']+)' to '([^']+)' loses precision", '64-bit cast'),
     (r"wrong number of template arguments \((\d+), should be (\d+)\)", 'template arguments (given, expected)'),

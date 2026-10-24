@@ -28,6 +28,8 @@ If you have questions concerning this license or the applicable additional terms
 
 #include "sys/platform.h"
 
+#include "idlib/math/Vector.h"
+
 #include "idlib/math/Math.h"
 
 const float	idMath::PI				= 3.14159265358979323846f;
@@ -128,4 +130,47 @@ float idMath::BitsToFloat( int i, int exponentBits, int mantissaBits ) {
 	mantissa = ( i & ( ( 1 << mantissaBits ) - 1 ) ) << ( IEEE_FLT_MANTISSA_BITS - mantissaBits );
 	value = sign << IEEE_FLT_SIGN_BIT | ( exponent + IEEE_FLT_EXPONENT_BIAS ) << IEEE_FLT_MANTISSA_BITS | mantissa;
 	return *reinterpret_cast<float *>(&value);
+}
+
+/*
+================
+idMath::Lerp
+================
+*/
+float idMath::Lerp( float start, float end, float frac ) {
+	if ( frac >= 1.0f ) {
+		return end;
+	}
+	if ( frac <= 0.0f ) {
+		return start;
+	}
+	return start + ( end - start ) * frac;
+}
+
+float idMath::Lerp( const idVec2 &range, float frac ) {
+	return Lerp( range[0], range[1], frac );
+}
+
+/*
+================
+idMath::MidPointLerp
+================
+*/
+float idMath::MidPointLerp( float start, float mid, float end, float frac ) {
+	if ( frac < 0.5f ) {
+		return Lerp( start, mid, 2.0f * frac );
+	}
+	return Lerp( mid, end, 2.0f * ( frac - 0.5f ) );
+}
+
+/*
+================
+idMath::dBToScale
+================
+*/
+float idMath::dBToScale( float db ) {
+	if ( db < -60.0f ) {
+		return 0.0f;
+	}
+	return powf( 2.0f, db * ( 1.0f / 6.0f ) );
 }

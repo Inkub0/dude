@@ -4,7 +4,8 @@ Status (2026-10-24): **Q0-Q3 done and on master** (Q3, world formats: merge 7148
 campaign maps load and quit cleanly in the null game on Vulkan and OpenGL3, `cm`/`aas`
 self-checks clean, `airdefense1` user-verified on both renderers; the collision API additions
 moved to Q5). **Q5 (game library) started 2026-10-24** (user: Q5 before Q4, BSE later),
-plan in §5.6. Goal: **DUDE runs the retail Quake 4 (2005,
+plan in §5.6: Q5.0 (dhewm3 ABI) merged, Q5.1 (build + inventory) and Q5.2 (idlib layer, 4214
+-> 2349 errors, 0 in idlib) done on `feat/quake4-game-library`; next Q5.3 (engine interfaces). Goal: **DUDE runs the retail Quake 4 (2005,
 Raven Software, idTech4) single-player campaign natively** — its own `q4base/*.pk4` assets,
 its own game logic, on DUDE's GL3 and Vulkan backends, with DUDE's enhancement tiers
 (PBR, tessellation, RT) available as opt-in on top. Multiplayer is out of scope for v1 (§9).
@@ -794,8 +795,8 @@ performance** as the goals; repository `~/dude-quake4-game` (local git, never pu
      | Work package | Largest items (distinct errors) |
      |---|---|
      | **Raven `game/Game.h`** - game-side definitions the adapter no longer pulls in (split it: game-side part stays in the game repo, interface part comes from DUDE) | `SND_CHANNEL_*` 286, `debugInfoProc_t` 113, `demoState_t` 34, `userOrigin_t` 22, `ClientStats_t` 12; plus the Quake 4 `idGame`/`idGameEdit` entries the game defines (68 + 12 definitions without declaration) |
-     | **Raven idlib layer** (Q5.2) | `RV_*` heap macros 140, `MA_*` / `MEM_*` allocation tags 128, `rvPair` 73, `rvRandom` 42, `idBitMsg` / `idBitMsgDelta` (`WriteLong`/`ReadLong` …) 152, `idVec3` 45 / `idBounds` 14 extras, template arity 82, `Lexer` (LexerFactory) 34, `idCVarHelp` 33 |
-     | **Engine: common / cvars / files / network** | `idCommon` 312 (`GetLocalizedString` …), `CVAR_*` 41, `idFile` 28, `idNetworkSystem` 25 |
+     | **Raven idlib layer** (Q5.2) | `RV_*` heap macros 140, `MA_*` / `MEM_*` allocation tags 128, `rvPair` 73, `rvRandom` 42, `idBitMsg` / `idBitMsgDelta` (`WriteLong`/`ReadLong` …) 152, `idVec3` 45 / `idBounds` 14 extras, template arity 82, `Lexer` (LexerFactory) 34 |
+     | **Engine: common / cvars / files / network** | `idCommon` 312 (`GetLocalizedString` …), `CVAR_*` 41, `idCVarHelp` 33 (Raven's `framework/CVarSystem.h`), `idFile` 28, `idNetworkSystem` 25 |
      | **Engine: sound** (`worldId`, emitter handles, Raven channel names) | `idSoundSystem` 79, `refSound_t` 88, `SOUNDWORLD_*` 62 |
      | **Engine: collision** | `idCollisionModel` 156, `idCollisionModelManager` 18, `contactInfo_t` 28 (`materialType`) |
      | **Engine: effects / BSE** (no-op manager until Q4) | `rvClientEffect` 116, `PlayEffect` 82, `renderEffect` / `renderEffect_t` 123, `effectCategory_t` 16 |
@@ -807,6 +808,48 @@ performance** as the goals; repository `~/dude-quake4-game` (local git, never pu
      Order: the `game/Game.h` split and the idlib layer first (they cascade the most), then the
      engine packages one by one, re-running the inventory after each.
   2. **Q5.2 idlib layer** - every idlib error gone. Gate: `idlib`-attributed errors 0.
+     **Done 2026-10-24: 4214 -> 2349 distinct errors, 0 attributed to idlib; the rest are engine
+     interfaces (Q5.3), 64-bit casts and their cascades.** Split by where a piece can live:
+     - **Raven's methods on id's classes go into DUDE's idlib**, written for DUDE (GPL, Raven's
+       code read for semantics only), all non-virtual, no data, so `check_dhewm3_abi.py` stays
+       at 0 breaks: `idVec3` `ToNormal` / `ToMat3( axis )` / `Dist` / `DistXY` / `Dist2XY` /
+       `DistToLineSeg` / `ProjectToLineSeg` / `ProjectOntoVector` / `IsLeftOf` / `IsZero` /
+       `Random`; `idAngles` `Length` / `Random` / `Remap` / `Scale`; `idBounds` `Size` /
+       `Contains` / `ShortestDistance` / `FindEdgePoint` / `FindVectorToEdge`; `idMath` `Lerp`
+       (clamped) / `MidPointLerp` / `dBToScale`; `idMat3` `RotateAbsolute` / `RotateRelative` /
+       `RotateArbitrary`; `idBitMsg` / `idBitMsgDelta` `*Long` (= `*Int`), `GetRemainingData`,
+       `GetReadData`, `InitReading` / `InitWriting`, `*DeltaVec3` / `*DeltaMat3`; `idStr`
+       `ReplaceChar`, `Filter` defaulting to case-sensitive; `idDict::RandomPrefix` with a
+       default; `idList` `TypeSize` / `RemoveNull` / `StackAdd` / `StackPop` / `StackTop`;
+       `idMapFile::Resolve` (+ `idMapBrush::TranslateSelf`, texture-locked).
+       **Checked against Raven's own implementations** (scratch harness on `libidlib.a`, not
+       committed - it holds SDK code): 200 000 random cases bit-identical, except
+       `RotateArbitrary` (closed form vs Raven's five-matrix product) within 4e-7. `Resolve` over
+       the 63 retail `.map` files: entity / primitive counts as expected in all 51 maps with
+       func_groups; 9017 func_groups have an origin, and their primitives are stored relative to
+       it (6082 of 6086 far-off patches sit near 0), so the translation Raven added is needed;
+       the brush texture lock holds on every brush tried. id's `Parse()` already applies the
+       worldspawn keys Raven moved into `Resolve` (`removeEntities*`, `overrideMaterial`,
+       `forceEntityNames`; no retail map uses them), so DUDE's `Resolve` is the func_group step.
+     - **Raven-only types, globals and macros live in the game repo** as Raven wrote them
+       (`source/idlib/RavenIdlib.h/.cpp`): allocation tags + heap macros (no-ops on the PC),
+       `rvRandom` (seed pinned to 32 bits: Raven's `unsigned long` is 64 on LP64 and broke its
+       0..32767 range), `rvPair`, `rvSphericalInterpolate`, `rvBits` / `rvPool` /
+       `rvIndexPool`, `idMsgQueue` / `idBitMsgQueue` (the engine's own `idMsgQueue` is never
+       included by the game and not exported), `SignZero`, `vec4_one`, Raven's colour / icon /
+       escape macros.
+     - **Raven members whose behaviour has quirks the game shipped with stay Raven's code**, as
+       free functions the game calls by a new name (marked patches): the `idList` heap
+       (`rvListHeapAdd` / `rvListHeapPop` - the sift-down always takes the left child),
+       `rvStr::Split` (takes a length for an end index inside quotes), `rvStr::RemoveEscapes` /
+       `IcmpNoEscape` / `IsEscape` (drops the character after an unremoved `^`), and
+       `rvListRemoveContents` (needs `EV_Remove`, so it was game-side in Raven too).
+     - **Mechanical game patches:** `idMath::INT_MIN/INT_MAX` -> `INT_MIN/INT_MAX`,
+       `idMath::FLOAT_EPSILON` -> `FLT_EPSILON`, allocator memory-tag template arguments dropped,
+       `LexerFactory` -> `idLexer` (Raven's binary lexer only ran under `com_binaryRead`), the
+       map-file resolved flag kept in `idGameLocal` (`mapFileResolved`), and `idGameEdit`'s map
+       export (an editor merge workflow DUDE's `idMapFile` does not have) reports no export
+       entities.
   3. **Q5.3 engine interfaces** - the union, item by item from the inventory, Doom 3 libraries
      rebuilt and unchanged in behaviour, the ABI diff against dhewm3 1.5.5 clean. Gate:
      `q4base.so` compiles and links; Doom 3 + RoE smoke test by the user.

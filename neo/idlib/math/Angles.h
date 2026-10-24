@@ -49,6 +49,7 @@ class idQuat;
 class idRotation;
 class idMat3;
 class idMat4;
+class idRandom;
 
 class idAngles {
 public:
@@ -100,6 +101,14 @@ public:
 	const float *	ToFloatPtr( void ) const;
 	float *			ToFloatPtr( void );
 	const char *	ToString( int precision = 2 ) const;
+
+	// helpers Quake 4's game code uses (Raven added them to its idlib); not virtual, no data
+	float			Length( void ) const;						// length of (pitch, yaw, roll) as a vector
+					// each angle a becomes a + a * range[i] * random.CRandomFloat()
+	idAngles		Random( const idVec3 &range, idRandom &random ) const;
+					// angle i becomes angle |map[i]|, negated when dirMap[i] < 0
+	idAngles &		Remap( const int map[3], const int dirMap[3] );
+	idAngles &		Scale( const idAngles &scalar );			// each angle times the matching one of scalar
 };
 
 extern idAngles ang_zero;
@@ -251,6 +260,25 @@ ID_INLINE void idAngles::Clamp( const idAngles &min, const idAngles &max ) {
 
 ID_INLINE int idAngles::GetDimension( void ) const {
 	return 3;
+}
+
+ID_INLINE float idAngles::Length( void ) const {
+	return idMath::Sqrt( pitch * pitch + yaw * yaw + roll * roll );
+}
+
+ID_INLINE idAngles &idAngles::Scale( const idAngles &scalar ) {
+	pitch *= scalar.pitch;
+	yaw *= scalar.yaw;
+	roll *= scalar.roll;
+	return *this;
+}
+
+ID_INLINE idAngles &idAngles::Remap( const int map[3], const int dirMap[3] ) {
+	const idAngles src = *this;
+	for ( int i = 0; i < GetDimension(); i++ ) {
+		(*this)[i] = ( dirMap[i] < 0 ? -1.0f : 1.0f ) * src[ abs( map[i] ) ];
+	}
+	return *this;
 }
 
 ID_INLINE const float *idAngles::ToFloatPtr( void ) const {

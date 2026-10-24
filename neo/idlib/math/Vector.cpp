@@ -218,6 +218,90 @@ idMat3 idVec3::ToMat3( void ) const {
 
 /*
 =============
+idVec3::ToMat3
+
+ToMat3() with the axes renamed: this vector is row 'axis', the next row is perpendicular to it
+in the plane of its 'axis' and next components, the last row completes the frame.
+ToMat3( 0 ) == ToMat3().
+=============
+*/
+idMat3 idVec3::ToMat3( int axis ) const {
+	const int a = axis % 3, b = ( axis + 1 ) % 3, c = ( axis + 2 ) % 3;
+	const idVec3 &v = *this;
+	idMat3	mat;
+	float	d;
+
+	mat[a] = v;
+	d = v[a] * v[a] + v[b] * v[b];
+	if ( !d ) {
+		mat[b][a] = 1.0f;
+		mat[b][b] = 0.0f;
+		mat[b][c] = 0.0f;
+	} else {
+		d = idMath::InvSqrt( d );
+		mat[b][a] = -v[b] * d;
+		mat[b][b] = v[a] * d;
+		mat[b][c] = 0.0f;
+	}
+	mat[c] = Cross( mat[b] );
+
+	return mat;
+}
+
+/*
+=============
+idVec3::DistToLineSeg
+=============
+*/
+float idVec3::DistToLineSeg( const idVec3 &start, const idVec3 &end, float &scale ) const {
+	const idVec3 seg = end - start;
+
+	scale = ( ( *this - start ) * seg ) / seg.LengthSqr();
+	if ( scale < 0.0f ) {
+		return Dist( start );
+	}
+	if ( scale > 1.0f ) {
+		return Dist( end );
+	}
+	return Dist( start + seg * scale );
+}
+
+/*
+=============
+idVec3::ProjectToLineSeg
+=============
+*/
+bool idVec3::ProjectToLineSeg( const idVec3 &start, const idVec3 &end ) {
+	const idVec3 seg = end - start;
+	const float scale = ( ( *this - start ) * seg ) / seg.LengthSqr();
+
+	if ( scale < 0.0f ) {
+		*this = start;
+		return false;
+	}
+	if ( scale > 1.0f ) {
+		*this = end;
+		return false;
+	}
+	*this = start + seg * scale;
+	return true;
+}
+
+/*
+=============
+idVec3::Random
+=============
+*/
+idVec3 idVec3::Random( const idVec3 &range, idRandom &random ) const {
+	idVec3 v = *this;
+	for ( int i = 0; i < GetDimension(); i++ ) {
+		v[i] += v[i] * range[i] * random.CRandomFloat();
+	}
+	return v;
+}
+
+/*
+=============
 idVec3::ToString
 =============
 */
