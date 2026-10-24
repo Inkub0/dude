@@ -63,7 +63,12 @@ static const int	SSF_NO_FLICKER =		BIT(8);	// always return 1.0 for volume queri
 static const int	SSF_NO_DUPS =			BIT(9);	// try not to play the same sound twice in a row
 // DUDE: Quake 4 shader flags (Raven's bit numbers)
 static const int	SSF_NO_RANDOMSTART =	BIT(11);	// a looping sound starts at its beginning, not at a diversity offset
+static const int	SSF_USEDOPPLER =		BIT(10);	// doppler pitch shifting allowed
 static const int	SSF_VO_FOR_PLAYER =		BIT(12);	// voice-over addressed to the player (radio chatter)
+static const int	SSF_IS_VO =				BIT(13);	// a voice-over line (the game passes it with the play)
+static const int	SSF_CAUSE_RUMBLE =		BIT(14);	// shakes the controller
+static const int	SSF_CENTER =			BIT(15);	// plays through the centre speaker only
+static const int	SSF_HILITE =			BIT(16);	// draws its emitter's debug info
 
 // these options can be overriden from sound shader defaults on a per-emitter and per-channel basis
 typedef struct {
@@ -123,6 +128,9 @@ public:
 	// Raven's precomputed screen-shake envelope for entry <index> (OGG samples carry no
 	// amplitude data): one letter per 1/30 s, 'a' = still. NULL when the shader has none.
 	const char *			GetShakeData( int index ) const;
+	bool					IsVO_ForPlayer( void ) const		{ return ( parms.soundShaderFlags & SSF_VO_FOR_PLAYER ) != 0; }
+	// the Quake 4 game library's form of GetParms (quake4/SoundQ4.h defines it)
+	void					GetParms( struct soundShaderParmsQ4_s *out ) const;
 
 private:
 	friend class idSoundWorldLocal;

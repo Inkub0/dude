@@ -270,7 +270,10 @@ typedef enum {
 	PS_BLOCK_LOCATION = 2,		// game map location strings often stop in hallways
 	PS_BLOCK_AIR = 4,			// windows between pressurized and unpresurized areas
 
-	PS_BLOCK_ALL = (1<<NUM_PORTAL_ATTRIBUTES)-1
+	PS_BLOCK_ALL = (1<<NUM_PORTAL_ATTRIBUTES)-1,
+
+	// Quake 4 (appended; not part of PS_BLOCK_ALL): portals that separate gravity zones
+	PS_BLOCK_GRAVITY = 8
 } portalConnection_t;
 
 

@@ -5,7 +5,8 @@ campaign maps load and quit cleanly in the null game on Vulkan and OpenGL3, `cm`
 self-checks clean, `airdefense1` user-verified on both renderers; the collision API additions
 moved to Q5). **Q5 (game library) started 2026-10-24** (user: Q5 before Q4, BSE later),
 plan in §5.6: Q5.0 (dhewm3 ABI) merged, Q5.1 (build + inventory) and Q5.2 (idlib layer, 4214
--> 2349 errors, 0 in idlib) done on `feat/quake4-game-library`; next Q5.3 (engine interfaces). Goal: **DUDE runs the retail Quake 4 (2005,
+-> 2349 errors, 0 in idlib) done on `feat/quake4-game-library`; Q5.3 (engine interfaces) in
+progress: 68 errors left, all but a few 64-bit cleanliness. Goal: **DUDE runs the retail Quake 4 (2005,
 Raven Software, idTech4) single-player campaign natively** — its own `q4base/*.pk4` assets,
 its own game logic, on DUDE's GL3 and Vulkan backends, with DUDE's enhancement tiers
 (PBR, tessellation, RT) available as opt-in on top. Multiplayer is out of scope for v1 (§9).
@@ -853,6 +854,41 @@ performance** as the goals; repository `~/dude-quake4-game` (local git, never pu
   3. **Q5.3 engine interfaces** - the union, item by item from the inventory, Doom 3 libraries
      rebuilt and unchanged in behaviour, the ABI diff against dhewm3 1.5.5 clean. Gate:
      `q4base.so` compiles and links; Doom 3 + RoE smoke test by the user.
+     **As built (2026-10-24), refining the facade plan above.** Two kinds of difference, two
+     mechanisms:
+     - **Quake 4 asks the same interface for more** (common, cvars, files, sys, UI, network,
+       render system, models, decls, AAS): the methods are added to DUDE's interfaces - inline
+       where they need nothing from the engine (`GetLocalizedString`, `DebuggerCheckBreakpoint`
+       over `FT_UpdateDebugger`, `ReadSyncId`, ...), appended virtuals otherwise; cvar flags and
+       portal bits as appended enum values. `check_dhewm3_abi.py` stays at 0 breaks.
+     - **Quake 4 reshaped a type** (render entities and lights, model traces, user commands,
+       traces and contacts with a material type, sounds addressed by world id and handle,
+       collision models as objects, effects, the game interface itself): `neo/quake4/` declares
+       Quake 4's versions under names of their own (`renderEntityQ4_t`, `idRenderWorldQ4`,
+       `idSoundSystemQ4`, `idCollisionModelManagerQ4`, `idEffectManagerQ4`, `idGameQ4`, ...),
+       written from the game's call sites, and `quake4/GameNamesQ4.h` - included only by the
+       game library, after every engine header - maps Raven's names onto them. Handing a Doom
+       3 struct where a Quake 4 one is expected is therefore a compile error, never a silent
+       layout mismatch (a shared header that only forward-declares `struct renderEntity_s`
+       would otherwise accept either). Inline conversions (`R_RenderEntityQ4ToEngine`,
+       `R_ModelBoundsQ4`) live in those headers so the game and the facades share them.
+     - **The handshake:** instead of the `GetAdditionalFunction` route sketched above, the
+       engine loads the Quake 4 library (title profile) with its own import block,
+       `gameImportQ4_t` - the engine's systems where they are shared, the Quake 4 facades where
+       not - and an engine-side adapter presents `idGameQ4` to the session as an `idGame`
+       (Q5.4). Doom 3's `GetGameAPI` path and `GAME_API_VERSION` 9 are untouched.
+     - **Engine work it took:** a real playback runtime (`idDeclPlayback`: samples carried
+       over, uniform cubic B-splines for position and angles, button / impulse events with
+       their time into the frame; OpenQ4's decompile-derived reading consulted for the format,
+       none of its code used), `idDeclPlayerModel`, `idDeclAF::fastEval`, AAS area ceilings,
+       sound-shader and lip-sync accessors, Raven's material sorts (`SS_PREGUI` = -2.5, between
+       Doom 3's subview -3 and GUI -2).
+     - **Recorded gaps** (interface in place, behaviour to come): `RunAlwaysThinkGUIs`, the
+       script full-screen effects (medlabs' blur), `^i` text icons, multiplayer and voice
+       entries (Q9), editor bits.
+     Inventory: 2349 -> 1756 (shared interfaces) -> 68 (the Quake 4 layer); what remains is
+     64-bit cleanliness of the event and script system, done next by applying dhewm3's own
+     x86_64 fixes of the same id code (`d92d4ba8`, `506ea7b3`, `ce976c47`, ... ) hunk by hunk.
   4. **Q5.4 load** - `q4base.so` replaces the null game under `run-q4.sh`: `GetGameAPI`,
      `Init`, main menu with the game's cvars (the sweep's `mainmenu.gui` cvar warnings gone),
      clean quit. Gate: boot + quit on both backends, no new warnings.

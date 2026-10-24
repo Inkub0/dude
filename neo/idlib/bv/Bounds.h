@@ -111,6 +111,7 @@ public:
 
 	// helpers Quake 4's game code uses (Raven added them to its idlib); not virtual, no data
 	idVec3			Size( void ) const;								// b[1] - b[0]
+	idBounds &		ExpandSelf( const idVec3 &d );					// grown by d on each axis, both ways
 	bool			Contains( const idBounds &a ) const;			// a lies inside these bounds, touching included
 	float			ShortestDistance( const idVec3 &point ) const;	// 0 inside, else distance to the closest point
 					// the point where the ray from start along dir leaves the bounds - found by casting
@@ -371,6 +372,12 @@ ID_INLINE bool idBounds::ContainsPoint( const idVec3 &p ) const {
 		return false;
 	}
 	return true;
+}
+
+ID_INLINE idBounds &idBounds::ExpandSelf( const idVec3 &d ) {
+	b[0] -= d;
+	b[1] += d;
+	return *this;
 }
 
 ID_INLINE idVec3 idBounds::Size( void ) const {

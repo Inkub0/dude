@@ -1417,6 +1417,8 @@ bool idDeclAF::ParseSettings( idLexer &src ) {
 			ParseContents( src, clipMask );
 		} else if ( !token.Icmp( "selfCollision" ) ) {
 			selfCollision = src.ParseBool();
+		} else if ( !token.Icmp( "fastEval" ) ) {		// DUDE: Quake 4, a bare keyword
+			fastEval = true;
 		} else if ( token == "}" ) {
 			break;
 		} else {
@@ -1582,6 +1584,7 @@ void idDeclAF::FreeData( void ) {
 	minMoveTime = -1.0f;
 	maxMoveTime = -1.0f;
 	selfCollision = true;
+	fastEval = false;
 	contents = CONTENTS_CORPSE;
 	clipMask = CONTENTS_SOLID | CONTENTS_CORPSE;
 	bodies.DeleteContents( true );

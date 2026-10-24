@@ -391,6 +391,7 @@ public:
 	void			SLerp( const idVec3 &v1, const idVec3 &v2, const float l );
 
 	// helpers Quake 4's game code uses (Raven added them to its idlib); not virtual, no data
+	idVec3 &		operator=( const idVec2 &a );				// x and y from a, z kept
 	idVec3			ToNormal( void ) const;						// normalized copy
 	idMat3			ToMat3( int axis ) const;					// as ToMat3(), with this vector as row 'axis'
 	float			Dist( const idVec3 &p ) const;				// distance to p (LengthFast precision)
@@ -819,6 +820,12 @@ ID_INLINE bool idVec3::ProjectAlongPlane( const idVec3 &normal, const float epsi
 	cross *= overBounce * ( normal * (*this) ) / len;
 	(*this) -= cross;
 	return true;
+}
+
+ID_INLINE idVec3 &idVec3::operator=( const idVec2 &a ) {
+	x = a.x;
+	y = a.y;
+	return *this;
 }
 
 ID_INLINE idVec3 idVec3::ToNormal( void ) const {

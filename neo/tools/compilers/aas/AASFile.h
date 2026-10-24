@@ -365,6 +365,8 @@ public:
 	bool						IsDummyFile( void ) const { return areas.Num() == 0; }
 	int							GetNumFeatures( void ) const { return features.Num(); }
 	const aasFeature_t &		GetFeature( int index ) const { return features[index]; }
+								// Quake 4's tactical search keeps a scratch weight in each feature
+	aasFeature_t &				GetFeature( int index ) { return features[index]; }
 	int							GetNumFeatureIndexes( void ) const { return featureIndex.Num(); }
 	const aasIndex_t &			GetFeatureIndex( int index ) const { return featureIndex[index]; }
 	void						GetAreaFeatures( int areaNum, int &firstFeature, int &numFeatures ) const {

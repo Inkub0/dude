@@ -136,6 +136,7 @@ public:
 	// helpers Quake 4's game code uses (Raven added them to its idlib); not virtual, no data
 	int				TypeSize( void ) const { return sizeof( type ); }	// size of an element
 	void			RemoveNull( void );									// remove every NULL element (pointer lists)
+	bool			RemoveRange( int low, int high );					// remove the elements low..high, inclusive
 	void			StackAdd( const type & obj ) { Append( obj ); }		// the list as a stack: push
 	void			StackPop( void ) { RemoveIndex( num - 1 ); }		// pop
 	type &			StackTop( void ) { assert( num > 0 ); return list[ num - 1 ]; }	// top
@@ -245,6 +246,27 @@ ID_INLINE void idList<type>::DeleteContents( bool clear ) {
 	} else {
 		memset( list, 0, size * sizeof( type ) );
 	}
+}
+
+/*
+================
+idList<type>::RemoveRange
+
+Removes the elements low..high, both included, moving the rest down once.
+================
+*/
+template< class type >
+ID_INLINE bool idList<type>::RemoveRange( int low, int high ) {
+	assert( low >= 0 && high < num && low <= high );
+	if ( low < 0 || high >= num || low > high ) {
+		return false;
+	}
+	const int count = high - low + 1;
+	for ( int i = high + 1; i < num; i++ ) {
+		list[ i - count ] = list[ i ];
+	}
+	num -= count;
+	return true;
 }
 
 /*
