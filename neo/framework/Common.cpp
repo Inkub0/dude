@@ -67,6 +67,7 @@ If you have questions concerning this license or the applicable additional terms
 #include "GameCallbacks_local.h"
 #include "Session_local.h" // DG: For FT_IsDemo/isDemo() hack
 #include "quake4/GameLoaderQ4.h"
+#include "quake4/SettingsQ4.h"
 
 #define	MAX_PRINT_MSG_SIZE	4096
 #define MAX_WARNING_LIST	256
@@ -2922,6 +2923,9 @@ void idCommonLocal::Frame( void ) {
 
 		eventLoop->RunEventLoop();
 
+		// DUDE: Quake 4's menu settings that mirror DUDE's own (master volume, sound device)
+		Q4Settings_Frame();
+
 		// DG: prepare new ImGui frame - I guess this is a good place, as all new events should be available?
 		D3::ImGuiHooks::NewFrame();
 
@@ -3784,6 +3788,10 @@ idCommonLocal::InitGame
 void idCommonLocal::InitGame( void ) {
 	// initialize the file system
 	fileSystem->Init();
+
+	// DUDE: the engine settings Quake 4's menus expect, now that the title is known and before
+	// the config files set them (quake4/SettingsQ4.h; nothing for Doom 3)
+	Q4Settings_Init();
 
 	// DUDE: load mod cvar translation table once fs can read base/. Cvar hooks
 	// are safe before this — ResolveAlias no-ops until Init succeeds.

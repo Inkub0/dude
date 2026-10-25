@@ -972,6 +972,7 @@ set(src_quake4
 	quake4/CollisionModelManagerQ4.cpp
 	quake4/GameQ4.cpp
 	quake4/RenderWorldQ4.cpp
+	quake4/SettingsQ4.cpp
 	quake4/SoundSystemQ4.cpp
 )
 

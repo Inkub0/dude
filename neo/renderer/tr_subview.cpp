@@ -30,6 +30,7 @@ If you have questions concerning this license or the applicable additional terms
 
 #include "renderer/tr_local.h"
 #include "renderer/RenderWorld_local.h"
+#include "quake4/SettingsQ4.h"
 
 typedef struct {
 	idVec3		origin;
@@ -596,7 +597,8 @@ bool R_PortalSkyRender( void ) {
 		return false;
 	}
 	idRenderWorldLocal *world = static_cast<idRenderWorldLocal *>( parent->renderWorld );
-	if ( world == NULL || !world->portalSkyCameraSet ) {
+	// DUDE: Quake 4's "Enable detailed sky: No" (r_skipSky, quake4/SettingsQ4.h)
+	if ( world == NULL || !world->portalSkyCameraSet || R_Q4SkipSky() ) {
 		return false;
 	}
 	if ( world->areaSkies.Num() > 0 && !parent->seesSkyArea ) {

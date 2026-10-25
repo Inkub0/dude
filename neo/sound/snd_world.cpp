@@ -33,6 +33,7 @@ If you have questions concerning this license or the applicable additional terms
 #include "renderer/RenderWorld.h"
 
 #include "sound/snd_local.h"
+#include "quake4/SettingsQ4.h"
 
 /*
 ==================
@@ -1758,6 +1759,17 @@ void idSoundWorldLocal::AddChannelContribution( idSoundEmitterLocal *sound, idSo
 
 	fadeDb = soundClassFade[parms->soundClass].FadeDbAt44kHz( current44kHz );
 	volume *= soundSystemLocal.dB2Scale( fadeDb );
+
+	// DUDE: Quake 4's mix (quake4/SettingsQ4.h): music (sound class 3) by its music volume, every
+	// other positional sound but voice-over by the ambient volume - so voice-over stays above the
+	// rest as in retail; nothing for Doom 3
+	if ( GameTitle::Get().title == GAME_TITLE_QUAKE4 ) {
+		if ( parms->soundClass == 3 ) {
+			volume *= S_Q4MusicVolume();
+		} else if ( !global && ( parms->soundShaderFlags & SSF_IS_VO ) == 0 ) {
+			volume *= S_Q4SpeakerFraction();
+		}
+	}
 
 
 	//

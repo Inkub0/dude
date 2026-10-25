@@ -34,6 +34,8 @@ If you have questions concerning this license or the applicable additional terms
 #include "ui/UserInterfaceLocal.h"
 
 #include "ui/ChoiceWindow.h"
+#include "framework/GameTitle.h"
+#include "quake4/SettingsQ4.h"
 
 /*
 ============
@@ -108,6 +110,10 @@ void idChoiceWindow::UpdateVars( bool read, bool force ) {
 		if ( cvar && cvarStr.NeedsUpdate() ) {
 			if ( read ) {
 				cvarStr.Set( cvar->GetString() );
+				// DUDE: as in HandleEvent - Quake 4's menu reads gui::<cvar>
+				if ( GameTitle::Get().title == GAME_TITLE_QUAKE4 ) {
+					Q4Settings_MirrorChoice( gui, cvar->GetName(), cvarStr.c_str() );
+				}
 			} else {
 				cvar->SetString( cvarStr.c_str() );
 			}
@@ -197,6 +203,12 @@ const char *idChoiceWindow::HandleEvent(const sysEvent_t *event, bool *updateVis
 	}
 
 	UpdateVars( false );
+
+	// DUDE: Quake 4's menu scripts read the chosen value back as gui::<cvar> (its aspect choice
+	// picks the resolution list that way); nothing for Doom 3
+	if ( cvar != NULL && GameTitle::Get().title == GAME_TITLE_QUAKE4 ) {
+		Q4Settings_MirrorChoice( gui, cvar->GetName(), cvarStr.c_str() );
+	}
 
 	if ( runAction2 ) {
 		RunScript( ON_ACTIONRELEASE );

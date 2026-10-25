@@ -39,6 +39,7 @@ If you have questions concerning this license or the applicable additional terms
 
 #include "framework/Session_local.h"
 #include "framework/ModCvarTranslation.h"
+#include "quake4/SettingsQ4.h"
 
 idCVar	idSessionLocal::gui_configServerRate( "gui_configServerRate", "0", CVAR_GUI | CVAR_ARCHIVE | CVAR_ROM | CVAR_INTEGER, "" );
 
@@ -338,6 +339,10 @@ void idSessionLocal::SetMainMenuGuiVars( void ) {
 
 	// "inetGame" will hold a hand-typed inet address, which is not archived to a cvar
 	guiMainMenu->SetStateString( "inetGame", "" );
+
+	// DUDE: Quake 4's menu lists the engine fills (resolutions per aspect, aspects, sound
+	// devices); nothing for Doom 3
+	Q4Settings_SetMenuGuiVars( guiMainMenu );
 
 	// key bind names
 	guiMainMenu->SetKeyBindingNames();
@@ -739,6 +744,11 @@ void idSessionLocal::HandleMainMenuCommands( const char *menuCommand ) {
 		const char *cmd = args.Argv( icmd++ );
 
 		if ( HandleSaveGameMenuCommand( args, icmd ) ) {
+			continue;
+		}
+
+		// DUDE: Quake 4's own menu commands (fixup_mode)
+		if ( Q4Settings_HandleMenuCommand( cmd, args, icmd ) ) {
 			continue;
 		}
 
