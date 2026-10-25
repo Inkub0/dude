@@ -354,6 +354,8 @@ public:
 	void		AutoAnchorHud		( bool overlay );
 	// DUDE: the CST anchor of the child window of that name, at any depth; false when there is none
 	bool		SetChildCstAnchor	( const char *childName, int anchor );
+	// DUDE: this window or one below it has a CST anchor (an anchored GUI file)
+	bool		HasCstAnchors		( void );
 
 	bool		UpdateFromDictionary ( idDict& dict );
 
@@ -369,9 +371,10 @@ protected:
 	bool IsSimple();
 
 	// DUDE: AutoAnchorHud's helpers
-	bool		RectFromExpression	( void );
+	int			HudRectExpressions	( void );
+	bool		HudPartArea			( float x, float y, idRectangle &area );
 	bool		HudContentBounds	( float x, float y, idRectangle &bounds );
-	void		AutoAnchorHudChildren( float x, float y, bool textOnly );
+	void		AutoAnchorHudChildren( float x, float y, bool overlay );
 	void UpdateWinVars();
 	void DisableRegister(const char *_name);
 	void Transition();

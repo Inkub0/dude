@@ -282,6 +282,7 @@ const idUserInterfaceManagerLocal::guiIcon_t *idUserInterfaceManagerLocal::FindI
 idUserInterfaceLocal::idUserInterfaceLocal() {
 	cursorX = cursorY = 0.0;
 	desktop = NULL;
+	hudAnchors = 0;
 	loading = false;
 	active = false;
 	interactive = false;
@@ -318,57 +319,94 @@ bool idUserInterfaceLocal::IsInteractive() const {
 
 /*
 ================
-AnchorQuake4Hud
+HudAnchorKind
 
-DUDE: CST anchors for the GUIs Quake 4 draws over the whole screen as a HUD, so they keep their
-shape on a wider screen (idWindow::AutoAnchorHud): the player's ("hud", "mphud", "cursor" in
-the retail defs - the crosshairs sit at the centre, the game only swaps their image) and the
-vehicles' ("gui_hud"). Of those, a scope or noise composed to cover the screen is an overlay,
-kept whole. The cinematic bars and the weapons' zoom views span the screen: none of them.
+DUDE: which GUIs get CST anchors so they keep their shape on a wider screen
+(idWindow::AutoAnchorHud): those a game draws over the whole screen as its HUD. 1: a HUD,
+every part anchored; 2: an overlay composed to cover the screen (a vehicle's scope or noise),
+kept whole but for its lines of text; 0: none.
+
+Quake 4: the player's HUDs ("hud", "mphud", "cursor" in the retail defs - its crosshairs sit
+at the centre, the game only swaps their image) and the vehicles' ("gui_hud"). The cinematic
+bars and the weapons' zoom views span the screen.
+
+Doom 3, RoE, Lost Mission: the HUD and the crosshairs - the stock games only (a mod's HUD is its
+own), and only when the file has no anchors already (the community "WideGuis" packs anchor
+theirs by hand: kept as authored). The PDA, the restart and intro screens are menus, scaled to
+4:3 (r_scaleMenusTo43).
 ================
 */
-static void AnchorQuake4Hud( idWindow *desktop, const char *qpath ) {
+static int HudAnchorKind( idWindow *desktop, const char *qpath ) {
 	static const struct {
 		const char *	gui;
-		bool			overlay;
-	} huds[] = {
-		{ "guis/hud.gui",						false },
-		{ "guis/hud_strogg.gui",				false },
-		{ "guis/mphud.gui",						false },
-		{ "guis/cursor.gui",					false },
-		{ "guis/vehicles/hud.gui",				false },
-		{ "guis/vehicles/airdef_cannon.gui",	true },
-		{ "guis/vehicles/medchange.gui",		true },
-		{ "guis/vehicles/strogg_noise.gui",		true },
-		{ "guis/vehicles/blank.gui",			true },
+		int				kind;
+	} quake4[] = {
+		{ "guis/hud.gui",						1 },
+		{ "guis/hud_strogg.gui",				1 },
+		{ "guis/mphud.gui",						1 },
+		{ "guis/cursor.gui",					1 },
+		{ "guis/vehicles/hud.gui",				1 },
+		{ "guis/vehicles/airdef_cannon.gui",	2 },
+		{ "guis/vehicles/medchange.gui",		2 },
+		{ "guis/vehicles/strogg_noise.gui",		2 },
+		{ "guis/vehicles/blank.gui",			2 },
+	}, doom3[] = {
+		{ "guis/hud.gui",						1 },
+		{ "guis/mphud.gui",						1 },
+		{ "guis/cursor.gui",					1 },
 	};
-	// where the rule would part what belongs together
+
+	if ( desktop == NULL ) {
+		return 0;
+	}
+	if ( GameTitle::Get().title == GAME_TITLE_QUAKE4 ) {
+		for ( int i = 0; i < (int)( sizeof( quake4 ) / sizeof( quake4[0] ) ); i++ ) {
+			if ( idStr::Icmp( qpath, quake4[i].gui ) == 0 ) {
+				return quake4[i].kind;
+			}
+		}
+		return 0;
+	}
+	const char *game = cvarSystem->GetCVarString( "fs_game" );
+	if ( game[0] != '\0' && idStr::Icmp( game, "base" ) != 0 && idStr::Icmp( game, "d3xp" ) != 0 && idStr::Icmp( game, "d3le" ) != 0 ) {
+		return 0;
+	}
+	for ( int i = 0; i < (int)( sizeof( doom3 ) / sizeof( doom3[0] ) ); i++ ) {
+		if ( idStr::Icmp( qpath, doom3[i].gui ) == 0 ) {
+			return desktop->HasCstAnchors() ? 0 : doom3[i].kind;
+		}
+	}
+	return 0;
+}
+
+/*
+================
+AnchorHud
+
+The anchors of HudAnchorKind's kind, and where the position rule would part what belongs
+together, by name
+================
+*/
+static void AnchorHud( idWindow *desktop, const char *qpath, int kind ) {
 	static const struct {
 		const char *	gui;
 		const char *	window;
 		int				anchor;
 	} fixes[] = {
-		// overlaps the armor bar beside it, its centre a little past the left third
+		// Quake 4: overlaps the armor bar beside it, its centre a little past the left third
 		{ "guis/vehicles/hud.gui",	"p_shields",	idDeviceContext::CST_ANCHOR_BOTTOM_LEFT },
-		// the target's name and description, beside the crosshair (wide to the edge for the text)
-		{ "guis/cursor.gui",		"crossName",	idDeviceContext::CST_ANCHOR_CENTER_CENTER },
-		{ "guis/cursor.gui",		"crossDesc",	idDeviceContext::CST_ANCHOR_CENTER_CENTER },
 	};
 
-	if ( desktop == NULL || GameTitle::Get().title != GAME_TITLE_QUAKE4 ) {
+	if ( kind == 0 ) {
 		return;
 	}
-	for ( int i = 0; i < (int)( sizeof( huds ) / sizeof( huds[0] ) ); i++ ) {
-		if ( idStr::Icmp( qpath, huds[i].gui ) != 0 ) {
-			continue;
-		}
-		desktop->AutoAnchorHud( huds[i].overlay );
+	desktop->AutoAnchorHud( kind == 2 );
+	if ( GameTitle::Get().title == GAME_TITLE_QUAKE4 ) {
 		for ( int j = 0; j < (int)( sizeof( fixes ) / sizeof( fixes[0] ) ); j++ ) {
 			if ( idStr::Icmp( qpath, fixes[j].gui ) == 0 ) {
 				desktop->SetChildCstAnchor( fixes[j].window, fixes[j].anchor );
 			}
 		}
-		return;
 	}
 }
 
@@ -406,8 +444,9 @@ bool idUserInterfaceLocal::InitFromFile( const char *qpath, bool rebuild, bool c
 				if ( desktop->Parse( &src, rebuild ) ) {
 					desktop->SetFlag( WIN_DESKTOP );
 					desktop->FixupParms();
-					// DUDE: Quake 4's HUDs keep their shape
-					AnchorQuake4Hud( desktop, qpath );
+					// DUDE: a HUD keeps its shape on a wider screen
+					hudAnchors = HudAnchorKind( desktop, qpath );
+					AnchorHud( desktop, qpath, hudAnchors );
 				}
 				continue;
 			}
@@ -907,8 +946,8 @@ bool idUserInterfaceLocal::ReadFromSaveGame( idFile *savefile ) {
 	desktop->ReadFromSaveGame( savefile );
 
 	// DUDE: the anchors come from the layout, not the game's state - a save made before
-	// Quake 4's HUDs had them holds none
-	AnchorQuake4Hud( desktop, source );
+	// the HUD had them holds none
+	AnchorHud( desktop, source, hudAnchors );
 
 	return true;
 }

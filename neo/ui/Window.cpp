@@ -4201,9 +4201,10 @@ void idWindow::FixupParms() {
 
 	A part is anchored as a whole - a full-screen group (p_health, p_ammo...) whose content sits
 	in one place by that content's bounds, so its bars, the value bars the game sizes through
-	"gui::" expressions and its icons move together; a smaller window by its own rect. A window
-	the game places at run time (the target brackets, at a projected point) and one drawn over
-	the whole screen (the hit indicator, fades) keep the stretched full screen. An overlay GUI
+	"gui::" expressions and its icons move together; a smaller window by its own rect, a window
+	of text by where its text is (its start, middle or end, as it is aligned). A window the game
+	places at run time (the target brackets, at a projected point) and one drawn over the whole
+	screen (the hit indicator, fades) keep the stretched full screen. An overlay GUI
 	(a vehicle's scope or noise, composed to cover the screen) keeps it too, all but its lines of
 	text as wide as the screen.
 
@@ -4213,6 +4214,15 @@ void idWindow::FixupParms() {
 static const float HUD_FULL_WIDTH	= 600.0f;	// as wide as the screen, give or take a margin
 static const float HUD_FULL_HEIGHT	= 440.0f;
 static const float HUD_EDGE			= 64.0f;	// this close to a screen edge, a part keeps to it
+
+// the screen area of a rect: a negative size flips the picture over the same area
+// (idDeviceContext::DrawMaterial) - Doom 3's HUD mirrors its right panel that way
+static idRectangle HudArea( const idRectangle &rect ) {
+	idRectangle r = rect;
+	r.w = idMath::Fabs( r.w );
+	r.h = idMath::Fabs( r.h );
+	return r;
+}
 
 static bool HudFullScreen( const idRectangle &r ) {
 	return r.w >= HUD_FULL_WIDTH && r.h >= HUD_FULL_HEIGHT;
@@ -4263,24 +4273,53 @@ static void HudAddBounds( idRectangle &bounds, bool &any, const idRectangle &r )
 
 /*
 ================
-idWindow::RectFromExpression
+idWindow::HudRectExpressions
 
-The rect is computed at run time from an expression ("gui::bracket_left" - 10, ...)
+Which of the rect's x, y, w, h (bits 0-3) are computed at run time from an expression
+("gui::bracket_left" - 10, "gui::player_stamina" * 1.33...)
 ================
 */
-bool idWindow::RectFromExpression( void ) {
+int idWindow::HudRectExpressions( void ) {
 	idRegister *reg = regList.FindReg( "rect" );
 	if ( reg == NULL ) {
-		return false;
+		return 0;
 	}
-	for ( int i = 0; i < reg->regCount; i++ ) {
+	int computed = 0;
+	for ( int i = 0; i < reg->regCount && i < 4; i++ ) {
 		for ( int j = 0; j < ops.Num(); j++ ) {
 			if ( ops[j].c == reg->regs[i] ) {
-				return true;
+				computed |= 1 << i;
+				break;
 			}
 		}
 	}
-	return false;
+	return computed;
+}
+
+/*
+================
+idWindow::HudPartArea
+
+The screen area a part of a HUD anchors by, at origin x, y: its rect's area (a size computed at
+run time counts as none - the part keeps its place). False for a part the game places at run
+time (the target brackets, at a projected point): it keeps the stretched full screen.
+================
+*/
+bool idWindow::HudPartArea( float x, float y, idRectangle &area ) {
+	const int computed = HudRectExpressions();
+	if ( computed & 3 ) {
+		return false;
+	}
+	area = HudArea( rect );
+	if ( computed & 4 ) {
+		area.w = 0.0f;
+	}
+	if ( computed & 8 ) {
+		area.h = 0.0f;
+	}
+	area.x += x;
+	area.y += y;
+	return true;
 }
 
 /*
@@ -4295,15 +4334,16 @@ bool idWindow::HudContentBounds( float x, float y, idRectangle &bounds ) {
 	bool any = false;
 	for ( int i = 0; i < drawWindows.Num(); i++ ) {
 		if ( drawWindows[i].simp != NULL ) {
-			idRectangle r = drawWindows[i].simp->rect;
+			idRectangle r = HudArea( drawWindows[i].simp->rect );
 			r.x += x;
 			r.y += y;
 			HudAddBounds( bounds, any, r );
-		} else if ( drawWindows[i].win != NULL && !drawWindows[i].win->RectFromExpression() ) {
+		} else if ( drawWindows[i].win != NULL ) {
 			idWindow *child = drawWindows[i].win;
-			idRectangle r = child->rect;
-			r.x += x;
-			r.y += y;
+			idRectangle r;
+			if ( !child->HudPartArea( x, y, r ) ) {
+				continue;
+			}
 			if ( HudFullScreen( r ) ) {
 				// a full-screen group within: what it holds
 				idRectangle inner;
@@ -4322,24 +4362,29 @@ bool idWindow::HudContentBounds( float x, float y, idRectangle &bounds ) {
 ================
 idWindow::AutoAnchorHudChildren
 
-Anchors the parts of a full-screen window at origin x, y; an overlay's (textOnly) only where
-they are lines as wide as the screen.
+Anchors the parts of a full-screen window at origin x, y; an overlay's only where they are
+lines as wide as the screen.
 ================
 */
-void idWindow::AutoAnchorHudChildren( float x, float y, bool textOnly ) {
+void idWindow::AutoAnchorHudChildren( float x, float y, bool overlay ) {
 	for ( int i = 0; i < drawWindows.Num(); i++ ) {
 		idWindow *win = drawWindows[i].win;
 		idSimpleWindow *simp = drawWindows[i].simp;
 		idRectangle r;
+		bool textOnly;		// draws nothing but its text
+		int align;
 		if ( simp != NULL ) {
-			r = simp->rect;
-		} else if ( win != NULL && !win->RectFromExpression() ) {	// else placed by the game at run time
-			r = win->rect;
+			r = HudArea( simp->rect );
+			r.x += x;
+			r.y += y;
+			textOnly = simp->background == NULL && simp->backColor.w() <= 0.0f;
+			align = simp->textAlign;
+		} else if ( win != NULL && win->HudPartArea( x, y, r ) ) {	// else placed by the game at run time
+			textOnly = win->background == NULL && win->backColor.w() <= 0.0f && win->drawWindows.Num() == 0;
+			align = win->textAlign;
 		} else {
 			continue;
 		}
-		r.x += x;
-		r.y += y;
 		if ( r.w <= 1.0f && r.h <= 1.0f ) {
 			continue;			// timer and helper windows
 		}
@@ -4353,15 +4398,25 @@ void idWindow::AutoAnchorHudChildren( float x, float y, bool textOnly ) {
 			if ( !win->HudContentBounds( r.x, r.y, content ) ) {
 				continue;
 			}
-			if ( textOnly || HudFullScreen( content ) ) {
-				win->AutoAnchorHudChildren( r.x, r.y, textOnly );
+			if ( overlay || HudFullScreen( content ) ) {
+				win->AutoAnchorHudChildren( r.x, r.y, overlay );
 			} else {
 				win->cstAnchor = HudAnchorFor( content );		// its children follow it
 			}
 			continue;
 		}
-		if ( textOnly && !( r.w >= HUD_FULL_WIDTH ) ) {
+		if ( overlay && !( r.w >= HUD_FULL_WIDTH ) ) {
 			continue;
+		}
+		// text keeps to where it is written - left-aligned text by its start (a target's name
+		// beside the crosshair, room to the screen edge after it), right-aligned by its end
+		if ( textOnly && r.w < HUD_FULL_WIDTH ) {
+			if ( align == 1 ) {
+				r.x += r.w * 0.5f;
+			} else if ( align == 2 ) {
+				r.x += r.w;
+			}
+			r.w = 0.0f;
 		}
 		if ( simp != NULL ) {
 			simp->cstAnchor = HudAnchorFor( r );
@@ -4369,6 +4424,27 @@ void idWindow::AutoAnchorHudChildren( float x, float y, bool textOnly ) {
 			win->cstAnchor = HudAnchorFor( r );		// its children follow it
 		}
 	}
+}
+
+/*
+================
+idWindow::HasCstAnchors
+================
+*/
+bool idWindow::HasCstAnchors( void ) {
+	if ( cstAnchor != idDeviceContext::CST_ANCHOR_NONE ) {
+		return true;
+	}
+	for ( int i = 0; i < drawWindows.Num(); i++ ) {
+		if ( drawWindows[i].simp != NULL ) {
+			if ( drawWindows[i].simp->cstAnchor != idDeviceContext::CST_ANCHOR_NONE ) {
+				return true;
+			}
+		} else if ( drawWindows[i].win != NULL && drawWindows[i].win->HasCstAnchors() ) {
+			return true;
+		}
+	}
+	return false;
 }
 
 /*

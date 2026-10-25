@@ -113,6 +113,7 @@ private:
 	idWindow *					bindHandler;
 
 	idStr						source;
+	int							hudAnchors;		// DUDE: AnchorHud's kind for this GUI (0 none, 1 HUD, 2 overlay), again after a savegame
 	idStr						activateStr;
 	idStr						pendingCmd;
 	idStr						returnCmd;

@@ -34,7 +34,19 @@ F10 → settings already works engine-side: `sys_imgui.cpp` auto-binds `K_F10` t
 - Fidelity: opt-in / non-destructive; must not alter the stock menu when a GUI mod
   is present.
 
-### 2. Ship DUDE's own widescreen GUIs (drop the CstDoom3 pak dependency)  **[in progress]**
+### 2. Ship DUDE's own widescreen GUIs (drop the CstDoom3 pak dependency)  **[HUD DONE; menus in progress]**
+*2026-10-25:* the HUD and crosshairs no longer need the pak: the engine anchors the stock
+`guis/hud.gui`, `guis/cursor.gui` and `guis/mphud.gui` of Doom 3, RoE and Lost Mission itself
+when they load (`idWindow::AutoAnchorHud`, `ui/UserInterface.cpp` `HudAnchorKind` - the same
+rule as Quake 4's HUDs: a part keeps 4:3 proportions at the screen edge it is near, else in its
+third; text by where it is written; full-screen groups as a whole; `cst_hudAdjustAspect 0`
+restores the stretch). It stands aside for a file that carries anchors already, so the pak, if
+installed, still wins, and for third-party mods. The PDA, restart and intro screens are menu
+GUIs in the stock data, scaled to 4:3 by `r_scaleMenusTo43` - without the pak they lose only
+its widescreen PDA layout (enlarge/shrink). The RoE menu now includes `_dude_anchor.pd`
+(identical constants) instead of the pak's `_cst_anchor.pd`. On the dev machine the packs are
+disabled (`*.pk4.disabled`) since.
+
 *2026-08-05:* first clean piece landed: `base/guis/_dude_anchor.pd` (DUDE-authored
 anchor-constant include, values fixed by the engine enum) is git-tracked, and the
 working menu now includes it instead of the pak's `_cst_anchor.pd`. The menu no
