@@ -6,8 +6,9 @@
 # build/CMakeCache.txt) plus -DASAN=ON. It is rebuilt incrementally before every run, so it never
 # lags behind the source - build/ stays the one build everything else uses.
 #
-# Usage:  tools/run-asan.sh [--q4] [game arguments...]
-#         --q4   Quake 4 (run-q4.sh, also rebuilds q4base.so against build-asan/); default Doom 3 (run.sh)
+# Usage:  tools/run-asan.sh [--d3 | --q4] [game arguments...]
+#         --d3   Doom 3 (run.sh) - the default
+#         --q4   Quake 4 (run-q4.sh, also rebuilds q4base.so against build-asan/)
 #         e.g.   tools/run-asan.sh +map game/mars_city1
 #                tools/run-asan.sh --q4 +map game/airdefense1
 # Reports: ~/.local/share/dude/asan.<pid> (ASAN_OPTIONS overrides). Slower than build/ by ~2-3x.
@@ -19,6 +20,15 @@ QUAKE4=0
 if [ "${1:-}" = "--q4" ]; then
 	QUAKE4=1
 	shift
+elif [ "${1:-}" = "--d3" ]; then
+	shift
+fi
+# the game takes +commands: anything else would reach the engine glued to run.sh's last
+# "+set fs_savepath <dir>" and become part of the save path ("<dir> --d3" - saves the load menu
+# never lists)
+if [ "${1:-}" != "${1#--}" ]; then
+	echo "run-asan.sh: unknown option '$1' (--d3 or --q4 first; game arguments are +commands)" >&2
+	exit 1
 fi
 
 if [ ! -f "$ASAN_BUILD/CMakeCache.txt" ]; then
