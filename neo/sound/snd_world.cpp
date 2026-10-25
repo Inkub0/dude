@@ -1892,7 +1892,8 @@ void idSoundWorldLocal::AddChannelContribution( idSoundEmitterLocal *sound, idSo
 			alSourcef( chan->openalSource, AL_REFERENCE_DISTANCE, mind );
 			alSourcef( chan->openalSource, AL_MAX_DISTANCE, maxd );
 #endif
-			alSourcef( chan->openalSource, AL_PITCH, ( slowmoActive && !chan->disallowSlow ) ? ( slowmoSpeed ) : ( 1.0f ) );
+			// DUDE: Quake 4's pitch (idSoundChannel::PlayRate) on top of RoE's slow motion
+			alSourcef( chan->openalSource, AL_PITCH, ( ( slowmoActive && !chan->disallowSlow ) ? ( slowmoSpeed ) : ( 1.0f ) ) * chan->PlayRate( sound ) );
 
 			if (idSoundSystemLocal::useEFXReverb) {
 				if (enviroSuitActive) {

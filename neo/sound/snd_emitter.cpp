@@ -184,6 +184,7 @@ void idSoundChannel::Clear( void ) {
 		lastV[j] = 0.0f;
 	}
 	memset( &parms, 0, sizeof(parms) );
+	pitch = 1.0f;
 
 	triggered = false;
 	paused = false;
@@ -191,6 +192,19 @@ void idSoundChannel::Clear( void ) {
 	openalStreamingOffset = 0;
 	openalStreamingBuffer[0] = openalStreamingBuffer[1] = openalStreamingBuffer[2] = 0;
 	lastopenalStreamingBuffer[0] = lastopenalStreamingBuffer[1] = lastopenalStreamingBuffer[2] = 0;
+}
+
+/*
+===================
+idSoundChannel::PlayRate
+===================
+*/
+float idSoundChannel::PlayRate( const idSoundEmitterLocal *emitter ) const {
+	if ( leadinSample == NULL || !leadinSample->hardwareBuffer ) {
+		return 1.0f;		// streamed: refilled at 1x, a changed rate would run it dry or skip
+	}
+	const float rate = pitch * ( emitter != NULL ? emitter->frequencyShift : 1.0f );
+	return idMath::ClampFloat( 0.05f, 4.0f, rate );
 }
 
 /*
@@ -377,6 +391,7 @@ void idSoundEmitterLocal::Clear( void ) {
 
 	playing = false;
 	hasShakes = false;
+	frequencyShift = 1.0f;
 	ampTime = 0;								// last time someone queried
 	amplitude = 0;
 	maxDistance = 10.0f;						// meters
@@ -468,7 +483,8 @@ void idSoundEmitterLocal::CheckForCompletion( int current44kHzTime ) {
 							chan->leadinSample->PurgeSoundSample();
 						}
 					}
-				} else if ( ( chan->trigger44kHzTime + chan->leadinSample->LengthIn44kHzSamples() < current44kHzTime ) || ( chan->stopped ) ) {
+				} else if ( ( chan->trigger44kHzTime + (int)( chan->leadinSample->LengthIn44kHzSamples() / chan->PlayRate( this ) ) < current44kHzTime ) || ( chan->stopped ) ) {
+					// DUDE: a pitched play (PlayRate) lasts length / rate
 					chan->Stop();
 
 					// free hardware resources
@@ -835,6 +851,15 @@ int idSoundEmitterLocal::StartSound( const idSoundShader *shader, const s_channe
 	chan->triggerGame44kHzTime = soundWorld->game44kHz;
 	chan->soundShader = shader;
 	chan->triggerChannel = channel;
+
+	// DUDE: Quake 4's per-play pitch (frequencyShift <min> <max> in the shader)
+	{
+		const float minShift = shader->GetMinFrequencyShift();
+		const float maxShift = shader->GetMaxFrequencyShift();
+		static idRandom pitchRandom( 0x51345159 );
+		const float shift = maxShift > minShift ? minShift + pitchRandom.RandomFloat() * ( maxShift - minShift ) : minShift;
+		chan->pitch = shift > 0.0f ? shift : 1.0f;
+	}
 	chan->stopped = false;
 	chan->Start();
 

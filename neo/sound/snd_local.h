@@ -444,6 +444,11 @@ public:
 
 	bool				disallowSlow;
 
+	float				pitch;					// DUDE: this play's pitch from the shader's frequencyShift range (Quake 4), 1 = as recorded
+
+	// DUDE: the play rate OpenAL runs this channel at, slow motion aside: its pitch and its
+	// emitter's (Quake 4's frequencyShift); 1 for a streamed sample, which is fed at 1x
+	float				PlayRate( const class idSoundEmitterLocal *emitter ) const;
 };
 
 class idSoundEmitterLocal : public idSoundEmitter {
@@ -499,6 +504,7 @@ public:
 	idVec3				origin;
 	int					listenerId;
 	soundShaderParms_t	parms;						// default overrides for all channels
+	float				frequencyShift;				// DUDE: Quake 4's game pitch for the emitter (movers, vehicles), 1 = none
 
 
 	// the following are calculated in UpdateEmitter, and don't need to be archived

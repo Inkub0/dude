@@ -11,9 +11,12 @@ Doom 3 GPL Source Code (see ArbProgram.h for license header)
 //
 // Volumes are a linear scale in the game and dB in the engine (S_SoundParmsQ4ToEngine).
 //
+// The game's frequencyShift is the emitter's pitch (idSoundEmitterLocal::frequencyShift, with the
+// shader's own per-play range, idSoundChannel::PlayRate), for samples held in one buffer.
+//
 // Not carried over yet (Quake 4 parameters the engine's mixer has no slot for): doppler from
-// the emitter velocity, the pitch shift, the wet/dry mix and the attenuated volume - accepted
-// and dropped. Voice chat is multiplayer (Q9): recording reports no microphone.
+// the emitter velocity (no single-player sound asks for it), the wet/dry mix and the attenuated
+// volume - accepted and dropped. Voice chat is multiplayer (Q9): recording reports no microphone.
 
 #include "sys/platform.h"
 #include "framework/Session_local.h"
@@ -307,6 +310,7 @@ void idSoundEmitterQ4Local::UpdateEmitter( const idVec3 &origin, const idVec3 &v
 	if ( parms != NULL ) {
 		soundShaderParms_t engineParms;
 		S_SoundParmsQ4ToEngine( *parms, engineParms );
+		emitter->frequencyShift = parms->frequencyShift > 0.0f ? parms->frequencyShift : 1.0f;		// movers, vehicles
 		emitter->UpdateEmitter( origin, listenerId, &engineParms );
 	} else {
 		emitter->UpdateEmitter( origin, listenerId, NULL );
@@ -323,6 +327,7 @@ void idSoundEmitterQ4Local::ModifySound( const s_channelType channel, const soun
 	if ( emitter != NULL && parms != NULL ) {
 		soundShaderParms_t engineParms;
 		S_SoundParmsQ4ToEngine( *parms, engineParms );
+		emitter->frequencyShift = parms->frequencyShift > 0.0f ? parms->frequencyShift : 1.0f;		// the emitter's, every channel
 		emitter->ModifySound( channel, &engineParms );
 	}
 }
