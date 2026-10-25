@@ -34,6 +34,7 @@ If you have questions concerning this license or the applicable additional terms
 #include "ui/Window.h"
 
 #include "renderer/tr_local.h"
+#include "renderer/bse/BseEffect.h"
 
 #include "Model_local.h"
 
@@ -2482,6 +2483,15 @@ void R_AddModelSurfaces( void ) {
 			}
 		}
 
+		// DUDE: a Quake 4 effect (renderer/bse/): its particles are built for this view once every
+		// entity is done; it has no model surfaces and no light interactions
+		if ( R_IsBseEntity( &vEntity->entityDef->parms ) ) {
+			if ( !vEntity->scissorRect.IsEmpty() && tr.viewDef->renderView.viewID >= 0 ) {
+				R_AddBseEntity( vEntity );
+			}
+			continue;
+		}
+
 		float oldFloatTime = 0.0f;
 		int oldTime = 0;
 
@@ -2569,6 +2579,9 @@ void R_AddModelSurfaces( void ) {
 		}
 
 	}
+
+	// DUDE: the view's Quake 4 effects, farthest first, after every other entity's surfaces
+	R_AddBseSurfaces();
 
 	// DUDE: reconcile the GUI-screen fill lights collected during the surface pass
 	R_UpdateEmissiveLights();

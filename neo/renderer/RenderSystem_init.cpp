@@ -39,6 +39,7 @@ If you have questions concerning this license or the applicable additional terms
 #include "ui/UserInterface.h"
 
 #include "renderer/tr_local.h"
+#include "renderer/bse/BseEffect.h"
 #include "renderer/rhi/RHI.h"
 #include "renderer/rhi/GL3Local.h"
 #include "sys/sys_imgui.h"		// DUDE Phase 4 M6: ImGui init on the Vulkan backend
@@ -3483,6 +3484,9 @@ void idRenderSystemLocal::Init( void ) {
 
 	renderModelManager->Init();
 
+	// DUDE: Quake 4's effects (renderer/bse/)
+	BSE_Init();
+
 	// set the identity space
 	identitySpace.modelMatrix[0*4+0] = 1.0f;
 	identitySpace.modelMatrix[1*4+1] = 1.0f;
@@ -3512,6 +3516,8 @@ void idRenderSystemLocal::Shutdown( void ) {
 	if ( glConfig.isInitialized ) {
 		globalImages->PurgeAllImages();
 	}
+
+	BSE_Shutdown();
 
 	renderModelManager->Shutdown();
 

@@ -50,6 +50,9 @@ public:
 	virtual void			FreeData( void );
 
 	float					TableLookup( float index ) const;
+							// DUDE: the lowest / highest value (Quake 4's effect bounds scale by them)
+	float					GetMinValue( void ) const;
+	float					GetMaxValue( void ) const;
 
 private:
 	bool					clamp;
@@ -96,6 +99,26 @@ ID_INLINE float idDeclTable::TableLookup( float index ) const {
 	}
 
 	return values[iIndex];
+}
+
+ID_INLINE float idDeclTable::GetMinValue( void ) const {
+	float value = values.Num() ? values[0] : 0.0f;
+	for ( int i = 1; i < values.Num(); i++ ) {
+		if ( values[i] < value ) {
+			value = values[i];
+		}
+	}
+	return value;
+}
+
+ID_INLINE float idDeclTable::GetMaxValue( void ) const {
+	float value = values.Num() ? values[0] : 0.0f;
+	for ( int i = 1; i < values.Num(); i++ ) {
+		if ( values[i] > value ) {
+			value = values[i];
+		}
+	}
+	return value;
 }
 
 #endif /* !__DECLTABLE_H__ */

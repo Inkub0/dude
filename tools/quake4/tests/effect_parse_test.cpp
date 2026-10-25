@@ -36,6 +36,7 @@
 
 #include "common_stub.h"
 #include "decl_stub.h"
+#include "effect_decls.h"
 
 // every name the parser looks up, by kind
 static std::map<std::string, std::set<std::string>> references;
@@ -266,74 +267,6 @@ static void CountEffect( const idDeclEffect &effect ) {
 
 ===============================================================================
 */
-
-typedef struct {
-	idStr		name;
-	int			line;
-	int			offset;
-	int			length;
-} declText_t;
-
-/*
-================
-SplitDecls
-
-idDeclManagerLocal::ParseFile's loop for a file of the effects folder: "effect" is the only
-decl type that appears there, any other first word is the name of a decl of the folder's
-default type.
-================
-*/
-static int SplitDecls( const char *fileName, const std::string &data, std::vector<declText_t> &decls ) {
-	idLexer src;
-	idToken token;
-	const int warningsBefore = stubWarnings;
-
-	src.LoadMemory( data.data(), (int)data.size(), fileName );
-	src.SetFlags( DECL_LEXER_FLAGS );
-	while ( 1 ) {
-		const int startMarker = src.GetFileOffset();
-		const int sourceLine = src.GetLineNum();
-		if ( !src.ReadToken( &token ) ) {
-			break;
-		}
-		if ( token.Icmp( "effect" ) ) {
-			if ( !token.Icmp( "{" ) ) {
-				src.Warning( "Missing decl name" );
-				src.SkipBracedSection( false );
-				continue;
-			}
-			src.UnreadToken( &token );
-		}
-		if ( !src.ReadToken( &token ) ) {
-			src.Warning( "Type without definition at end of file" );
-			break;
-		}
-		if ( !token.Icmp( "{" ) ) {
-			src.Warning( "Missing decl name" );
-			src.SkipBracedSection( false );
-			continue;
-		}
-		const idStr name = token;
-		if ( !src.ReadToken( &token ) ) {
-			src.Warning( "Type without definition at end of file" );
-			break;
-		}
-		if ( token != "{" ) {
-			src.Warning( "Expecting '{' but found '%s'", token.c_str() );
-			continue;
-		}
-		src.UnreadToken( &token );
-		src.SkipBracedSection();
-
-		declText_t decl;
-		decl.name = name;
-		decl.line = sourceLine;
-		decl.offset = startMarker;
-		decl.length = src.GetFileOffset() - startMarker;
-		decls.push_back( decl );
-	}
-	return stubWarnings - warningsBefore;
-}
 
 // parses one decl's text through its stub manager state; true when it parsed without defaulting
 static bool ParseEffect( idDeclBaseStub &base, const char *text, int length, int &warnings ) {

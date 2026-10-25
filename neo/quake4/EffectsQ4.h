@@ -7,8 +7,8 @@ Doom 3 GPL Source Code (see ArbProgram.h for license header)
 // DUDE: the Quake 4 game library's effect system interface - Raven's BSE as the game sees it
 // (docs/quake4-port.md 5.5, 5.6). Effects are played as render world effect defs
 // (quake4/RenderWorldQ4.h); the game asks the effect manager only about filtering, rate
-// limits, durations and frame bracketing. Until the effect system exists (phase Q4) the
-// engine's manager accepts every effect and draws none.
+// limits, durations and frame bracketing. The engine runs effects in renderer/bse/
+// (docs/quake4-bse.md).
 
 #ifndef __EFFECTSQ4_H__
 #define __EFFECTSQ4_H__

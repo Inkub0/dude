@@ -80,7 +80,7 @@ How many components a parameter has for a particle type. The retail files give e
 with exactly this many numbers per point; the pairs no retail particle uses follow the same rules.
 ================
 */
-static int EffectParmComponents( effectParticleType_t type, int parm ) {
+int EffectParmComponents( effectParticleType_t type, int parm ) {
 	switch ( parm ) {
 		case EFFECT_PARM_FADE:
 			return 1;
@@ -451,6 +451,9 @@ void idEffectParticle::Clear( void ) {
 	impactEffects.Clear();
 	timeoutEffects.Clear();
 	memset( parms, 0, sizeof( parms ) );		// EFFECT_DOMAIN_NONE, no envelope
+	spawnCentre.Zero();
+	hasPhysics = false;
+	usesEndOrigin = false;
 }
 
 /*
@@ -604,6 +607,11 @@ void idEffectSegment::Clear( void ) {
 	soundShader = NULL;
 	effect = NULL;
 	particle.Clear();
+	enabled = true;
+	hasParticles = false;
+	complex = false;
+	ignoreDuration = false;
+	temporary = false;
 }
 
 /*
@@ -759,6 +767,10 @@ void idDeclEffect::FreeData( void ) {
 	cutOffDistance = 0.0f;
 	keys = 0;
 	hasSound = false;
+	usesEndOrigin = false;
+	attenuates = false;
+	minDuration = 0.0f;
+	maxDuration = 0.0f;
 	segments.Clear();
 }
 
@@ -817,6 +829,281 @@ bool idDeclEffect::Parse( const char *text, const int textLength ) {
 }
 
 /*
+===============================================================================
+
+	derived data
+
+	What the runtime needs from the file and does not want to work out per play: segment
+	roles, durations and the radius particles stay within. These follow Quake 4's own effect
+	system as OpenQ4's audit of the retail executable describes it (docs/quake4-bse.md 3.1):
+	the bounds formula below is the one the effect editor wrote each file's "size" with.
+
+===============================================================================
+*/
+
+static void SortEffectRange( effectRange_t &range ) {
+	if ( range.max < range.min ) {
+		const float min = range.max;
+		range.max = range.min;
+		range.min = min;
+	}
+}
+
+/*
+================
+EffectDomainRange
+
+The lowest and highest value a start or end domain gives each component (unused components 0;
+a domain that is not given has its default value). Not sorted: a box written high-to-low keeps
+its order, as in retail.
+================
+*/
+void EffectDomainRange( const effectDomain_t &domain, int components, float defaultValue, idVec3 &lo, idVec3 &hi ) {
+	lo.Zero();
+	hi.Zero();
+	for ( int i = 0; i < components && i < 3; i++ ) {
+		switch ( domain.type ) {
+			case EFFECT_DOMAIN_NONE:
+				lo[i] = hi[i] = defaultValue;
+				break;
+			case EFFECT_DOMAIN_POINT:
+				lo[i] = hi[i] = domain.values[i];
+				break;
+			default:
+				lo[i] = domain.values[i];
+				hi[i] = domain.values[components + i];
+				break;
+		}
+	}
+}
+
+/*
+================
+EffectMaxParmValue
+
+The largest a parameter gets over a life: its start range, or with an envelope the start and
+end ranges scaled by the table's lowest and highest values.
+================
+*/
+static float EffectMaxParmValue( const idEffectParticle &particle, int parm, float defaultValue ) {
+	const effectParm_t &value = particle.parms[parm];
+	const int components = EffectParmComponents( particle.type, parm );
+	idVec3 lo, hi;
+	EffectDomainRange( value.start, components, defaultValue, lo, hi );
+	if ( value.envelope.table != NULL ) {
+		const float envMin = value.envelope.table->GetMinValue();
+		const float envMax = value.envelope.table->GetMaxValue();
+		idVec3 endLo, endHi;
+		EffectDomainRange( value.end, components, defaultValue, endLo, endHi );
+		for ( int i = 0; i < 3; i++ ) {
+			lo[i] = Min( lo[i] * envMin, endLo[i] * envMin );
+			hi[i] = Max( hi[i] * envMax, endHi[i] * envMax );
+		}
+	}
+	return Max( lo.Length(), hi.Length() );
+}
+
+// a particle's position at time t of its life, without offsets or physics
+static idVec3 EffectSimplePosition( float t, float life, const idVec3 &position, const idVec3 &velocity, const idVec3 &acceleration, const idVec3 &friction ) {
+	const float halfT2 = 0.5f * t * t;
+	const float drift = halfT2 * halfT2 * ( idMath::Exp( ( life - halfT2 ) / life ) - 1.0f ) / 3.0f;
+	return position + velocity * t + acceleration * halfT2 + friction * drift;
+}
+
+/*
+================
+EffectFurthestDistance
+
+Half the furthest a particle travels from the origin: every combination of the lowest and
+highest start position, velocity, acceleration (with gravity) and friction, sampled at eight
+points of the longest life.
+================
+*/
+static float EffectFurthestDistance( const idEffectParticle &particle, float gravity ) {
+	idVec3 minPos, maxPos, minVel, maxVel, minAccel, maxAccel, minFriction, maxFriction;
+	EffectDomainRange( particle.parms[EFFECT_PARM_POSITION].start, 3, 0.0f, minPos, maxPos );
+	EffectDomainRange( particle.parms[EFFECT_PARM_VELOCITY].start, 3, 0.0f, minVel, maxVel );
+	EffectDomainRange( particle.parms[EFFECT_PARM_ACCELERATION].start, 3, 0.0f, minAccel, maxAccel );
+	EffectDomainRange( particle.parms[EFFECT_PARM_FRICTION].start, 3, 0.0f, minFriction, maxFriction );
+
+	const idVec3 down( 0.0f, 0.0f, -gravity );
+	minAccel -= down * particle.gravity.min;
+	maxAccel += down * particle.gravity.max;
+
+	const float life = Max( 0.002f, particle.duration.max );
+	idVec3 mins( vec3_origin ), maxs( vec3_origin );
+	for ( int i = 0; i < 8; i++ ) {
+		const float t = i * life * 0.125f;
+		for ( int combination = 0; combination < 16; combination++ ) {
+			const idVec3 pos = EffectSimplePosition( t, life,
+				( combination & 1 ) ? maxPos : minPos, ( combination & 2 ) ? maxVel : minVel,
+				( combination & 4 ) ? maxAccel : minAccel, ( combination & 8 ) ? maxFriction : minFriction );
+			for ( int j = 0; j < 3; j++ ) {
+				mins[j] = Min( mins[j], pos[j] );
+				maxs[j] = Max( maxs[j], pos[j] );
+			}
+		}
+	}
+	return Max( mins.Length() * 0.5f, maxs.Length() * 0.5f );
+}
+
+static float EffectSegmentRadius( const idEffectSegment &segment, float gravity ) {
+	const idEffectParticle &particle = segment.particle;
+	switch ( segment.type ) {
+		case EFFECT_SEG_EMITTER:
+		case EFFECT_SEG_SPAWNER:
+		case EFFECT_SEG_LIGHT: {
+			float radius = EffectMaxParmValue( particle, EFFECT_PARM_SIZE, 1.0f ) + EffectFurthestDistance( particle, gravity ) +
+				EffectMaxParmValue( particle, EFFECT_PARM_OFFSET, 0.0f );
+			if ( particle.type == EFFECT_PARTICLE_LINE || particle.type == EFFECT_PARTICLE_ELECTRICITY ) {
+				radius += EffectMaxParmValue( particle, EFFECT_PARM_LENGTH, 0.0f );
+			}
+			return radius;
+		}
+		case EFFECT_SEG_DECAL:
+			return EffectMaxParmValue( particle, EFFECT_PARM_SIZE, 1.0f );
+		default:
+			return 8.0f;
+	}
+}
+
+/*
+================
+idDeclEffect::GetBoundsRadius
+================
+*/
+float idDeclEffect::GetBoundsRadius( float gravity ) const {
+	float radius = 0.0f;
+	for ( int i = 0; i < segments.Num(); i++ ) {
+		if ( segments[i].enabled ) {
+			radius = Max( radius, EffectSegmentRadius( segments[i], gravity ) );
+		}
+	}
+	return idMath::Ceil( radius );
+}
+
+/*
+================
+FinishEffectParticle
+================
+*/
+static void FinishEffectParticle( idEffectParticle &particle ) {
+	// lives are 0.002 to 60 seconds; every retail value is in that range
+	particle.duration.min = idMath::ClampFloat( 0.002f, 60.0f, particle.duration.min );
+	particle.duration.max = idMath::ClampFloat( 0.002f, 60.0f, particle.duration.max );
+	if ( !( particle.keys & EFFECT_PKEY_DURATION ) ) {
+		particle.duration.min = particle.duration.max = 0.002f;
+	}
+	SortEffectRange( particle.duration );
+	SortEffectRange( particle.gravity );
+	SortEffectRange( particle.trailTime );
+	SortEffectRange( particle.trailCount );
+	if ( particle.keys & EFFECT_PKEY_TILING ) {
+		particle.tiling = idMath::ClampFloat( 0.002f, 1024.0f, particle.tiling );
+	} else {
+		particle.tiling = 8.0f;
+	}
+
+	// a particle without a material draws with the default one, as in Quake 4 (the retail cases
+	// are zero-sized carriers of impact effects)
+	if ( !( particle.keys & EFFECT_PKEY_MATERIAL ) ) {
+		particle.material = declManager->FindMaterial( "_default" );
+	}
+
+	particle.hasPhysics = ( particle.keys & EFFECT_PKEY_IMPACT ) != 0;
+	particle.usesEndOrigin = false;
+	for ( int parm = 0; parm < EFFECT_PARM_NUM; parm++ ) {
+		if ( ( particle.parms[parm].start.flags | particle.parms[parm].end.flags ) & EFFECT_DOMAIN_USE_END_ORIGIN ) {
+			particle.usesEndOrigin = true;
+		}
+	}
+
+	// generated normals point away from the position domain's centre (from the origin with
+	// generatedOriginNormal)
+	particle.spawnCentre.Zero();
+	const effectDomain_t &position = particle.parms[EFFECT_PARM_POSITION].start;
+	if ( !( particle.flags & EFFECT_PARTICLE_GENERATED_ORIGIN_NORMAL ) ) {
+		if ( position.type == EFFECT_DOMAIN_POINT ) {
+			particle.spawnCentre.Set( position.values[0], position.values[1], position.values[2] );
+		} else if ( position.type != EFFECT_DOMAIN_NONE ) {
+			for ( int i = 0; i < 3; i++ ) {
+				particle.spawnCentre[i] = ( position.values[i] + position.values[3 + i] ) * 0.5f;
+			}
+		}
+	}
+}
+
+/*
+================
+FinishEffectSegment
+
+A segment's role in the runtime. A particle segment without particles is disabled, as is a
+constant emitter (Quake 4 drops both; no retail file has one).
+================
+*/
+static void FinishEffectSegment( idEffectSegment &segment ) {
+	SortEffectRange( segment.start );
+	SortEffectRange( segment.duration );
+	SortEffectRange( segment.count );
+	SortEffectRange( segment.density );
+	SortEffectRange( segment.attenuation );
+
+	idEffectParticle &particle = segment.particle;
+	const bool hasParticle = particle.type != EFFECT_PARTICLE_NONE;
+	if ( hasParticle ) {
+		FinishEffectParticle( particle );
+	}
+
+	segment.enabled = true;
+	segment.hasParticles = false;
+	segment.complex = false;
+	segment.ignoreDuration = false;
+	segment.temporary = false;
+	switch ( segment.type ) {
+		case EFFECT_SEG_EMITTER:
+			segment.enabled = hasParticle && !( segment.flags & EFFECT_SEGMENT_CONSTANT );
+			segment.hasParticles = true;
+			break;
+		case EFFECT_SEG_SPAWNER:
+		case EFFECT_SEG_TRAIL:
+			segment.enabled = hasParticle;
+			segment.hasParticles = true;
+			break;
+		case EFFECT_SEG_SOUND:
+			segment.ignoreDuration = true;
+			break;
+		case EFFECT_SEG_DECAL:
+			segment.temporary = true;
+			break;
+		default:
+			break;
+	}
+	if ( particle.type == EFFECT_PARTICLE_DEBRIS ) {
+		// debris becomes game entities
+		segment.hasParticles = false;
+		segment.temporary = true;
+	}
+	segment.complex = ( segment.flags & EFFECT_SEGMENT_CONSTANT ) || particle.trailType == EFFECT_TRAIL_SEGMENT ||
+		particle.hasPhysics || particle.timeoutEffects.Num() > 0 ||
+		particle.type == EFFECT_PARTICLE_ELECTRICITY || particle.type == EFFECT_PARTICLE_LIGHT;
+}
+
+// a segment thins out (or its view effect weakens) with the player's distance
+bool EffectSegmentAttenuates( const idEffectSegment &segment ) {
+	if ( segment.flags & ( EFFECT_SEGMENT_ATTENUATE_EMITTER | EFFECT_SEGMENT_INVERSE_ATTENUATE_EMITTER ) ) {
+		return true;
+	}
+	switch ( segment.type ) {
+		case EFFECT_SEG_SHAKE:
+		case EFFECT_SEG_DOUBLEVISION:
+		case EFFECT_SEG_TUNNEL:
+			return segment.attenuation.max > 0.0f;
+		default:
+			return false;
+	}
+}
+
+/*
 ================
 idDeclEffect::Finish
 
@@ -827,10 +1114,33 @@ void idDeclEffect::Finish( void ) {
 	segments.Condense();
 
 	hasSound = false;
+	usesEndOrigin = false;
+	attenuates = false;
+	minDuration = 0.0f;
+	maxDuration = 0.0f;
 	for ( int i = 0; i < segments.Num(); i++ ) {
 		idEffectSegment &segment = segments[i];
-		if ( segment.type == EFFECT_SEG_SOUND && segment.soundShader != NULL ) {
+		FinishEffectSegment( segment );
+		if ( !segment.enabled ) {
+			continue;
+		}
+		if ( segment.type == EFFECT_SEG_SOUND ) {
 			hasSound = true;
+		}
+		if ( segment.particle.usesEndOrigin ) {
+			usesEndOrigin = true;
+		}
+		if ( EffectSegmentAttenuates( segment ) ) {
+			attenuates = true;
+		}
+		if ( !segment.ignoreDuration ) {
+			// a trail's particles follow the segment that leaves them: no time of its own
+			const float window = segment.type == EFFECT_SEG_TRAIL ? 0.0f : segment.start.min + segment.duration.min;
+			minDuration = Max( minDuration, window );
+			maxDuration = Max( maxDuration, window );
+			if ( segment.particle.type != EFFECT_PARTICLE_NONE ) {
+				maxDuration = Max( maxDuration, window + segment.particle.duration.max );
+			}
 		}
 
 		idEffectParticle &particle = segment.particle;

@@ -247,6 +247,11 @@ public:
 	idList<const idDeclEffect *>	timeoutEffects;
 
 	effectParm_t			parms[EFFECT_PARM_NUM];
+
+	// derived by idDeclEffect::Finish
+	idVec3					spawnCentre;	// what a generated normal points away from (the position domain's centre)
+	bool					hasPhysics;		// collides (an impact block)
+	bool					usesEndOrigin;	// a domain spans the effect's origin to its end origin
 };
 
 // segment flags
@@ -294,11 +299,25 @@ public:
 	const idSoundShader *	soundShader;
 	const idDeclEffect *	effect;			// EFFECT_SEG_EFFECT
 	idEffectParticle		particle;		// type EFFECT_PARTICLE_NONE for segments without particles
+
+	// derived by idDeclEffect::Finish: what the runtime does with the segment
+	bool					enabled;		// false: a particle segment without particles, or an emitter that is constant
+	bool					hasParticles;	// draws particles (emitters, spawners, trails; decals, lights and debris do not)
+	bool					complex;		// its particles need work every frame; the newest draws first
+	bool					ignoreDuration;	// its time does not make the effect last longer (sound)
+	bool					temporary;		// one particle slot (decals, debris)
 };
 
 // effect keywords
 #define EFFECT_KEY_SIZE						BIT( 0 )
 #define EFFECT_KEY_CUTOFF_DISTANCE			BIT( 1 )
+
+// how many components a parameter has for a particle type (sprite size 2, line size 1, ...)
+int		EffectParmComponents( effectParticleType_t type, int parm );
+// the lowest and highest value a domain gives each component (a domain not given: defaultValue)
+void	EffectDomainRange( const effectDomain_t &domain, int components, float defaultValue, idVec3 &lo, idVec3 &hi );
+// whether a segment thins out (or its view effect weakens) with the player's distance
+bool	EffectSegmentAttenuates( const idEffectSegment &segment );
 
 class idDeclEffect : public idDecl {
 public:
@@ -312,13 +331,23 @@ public:
 	int						GetKeys( void ) const { return keys; }			// EFFECT_KEY_*
 	int						GetNumSegments( void ) const { return segments.Num(); }
 	const idEffectSegment &	GetSegment( int index ) const { return segments[index]; }
-	bool					HasSound( void ) const { return hasSound; }		// a sound segment with a shader
+	bool					HasSound( void ) const { return hasSound; }		// a sound segment
+	bool					UsesEndOrigin( void ) const { return usesEndOrigin; }
+	bool					Attenuates( void ) const { return attenuates; }	// a segment thins out with distance
+	float					GetMinDuration( void ) const { return minDuration; }	// seconds, the shortest play
+	float					GetMaxDuration( void ) const { return maxDuration; }	// seconds, the longest, particles' lives included
+							// the radius particles stay within about the origin, under that world gravity
+	float					GetBoundsRadius( float gravity ) const;
 
 private:
 	float					size;
 	float					cutOffDistance;
 	int						keys;
 	bool					hasSound;
+	bool					usesEndOrigin;
+	bool					attenuates;
+	float					minDuration;
+	float					maxDuration;
 	idList<idEffectSegment>	segments;		// in file order
 
 	void					Finish( void );

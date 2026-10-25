@@ -37,6 +37,7 @@ If you have questions concerning this license or the applicable additional terms
 #include "renderer/RenderWorld_local.h"
 
 #include "renderer/tr_local.h"
+#include "renderer/bse/BseEffect.h"
 #include "renderer/rhi/RHI.h"		// DUDE Phase 4 M6: capture readback on the Vulkan backend
 #include "quake4/SettingsQ4.h"		// DUDE: Quake 4's r_forceAmbient (R_Q4ForceAmbient)
 
@@ -1172,6 +1173,7 @@ void idRenderSystemLocal::FreeRenderWorld( idRenderWorld *rw ) {
 	if ( primaryWorld == rw ) {
 		primaryWorld = NULL;
 	}
+	BSE_WorldFreed( rw );		// DUDE: Quake 4 effects playing in it lose their entities
 	worlds.Remove( static_cast<idRenderWorldLocal *>(rw) );
 	delete rw;
 }

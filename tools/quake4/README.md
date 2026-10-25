@@ -67,6 +67,11 @@ Q4BASE="/path/to/Quake 4/q4base" python3 tools/quake4/q4_inventory.py > /tmp/q4_
   Gate: 0 failures, 0 parse warnings, 29 control effects as designed, and every count and sum the
   parser stored equal to `q4_effect_census.py census` (its own tokenizer and grammar walk of the
   text). Also prints the names the retail data lacks (`refs`). Needs a configured `build/`.
+- `test_bse_sim.sh` (+ `tests/bse_sim_test.cpp`) — the effect runtime (`neo/renderer/bse/BseEffect.cpp`)
+  with the real effect and table parsers and the retail envelope tables: plays every effect once and
+  looping at 60 Hz and evaluates every live particle each frame. Gate: nothing that is not finite,
+  every non-looping effect ends, no segment over its particle budget. Also: the retail bounds formula
+  against each file's `size`, and particles past twice that radius. Needs a configured `build/`.
 - `q4_effect_census.py census|compare|refs` — the independent effect census above; `refs <q4base>
   <parser output>` resolves tables, materials, sound shaders, effects, entity defs and models.
 - `check_engine_strings.py [q4base]` — every `#str_` id the engine source uses, resolved as the

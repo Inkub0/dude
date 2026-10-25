@@ -17,11 +17,14 @@ Doom 3 GPL Source Code (see ArbProgram.h for license header)
 // game, which hides surfaces on MD5 models only (whose posed model the RT tiers use). An
 // overlayShader is a second engine entity drawing the model with it.
 //
+// Effects (Raven's BSE) play in the engine's effect runtime (renderer/bse/BseEffect.h): a handle
+// is the game's view of one played effect. Phase Q4 S2: sprites draw; the other particle kinds,
+// sounds, lights, decals, physics and view effects come with S3-S6.
+//
 // Not carried over yet - accepted and dropped, the renderer has no slot for them:
 // shadowLODDistance / suppressLOD, a light's detailLevel,
 // noDynamicShadows and globalLight; the view weapon's depth hack applies in every view, not just
-// weaponDepthHackInViewID's. Effects (Raven's BSE) come with phase Q4: until then AddEffectDef
-// declines every effect.
+// weaponDepthHackInViewID's (effects too).
 
 #include "sys/platform.h"
 #include "framework/Common.h"
@@ -29,8 +32,16 @@ Doom 3 GPL Source Code (see ArbProgram.h for license header)
 #include "renderer/Material.h"
 #include "renderer/tr_local.h"
 #include "renderer/RenderWorld_local.h"
+#include "renderer/bse/BseEffect.h"
 
 #include "quake4/EngineQ4.h"
+
+// a played effect, as the game holds it (opaque to the game)
+class idRenderEffectQ4 {
+public:
+	idBseEffect *			effect;
+	const idDeclEffect *	decl;
+};
 
 /*
 ===============================================================================
@@ -117,6 +128,7 @@ private:
 	static bool				OverlayCallback( renderEntity_s *engineEntity, const renderView_s *view );
 
 	idList<entityQ4_t *>	entities;			// by engine entity handle
+	idList<idRenderEffectQ4 *>	effects;		// by effect handle; NULL: free
 
 	bool					portalSkyPending;	// the game rendered its portal sky view this frame
 	idVec3					portalSkyOrigin;
@@ -130,6 +142,12 @@ idRenderWorldQ4Local::idRenderWorldQ4Local( idRenderWorld *renderWorld ) :
 
 idRenderWorldQ4Local::~idRenderWorldQ4Local( void ) {
 	entities.DeleteContents( true );
+	for ( int i = 0; i < effects.Num(); i++ ) {
+		if ( effects[i] != NULL ) {
+			BSE_FreeEffect( effects[i]->effect );
+		}
+	}
+	effects.DeleteContents( true );
 }
 
 /*
@@ -371,27 +389,92 @@ void idRenderWorldQ4Local::FreeLightDef( qhandle_t lightHandle ) {
 
 /*
 ===============
-effects (phase Q4)
+effects
 ===============
 */
+static const idDeclEffect *EffectDeclQ4( const renderEffect_t *reffect ) {
+	if ( reffect == NULL || reffect->declEffect == NULL || reffect->declEffect->GetType() != DECL_EFFECT ) {
+		return NULL;
+	}
+	return static_cast<const idDeclEffect *>( reffect->declEffect );
+}
+
+// the game's description of a played effect as the effect runtime's
+static void R_RenderEffectQ4ToBse( const renderEffect_t &src, const idDeclEffect *decl, bseEffectParms_t &dst ) {
+	memset( &dst, 0, sizeof( dst ) );
+	dst.effect = decl;
+	dst.startTime = src.startTime;
+	dst.origin = src.origin;
+	dst.axis = src.axis;
+	dst.gravity = src.gravity;
+	dst.endOrigin = src.endOrigin;
+	dst.hasEndOrigin = src.hasEndOrigin;
+	dst.attenuation = src.attenuation;
+	dst.loop = src.loop;
+	dst.ambient = src.ambient;
+	dst.inConnectedArea = src.inConnectedArea;
+	dst.suppressSurfaceInViewID = src.suppressSurfaceInViewID;
+	dst.allowSurfaceInViewID = src.allowSurfaceInViewID;
+	dst.weaponDepthHack = src.weaponDepthHackInViewID != 0;
+	dst.modelDepthHack = src.modelDepthHack;
+	dst.referenceSoundHandle = src.referenceSoundHandle;
+	memcpy( dst.shaderParms, src.shaderParms, sizeof( dst.shaderParms ) );
+}
+
 qhandle_t idRenderWorldQ4Local::AddEffectDef( const renderEffect_t *reffect, int time ) {
-	return -1;
+	const idDeclEffect *decl = EffectDeclQ4( reffect );
+	if ( decl == NULL ) {
+		return -1;
+	}
+	bseEffectParms_t parms;
+	R_RenderEffectQ4ToBse( *reffect, decl, parms );
+	idBseEffect *effect = BSE_PlayEffect( renderWorld, parms, time );
+	if ( effect == NULL ) {
+		return -1;
+	}
+	int handle = effects.FindNull();
+	if ( handle < 0 ) {
+		handle = effects.Append( NULL );
+	}
+	effects[handle] = new idRenderEffectQ4;
+	effects[handle]->effect = effect;
+	effects[handle]->decl = decl;
+	return handle;
 }
 
 bool idRenderWorldQ4Local::UpdateEffectDef( qhandle_t effectHandle, const renderEffect_t *reffect, int time ) {
-	return true;
+	if ( effectHandle < 0 || effectHandle >= effects.Num() || effects[effectHandle] == NULL ) {
+		return true;
+	}
+	idRenderEffectQ4 *def = effects[effectHandle];
+	bseEffectParms_t parms;
+	R_RenderEffectQ4ToBse( *reffect, def->decl, parms );
+	return BSE_UpdateEffect( def->effect, parms, time );
 }
 
 void idRenderWorldQ4Local::StopEffectDef( qhandle_t effectHandle ) {
+	if ( effectHandle >= 0 && effectHandle < effects.Num() && effects[effectHandle] != NULL ) {
+		BSE_StopEffect( effects[effectHandle]->effect );
+	}
 }
 
 const idRenderEffectQ4 *idRenderWorldQ4Local::GetEffectDef( qhandle_t effectHandle ) const {
-	return NULL;
+	if ( effectHandle < 0 || effectHandle >= effects.Num() ) {
+		return NULL;
+	}
+	return effects[effectHandle];
 }
 
 void idRenderWorldQ4Local::FreeEffectDef( qhandle_t effectHandle ) {
+	if ( effectHandle < 0 || effectHandle >= effects.Num() || effects[effectHandle] == NULL ) {
+		return;
+	}
+	BSE_FreeEffect( effects[effectHandle]->effect );
+	delete effects[effectHandle];
+	effects[effectHandle] = NULL;
 }
 
+// whether the game should give the effect a sound emitter (sound segments: phase Q4 S4)
 bool idRenderWorldQ4Local::EffectDefHasSound( const renderEffect_t *reffect ) {
 	return false;
 }
@@ -658,8 +741,8 @@ void FreeRenderWorldsQ4( void ) {
 /*
 ===============================================================================
 
-	idEffectManagerQ4Local - until the effect system exists (phase Q4), every effect may play
-	and none is drawn (AddEffectDef declines them)
+	idEffectManagerQ4Local - the game's questions to the effect system. Filtering and rate
+	limits come with phase Q4 S7 (bse_singleEffect, bse_rateLimit): until then every effect plays.
 
 ===============================================================================
 */
@@ -668,7 +751,12 @@ class idEffectManagerQ4Local : public idEffectManagerQ4 {
 public:
 	virtual bool			Filtered( const char *name, effectCategory_t category ) { return false; }
 	virtual bool			CanPlayRateLimited( effectCategory_t category ) { return true; }
-	virtual float			EffectDuration( const idRenderEffectQ4 *def ) { return 0.0f; }
+	virtual float			EffectDuration( const idRenderEffectQ4 *def ) {
+								if ( def == NULL ) {
+									return 0.0f;
+								}
+								return def->effect != NULL ? BSE_EffectDuration( def->effect ) : BSE_DeclDuration( def->decl );
+							}
 	virtual void			StartFrame( void ) {}
 	virtual void			EndFrame( void ) {}
 };
