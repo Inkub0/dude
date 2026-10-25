@@ -126,6 +126,10 @@ Domains (count, values): `point` 11835 (n), `box` 11531 (2n), `line` 4862 (2n), 
   effect plays nothing); materials `gfx/effects/particles_shapes/jk_dirt`, `gfx/test/corona2`,
   `textures/decals/goospread`, `textures/decals/hurt03`; model `models/misc/rock_chunk.ase`;
   sound shader `effects_acid_burn2`; the trail `sparktrail` of `monsters/harvester/hit_walker`.
+- `models/misc/rock_chunk.ase` is named by the model particles of `materials/concrete.fx`,
+  `materials/gravel.fx` and `materials/rock.fx` (surface impacts). Doom 3's model manager draws a
+  missing model as its default box: compare these impacts with retail in S3 before choosing what
+  the particle draws.
 
 ## 3. Runtime design (approved 2026-10-25)
 
@@ -190,8 +194,11 @@ decl-manager warnings are the `q4cmp5` quirk); 29 control effects behave as desi
 ones fail, one valid one stores every value checked); **all 110 keyword counts and the number
 counts and sums** (31868 statement values, 105250 domain values, 1063 envelope values) equal an
 independent census of the text. Builds: Linux, the Windows cross-build, `q4base.so` against the
-new header; `check_dhewm3_abi.py` 0 breaks. In the engine: `lintDecls effect` should list 1172
-checked, 0 failed.
+new header; `check_dhewm3_abi.py` 0 breaks. In the engine (user, 2026-10-25): `lintDecls effect` -
+**1157 checked, 0 failed**. The other 15 are the multiplayer map pack's (`q4cmp_pak001.pk4` holds an
+`addon.conf`, so the file system, like retail's, leaves it out of the search path until one of its
+maps loads); the offline test covers them too. The one warning, `Couldn't load model:
+'models/misc/rock_chunk.ASE'`, is the missing retail model of the reference report.
 
 ## 5. Comparing with retail
 
