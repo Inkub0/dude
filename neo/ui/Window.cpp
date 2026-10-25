@@ -179,6 +179,7 @@ void idWindow::CommonInit() {
 	cstAnchorFactor = 0.0f;
 	cstNoClipBackground = false;
 	//#modified-fva; END
+	cstCursorCentered = false;
 }
 
 /*
@@ -1393,6 +1394,12 @@ void idWindow::Redraw(float x, float y) {
 
 	if (gui_edit.GetBool()  || (flags & WIN_DESKTOP && !( flags & WIN_NOCURSOR )  && !hideCursor && (gui->Active() || ( flags & WIN_MENUGUI ) ))) {
 		dc->SetTransformInfo(vec3_origin, mat3_identity);
+		// DUDE: a menu laid out by AutoAnchorMenuFill draws its cursor as an anchored window
+		// last in the desktop would leave it (the FakeDesktop of DUDE's main menu): unstretched
+		if ( cstCursorCentered && cst_hudAdjustAspect.GetBool() ) {
+			dc->SetMenuScaleFix( false );
+			dc->CstSetSize( idDeviceContext::CST_ANCHOR_CENTER_CENTER, idDeviceContext::CST_ANCHOR_NONE, 0.0f );
+		}
 		gui->DrawCursor();
 	}
 
@@ -4465,6 +4472,43 @@ bool idWindow::SetChildCstAnchor( const char *childName, int anchor ) {
 		dw->win->cstAnchor = anchor;
 	}
 	return true;
+}
+
+/*
+================
+idWindow::AutoAnchorMenuFill
+
+DUDE: a full-screen menu composed for 4:3 - a picture over the whole screen, the menu itself on
+it (Doom 3's death screen, guis/restart.gui) - laid out for any screen as the community WideGuis
+pack lays it out by hand: what paints a backdrop as wide as the screen fills the screen,
+stretched; the rest keeps 4:3 proportions at the centre, so it sits where the 4:3 menu sat. Not
+scaled to 4:3 as a whole (the backdrop would leave bars at the sides); the mouse then roams the
+whole screen, as the anchored windows expect, and the cursor is drawn unstretched. Only with
+cst_hudAdjustAspect on (read at load), else the menu is scaled to 4:3 as before.
+================
+*/
+void idWindow::AutoAnchorMenuFill( void ) {
+	if ( !cst_hudAdjustAspect.GetBool() ) {
+		return;
+	}
+	flags |= WIN_NO_SCALETO43;
+	cstCursorCentered = true;
+	for ( int i = 0; i < drawWindows.Num(); i++ ) {
+		idWindow *win = drawWindows[i].win;
+		idSimpleWindow *simp = drawWindows[i].simp;
+		const idRectangle r = HudArea( simp != NULL ? (idRectangle)simp->rect : (idRectangle)win->rect );
+		const bool paints = simp != NULL
+			? ( simp->background != NULL || simp->backColor.w() > 0.0f )
+			: ( win->background != NULL || win->backColor.w() > 0.0f );
+		if ( paints && r.w >= HUD_FULL_WIDTH ) {
+			continue;		// a backdrop: fills the screen
+		}
+		if ( simp != NULL ) {
+			simp->cstAnchor = idDeviceContext::CST_ANCHOR_CENTER_CENTER;
+		} else {
+			win->cstAnchor = idDeviceContext::CST_ANCHOR_CENTER_CENTER;		// its children follow it
+		}
+	}
 }
 
 /*

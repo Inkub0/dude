@@ -324,16 +324,17 @@ HudAnchorKind
 DUDE: which GUIs get CST anchors so they keep their shape on a wider screen
 (idWindow::AutoAnchorHud): those a game draws over the whole screen as its HUD. 1: a HUD,
 every part anchored; 2: an overlay composed to cover the screen (a vehicle's scope or noise),
-kept whole but for its lines of text; 0: none.
+kept whole but for its lines of text; 3: a full-screen menu over a backdrop, the backdrop
+filling the screen and the menu kept 4:3 at the centre (idWindow::AutoAnchorMenuFill); 0: none.
 
 Quake 4: the player's HUDs ("hud", "mphud", "cursor" in the retail defs - its crosshairs sit
 at the centre, the game only swaps their image) and the vehicles' ("gui_hud"). The cinematic
 bars and the weapons' zoom views span the screen.
 
-Doom 3, RoE, Lost Mission: the HUD and the crosshairs - the stock games only (a mod's HUD is its
-own), and only when the file has no anchors already (the community "WideGuis" packs anchor
-theirs by hand: kept as authored). The PDA, the restart and intro screens are menus, scaled to
-4:3 (r_scaleMenusTo43).
+Doom 3, RoE, Lost Mission: the HUD and the crosshairs, and the death screen (restart.gui, a
+menu over a backdrop) - the stock games only (a mod's are its own), and only when the file has
+no anchors already (the community "WideGuis" packs anchor theirs by hand: kept as authored).
+The PDA and the intro are menus, scaled to 4:3 (r_scaleMenusTo43).
 ================
 */
 static int HudAnchorKind( idWindow *desktop, const char *qpath ) {
@@ -354,6 +355,7 @@ static int HudAnchorKind( idWindow *desktop, const char *qpath ) {
 		{ "guis/hud.gui",						1 },
 		{ "guis/mphud.gui",						1 },
 		{ "guis/cursor.gui",					1 },
+		{ "guis/restart.gui",					3 },
 	};
 
 	if ( desktop == NULL ) {
@@ -398,6 +400,10 @@ static void AnchorHud( idWindow *desktop, const char *qpath, int kind ) {
 	};
 
 	if ( kind == 0 ) {
+		return;
+	}
+	if ( kind == 3 ) {
+		desktop->AutoAnchorMenuFill();
 		return;
 	}
 	desktop->AutoAnchorHud( kind == 2 );

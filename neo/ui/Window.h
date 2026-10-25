@@ -352,6 +352,9 @@ public:
 	// keeps its shape on a screen of any aspect instead of stretching (overlay: only its lines
 	// of text as wide as the screen)
 	void		AutoAnchorHud		( bool overlay );
+	// DUDE: a full-screen 4:3 menu (Doom 3's death screen) laid out for any screen: its full-width
+	// backdrops stretched, the rest anchored at the centre (idUserInterfaceLocal::InitFromFile)
+	void		AutoAnchorMenuFill	( void );
 	// DUDE: the CST anchor of the child window of that name, at any depth; false when there is none
 	bool		SetChildCstAnchor	( const char *childName, int anchor );
 	// DUDE: this window or one below it has a CST anchor (an anchored GUI file)
@@ -485,6 +488,7 @@ protected:
 	idWinBool	hideCursor;
 
 	//#modified-fva; BEGIN
+	bool		cstCursorCentered;	// DUDE: AutoAnchorMenuFill - the cursor drawn as by a centre-anchored window
 	idWinInt	cstAnchor;
 	idWinInt	cstAnchorTo;		// for anchor transitions
 	idWinFloat	cstAnchorFactor;	// for anchor transitions

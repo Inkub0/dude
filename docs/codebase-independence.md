@@ -41,11 +41,15 @@ when they load (`idWindow::AutoAnchorHud`, `ui/UserInterface.cpp` `HudAnchorKind
 rule as Quake 4's HUDs: a part keeps 4:3 proportions at the screen edge it is near, else in its
 third; text by where it is written; full-screen groups as a whole; `cst_hudAdjustAspect 0`
 restores the stretch). It stands aside for a file that carries anchors already, so the pak, if
-installed, still wins, and for third-party mods. The PDA, restart and intro screens are menu
-GUIs in the stock data, scaled to 4:3 by `r_scaleMenusTo43` - without the pak they lose only
-its widescreen PDA layout (enlarge/shrink). The RoE menu now includes `_dude_anchor.pd`
-(identical constants) instead of the pak's `_cst_anchor.pd`. On the dev machine the packs are
-disabled (`*.pk4.disabled`) since.
+installed, still wins, and for third-party mods. The death screen (`guis/restart.gui`) is laid out
+by the engine too (`idWindow::AutoAnchorMenuFill`): its full-width backdrops fill the screen,
+the menu keeps 4:3 at the centre - the pak's hand anchors exactly. The intro is a menu GUI,
+identical in the pak, scaled to 4:3 by `r_scaleMenusTo43`. Only the pak's widescreen PDA
+(enlarge/shrink) has no engine equivalent. The RoE menu now includes `_dude_anchor.pd`
+(identical constants) instead of the pak's `_cst_anchor.pd`.
+On the dev machine the packs are trimmed to their PDA (`pda.gui` + assets + `_cst_anchor.pd`;
+RoE `pda.gui` + `pda-weapons.pd`), originals kept as `*.pk4.pre-trim`. Saves made with the
+pak's HUD do not load without it (a GUI's saved state follows its file): new saves.
 
 *2026-08-05:* first clean piece landed: `base/guis/_dude_anchor.pd` (DUDE-authored
 anchor-constant include, values fixed by the engine enum) is git-tracked, and the
