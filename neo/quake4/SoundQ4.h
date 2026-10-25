@@ -32,7 +32,7 @@ const int SOUND_CLASS_MUSICAL	= 3;		// the class the music plays in (soundClass 
 typedef struct soundShaderParmsQ4_s {
 	float					minDistance;
 	float					maxDistance;
-	float					volume;					// dB
+	float					volume;					// a linear scale, not dB (0 = not set) - Raven's convention
 	float					attenuatedVolume;
 	float					shakes;
 	int						soundShaderFlags;		// SSF_*
@@ -110,13 +110,14 @@ public:
 // s_mindistance / s_maxdistance); the engine keeps metres (GameTitle soundUnitsToMeters)
 const float SOUND_Q4_UNITS_TO_METERS	= DOOM_TO_METERS;
 
-// idSoundShader's Quake 4 form of GetParms: the shader's own parameters in map units, with the
-// Quake 4 ones at their neutral values (no pitch shift, full wet and dry levels)
+// idSoundShader's Quake 4 form of GetParms: the shader's own parameters in map units and its
+// volume as a linear scale, with the Quake 4 ones at their neutral values (no pitch shift, full
+// wet and dry levels)
 ID_INLINE void idSoundShader::GetParms( soundShaderParmsQ4_t *out ) const {
 	const soundShaderParms_t *p = GetParms();
 	out->minDistance = p->minDistance * ( 1.0f / SOUND_Q4_UNITS_TO_METERS );
 	out->maxDistance = p->maxDistance * ( 1.0f / SOUND_Q4_UNITS_TO_METERS );
-	out->volume = p->volume;
+	out->volume = idMath::dBToScale( p->volume );
 	out->attenuatedVolume = 0.0f;
 	out->shakes = p->shakes;
 	out->soundShaderFlags = p->soundShaderFlags;

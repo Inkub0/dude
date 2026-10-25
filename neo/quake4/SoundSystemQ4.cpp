@@ -9,6 +9,8 @@ Doom 3 GPL Source Code (see ArbProgram.h for license header)
 // emitter's own index (idSoundEmitter::Index, 1 and up), so a handle survives save games the
 // way Doom 3's indices do. Distances come in map units and go to the engine in metres.
 //
+// Volumes are a linear scale in the game and dB in the engine (S_SoundParmsQ4ToEngine).
+//
 // Not carried over yet (Quake 4 parameters the engine's mixer has no slot for): doppler from
 // the emitter velocity, the pitch shift, the wet/dry mix and the attenuated volume - accepted
 // and dropped. Voice chat is multiplayer (Q9): recording reports no microphone.
@@ -105,7 +107,17 @@ The game's play parameters as the engine's: distances to metres, the Quake 4-onl
 void S_SoundParmsQ4ToEngine( const soundShaderParmsQ4_t &src, soundShaderParms_t &dst ) {
 	dst.minDistance = src.minDistance * SOUND_Q4_UNITS_TO_METERS;
 	dst.maxDistance = src.maxDistance * SOUND_Q4_UNITS_TO_METERS;
-	dst.volume = src.volume;
+	// the game's volume is a linear scale (Entity.cpp turns an entity's s_volume dB into one), the
+	// engine's dB; 0 means "not set" on both sides. A scale of exactly 1 is 0 dB, which the engine
+	// would read as "not set" (OverrideParms) and so keep the shader's own volume: nudge it.
+	if ( src.volume > 0.0f ) {
+		dst.volume = 20.0f * log10f( src.volume );
+		if ( dst.volume == 0.0f ) {
+			dst.volume = -0.0001f;
+		}
+	} else {
+		dst.volume = 0.0f;
+	}
 	dst.shakes = src.shakes;
 	dst.soundShaderFlags = src.soundShaderFlags;
 	dst.soundClass = src.soundClass;
