@@ -1713,6 +1713,8 @@ bool R_IssueEntityDefCallback( idRenderEntityLocal *def );
 idRenderModel *R_EntityDefDynamicModel( idRenderEntityLocal *def );
 // DUDE: apply the fill-light frees / moves R_UpdateEmissiveLights queued (end of frame, after the back end)
 void R_FlushEmissiveLightChanges( void );
+// DUDE: Quake 4's r_forceAmbient light in every world (RenderWorld.cpp), at the end of the frame
+void R_UpdateForcedAmbientLights( float level );
 // DUDE: the suppressSurfaceMask of the entity whose MD5 model is being posed now (0 otherwise)
 extern int r_instancingSurfaceMask;
 

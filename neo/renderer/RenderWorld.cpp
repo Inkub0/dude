@@ -134,6 +134,10 @@ idRenderWorldLocal::idRenderWorldLocal() {
 	generateAllInteractionsCalled = false;
 	defsGeneration = 0;
 
+	forcedAmbientHandle = -1;
+	forcedAmbientGeneration = -1;
+	forcedAmbientLevel = 0.0f;
+
 	areaNodes = NULL;
 	numAreaNodes = 0;
 
@@ -504,6 +508,106 @@ const renderLight_t *idRenderWorldLocal::GetRenderLight( qhandle_t lightHandle )
 	}
 
 	return &def->parms;
+}
+
+/*
+==================
+R_ForcedAmbientMaterial
+
+DUDE: the material of the forced ambient light - an ambient light with uniform falloff and
+projection, coloured by the light's colour. Made in memory: neither title ships one.
+==================
+*/
+static const idMaterial *R_ForcedAmbientMaterial( void ) {
+	static const char *name = "_dudeForcedAmbient";
+	const idMaterial *material = static_cast<const idMaterial *>( declManager->FindType( DECL_MATERIAL, name, false ) );
+	if ( material == NULL ) {
+		idDecl *decl = declManager->CreateNewDecl( DECL_MATERIAL, name, "materials/_dude_engine.mtr" );
+		decl->SetText( va( "material %s\n{\n\tambientLight\n\tlightFalloffImage _white\n\t{\n\t\tmap _white\n\t\tcolored\n\t}\n}\n", name ) );
+		material = declManager->FindMaterial( name );
+	}
+	return material;
+}
+
+/*
+==================
+idRenderWorldLocal::UpdateForcedAmbient
+
+DUDE: keeps this world's forced ambient light (Quake 4's r_forceAmbient, "Force a single ambient
+light throughout the level") at the given level: a shadowless, specular-free ambient light over the
+map's bounds, drawn by the ambient light pass like a mapper's ambient light. 0 removes it. A world
+without a map (a GUI's model view) never gets one. Called with no view in flight
+(R_UpdateForcedAmbientLights).
+==================
+*/
+void idRenderWorldLocal::UpdateForcedAmbient( float level ) {
+	// a map load freed every def (FreeDefs bumped the generation): the handle went with them
+	if ( forcedAmbientGeneration != defsGeneration
+		|| forcedAmbientHandle < 0 || forcedAmbientHandle >= lightDefs.Num() || lightDefs[forcedAmbientHandle] == NULL ) {
+		forcedAmbientHandle = -1;
+	}
+
+	idBounds bounds;
+	bounds.Clear();
+	if ( level > 0.0f && mapName.Length() > 0 ) {
+		for ( int i = 0; i < localModels.Num(); i++ ) {
+			if ( localModels[i] != NULL && idStr::Icmpn( localModels[i]->Name(), "_area", 5 ) == 0 ) {
+				bounds.AddBounds( localModels[i]->Bounds() );
+			}
+		}
+	}
+	const idMaterial *material = bounds.IsCleared() ? NULL : R_ForcedAmbientMaterial();
+
+	if ( material == NULL ) {
+		if ( forcedAmbientHandle >= 0 ) {
+			FreeLightDef( forcedAmbientHandle );
+			forcedAmbientHandle = -1;
+		}
+		return;
+	}
+	if ( forcedAmbientHandle >= 0 && forcedAmbientLevel == level ) {
+		return;
+	}
+
+	renderLight_t light;
+	memset( &light, 0, sizeof( light ) );
+	light.axis = mat3_identity;
+	light.origin = bounds.GetCenter();
+	light.pointLight = true;
+	light.lightRadius = ( bounds[1] - bounds[0] ) * 0.5f + idVec3( 16.0f, 16.0f, 16.0f );
+	light.noShadows = true;
+	light.noSpecular = true;
+	light.shader = material;
+	light.shaderParms[SHADERPARM_RED] = level;
+	light.shaderParms[SHADERPARM_GREEN] = level;
+	light.shaderParms[SHADERPARM_BLUE] = level;
+	light.shaderParms[SHADERPARM_ALPHA] = 1.0f;
+
+	if ( forcedAmbientHandle >= 0 ) {
+		UpdateLightDef( forcedAmbientHandle, &light );
+	} else {
+		forcedAmbientHandle = AddLightDef( &light );
+		forcedAmbientGeneration = defsGeneration;
+	}
+	forcedAmbientLevel = level;
+}
+
+/*
+==================
+R_UpdateForcedAmbientLights
+
+DUDE: every world's forced ambient light at the level asked for (quake4/SettingsQ4.h
+R_Q4ForceAmbient; 0 for Doom 3). Called at the end of the frame, after the back end ran, so no
+view still refers to a light it changes (as R_FlushEmissiveLightChanges).
+==================
+*/
+void R_UpdateForcedAmbientLights( float level ) {
+	for ( int i = 0; i < tr.worlds.Num(); i++ ) {
+		idRenderWorldLocal *world = tr.worlds[i];
+		if ( world != NULL && ( level > 0.0f || world->forcedAmbientHandle >= 0 ) ) {
+			world->UpdateForcedAmbient( level );
+		}
+	}
 }
 
 /*

@@ -38,6 +38,7 @@ If you have questions concerning this license or the applicable additional terms
 
 #include "renderer/tr_local.h"
 #include "renderer/rhi/RHI.h"		// DUDE Phase 4 M6: capture readback on the Vulkan backend
+#include "quake4/SettingsQ4.h"		// DUDE: Quake 4's r_forceAmbient (R_Q4ForceAmbient)
 
 idRenderSystemLocal	tr;
 idRenderSystem	*renderSystem = &tr;
@@ -883,6 +884,10 @@ void idRenderSystemLocal::EndFrame( int *frontEndMsec, int *backEndMsec ) {
 	// DUDE: the GUI-screen / item fill lights retired or moved this frame, now that no view
 	// references them (tr_light.cpp R_UpdateEmissiveLights)
 	R_FlushEmissiveLightChanges();
+
+	// DUDE: Quake 4's "Force ambient light" (r_forceAmbient, quake4/SettingsQ4.h), likewise
+	// changed only now; 0 - and always 0 for Doom 3 - removes it
+	R_UpdateForcedAmbientLights( R_Q4ForceAmbient() );
 
 	// use the other buffers next frame, because another CPU
 	// may still be rendering into the current buffers

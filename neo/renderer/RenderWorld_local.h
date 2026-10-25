@@ -208,6 +208,14 @@ public:
 	// caching def handles (emissive GUI lights) must compare this, not the world pointer
 	int						defsGeneration;
 
+	// DUDE: Quake 4's r_forceAmbient - one engine-owned ambient light over the whole map
+	// (R_UpdateForcedAmbientLights); the handle is valid while forcedAmbientGeneration ==
+	// defsGeneration
+	qhandle_t				forcedAmbientHandle;
+	int						forcedAmbientGeneration;
+	float					forcedAmbientLevel;
+	void					UpdateForcedAmbient( float level );
+
 	//-----------------------
 	// RenderWorld_load.cpp
 

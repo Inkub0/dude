@@ -14,10 +14,12 @@ Doom 3 GPL Source Code (see ArbProgram.h for license header)
 //   s_musicVolume       Music Volume      0.5; sound class 3 (SOUND_CLASS_MUSICAL)
 //   s_deviceName        Sound Device      the OpenAL device, DUDE's s_device in step with it
 //   r_skipSky           Enable detailed sky: No - no portal sky view
-//   s_useOpenAL, r_useSmp, in_freeLook, r_forceAmbient, the multiplayer and voice chat ones:
+//   r_forceAmbient      Force ambient light / Ambient brightness (1.4 patch): 0 off (retail's
+//                       default), the menu's toggle sets 0.7 - one shadowless ambient light over
+//                       the whole map (RenderWorld.cpp R_UpdateForcedAmbientLights)
+//   s_useOpenAL, r_useSmp, in_freeLook, the multiplayer and voice chat ones:
 //                       accepted so the menu works, no effect (DUDE always uses OpenAL and its
-//                       own threading, mouse look is always on, ambient brightness and
-//                       multiplayer are not implemented)
+//                       own threading, mouse look is always on, multiplayer is not implemented)
 //
 // The main menu's resolution lists are DUDE's own video modes (r_mode), grouped by aspect ratio
 // into Quake 4's 4:3, 16:9 and 16:10 lists; the aspect choice adds Auto (r_aspectRatio -1, the
@@ -47,6 +49,7 @@ static idCVar *				q4_speakerFraction = NULL;
 static idCVar *				q4_musicVolume = NULL;
 static idCVar *				q4_deviceName = NULL;
 static idCVar *				q4_skipSky = NULL;
+static idCVar *				q4_forceAmbient = NULL;
 
 static float				q4_lastVolume = -1.0f;			// what s_volume / s_volume_dB were last kept at
 static float				q4_lastVolumeDb = 1.0e30f;
@@ -80,7 +83,7 @@ void Q4Settings_Init( void ) {
 	new idCVar( "s_useOpenAL", "1", CVAR_SOUND | CVAR_ARCHIVE | CVAR_BOOL, "Quake 4 menu: sound system - DUDE always uses OpenAL" );
 	new idCVar( "r_useSmp", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "Quake 4 menu: multiple CPU optimization - DUDE uses its own threading" );
 	new idCVar( "in_freeLook", "1", CVAR_SYSTEM | CVAR_ARCHIVE | CVAR_BOOL, "Quake 4 menu: free look - mouse look is always on in DUDE" );
-	new idCVar( "r_forceAmbient", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "Quake 4 menu: ambient brightness - not implemented", 0.0f, 1.0f );
+	q4_forceAmbient		= new idCVar( "r_forceAmbient", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "Quake 4: force a single ambient light throughout the level if > 0 (intensity 0..1)", 0.0f, 1.0f );
 
 	// multiplayer and voice chat (docs/quake4-port.md Q9)
 	new idCVar( "net_menulanserver", "0", CVAR_SYSTEM | CVAR_ARCHIVE | CVAR_INTEGER, "Quake 4 menu: LAN server - multiplayer is not implemented" );
@@ -142,7 +145,7 @@ void Q4Settings_Frame( void ) {
 
 /*
 ================
-S_Q4SpeakerFraction, S_Q4MusicVolume, R_Q4SkipSky
+S_Q4SpeakerFraction, S_Q4MusicVolume, R_Q4SkipSky, R_Q4ForceAmbient
 ================
 */
 float S_Q4SpeakerFraction( void ) {
@@ -155,6 +158,10 @@ float S_Q4MusicVolume( void ) {
 
 bool R_Q4SkipSky( void ) {
 	return q4_skipSky != NULL && q4_skipSky->GetBool();
+}
+
+float R_Q4ForceAmbient( void ) {
+	return q4_forceAmbient != NULL ? idMath::ClampFloat( 0.0f, 1.0f, q4_forceAmbient->GetFloat() ) : 0.0f;
 }
 
 /*

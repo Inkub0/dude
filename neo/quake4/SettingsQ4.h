@@ -35,5 +35,7 @@ float	S_Q4SpeakerFraction( void );
 float	S_Q4MusicVolume( void );
 // Quake 4's "Enable detailed sky: No"
 bool	R_Q4SkipSky( void );
+// Quake 4's "Force ambient light" level, 0..1 (0: off, and always for Doom 3)
+float	R_Q4ForceAmbient( void );
 
 #endif /* !__SETTINGSQ4_H__ */
