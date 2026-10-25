@@ -2420,6 +2420,39 @@ void idFileSystemLocal::FollowAddonDependencies( pack_t *pak ) {
 idFileSystemLocal::Startup
 ================
 */
+/*
+================
+FS_KnownModBase
+
+The fs_game_base a known mod needs, "" for any other: Doom 3 mods built on RoE need d3xp's data
+beneath them. Used by the mods menu (Session_menu.cpp loadMod) and, for a mod started with
++set fs_game only, by Startup.
+================
+*/
+const char *FS_KnownModBase( const char *modName ) {
+	static const char *d3xpMods[] = {
+		// TODO: if there are more mods that need d3xp as base
+		// (and that are supported by DUDE), add them here
+		"bloodmod_roe",
+		"d3le", // The Lost Mission
+		"librecoopd3xp",
+		"perfected_roe",
+		"sikkmodd3xp",
+		// Doom 3: Phobos (they haven't released source yet, so it won't work yet,
+		//                 but ain't I ever the optimist..)
+		"tfphobos"
+	};
+	if ( modName == NULL || GameTitle::Get().title != GAME_TITLE_DOOM3 ) {
+		return "";
+	}
+	for ( int i = 0; i < (int)( sizeof( d3xpMods ) / sizeof( d3xpMods[0] ) ); i++ ) {
+		if ( idStr::Icmp( modName, d3xpMods[i] ) == 0 ) {
+			return "d3xp";
+		}
+	}
+	return "";
+}
+
 void idFileSystemLocal::Startup( void ) {
 	searchpath_t	**search;
 	int				i;
@@ -2438,6 +2471,13 @@ void idFileSystemLocal::Startup( void ) {
 	// DUDE: the active title's base folder (GameTitle), base/ for Doom 3
 	const char *baseGameDir = GameTitle::Get().baseGameDir;
 	SetupGameDirectories( baseGameDir );
+
+	// DUDE: a known RoE-based mod started from the command line (+set fs_game d3le) without its
+	// base gets d3xp, as the mods menu sets it
+	if ( fs_game_base.GetString()[0] == '\0' && FS_KnownModBase( fs_game.GetString() )[0] != '\0' ) {
+		fs_game_base.SetString( FS_KnownModBase( fs_game.GetString() ) );
+		common->Printf( "fs_game_base %s for %s\n", fs_game_base.GetString(), fs_game.GetString() );
+	}
 
 	// fs_game_base override
 	if ( fs_game_base.GetString()[0] &&

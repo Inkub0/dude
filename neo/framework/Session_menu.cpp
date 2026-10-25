@@ -40,6 +40,8 @@ If you have questions concerning this license or the applicable additional terms
 #include "framework/Session_local.h"
 #include "framework/ModCvarTranslation.h"
 #include "framework/GameTitle.h"
+
+const char *FS_KnownModBase( const char *modName );	// FileSystem.cpp
 #include "quake4/SettingsQ4.h"
 
 idCVar	idSessionLocal::gui_configServerRate( "gui_configServerRate", "0", CVAR_GUI | CVAR_ARCHIVE | CVAR_ROM | CVAR_INTEGER, "" );
@@ -700,26 +702,9 @@ void idSessionLocal::UpdateMPLevelShot( void ) {
 
 // helper function to load a mod (from mods menu)
 static void loadMod ( const idStr& modName ) {
-	// add special case for mods known to need fs_game_base d3xp
-	static const char* d3xpMods[] = {
-		// TODO: if there are more mods that need d3xp as base
-		// (and that are supported by DUDE), add them here
-		"bloodmod_roe",
-		"d3le", // The Lost Mission
-		"librecoopd3xp",
-		"perfected_roe",
-		"sikkmodd3xp",
-		// Doom 3: Phobos (they haven't released source yet, so it won't work yet,
-		//                 but ain't I ever the optimist..)
-		"tfphobos"
-	};
-	const char* baseMod = "";
-	for ( int i=0; i < sizeof(d3xpMods)/sizeof(d3xpMods[0]); ++i ) {
-		if ( modName.Icmp( d3xpMods[i] ) == 0 ) {
-			baseMod = "d3xp";
-			break;
-		}
-	}
+	// mods known to need fs_game_base d3xp (DUDE: the list lives with the file system, which
+	// also applies it to a mod started from the command line)
+	const char* baseMod = FS_KnownModBase( modName.c_str() );
 
 	cvarSystem->SetCVarString( "fs_game", modName );
 	cvarSystem->SetCVarString( "fs_game_base", baseMod );
