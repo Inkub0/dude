@@ -56,6 +56,7 @@ static idStr				q4_lastDevice;
 static const float			Q4_VOLUME_SILENT_DB = -60.0f;		// s_volume 0
 
 static void					Q4_SoundDevices( idStrList &devices );
+static idStr				Q4_MenuDeviceName( const char *device );
 static idStr				Q4_ChoiceValue( const char *text );
 
 /*
@@ -108,7 +109,8 @@ void Q4Settings_Frame( void ) {
 	if ( q4_lastVolume < 0.0f || ( volumeDb != q4_lastVolumeDb && volume == q4_lastVolume ) ) {
 		q4_volume->SetFloat( idMath::ClampFloat( 0.0f, 2.0f, idMath::dBToScale( volumeDb ) ) );
 	} else if ( volume != q4_lastVolume ) {
-		const float db = volume > 0.001f ? 20.0f * log10f( volume ) : Q4_VOLUME_SILENT_DB;
+		// id's dB rule, 6 dB per doubling (idMath::dBToScale, the mixer's dB2Scale)
+		const float db = volume > 0.001f ? 6.0f * log2f( volume ) : Q4_VOLUME_SILENT_DB;
 		cvarSystem->SetCVarFloat( "s_volume_dB", db );
 	}
 	q4_lastVolume = q4_volume->GetFloat();
@@ -124,7 +126,7 @@ void Q4Settings_Frame( void ) {
 			idStrList devices;
 			Q4_SoundDevices( devices );
 			for ( int i = 1; i < devices.Num(); i++ ) {
-				if ( devices[i].Cmp( deviceName ) == 0 || Q4_ChoiceValue( devices[i] ).Cmp( deviceName ) == 0 ) {
+				if ( devices[i].Cmp( deviceName ) == 0 || Q4_ChoiceValue( Q4_MenuDeviceName( devices[i] ) ).Cmp( deviceName ) == 0 ) {
 					chosen = devices[i];
 					break;
 				}
@@ -132,7 +134,7 @@ void Q4Settings_Frame( void ) {
 		}
 		cvarSystem->SetCVarString( "s_device", chosen );
 	} else if ( q4_lastDevice.Cmp( device ) != 0 ) {
-		q4_deviceName->SetString( idStr::Icmp( device, "default" ) == 0 ? "" : Q4_ChoiceValue( device ).c_str() );
+		q4_deviceName->SetString( idStr::Icmp( device, "default" ) == 0 ? "" : Q4_ChoiceValue( Q4_MenuDeviceName( device ) ).c_str() );
 	}
 	q4_lastDeviceName = q4_deviceName->GetString();
 	q4_lastDevice = cvarSystem->GetCVarString( "s_device" );
@@ -229,9 +231,36 @@ static void Q4_ModesOfAspect( int aspect, idList<int> &modes ) {
 
 /*
 ================
+Q4_MenuDeviceName
+
+A device name as the menu lists it: letters, digits and single spaces. Quake 4's device choice
+builds its choices and its values from the same list, and the choice window parses the two with
+different lexer settings ('-' glued to the next token in values only, errors fatal in values only):
+device names full of '-', '/', '(' made the two lists different lengths.
+================
+*/
+static idStr Q4_MenuDeviceName( const char *device ) {
+	idStr out;
+	bool space = false;
+	for ( const char *c = device; *c; c++ ) {
+		if ( idStr::CharIsAlpha( *c ) || idStr::CharIsNumeric( *c ) ) {
+			if ( space && out.Length() ) {
+				out += ' ';
+			}
+			out += *c;
+			space = false;
+		} else {
+			space = true;
+		}
+	}
+	return out.Length() ? out : idStr( "device" );
+}
+
+/*
+================
 Q4_SoundDevices
 
-"default" and the OpenAL devices, as Quake 4's device list names them.
+"default" and the OpenAL devices (their real names).
 ================
 */
 static void Q4_SoundDevices( idStrList &devices ) {
@@ -319,13 +348,13 @@ void Q4Settings_SetMenuGuiVars( idUserInterface *gui ) {
 		if ( i ) {
 			list += ";";
 		}
-		list += devices[i];
+		list += i == 0 ? devices[i] : Q4_MenuDeviceName( devices[i] );
 	}
 	gui->SetStateString( "device_name", list );
 	const char *device = cvarSystem->GetCVarString( "s_device" );
 	for ( int i = 0; i < devices.Num(); i++ ) {
 		if ( devices[i].Icmp( device ) == 0 ) {
-			q4_deviceName->SetString( i == 0 ? "" : Q4_ChoiceValue( devices[i] ).c_str() );
+			q4_deviceName->SetString( i == 0 ? "" : Q4_ChoiceValue( Q4_MenuDeviceName( devices[i] ) ).c_str() );
 			break;
 		}
 	}

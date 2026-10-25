@@ -110,11 +110,13 @@ The game's play parameters as the engine's: distances to metres, the Quake 4-onl
 void S_SoundParmsQ4ToEngine( const soundShaderParmsQ4_t &src, soundShaderParms_t &dst ) {
 	dst.minDistance = src.minDistance * SOUND_Q4_UNITS_TO_METERS;
 	dst.maxDistance = src.maxDistance * SOUND_Q4_UNITS_TO_METERS;
-	// the game's volume is a linear scale (Entity.cpp turns an entity's s_volume dB into one), the
-	// engine's dB; 0 means "not set" on both sides. A scale of exactly 1 is 0 dB, which the engine
-	// would read as "not set" (OverrideParms) and so keep the shader's own volume: nudge it.
+	// the game's volume is a linear scale (Entity.cpp turns an entity's s_volume dB into one with
+	// idMath::dBToScale), the engine's dB; 0 means "not set" on both sides. id's dB rule is 6 dB per
+	// doubling (dBToScale and the mixer's dB2Scale are 2^(dB/6)), so the inverse is 6 * log2. A scale
+	// of exactly 1 is 0 dB, which the engine would read as "not set" (OverrideParms) and so keep
+	// the shader's own volume: nudge it.
 	if ( src.volume > 0.0f ) {
-		dst.volume = 20.0f * log10f( src.volume );
+		dst.volume = 6.0f * log2f( src.volume );
 		if ( dst.volume == 0.0f ) {
 			dst.volume = -0.0001f;
 		}
