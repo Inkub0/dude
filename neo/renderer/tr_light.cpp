@@ -1236,6 +1236,31 @@ it and any necessary overlays
 */
 int r_instancingSurfaceMask = 0;
 
+/*
+===================
+R_MaskedStaticModel
+
+DUDE: a static model without the surfaces a Quake 4 surface mask hides (bit i = surface i,
+idRenderModelStatic::GetSurfaceMask), for one entity.
+===================
+*/
+static idRenderModel *R_MaskedStaticModel( const idRenderModel *source, int mask ) {
+	idRenderModelStatic *model = new idRenderModelStatic;
+	model->InitEmpty( va( "_masked_%s", source->Name() ) );
+	for ( int i = 0; i < source->NumSurfaces(); i++ ) {
+		if ( i < 32 && ( mask & ( 1 << i ) ) != 0 ) {
+			continue;
+		}
+		modelSurface_t surf = *source->Surface( i );
+		if ( surf.geometry != NULL ) {
+			surf.geometry = R_CopyStaticTriSurf( surf.geometry );
+		}
+		model->AddSurface( surf );
+	}
+	model->FinishSurfaces();
+	return model;
+}
+
 idRenderModel *R_EntityDefDynamicModel( idRenderEntityLocal *def ) {
 	bool callbackUpdate;
 
@@ -1253,6 +1278,19 @@ idRenderModel *R_EntityDefDynamicModel( idRenderEntityLocal *def ) {
 	}
 
 	if ( model->IsDynamicModel() == DM_STATIC ) {
+		// DUDE: Quake 4's hidden surfaces on a static model: a copy without them, kept while the
+		// mask and model stay (an unchanged dynamicModelFrameCount keeps the interactions)
+		if ( def->suppressSurfaceMask != 0 ) {
+			if ( def->cachedDynamicModel == NULL || def->maskedSource != model || def->maskedMask != def->suppressSurfaceMask ) {
+				delete def->cachedDynamicModel;
+				def->cachedDynamicModel = R_MaskedStaticModel( model, def->suppressSurfaceMask );
+				def->maskedSource = model;
+				def->maskedMask = def->suppressSurfaceMask;
+				def->dynamicModelFrameCount = tr.frameCount;
+			}
+			def->dynamicModel = def->cachedDynamicModel;
+			return def->dynamicModel;
+		}
 		def->dynamicModel = NULL;
 		def->dynamicModelFrameCount = 0;
 		return model;

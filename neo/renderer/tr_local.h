@@ -301,8 +301,11 @@ public:
 
 	// DUDE: Quake 4's renderEntity suppressSurfaceMask, set by its render world facade: bit i hides
 	// an MD5 model's mesh i (idRenderModel::GetSurfaceMask) when the model is posed, so every pass
-	// that draws or shadows the posed model leaves it out. Doom 3 never sets it.
+	// that draws or shadows the posed model leaves it out; a static model's surface i through a
+	// copy without it (R_EntityDefDynamicModel). Doom 3 never sets it.
 	int						suppressSurfaceMask;
+	const idRenderModel *	maskedSource;			// the static model cachedDynamicModel is a masked copy of
+	int						maskedMask;				// and the mask it left out
 };
 
 

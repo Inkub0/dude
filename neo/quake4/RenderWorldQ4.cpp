@@ -11,11 +11,13 @@ Doom 3 GPL Source Code (see ArbProgram.h for license header)
 // Sound handles become the engine's emitters. Quake 4's portal sky view (RF_PORTAL_SKY) is the
 // renderer's portal sky subview (idRenderWorld::SetPortalSkyCamera), as for Doom 3's RoE.
 //
-// Hidden surfaces (suppressSurfaceMask) go to the engine entity and take effect when an MD5 model
-// is posed; an overlayShader is a second engine entity drawing the model with it.
+// Hidden surfaces (suppressSurfaceMask) go to the engine entity: an MD5 model leaves them out when
+// posed, a static model is drawn from a copy without them (R_EntityDefDynamicModel); the ray traced
+// tiers' shared model BLASes still hold a static model's hidden surfaces. An overlayShader is a
+// second engine entity drawing the model with it.
 //
-// Not carried over yet - accepted and dropped, the renderer has no slot for them: a static
-// model's suppressSurfaceMask, shadowLODDistance / suppressLOD, a light's detailLevel,
+// Not carried over yet - accepted and dropped, the renderer has no slot for them:
+// shadowLODDistance / suppressLOD, a light's detailLevel,
 // noDynamicShadows and globalLight; the view weapon's depth hack applies in every view, not just
 // weaponDepthHackInViewID's. Effects (Raven's BSE) come with phase Q4: until then AddEffectDef
 // declines every effect.
