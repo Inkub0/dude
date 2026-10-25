@@ -145,8 +145,11 @@ const char *idListWindow::HandleEvent(const sysEvent_t *event, bool *updateVisua
 			if (Contains(gui->CursorX(), cursorY)) {
 
 				// DG: adjust cursorY for cst anchors
+				// DUDE: only when the list is anchored, as Contains() does (an unanchored list on a
+				// portrait screen picked the wrong row)
 				idVec2 scale, offset;
-				if ( idDeviceContext::CstGetParams( cstAnchor, cstAnchorTo, cstAnchorFactor, scale, offset ) ) {
+				if ( cstAnchor != idDeviceContext::CST_ANCHOR_NONE &&
+					 idDeviceContext::CstGetParams( cstAnchor, cstAnchorTo, cstAnchorFactor, scale, offset ) ) {
 					cursorY -= offset.y;
 					cursorY /= scale.y;
 				}

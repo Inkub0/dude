@@ -295,8 +295,12 @@ const char *idSliderWindow::RouteMouseCoords(float xd, float yd) {
 	r.w -= thumbWidth;
 
 	// DG: adjust r for anchors, like in idWindow::Contains()
+	// DUDE: only when the slider is anchored, as Contains() does - CstGetParams() answers for any
+	// window, so a slider in an unanchored menu (Quake 4's, a mod's) was squeezed to 0.75 of its
+	// place on a 16:9 screen and every click landed past its end, at "high"
 	idVec2 scale, offset;
-	if ( idDeviceContext::CstGetParams( cstAnchor, cstAnchorTo, cstAnchorFactor, scale, offset ) ) {
+	if ( cstAnchor != idDeviceContext::CST_ANCHOR_NONE &&
+		 idDeviceContext::CstGetParams( cstAnchor, cstAnchorTo, cstAnchorFactor, scale, offset ) ) {
 		r.x = r.x * scale.x + offset.x;
 		r.y = r.y * scale.y + offset.y;
 		r.w *= scale.x;
