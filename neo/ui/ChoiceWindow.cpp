@@ -196,7 +196,9 @@ const char *idChoiceWindow::HandleEvent(const sysEvent_t *event, bool *updateVis
 
 	if ( choiceType == 0 ) {
 		cvarStr.Set( va( "%i", currentChoice ) );
-	} else if ( values.Num() ) {
+	} else if ( currentChoice < values.Num() ) {
+		// DUDE: only while the values list reaches the choice - a GUI whose values list is shorter
+		// than its choices list (or whose lists parse to different lengths) indexed past its end
 		cvarStr.Set( values[ currentChoice ] );
 	} else {
 		cvarStr.Set( choices[ currentChoice ] );
