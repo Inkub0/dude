@@ -35,6 +35,7 @@ If you have questions concerning this license or the applicable additional terms
 #include "ui/Window.h"
 
 #include "ui/UserInterfaceLocal.h"
+#include "framework/GameTitle.h"
 
 #include "renderer/tr_local.h" // glConfig for winWidth/winHeight
 
@@ -315,6 +316,58 @@ bool idUserInterfaceLocal::IsInteractive() const {
 	return interactive;
 }
 
+/*
+================
+AnchorQuake4Hud
+
+DUDE: CST anchors for the GUIs Quake 4 draws over the whole screen as a HUD, so they keep their
+shape on a wider screen (idWindow::AutoAnchorHud): the player's ("hud", "mphud" in the retail
+defs) and the vehicles' ("gui_hud"). Of those, a scope or noise composed to cover the screen is
+an overlay, kept whole. The cursor, the cinematic bars and the weapons' zoom views are none of
+them: the cursor is placed at projected points, the others span the screen.
+================
+*/
+static void AnchorQuake4Hud( idWindow *desktop, const char *qpath ) {
+	static const struct {
+		const char *	gui;
+		bool			overlay;
+	} huds[] = {
+		{ "guis/hud.gui",						false },
+		{ "guis/hud_strogg.gui",				false },
+		{ "guis/mphud.gui",						false },
+		{ "guis/vehicles/hud.gui",				false },
+		{ "guis/vehicles/airdef_cannon.gui",	true },
+		{ "guis/vehicles/medchange.gui",		true },
+		{ "guis/vehicles/strogg_noise.gui",		true },
+		{ "guis/vehicles/blank.gui",			true },
+	};
+	// where the rule would part what belongs together
+	static const struct {
+		const char *	gui;
+		const char *	window;
+		int				anchor;
+	} fixes[] = {
+		// overlaps the armor bar beside it, its centre a little past the left third
+		{ "guis/vehicles/hud.gui", "p_shields", idDeviceContext::CST_ANCHOR_BOTTOM_LEFT },
+	};
+
+	if ( desktop == NULL || GameTitle::Get().title != GAME_TITLE_QUAKE4 ) {
+		return;
+	}
+	for ( int i = 0; i < (int)( sizeof( huds ) / sizeof( huds[0] ) ); i++ ) {
+		if ( idStr::Icmp( qpath, huds[i].gui ) != 0 ) {
+			continue;
+		}
+		desktop->AutoAnchorHud( huds[i].overlay );
+		for ( int j = 0; j < (int)( sizeof( fixes ) / sizeof( fixes[0] ) ); j++ ) {
+			if ( idStr::Icmp( qpath, fixes[j].gui ) == 0 ) {
+				desktop->SetChildCstAnchor( fixes[j].window, fixes[j].anchor );
+			}
+		}
+		return;
+	}
+}
+
 bool idUserInterfaceLocal::InitFromFile( const char *qpath, bool rebuild, bool cache ) {
 
 	if ( !( qpath && *qpath ) ) {
@@ -349,6 +402,8 @@ bool idUserInterfaceLocal::InitFromFile( const char *qpath, bool rebuild, bool c
 				if ( desktop->Parse( &src, rebuild ) ) {
 					desktop->SetFlag( WIN_DESKTOP );
 					desktop->FixupParms();
+					// DUDE: Quake 4's HUDs keep their shape
+					AnchorQuake4Hud( desktop, qpath );
 				}
 				continue;
 			}
@@ -846,6 +901,10 @@ bool idUserInterfaceLocal::ReadFromSaveGame( idFile *savefile ) {
 	savefile->Read( &cursorY, sizeof( cursorY ) );
 
 	desktop->ReadFromSaveGame( savefile );
+
+	// DUDE: the anchors come from the layout, not the game's state - a save made before
+	// Quake 4's HUDs had them holds none
+	AnchorQuake4Hud( desktop, source );
 
 	return true;
 }

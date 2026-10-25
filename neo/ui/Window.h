@@ -348,6 +348,13 @@ public:
 	void		ScreenToClient		( idRectangle* rect );
 	void		ClientToScreen		( idRectangle* rect );
 
+	// DUDE: CST anchors for a Quake 4 HUD's desktop (idUserInterfaceLocal::InitFromFile), so it
+	// keeps its shape on a screen of any aspect instead of stretching (overlay: only its lines
+	// of text as wide as the screen)
+	void		AutoAnchorHud		( bool overlay );
+	// DUDE: the CST anchor of the child window of that name, at any depth; false when there is none
+	bool		SetChildCstAnchor	( const char *childName, int anchor );
+
 	bool		UpdateFromDictionary ( idDict& dict );
 
 protected:
@@ -360,6 +367,11 @@ protected:
 	friend class idSimpleWindow;
 	friend class idUserInterfaceLocal;
 	bool IsSimple();
+
+	// DUDE: AutoAnchorHud's helpers
+	bool		RectFromExpression	( void );
+	bool		HudContentBounds	( float x, float y, idRectangle &bounds );
+	void		AutoAnchorHudChildren( float x, float y, bool textOnly );
 	void UpdateWinVars();
 	void DisableRegister(const char *_name);
 	void Transition();
