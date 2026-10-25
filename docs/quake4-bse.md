@@ -1,9 +1,8 @@
 # Quake 4 effects (BSE) on DUDE — phase Q4
 
-Status (2026-10-25): **plan approved; S1 (the effect decl) done and on master; S2 (the runtime
-and sprites) built** on `feat/quake4-bse-runtime`, awaiting the user's gate. Effects play; their
-sprites draw; the other particle kinds, sounds, lights, decals, physics and view effects come with
-S3-S6.
+Status (2026-10-25): **plan approved; S1 (the effect decl) and S2 (the runtime and sprites)
+done and on master.** Effects play; their sprites draw; the other particle kinds, sounds, lights,
+decals, physics and view effects come with S3-S6.
 
 Raven's BSE (their effects runtime, linked into the closed Quake 4 engine) plays the 1172
 `effects/**/*.fx` decls of the retail paks: muzzle flashes, impacts, explosions, beams, ambient
@@ -233,7 +232,7 @@ every in-game check; nothing here launches the game.
 | Stage | Scope | Gate |
 |---|---|---|
 | **S1 Decl** — **BUILT 2026-10-25** | The grammar of §2: `neo/renderer/bse/DeclEffect.{h,cpp}`, strict value counts, references through the decl / model managers, named trails resolved | `tools/quake4/test_effect_parse.sh` (below) |
-| S2 Runtime + sprites — **BUILT 2026-10-25** | Manager, effect instances behind the render world calls, timing (start, duration, count, spawner bursts, loops, delay segments, looping ambient effects already in full flow), domains and modifiers, envelopes, motion, `locked` / `attenuation` / `detail` / `density` / `particleCap`, sprites, segment draw order, `testEffect` | Offline simulation over every retail emitter (no NaN, population follows the emission rate, particles stay within the decl's `size`); the user compares 10 sprite-only effects covering every domain, modifier and envelope option with retail on GL3 and Vulkan (`moveables/barrel/debris_fly`, `monsters/scientist/obscuring_cloud`, `weapons/nailgun/guide`, `ambient/dustedge_mp`, `monsters/teleport_dropper/blast_exhaust`, `monsters/fatty/ambient_acid`, `steam/mcc_vent_slow`, `smoke/air_defense_hillsa`, `mapobjects/casket_door2_inv`, `levels/dispersal/supportbreak`); an airdefense1 fight; no FSR2 ghosting; ASAN `--q4`; Doom 3 / RoE smoke |
+| S2 Runtime + sprites — **DONE 2026-10-25** (gate passed: user firefights in Quake 4 and Doom 3, ASAN clean on both) | Manager, effect instances behind the render world calls, timing (start, duration, count, spawner bursts, loops, delay segments, looping ambient effects already in full flow), domains and modifiers, envelopes, motion, `locked` / `attenuation` / `detail` / `density` / `particleCap`, sprites, segment draw order, `testEffect` | Offline simulation over every retail emitter (no NaN, population follows the emission rate, particles stay within the decl's `size`); the user compares 10 sprite-only effects covering every domain, modifier and envelope option with retail on GL3 and Vulkan (`moveables/barrel/debris_fly`, `monsters/scientist/obscuring_cloud`, `weapons/nailgun/guide`, `ambient/dustedge_mp`, `monsters/teleport_dropper/blast_exhaust`, `monsters/fatty/ambient_acid`, `steam/mcc_vent_slow`, `smoke/air_defense_hillsa`, `mapobjects/casket_door2_inv`, `levels/dispersal/supportbreak`); an airdefense1 fight; no FSR2 ghosting; ASAN `--q4`; Doom 3 / RoE smoke |
 | S3 Particle kinds | line, oriented, electricity, linked, model; `motion` / `burn` / named trails | Offline geometry test; the user compares `weapons/nailgun/impact_default`, `ambient/acid_react_waste`, `weapons/lightninggun/tube` + `impact`, `weapons/railgun/trail`, `monsters/strogg_flyer/bomb_fly`, `moveables/barrel/explode`, `weapons/nailgun/impact_glass`, `monsters/makron/blaster_fly`, `monsters/gunner/grenade_burst`; lightning gun and railgun in play |
 | S4 Lights, sounds, decals | light segments as render lights; sound segments on the effect's emitter (`EffectDefHasSound`, random sample choice); decal segments projected | Rocket light, impact decals, impact sounds varying per shot; a busy fight on `dude_rtx 2` with no device loss; GL3 and Vulkan |
 | S5 Physics and children | traces through `Translation`, bounce / remove, impact and timeout effects, nested effect segments, debris through `SpawnClientMoveable`, `entityDef` on other kinds, `persist` | Offline physics test; wall impacts, `wounds/blood`, harvester claw debris, turret deaths, `bse_physics` / `bse_debris`; ASAN |
@@ -283,6 +282,11 @@ life).
 3. FSR2 on: no ghost trails behind moving sprites.
 4. `tools/run-asan.sh --q4` for a few minutes of play: no report.
 5. Doom 3 / RoE smoke (the renderer hook and `DeclTable.h` are shared).
+
+**S2 gate result (2026-10-25, user):** Quake 4 and Doom 3 firefights fine; `tools/run-asan.sh`
+runs of both titles with S2 left no report; the Quake 4 log's warnings are the known retail data
+quirks only. Merged to master (`ce6be7d9`). The side-by-side retail comparisons carry over to the
+S3 gate, where the effects that mix sprites with lines, oriented quads and bolts become complete.
 
 **S1 as built.** `idDeclEffect` parses into DUDE's templates (`idEffectSegment`,
 `idEffectParticle`, `effectParm_t` = start domain + envelope + end domain per parameter). A
