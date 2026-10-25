@@ -270,6 +270,7 @@ public:
 	// localization
 	void						InitLanguageDict( void );
 	void						AddEngineStringFallbacks( void );	// DUDE
+	idStr						InstalledLanguages( const idStrList &langList );	// DUDE
 	void						LocalizeGui( const char *fileName, idLangDict &langDict );
 	void						LocalizeMapData( const char *fileName, idLangDict &langDict );
 	void						LocalizeSpecificMapData( const char *fileName, idLangDict &langDict, const idLangDict &replaceArgs );
@@ -1949,6 +1950,55 @@ void idCommonLocal::FilterLangList( idStrList* list, idStr lang ) {
 
 /*
 ===============
+idCommonLocal::InstalledLanguages
+
+DUDE: the languages the string tables are in, comma separated. A table belongs to the language
+its name starts with, as FilterLangList matches them ("strings/englishctf.lang" is English); a
+name no sys_lang language starts (a community translation) counts by its own name, without
+trailing digits.
+===============
+*/
+extern const char *sysLanguageNames[];
+
+idStr idCommonLocal::InstalledLanguages( const idStrList &langList ) {
+	idStrList names;
+	for ( int i = 0; i < langList.Num(); i++ ) {
+		idStr name = langList[i];
+		name.StripPath();
+		name.StripFileExtension();
+		name.ToLower();
+		bool known = false;
+		for ( int l = 0; sysLanguageNames[l] != NULL; l++ ) {
+			if ( name.Icmpn( sysLanguageNames[l], idStr::Length( sysLanguageNames[l] ) ) == 0 ) {
+				names.AddUnique( sysLanguageNames[l] );
+				known = true;
+				break;
+			}
+		}
+		if ( !known ) {
+			int len = name.Length();
+			while ( len > 0 && idStr::CharIsNumeric( name[len - 1] ) ) {
+				len--;
+			}
+			name.CapLength( len );
+			if ( name.Length() > 0 ) {
+				names.AddUnique( name );
+			}
+		}
+	}
+	names.Sort();
+	idStr out;
+	for ( int i = 0; i < names.Num(); i++ ) {
+		if ( i > 0 ) {
+			out += ", ";
+		}
+		out += names[i];
+	}
+	return out.Length() > 0 ? out : idStr( "none" );
+}
+
+/*
+===============
 idCommonLocal::InitLanguageDict
 ===============
 */
@@ -1974,10 +2024,26 @@ void idCommonLocal::InitLanguageDict( void ) {
 
 	if ( currentLangList.Num() == 0 ) {
 		// reset cvar to default and try to load again
+		const idStr wanted = langName;
 		cmdSystem->BufferCommandText( CMD_EXEC_NOW, "reset sys_lang" );
 		langName = cvarSystem->GetCVarString( "sys_lang" );
 		currentLangList = langList;
 		FilterLangList(&currentLangList, langName);
+		// DUDE: say so - Doom 3 fell back silently
+		Warning( "sys_lang '%s' is not installed - using '%s'%s (installed: %s)", wanted.c_str(), langName.c_str(),
+			currentLangList.Num() == 0 ? ", which is not installed either" : "", InstalledLanguages( langList ).c_str() );
+	}
+
+	// DUDE: English first, as a base under the chosen language: a string a partial (community)
+	// translation lacks then shows in English instead of as its "#str_" id. The chosen language's
+	// tables load after it and win, idLangDict finding the newest entry of an id first; the
+	// official tables are complete, so they read exactly as before.
+	if ( langName.Icmp( "english" ) != 0 ) {
+		idStrList englishList = langList;
+		FilterLangList( &englishList, "english" );
+		for ( int i = 0; i < englishList.Num(); i++ ) {
+			languageDict.Load( englishList[i], false );
+		}
 	}
 
 	for( int i = 0; i < currentLangList.Num(); i++ ) {
@@ -2243,6 +2309,20 @@ ReloadLanguage_f
 */
 void Com_ReloadLanguage_f( const idCmdArgs &args ) {
 	commonLocal.InitLanguageDict();
+}
+
+/*
+=================
+Com_ListLanguages_f
+
+DUDE: the languages installed, for sys_lang
+=================
+*/
+static void Com_ListLanguages_f( const idCmdArgs &args ) {
+	idFileList *langFiles = fileSystem->ListFilesTree( "strings", ".lang", true );
+	common->Printf( "installed languages: %s\n", commonLocal.InstalledLanguages( langFiles->GetList() ).c_str() );
+	common->Printf( "sys_lang: %s (set it, then reloadLanguage or restart)\n", cvarSystem->GetCVarString( "sys_lang" ) );
+	fileSystem->FreeFileList( langFiles );
 }
 
 typedef idHashTable<idStrList> ListHash;
@@ -2814,6 +2894,7 @@ void idCommonLocal::InitCommands( void ) {
 	cmdSystem->AddCommand( "localizeGuis", Com_LocalizeGuis_f, CMD_FL_SYSTEM|CMD_FL_CHEAT, "localize guis" );
 	cmdSystem->AddCommand( "localizeMaps", Com_LocalizeMaps_f, CMD_FL_SYSTEM|CMD_FL_CHEAT, "localize maps" );
 	cmdSystem->AddCommand( "reloadLanguage", Com_ReloadLanguage_f, CMD_FL_SYSTEM, "reload language dict" );
+	cmdSystem->AddCommand( "listLanguages", Com_ListLanguages_f, CMD_FL_SYSTEM, "lists the installed languages (for sys_lang)" );
 
 	//D3XP Localization
 	cmdSystem->AddCommand( "localizeGuiParmsTest", Com_LocalizeGuiParmsTest_f, CMD_FL_SYSTEM, "Create test files that show gui parms localized and ignored." );
