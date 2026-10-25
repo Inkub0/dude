@@ -37,6 +37,8 @@ static const gameTitleProfile_t titleProfiles[GAME_TITLE_COUNT] = {
 		"fonts",						// resolves to fonts/<lang>/fontImage_<pt>.dat
 		"fonts/bank",
 		"guis/map/loading.gui",
+		"guis/assets/blankLevelShot",
+		"guis/assets/splash/pdtempa",
 	},
 	{
 		GAME_TITLE_QUAKE4, "quake4", "Quake 4",
@@ -57,6 +59,8 @@ static const gameTitleProfile_t titleProfiles[GAME_TITLE_COUNT] = {
 		"fonts/chain",					// resolves to fonts/<lang>/chain_<pt>.fontdat
 		"fonts/profont",				// Quake 4's BankGothic-style face, the counterpart of fonts/bank
 		"guis/loading/generic.gui",
+		"gfx/guis/loadscreens/generic",	// Quake 4 ships neither of Doom 3's placeholders
+		"gfx/guis/loadscreens/generic",
 	},
 };
 

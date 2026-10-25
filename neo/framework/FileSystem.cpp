@@ -4299,7 +4299,7 @@ void idFileSystemLocal::FindMapScreenshot( const char *path, char *buf, int len 
 			WriteFile( buf, data, dlen );
 			delete[] data;
 		} else {
-			idStr::Copynz( buf, "guis/assets/splash/pdtempa", len );
+			idStr::Copynz( buf, GameTitle::Get().noMapLevelShot, len );
 		}
 	}
 }

@@ -53,6 +53,8 @@ typedef struct gameTitleProfile_s {
 	const char *	defaultFont;		// first font every GUI device context registers
 	const char *	overlayFont;		// FPS / stats overlay font
 	const char *	loadingGui;			// map loading screen
+	const char *	noLevelShot;		// load / server menu picture when a save or map has none
+	const char *	noMapLevelShot;		// the map browser's picture when a map has none
 } gameTitleProfile_t;
 
 // Stem of the null game library (nullgame.so / nullgame.dll): a spectator-only idGame

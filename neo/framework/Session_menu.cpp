@@ -39,6 +39,7 @@ If you have questions concerning this license or the applicable additional terms
 
 #include "framework/Session_local.h"
 #include "framework/ModCvarTranslation.h"
+#include "framework/GameTitle.h"
 #include "quake4/SettingsQ4.h"
 
 idCVar	idSessionLocal::gui_configServerRate( "gui_configServerRate", "0", CVAR_GUI | CVAR_ARCHIVE | CVAR_ROM | CVAR_INTEGER, "" );
@@ -226,7 +227,7 @@ void idSessionLocal::SetSaveGameGuiVars( void ) {
 	guiActive->DeleteStateVar( va("loadgame_item_%i", fileList.Num()) );
 
 	guiActive->SetStateString( "loadgame_sel_0", "-1" );
-	guiActive->SetStateString( "loadgame_shot", "guis/assets/blankLevelShot" );
+	guiActive->SetStateString( "loadgame_shot", GameTitle::Get().noLevelShot );
 
 }
 
@@ -358,7 +359,7 @@ void idSessionLocal::SetMainMenuGuiVars( void ) {
 
 	SetCDKeyGuiVars( );
 	guiMainMenu->SetStateString( "nightmare", cvarSystem->GetCVarBool( "g_nightmare" ) ? "1" : "0" );
-	guiMainMenu->SetStateString( "browser_levelshot", "guis/assets/splash/pdtempa" );
+	guiMainMenu->SetStateString( "browser_levelshot", GameTitle::Get().noMapLevelShot );
 
 	SetMainMenuSkin();
 	// Mods Menu
