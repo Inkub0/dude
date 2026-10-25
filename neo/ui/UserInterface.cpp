@@ -321,10 +321,10 @@ bool idUserInterfaceLocal::IsInteractive() const {
 AnchorQuake4Hud
 
 DUDE: CST anchors for the GUIs Quake 4 draws over the whole screen as a HUD, so they keep their
-shape on a wider screen (idWindow::AutoAnchorHud): the player's ("hud", "mphud" in the retail
-defs) and the vehicles' ("gui_hud"). Of those, a scope or noise composed to cover the screen is
-an overlay, kept whole. The cursor, the cinematic bars and the weapons' zoom views are none of
-them: the cursor is placed at projected points, the others span the screen.
+shape on a wider screen (idWindow::AutoAnchorHud): the player's ("hud", "mphud", "cursor" in
+the retail defs - the crosshairs sit at the centre, the game only swaps their image) and the
+vehicles' ("gui_hud"). Of those, a scope or noise composed to cover the screen is an overlay,
+kept whole. The cinematic bars and the weapons' zoom views span the screen: none of them.
 ================
 */
 static void AnchorQuake4Hud( idWindow *desktop, const char *qpath ) {
@@ -335,6 +335,7 @@ static void AnchorQuake4Hud( idWindow *desktop, const char *qpath ) {
 		{ "guis/hud.gui",						false },
 		{ "guis/hud_strogg.gui",				false },
 		{ "guis/mphud.gui",						false },
+		{ "guis/cursor.gui",					false },
 		{ "guis/vehicles/hud.gui",				false },
 		{ "guis/vehicles/airdef_cannon.gui",	true },
 		{ "guis/vehicles/medchange.gui",		true },
@@ -347,8 +348,18 @@ static void AnchorQuake4Hud( idWindow *desktop, const char *qpath ) {
 		const char *	window;
 		int				anchor;
 	} fixes[] = {
+		// the health and armor bars stay beside the ammo bar, 4:3 apart, not about the centre
+		{ "guis/hud.gui",			"p_health",		idDeviceContext::CST_ANCHOR_BOTTOM_LEFT },
+		{ "guis/hud.gui",			"p_armor",		idDeviceContext::CST_ANCHOR_BOTTOM_LEFT },
+		{ "guis/hud.gui",			"p_health_mp",	idDeviceContext::CST_ANCHOR_BOTTOM_LEFT },
+		{ "guis/hud.gui",			"p_armor_mp",	idDeviceContext::CST_ANCHOR_BOTTOM_LEFT },
+		{ "guis/hud_strogg.gui",	"p_health",		idDeviceContext::CST_ANCHOR_BOTTOM_LEFT },
+		{ "guis/hud_strogg.gui",	"p_armor",		idDeviceContext::CST_ANCHOR_BOTTOM_LEFT },
 		// overlaps the armor bar beside it, its centre a little past the left third
-		{ "guis/vehicles/hud.gui", "p_shields", idDeviceContext::CST_ANCHOR_BOTTOM_LEFT },
+		{ "guis/vehicles/hud.gui",	"p_shields",	idDeviceContext::CST_ANCHOR_BOTTOM_LEFT },
+		// the target's name and description, beside the crosshair (wide to the edge for the text)
+		{ "guis/cursor.gui",		"crossName",	idDeviceContext::CST_ANCHOR_CENTER_CENTER },
+		{ "guis/cursor.gui",		"crossDesc",	idDeviceContext::CST_ANCHOR_CENTER_CENTER },
 	};
 
 	if ( desktop == NULL || GameTitle::Get().title != GAME_TITLE_QUAKE4 ) {
