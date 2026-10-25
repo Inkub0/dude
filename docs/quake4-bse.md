@@ -366,9 +366,9 @@ fastest) rather than every rendered frame, so it does not flicker faster at high
 
 **S3 gate (user):**
 1. Each next to retail, `testEffect effects/<name>` in DUDE and
-   `spawn func_fx fx effects/<name> loop 1` in retail from the same `setviewpos` (beams need
-   an `endOrigin`: in retail `spawn func_fx fx effects/<name> loop 1 endOrigin "x y z"`), GL3
-   and Vulkan: `weapons/nailgun/impact_default`, `ambient/acid_react_waste`,
+   `spawn func_fx fx effects/<name> loop 1` in retail from the same `setviewpos` (a beam:
+   `testEffect` ends it 256 units to the viewer's right and prints that point; in retail add
+   `endOrigin "x y z"` with it), GL3 and Vulkan: `weapons/nailgun/impact_default`, `ambient/acid_react_waste`,
    `weapons/lightninggun/tube` + `weapons/lightninggun/impact`, `weapons/railgun/trail`,
    `monsters/strogg_flyer/bomb_fly` (the grenade model, lit), `moveables/barrel/explode`,
    `weapons/nailgun/impact_glass`, `monsters/makron/blaster_fly`,

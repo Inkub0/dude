@@ -519,8 +519,9 @@ static void BSE_ClearTestEffects( void ) {
 BSE_TestEffect_f
 
 testEffect <effect> [once]: plays an effect 80 units in front of the view, facing it - where the
-game's "spawn func_fx fx <effect>" puts one, so the two compare - looping unless "once".
-testEffect alone removes it.
+game's "spawn func_fx fx <effect>" puts one, so the two compare - looping unless "once". A beam
+(an effect reaching to an end origin) ends 256 units to the viewer's right; the end is printed,
+for func_fx's "endOrigin". testEffect alone removes it.
 ================
 */
 static void BSE_TestEffect_f( const idCmdArgs &args ) {
@@ -557,6 +558,11 @@ static void BSE_TestEffect_f( const idCmdArgs &args ) {
 	parms.shaderParms[SHADERPARM_RED] = parms.shaderParms[SHADERPARM_GREEN] = parms.shaderParms[SHADERPARM_BLUE] = parms.shaderParms[SHADERPARM_ALPHA] = 1.0f;
 	parms.shaderParms[6] = 1.0f;		// brightness
 	parms.shaderParms[SHADERPARM_TIMEOFFSET] = MS2SEC( view.time );
+	if ( decl->UsesEndOrigin() ) {
+		parms.hasEndOrigin = true;
+		parms.endOrigin = parms.origin - view.viewaxis[1] * 256.0f;
+		common->Printf( "testEffect: beam from %s to endOrigin \"%s\"\n", parms.origin.ToString( 0 ), parms.endOrigin.ToString( 0 ) );
+	}
 
 	idBseEffect *effect = BSE_PlayEffect( world, parms, view.time );
 	if ( effect == NULL ) {
