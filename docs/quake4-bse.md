@@ -1,7 +1,9 @@
 # Quake 4 effects (BSE) on DUDE — phase Q4
 
-Status (2026-10-25): **plan approved; S1 (the effect decl) built** on `feat/quake4-bse-decl`.
-Effects still do not play: the render world declines every effect until S2.
+Status (2026-10-25): **plan approved; S1 (the effect decl) done and on master; S2 (the runtime
+and sprites) built** on `feat/quake4-bse-runtime`, awaiting the user's gate. Effects play; their
+sprites draw; the other particle kinds, sounds, lights, decals, physics and view effects come with
+S3-S6.
 
 Raven's BSE (their effects runtime, linked into the closed Quake 4 engine) plays the 1172
 `effects/**/*.fx` decls of the retail paks: muzzle flashes, impacts, explosions, beams, ambient
@@ -46,7 +48,8 @@ own code and the consultation is recorded in the commit message and in the table
 | No envelope means no end value | iddevnet `Notes_about_Envelopes/Tables` |
 | `offset` displaces the particle, `angle` orbits it about its position, `rotate` turns it | iddevnet `FXEditor` tabs (Offset, Orbit, Rotate) |
 | A table of one value reads 1.0 (missing tables default to `{ { 0 } }`) | OpenQ4 prose; DUDE's `idDeclTable::TableLookup` already does this |
-| Decompile consultations | none so far |
+| Spawn timing (fixed intervals from the segment's clock, each particle at its own birth time, 0.016 s look-ahead), the count/density/cap and `bse_scale` arithmetic, distance attenuation (camera to the effect's bounds, linear between the segment's distances), loops (window re-drawn each loop, the ambient two-loop head start), durations, the particle budget, sampler shapes (direction from the [-1,1] cube, per-axis random sphere radius, cube-face order, cylinder along x with cone taper, spiral turns), envelope evaluation (`count` = passes per life at the rate fixed at birth, `rate` = per second, `offset`), parameter defaults, spawn order and frames (generated normals, acceleration relative to travel, unlocked particles in their birth frame), the friction formula, sprite corners and texture corners, colour packing (byte wrap; additive fades through RGB), draw order within and across segments, the bounds formula | **decompile-derived, consulted 2026-10-25 (S2)**: OpenQ4 `src/bse` (`BSE_Envelopes.cpp`, `BSE_SpawnDomains.cpp`, `BSE_Segment.cpp`, `BSE_SegmentRuntime.cpp`, `BSE_SegmentTemplate.cpp`, `BSE_Effect.cpp`, `BSE_Particle.cpp`, `BSE_ParseParticle2.cpp`, `BSE_Manager.cpp`), which OpenQ4 corrected against the retail 1.4.2 executable in its 2026-10 audit - read for these behaviours only, the grammar, the docs and screenshots cannot fix them; re-expressed in DUDE's own code (`BseEffect.cpp`), nothing copied (decision quake4-port.md §9.2) |
+| What a missing material draws, and that it is `{ map _default }` | the retail `materials/gfx.mtr` |
 
 ## 2. The grammar (measured)
 
@@ -160,6 +163,68 @@ Domains (count, values): `point` 11835 (n), `box` 11531 (2n), `line` 4862 (2n), 
    particle clamp, a missing child effect plays nothing, a missing table reads 1.0). DUDE extras
    (soft particles on effects, …) are opt-in toggles.
 
+### 3.1 Runtime semantics (S2, in DUDE's words)
+
+The rules `neo/renderer/bse/BseEffect.cpp` implements; sources in the table of §1.
+
+- **Effect clock.** An effect starts at its owner's start time. Each segment draws its window -
+  a start time and a duration from their ranges - when the effect (or a new loop) starts. A
+  segment that is not a sound makes the effect last at least to its window's end; a non-looping
+  effect also lasts until its particles' longest life is over. A looping effect starts a new loop
+  when that time has passed (every segment but a `constant` one draws a new window); one that
+  nothing times starts over half a second after the decl's longest play. A looping effect placed
+  in the map starts with two loops of history: it is already in full flow when first seen.
+- **Spawning.** An emitter spawns at a fixed interval - one over its count, between the slowest
+  and fastest count by `bse_scale`, divided by its distance attenuation when it has
+  `attenuateEmitter` - from a clock that runs from the effect's start, up to 0.016 s past the
+  time serviced and to the end of its window; each particle keeps its own birth time. A spawner
+  spawns its count (between the lowest and the scaled highest, truncated) at its start. `density`
+  replaces the count by density times the spawn domain's size (the sum of its extents / 100),
+  capped by `particleCap`. A segment holds at most a budget of particles (its count over the
+  shorter of its window and a particle's life; more when a looping effect's particles outlive a
+  loop); a spawn beyond it is dropped. A segment whose `detail` is above `bse_scale` does nothing.
+- **A particle's birth.** Velocity, acceleration and friction first. The position domain gives the
+  position; with `generatedNormal` / `generatedOriginNormal` it also gives a normal pointing away
+  from the domain's centre / the origin, which turns the velocity (authored along +x). `flipNormal`
+  reverses the velocity. Acceleration is authored relative to the direction of travel, friction
+  relative to the acceleration's. Gravity is the owner's world gravity times the particle's
+  `gravity`, in the effect's frame. An unlocked particle stays in the frame the effect had at its
+  birth (where the effect was at that instant within the frame); a `locked` one moves with the
+  effect. Life: from its range, 0.002-60 s.
+- **Values.** Each parameter takes a start value from its start domain and an end value from its
+  end domain (`relative`: the end adds the start). Not given: colour, opacity and size start at 1,
+  the rest at 0; end values are 0, but size 1. Angles and rotations are in turns. A start domain
+  marked `attenuate` scales opacity or size by the distance attenuation. A `motion` envelope moves
+  a value from start to end: its table read at `rate * t + offset` per component, `count n` meaning
+  n passes over the life (the rate fixed at birth), `rate n` n passes per second; without one the
+  value keeps its start.
+- **Domains.** Point: its value. Line: between the ends, at random (or, with `linearSpacing`, at
+  the spawn fraction - a spawner's i / count, an emitter's birth time, which extrapolates far
+  past the line as in retail). Box: per component at random; `surface`: on a face (order -x -y -z
+  +x +y +z), or a rectangle's outline. Sphere: a direction from the [-1,1] cube pushed onto the
+  sphere, each axis scaled by its own random radius (`surface`: the full radius). Cylinder: along
+  x, the cross-section like the sphere's, `cone` narrowing to the lowest x. Spiral: x along the
+  box, the cross-section turned once per its 7th value of x. `useEndOrigin`: x runs out to the
+  effect's end origin.
+- **Motion.** Position at age t: start + velocity t + acceleration t²/2, plus a friction drift
+  (exponential: pushes early, pulls back once t²/2 passes the life), plus the `offset` turned by
+  the `angle` orbit.
+- **Sprites.** Four corners at the position minus and plus the viewer's left and up axes (turned
+  by the rotation, scaled by the size), the texture's corners on them in order - a sprite is its
+  image turned 45°, `size` its centre-to-corner distance. Vertex colour: the owner's colour
+  (shader parms 0-3) times the particle's; an additive (`blend add`) particle fades through its
+  colour times the brightness (parm 6) and stays opaque, the others fade through alpha. Channels
+  round and wrap past 0-1 (a byte), as retail's do. A fully faded particle still draws.
+- **Draw order.** Within a segment, the particle soonest to die first (a complex segment's newest
+  first); the segments in file order (the first at the back); effects farthest first.
+- **Bounds.** The decl's radius by the retail formula: the largest size, offset and (lines) length
+  plus half the furthest a particle's start position, velocity, acceleration with gravity and
+  friction take it over eight points of its longest life. The played effect's entity is that box
+  about its origin (and end origin) as it moves, plus where its live particles are.
+- **Removal.** A particle dies at the end of its life; a `constant` segment's live as long as the
+  effect. A stopped effect spawns nothing more; its particles go, but `persist` ones live out
+  their lives.
+
 ## 4. Stages and gates
 
 One branch per stage, merged to master at its gate after the user's verification. The user runs
@@ -168,7 +233,7 @@ every in-game check; nothing here launches the game.
 | Stage | Scope | Gate |
 |---|---|---|
 | **S1 Decl** — **BUILT 2026-10-25** | The grammar of §2: `neo/renderer/bse/DeclEffect.{h,cpp}`, strict value counts, references through the decl / model managers, named trails resolved | `tools/quake4/test_effect_parse.sh` (below) |
-| S2 Runtime + sprites | Manager, effect instances behind the render world calls, timing (start, duration, count, spawner bursts, loops, delay segments, looping ambient effects already in full flow), domains and modifiers, envelopes, motion, `locked` / `attenuation` / `detail` / `density` / `particleCap`, sprites, segment draw order, `testEffect` | Offline simulation over every retail emitter (no NaN, population follows the emission rate, particles stay within the decl's `size`); the user compares 10 sprite-only effects covering every domain, modifier and envelope option with retail on GL3 and Vulkan (`moveables/barrel/debris_fly`, `monsters/scientist/obscuring_cloud`, `weapons/nailgun/guide`, `ambient/dustedge_mp`, `monsters/teleport_dropper/blast_exhaust`, `monsters/fatty/ambient_acid`, `steam/mcc_vent_slow`, `smoke/air_defense_hillsa`, `mapobjects/casket_door2_inv`, `levels/dispersal/supportbreak`); an airdefense1 fight; no FSR2 ghosting; ASAN `--q4`; Doom 3 / RoE smoke |
+| S2 Runtime + sprites — **BUILT 2026-10-25** | Manager, effect instances behind the render world calls, timing (start, duration, count, spawner bursts, loops, delay segments, looping ambient effects already in full flow), domains and modifiers, envelopes, motion, `locked` / `attenuation` / `detail` / `density` / `particleCap`, sprites, segment draw order, `testEffect` | Offline simulation over every retail emitter (no NaN, population follows the emission rate, particles stay within the decl's `size`); the user compares 10 sprite-only effects covering every domain, modifier and envelope option with retail on GL3 and Vulkan (`moveables/barrel/debris_fly`, `monsters/scientist/obscuring_cloud`, `weapons/nailgun/guide`, `ambient/dustedge_mp`, `monsters/teleport_dropper/blast_exhaust`, `monsters/fatty/ambient_acid`, `steam/mcc_vent_slow`, `smoke/air_defense_hillsa`, `mapobjects/casket_door2_inv`, `levels/dispersal/supportbreak`); an airdefense1 fight; no FSR2 ghosting; ASAN `--q4`; Doom 3 / RoE smoke |
 | S3 Particle kinds | line, oriented, electricity, linked, model; `motion` / `burn` / named trails | Offline geometry test; the user compares `weapons/nailgun/impact_default`, `ambient/acid_react_waste`, `weapons/lightninggun/tube` + `impact`, `weapons/railgun/trail`, `monsters/strogg_flyer/bomb_fly`, `moveables/barrel/explode`, `weapons/nailgun/impact_glass`, `monsters/makron/blaster_fly`, `monsters/gunner/grenade_burst`; lightning gun and railgun in play |
 | S4 Lights, sounds, decals | light segments as render lights; sound segments on the effect's emitter (`EffectDefHasSound`, random sample choice); decal segments projected | Rocket light, impact decals, impact sounds varying per shot; a busy fight on `dude_rtx 2` with no device loss; GL3 and Vulkan |
 | S5 Physics and children | traces through `Translation`, bounce / remove, impact and timeout effects, nested effect segments, debris through `SpawnClientMoveable`, `entityDef` on other kinds, `persist` | Offline physics test; wall impacts, `wounds/blood`, harvester claw debris, turret deaths, `bse_physics` / `bse_debris`; ASAN |
@@ -176,6 +241,48 @@ every in-game check; nothing here launches the game.
 | S7 Cvars and tools | the retail `bse_*` cvars, rate limits, `bseSweep` + log summary, debug overlay, opt-in extras, performance | quake4-port.md §6's Q4 gate: `bseSweep` clean over all 1172, ~20 effects signed off against retail, OpenQ4's prose checklist, Doom 3 / RoE / LM smoke, ABI 0 breaks |
 
 `testEffect` moves from S7 into S2: every later gate needs it.
+
+**S2 as built.** `neo/renderer/bse/BseEffect.{h,cpp}` (the simulation of §3.1, no renderer)
+and `BseRender.cpp` (the engine side). A played effect (`idBseEffect`) is an engine render
+entity whose model is a shared marker (`_BSE_EFFECT`, a continuous dynamic model that draws
+nothing and so never reaches a BLAS) and whose `callbackData` is the effect; `R_AddModelSurfaces`
+hands such entities over and, once the view's other entities are done, `R_AddBseSurfaces` builds
+each one's sprites for the view into frame-temporary vertices (`vertexCache.AllocFrameTemp`, the
+deform-particle pattern: drawn by every backend, nothing kept past the frame) and adds them as
+draw surfaces - effects farthest first, segments in file order. The game's `UpdateEffectDef`
+services an effect at its game time (owner state, spawns, loops, deaths, the entity's bounds);
+the first view of a frame services one nobody has updated (a new effect, `testEffect`'s).
+Particles are evaluated at the view's time. The Quake 4 render world facade
+(`quake4/RenderWorldQ4.cpp`) plays the game's effects through `BSE_PlayEffect` /
+`BSE_UpdateEffect` / `BSE_StopEffect` / `BSE_FreeEffect`; `EffectDuration` answers from the
+played effect (or the decl's longest play). `EffectDefHasSound` stays false until S4. A freed
+render world detaches its effects. The decl gained what the runtime needs (segment roles,
+durations, the bounds formula, `_default` for a particle without a material) and `idDeclTable`
+inline min/max accessors (ABI-neutral).
+
+Cvars (Quake 4 title only, as `SettingsQ4.cpp`'s; Doom 3's list is unchanged): `bse_enabled`,
+`bse_render`, `bse_scale` (archived, 1), `bse_maxParticles` (2048), `bse_debug` (1 logs effects
+starting, looping, stopping, ending). `testEffect <effect> [once]` (Quake 4, cheat) plays an effect
+80 units in front of the view facing it, where `spawn func_fx` puts one; `testEffect` alone
+removes it.
+
+Offline (`tools/quake4/test_bse_sim.sh`, the runtime with the real parsers and the retail
+tables, every effect played once and looping at 60 Hz): no value that is not finite, every
+non-looping effect ends, no segment over its budget. The bounds formula gives each file's own
+`size` exactly for 897 effects at g_gravity 1066 and 959 at 0 (1132 of 1172 under one of the
+gravities tried: the editor wrote `size` under the gravity it ran with); particles go past twice
+that radius in 10 of 1124 effects (tracers and drips: the formula samples only the first 7/8 of a
+life).
+
+**S2 gate (user):**
+1. The ten sprite-only effects of the table, each next to retail: in both games
+   `spawn func_fx fx effects/<name> loop 1` from the same `setviewpos` (or `testEffect` in DUDE),
+   GL3 and Vulkan.
+2. An `airdefense1` fight: the sprite parts of the weapon and impact effects show where they
+   should (lines, lights, sounds, decals are later stages), no hitch.
+3. FSR2 on: no ghost trails behind moving sprites.
+4. `tools/run-asan.sh --q4` for a few minutes of play: no report.
+5. Doom 3 / RoE smoke (the renderer hook and `DeclTable.h` are shared).
 
 **S1 as built.** `idDeclEffect` parses into DUDE's templates (`idEffectSegment`,
 `idEffectParticle`, `effectParm_t` = start domain + envelope + end domain per parameter). A
