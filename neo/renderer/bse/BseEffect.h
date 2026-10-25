@@ -21,6 +21,7 @@ Doom 3 GPL Source Code (see ArbProgram.h for license header)
 #include "idlib/bv/Bounds.h"
 #include "idlib/geometry/DrawVert.h"
 #include "framework/CVarSystem.h"
+#include "renderer/Model.h"
 #include "renderer/RenderWorld.h"
 #include "renderer/bse/DeclEffect.h"
 
@@ -45,6 +46,13 @@ const float BSE_FUTURE				= 0.016f;	// emitters spawn this far past the time the
 const float BSE_TIME_EPSILON		= 0.002f;
 const float BSE_MAX_LIFE			= 300.0f;	// seconds
 const int	BSE_MAX_PARTICLES		= 2048;		// per segment
+const int	BSE_MAX_TRAIL_COUNT		= 2500;		// motion / burn trail steps
+const int	BSE_MAX_FORKS			= 16;		// electricity
+const int	BSE_MAX_BOLTS			= 200;		// electricity: segments of a branch
+const int	BSE_MAX_BOLT_POINTS		= 255;		// electricity: points of a branch
+const int	BSE_MAX_BOLT_VERTS		= 16384;	// electricity: a segment's vertices (retail's surface; bolts past it are cut)
+const int	BSE_MAX_SURFACE_VERTS	= 10000;	// the other kinds, and motion trails: retail's surfaces; particles past them are not drawn
+const int	BSE_MAX_SURFACE_INDEXES	= 30000;
 
 // what plays an effect: the Quake 4 game's renderEffect_t, or testEffect
 typedef struct {
@@ -96,8 +104,36 @@ typedef struct {
 	idVec3					rotateStart, rotateEnd;		// radians
 	idVec3					angleStart, angleEnd;		// radians
 	idVec3					offsetStart, offsetEnd;
-	idVec3					lengthStart, lengthEnd;
+	idVec3					lengthStart, lengthEnd;		// lines and electricity
+	float					textureScale;		// lines: repeats along the length; a strip: per unit of fraction
+	// motion and burn trails
+	float					trailTime;
+	int						trailCount;
+	float					lastTrailTime;		// a named trail: its next particle's birth time
+	int						seed;				// electricity: the bolt's shape
 } bseParticle_t;
+
+// a viewer, in the effect's frame
+typedef struct {
+	idVec3					origin;
+	idVec3					left;				// the view's axis 1 and 2
+	idVec3					up;
+} bseView_t;
+
+// a segment's geometry as it is built: grows as needed, kept for reuse
+class idBseGeometry {
+public:
+							idBseGeometry( void ) { verts.SetGranularity( 1024 ); indexes.SetGranularity( 1024 ); bounds.Clear(); }
+	void					Clear( void ) { verts.SetNum( 0, false ); indexes.SetNum( 0, false ); bounds.Clear(); }
+	int						NumVerts( void ) const { return verts.Num(); }
+	int						NumIndexes( void ) const { return indexes.Num(); }
+	idDrawVert &			AddVert( const idVec3 &xyz, float s, float t, const byte rgba[4] );
+	void					AddTri( int a, int b, int c ) { indexes.Append( a ); indexes.Append( b ); indexes.Append( c ); }
+
+	idList<idDrawVert>		verts;
+	idList<glIndex_t>		indexes;
+	idBounds				bounds;
+};
 
 class idBseEffect;
 
@@ -123,13 +159,24 @@ public:
 	float					fastInterval;		// seconds per particle at the highest and lowest count
 	float					slowInterval;
 	int						budget;				// most particles alive at once
+	int						budgetOnce;			// ... when the effect plays once, and when it loops
+	int						budgetLooping;
+	float					trailDuration;		// how long a particle leaves a named trail, for its budget
 	idList<bseParticle_t>	particles;			// draw order: soonest to die first (complex: newest first)
+
+							// a named trail's budget grows by what the segments leaving it hold
+	void					AddTrailBudget( int once, int looping, float duration );
+							// a particle of this (trail) segment, left at birthTime where offset and axis say
+	void					SpawnTrailParticle( idBseEffect *effect, float birthTime, const idVec3 &offset, const idMat3 &axis );
 
 private:
 	float					AttenuatedInterval( idBseEffect *effect ) const;
 	float					AttenuatedCount( idBseEffect *effect ) const;
-	void					Spawn( idBseEffect *effect, float birthTime, float fraction );
-	void					SpawnParticle( idBseEffect *effect, bseParticle_t &p, float birthTime, float fraction );
+	void					Spawn( idBseEffect *effect, float birthTime, float fraction, const idVec3 *trailOffset = NULL, const idMat3 *trailAxis = NULL );
+	void					SpawnParticle( idBseEffect *effect, bseParticle_t &p, float birthTime, float fraction, const idVec3 *trailOffset, const idMat3 *trailAxis );
+	void					SampleLength( idBseEffect *effect, const effectDomain_t &domain, idVec3 &length ) const;
+	void					RefreshLengths( idBseEffect *effect );
+	void					EmitTrail( idBseEffect *effect, bseParticle_t &p, float time );
 	void					Insert( const bseParticle_t &p );
 };
 
@@ -147,13 +194,16 @@ public:
 	float					SegmentAttenuation( const idEffectSegment &segment ) const;
 							// a particle's position at time, in the effect's current frame
 	idVec3					EvaluatePosition( const bseParticle_t &p, const idEffectParticle &tmpl, float time ) const;
+							// its velocity at time, in the frame it was born in
+	idVec3					EvaluateVelocity( const bseParticle_t &p, float time ) const;
 							// a particle's state at time, in the effect's current frame; false when not alive then
 	bool					EvaluateParticle( const bseParticle_t &p, const idEffectParticle &tmpl, float time,
 								idVec3 &position, idVec4 &tint, idVec3 &size, idVec3 &rotate ) const;
-							// a segment's sprites for a viewer with these left and up axes (effect frame): the
-							// particles alive at time, four vertices and six indexes each; returns the quads
-	int						BuildSprites( const idBseSegment &segment, float time, const idVec3 &viewLeft, const idVec3 &viewUp,
-								idDrawVert *verts, int maxQuads, idBounds &bounds ) const;
+							// a segment's particles alive at time as geometry for a viewer (effect frame),
+							// appended to geo; returns the particles drawn
+	int						BuildSegment( const idBseSegment &segment, float time, const bseView_t &view, idBseGeometry &geo ) const;
+							// the ribbons of a segment's "trailType motion" particles
+	int						BuildMotionTrails( const idBseSegment &segment, float time, const bseView_t &view, idBseGeometry &geo ) const;
 	int						CountParticles( void ) const;
 
 	bseEffectParms_t		owner;				// the owner's last state
@@ -186,9 +236,12 @@ public:
 	float					brightness;			// shader parm 6
 	idList<idBseSegment>	segments;
 
+	bool					endOriginChanged;	// lines spanning to the end origin take their new lengths
+
 	// the engine side
 	idRenderWorld *			world;
 	int						entityHandle;
+	int						litHandle;			// the lit entity drawing lit model particles, or -1
 	int						serviceTime;		// ms, the last game time serviced
 	bool					finished;
 
@@ -199,6 +252,13 @@ private:
 	void					LoopSegments( float time );
 	void					StartSegments( float time );
 	bool					SpawnAllowed( void ) const { return currentTime - lastTime > BSE_TIME_EPSILON; }
+	idVec3					ToCurrentFrame( const bseParticle_t &p, const idVec3 &v ) const;
+	byte					ColorByte( float x ) const;
+	void					ParticleColor( const idEffectParticle &tmpl, const idVec4 &color, float override, byte rgba[4] ) const;
+	bool					BuildParticle( const idBseSegment &segment, const bseParticle_t &p, float time, float override,
+								const bseView_t &view, idBseGeometry &geo ) const;
+	void					BuildElectricity( const idEffectParticle &tmpl, const bseParticle_t &p, float time, const idVec3 &position,
+								const idVec3 &length, float width, const byte rgba[4], const bseView_t &view, idBseGeometry &geo ) const;
 	friend class			idBseSegment;
 };
 
@@ -213,6 +273,8 @@ private:
 float			BSE_GameGravity( void );				// g_gravity, for the decls' bounds
 bool			BSE_ViewOrigin( const idRenderWorld *world, idVec3 &origin );	// the player's view of world, for distance attenuation
 idRandom &		BSE_Random( void );
+				// a model particle's mesh: its model's first surface, as Quake 4 draws it (NULL: none)
+const srfTriangles_t *	BSE_ModelGeometry( const idRenderModel *model );
 
 /*
 ===============================================================================

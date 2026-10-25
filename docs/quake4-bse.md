@@ -1,8 +1,9 @@
 # Quake 4 effects (BSE) on DUDE — phase Q4
 
 Status (2026-10-25): **plan approved; S1 (the effect decl) and S2 (the runtime and sprites)
-done and on master.** Effects play; their sprites draw; the other particle kinds, sounds, lights,
-decals, physics and view effects come with S3-S6.
+done and on master; S3 (every drawn particle kind and the trails) built, at its gate.** Effects
+play and draw every particle kind; sounds, lights, decals, physics and view effects come with
+S4-S6.
 
 Raven's BSE (their effects runtime, linked into the closed Quake 4 engine) plays the 1172
 `effects/**/*.fx` decls of the retail paks: muzzle flashes, impacts, explosions, beams, ambient
@@ -48,7 +49,9 @@ own code and the consultation is recorded in the commit message and in the table
 | `offset` displaces the particle, `angle` orbits it about its position, `rotate` turns it | iddevnet `FXEditor` tabs (Offset, Orbit, Rotate) |
 | A table of one value reads 1.0 (missing tables default to `{ { 0 } }`) | OpenQ4 prose; DUDE's `idDeclTable::TableLookup` already does this |
 | Spawn timing (fixed intervals from the segment's clock, each particle at its own birth time, 0.016 s look-ahead), the count/density/cap and `bse_scale` arithmetic, distance attenuation (camera to the effect's bounds, linear between the segment's distances), loops (window re-drawn each loop, the ambient two-loop head start), durations, the particle budget, sampler shapes (direction from the [-1,1] cube, per-axis random sphere radius, cube-face order, cylinder along x with cone taper, spiral turns), envelope evaluation (`count` = passes per life at the rate fixed at birth, `rate` = per second, `offset`), parameter defaults, spawn order and frames (generated normals, acceleration relative to travel, unlocked particles in their birth frame), the friction formula, sprite corners and texture corners, colour packing (byte wrap; additive fades through RGB), draw order within and across segments, the bounds formula | **decompile-derived, consulted 2026-10-25 (S2)**: OpenQ4 `src/bse` (`BSE_Envelopes.cpp`, `BSE_SpawnDomains.cpp`, `BSE_Segment.cpp`, `BSE_SegmentRuntime.cpp`, `BSE_SegmentTemplate.cpp`, `BSE_Effect.cpp`, `BSE_Particle.cpp`, `BSE_ParseParticle2.cpp`, `BSE_Manager.cpp`), which OpenQ4 corrected against the retail 1.4.2 executable in its 2026-10 audit - read for these behaviours only, the grammar, the docs and screenshots cannot fix them; re-expressed in DUDE's own code (`BseEffect.cpp`), nothing copied (decision quake4-port.md §9.2) |
+| Particle kinds and trails (§3.2): a line's lengths (sampled first, out to the end origin, turned by a generated normal, flipped, texture repeats per `tiling` units of the start length, re-sampled while the end origin or the effect moves), the line ribbon and `generatedLine`, the strip of linked particles, an oriented quad's angles (and Quake 4's normal-to-angles conversion with its straight-down quirk), a model particle's turn, scale and material, the bolt (count, jitter walk, two-level kinks, forks, defaults, the 16384-vertex surface), motion trail ribbons and burn copies, named trail emission (child frame, interval, budget), the particle velocity formula, the 10000-vertex / 30000-index surfaces, what a missing model draws | **decompile-derived, consulted 2026-10-25 (S3)**: OpenQ4 `src/bse` (`BSE_Particle.cpp`, `BSE_Particle.h`, `BSE_Segment.cpp`, `BSE_SegmentRuntime.cpp`, `BSE_Envelopes.cpp`, `BSE_ParseParticle2.cpp`, `BSE_Effect.cpp`; `idlib/math/Vector.cpp` `ToRadians`, `Radians.cpp`) - read for these behaviours only, as for S2; re-expressed in DUDE's own code (`BseEffect.cpp`, `BseRender.cpp`), nothing copied |
 | What a missing material draws, and that it is `{ map _default }` | the retail `materials/gfx.mtr` |
+| Trail ribbons and the railgun strip are two-sided (so the ribbon's alternating winding shows both halves) | the retail `materials/effects/particles_shapes.mtr`, `weapons.mtr` |
 
 ## 2. The grammar (measured)
 
@@ -146,8 +149,10 @@ Domains (count, values): `point` 11835 (n), `box` 11531 (2n), `line` 4862 (2n), 
    from a BSE branch in `R_AddModelSurfaces` — the deform-particle / decal pattern, which every
    backend draws. Doom 3's `idRenderModelPrt` path rebuilds a heap snapshot each frame, and on
    Vulkan each snapshot block is its own RHI buffer, created and destroyed every frame. Only 3 of
-   the 323 materials effects use are lit (model particles); lit model particles and debris become
-   real render entities (lighting, shadows, motion vectors).
+   the 323 materials effects use are lit, all on model particles (10 effects: grenades in flight,
+   rock chunks); an effect with lit segments gets a second render entity whose continuous model
+   is a snapshot of those segments (it receives lights, casts no shadow - S3); debris becomes game
+   entities (S5).
 4. **Time:** spawning and physics advance on game frames (`UpdateEffectDef`); particle state is
    evaluated analytically at each view's time, so effects stay smooth with `com_interpolate`
    (the same curves, sampled more often — no fidelity change).
@@ -224,6 +229,52 @@ The rules `neo/renderer/bse/BseEffect.cpp` implements; sources in the table of �
   effect. A stopped effect spawns nothing more; its particles go, but `persist` ones live out
   their lives.
 
+### 3.2 Particle kinds and trails (S3, in DUDE's words)
+
+- **Line.** Its start and end lengths are sampled before anything else; when the start length
+  has `useEndOrigin` and the effect has an end origin, x moves out by the distance from the effect
+  to it (an unset end length stays nothing). A generated normal turns them as it turns the
+  velocity, `flipNormal` reverses them, `relative` adds the start to the end, and an `attenuate`
+  start length scales both. With `tiling`, the texture repeats once per `tiling` units of the start
+  length (without it, once along the line). While the end origin or the effect moves, the live
+  lines of a segment that spans to the end origin take new lengths (sampled again without the
+  normal, flip or attenuation). Drawn as a ribbon from the position along the length, as wide as
+  the size each side, turned square to the length and the viewer; `generatedLine` lays it along
+  the direction of travel (none without motion). An unlocked line's length turns with the frame it
+  was born in.
+- **Oriented.** A quad like a sprite's on the plane its three rotation angles give (pitch, yaw,
+  roll, in turns), plus the angles of its generated normal - Quake 4's own conversion: yaw and
+  pitch of the normal, pitch negated, and a normal straight down pitched by 3/4 of a half turn
+  rather than 3/2.
+- **Electricity.** A bolt from the position along the length (as a line's, with `generatedLine`):
+  steps of about 16 units (3-200), each step's point wandering off the line by a jitter that adds
+  up along the bolt (`jitterSize`, along / sideways / down) scaled by `jitterTable` at that fraction
+  (default `halfsintable`, which pins both ends), each step kinked twice over into nine short
+  pieces that zigzag about it. `fork` bolts (up to 16) leave from random points of the bolt towards
+  20 units about the middle of the rest of its way, shorter than the bolt. The ribbon is as wide
+  as the size, turned square to the bolt's length and the viewer's position; the shape holds for
+  `jitterRate` seconds (0: a new one every game tic, 60 a second, as retail draws them at most). A
+  segment's bolts stop at 16384 vertices, as retail's surface does.
+- **Linked.** Each particle is a pair of points, the size either side of its position along the
+  viewer's left axis; the segment's particles make one strip in their order, the texture running
+  along it by their spawn fraction (`tiling` times over the strip).
+- **Model.** The model's first surface, turned by the three rotation angles (and the birth frame
+  of an unlocked particle), scaled along each axis by the size, coloured by the particle's colour,
+  drawn with the particle's `material` (a missing model is the default model). A lit material
+  draws through the effect's lit entity.
+- **Trails.** `trailType motion`: a ribbon (with `trailMaterial`, default
+  `gfx/effects/particles_shapes/motionblur`) through the particle's positions back over its trail
+  time (or its age), `trailCount` steps, as wide as its size, turned square to its birth velocity
+  and the viewer, fading out to the oldest - Quake 4's arithmetic with its quirks (each step draws
+  the previous step's position, so the first two coincide). `trailType burn`: `trailCount` copies
+  of the particle as it was over its trail time, fainter with age. `trailType <name>`: the
+  particle leaves the `trail` segment of that name's particles behind it, one per that segment's
+  spawn interval from its birth on, each born where the particle was then with its velocity turned
+  to the particle's direction of travel; the trail segment holds as many as the segments leaving it
+  need. A one-shot effect still ends at its own duration.
+- **Surfaces.** A segment draws at most 10000 vertices and 30000 indexes (motion trails too):
+  particles past that are not drawn, as in retail.
+
 ## 4. Stages and gates
 
 One branch per stage, merged to master at its gate after the user's verification. The user runs
@@ -233,7 +284,7 @@ every in-game check; nothing here launches the game.
 |---|---|---|
 | **S1 Decl** — **BUILT 2026-10-25** | The grammar of §2: `neo/renderer/bse/DeclEffect.{h,cpp}`, strict value counts, references through the decl / model managers, named trails resolved | `tools/quake4/test_effect_parse.sh` (below) |
 | S2 Runtime + sprites — **DONE 2026-10-25** (gate passed: user firefights in Quake 4 and Doom 3, ASAN clean on both) | Manager, effect instances behind the render world calls, timing (start, duration, count, spawner bursts, loops, delay segments, looping ambient effects already in full flow), domains and modifiers, envelopes, motion, `locked` / `attenuation` / `detail` / `density` / `particleCap`, sprites, segment draw order, `testEffect` | Offline simulation over every retail emitter (no NaN, population follows the emission rate, particles stay within the decl's `size`); the user compares 10 sprite-only effects covering every domain, modifier and envelope option with retail on GL3 and Vulkan (`moveables/barrel/debris_fly`, `monsters/scientist/obscuring_cloud`, `weapons/nailgun/guide`, `ambient/dustedge_mp`, `monsters/teleport_dropper/blast_exhaust`, `monsters/fatty/ambient_acid`, `steam/mcc_vent_slow`, `smoke/air_defense_hillsa`, `mapobjects/casket_door2_inv`, `levels/dispersal/supportbreak`); an airdefense1 fight; no FSR2 ghosting; ASAN `--q4`; Doom 3 / RoE smoke |
-| S3 Particle kinds | line, oriented, electricity, linked, model; `motion` / `burn` / named trails | Offline geometry test; the user compares `weapons/nailgun/impact_default`, `ambient/acid_react_waste`, `weapons/lightninggun/tube` + `impact`, `weapons/railgun/trail`, `monsters/strogg_flyer/bomb_fly`, `moveables/barrel/explode`, `weapons/nailgun/impact_glass`, `monsters/makron/blaster_fly`, `monsters/gunner/grenade_burst`; lightning gun and railgun in play |
+| S3 Particle kinds — **BUILT 2026-10-25**, at its gate | line, oriented, electricity, linked, model; `motion` / `burn` / named trails | Offline geometry test; the user compares `weapons/nailgun/impact_default`, `ambient/acid_react_waste`, `weapons/lightninggun/tube` + `impact`, `weapons/railgun/trail`, `monsters/strogg_flyer/bomb_fly`, `moveables/barrel/explode`, `weapons/nailgun/impact_glass`, `monsters/makron/blaster_fly`, `monsters/gunner/grenade_burst`; lightning gun and railgun in play |
 | S4 Lights, sounds, decals | light segments as render lights; sound segments on the effect's emitter (`EffectDefHasSound`, random sample choice); decal segments projected | Rocket light, impact decals, impact sounds varying per shot; a busy fight on `dude_rtx 2` with no device loss; GL3 and Vulkan |
 | S5 Physics and children | traces through `Translation`, bounce / remove, impact and timeout effects, nested effect segments, debris through `SpawnClientMoveable`, `entityDef` on other kinds, `persist` | Offline physics test; wall impacts, `wounds/blood`, harvester claw debris, turret deaths, `bse_physics` / `bse_debris`; ASAN |
 | S6 View effects | `shake` scaled by distance, `doubleVision`, `tunnel` | Explosions shake by distance, `mapobjects/buzzsaw_chop`, the intro blur |
@@ -287,6 +338,47 @@ life).
 runs of both titles with S2 left no report; the Quake 4 log's warnings are the known retail data
 quirks only. Merged to master (`ce6be7d9`). The side-by-side retail comparisons carry over to the
 S3 gate, where the effects that mix sprites with lines, oriented quads and bolts become complete.
+
+**S3 as built.** `BseEffect.cpp` builds every drawn kind (§3.2) into a growable geometry
+(`idBseGeometry`) for a viewer in the effect's frame - `BuildSegment` (the particles, with burn
+copies) and `BuildMotionTrails` - and `BseRender.cpp` copies each segment's into frame-temporary
+memory as one draw surface, then its motion trails as another with the trail material. Spawning
+gained the line lengths, the oriented angles, trail times and counts, a seed per bolt (its shape
+is a hash of the seed and the jitter period, so every view of a frame draws the same bolt), and
+named trails (emitted as their particles are retired or kept each service; budgets added once
+every segment's is known). An effect with lit segments plays a second render entity
+(`_BSE_EFFECT_LIT`, a continuous model, `noShadow`) whose snapshot holds those segments, rebuilt
+each frame like Doom 3's particle models; ray tracing never takes it (it gathers static and
+skinned models only). The entity bounds now grow by lengths, model reach, bolt forks and jitter,
+and where trails were. The decl adds the electricity defaults (`jitterSize` 3,7,7,
+`halfsintable`; a missing jitter table falls back to it) and the default motion trail material.
+
+Offline (`tools/quake4/test_bse_sim.sh`, now also building every segment's geometry ten times a
+second for a viewer, model particles with a stand-in cube): **0 bad geometry** (vertices not
+finite, indexes outside, broken triangles), no value that is not finite, every one-shot effect
+ends, no segment over its budget, **all 29 named trail segments receive particles**. Most
+vertices one segment took: sprites 8192 (`monsters/harvester/explode_final`), oriented 8192,
+lines 2040, bolts 16384 (the berserker's `electric_shield`, at retail's cap), models 9984 (the
+cube; at the 10000 cap), linked 500; motion trail ribbons up to 2448. `test_effect_parse.sh` still
+passes (1172 / 0 failed, 0 mismatches). Fidelity: what the reference showed is kept, quirks
+included; one choice: a bolt with `jitterRate 0` takes a new shape every 1/60 s (retail's
+fastest) rather than every rendered frame, so it does not flicker faster at high frame rates.
+
+**S3 gate (user):**
+1. Each next to retail, `testEffect effects/<name>` in DUDE and
+   `spawn func_fx fx effects/<name> loop 1` in retail from the same `setviewpos` (beams need
+   an `endOrigin`: in retail `spawn func_fx fx effects/<name> loop 1 endOrigin "x y z"`), GL3
+   and Vulkan: `weapons/nailgun/impact_default`, `ambient/acid_react_waste`,
+   `weapons/lightninggun/tube` + `weapons/lightninggun/impact`, `weapons/railgun/trail`,
+   `monsters/strogg_flyer/bomb_fly` (the grenade model, lit), `moveables/barrel/explode`,
+   `weapons/nailgun/impact_glass`, `monsters/makron/blaster_fly`,
+   `monsters/gunner/grenade_burst`; and S2's ten sprite-only effects.
+2. In play: the lightning gun (bolts, forks, jitter), the railgun (spiral strip, trail), a gunner's
+   grenades (lit model, smoke trail), concrete / rock impacts (the rock chunks: retail shows what
+   for the missing `rock_chunk.ase`?).
+3. FSR2 on: no ghosting behind bolts and trails.
+4. `tools/run-asan.sh --q4` for a few minutes of play: no report.
+5. Doom 3 / RoE smoke.
 
 **S1 as built.** `idDeclEffect` parses into DUDE's templates (`idEffectSegment`,
 `idEffectParticle`, `effectParm_t` = start domain + envelope + end domain per parameter). A

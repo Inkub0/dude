@@ -525,7 +525,8 @@ static bool ParseEffectParticle( idLexer &src, idEffectParticle &particle ) {
 		} else if ( !token.Icmp( "jitterTable" ) ) {
 			ok = ParseEffectName( src, "jitterTable", name );
 			if ( ok ) {
-				particle.jitterTable = static_cast<const idDeclTable *>( declManager->FindType( DECL_TABLE, name, true ) );
+				// a table that does not exist is not made: the bolt takes the default one (below)
+				particle.jitterTable = static_cast<const idDeclTable *>( declManager->FindType( DECL_TABLE, name, false ) );
 			}
 			key = EFFECT_PKEY_JITTER_TABLE;
 		} else if ( !token.Icmp( "trailType" ) ) {
@@ -1008,6 +1009,20 @@ static void FinishEffectParticle( idEffectParticle &particle ) {
 	// are zero-sized carriers of impact effects)
 	if ( !( particle.keys & EFFECT_PKEY_MATERIAL ) ) {
 		particle.material = declManager->FindMaterial( "_default" );
+	}
+
+	// a motion trail's ribbon, and a bolt's jitter, as Quake 4 has them when not given
+	if ( particle.trailType == EFFECT_TRAIL_MOTION && particle.trailMaterial == NULL ) {
+		particle.trailMaterial = declManager->FindMaterial( "gfx/effects/particles_shapes/motionblur" );
+	}
+	if ( particle.type == EFFECT_PARTICLE_ELECTRICITY ) {
+		if ( !( particle.keys & EFFECT_PKEY_JITTER_SIZE ) ) {
+			particle.jitterSize.Set( 3.0f, 7.0f, 7.0f );
+		}
+		if ( particle.jitterTable == NULL ) {
+			particle.jitterTable = static_cast<const idDeclTable *>( declManager->FindType( DECL_TABLE, "halfsintable", false ) );
+		}
+		particle.fork = idMath::ClampInt( 0, 16, particle.fork );
 	}
 
 	particle.hasPhysics = ( particle.keys & EFFECT_PKEY_IMPACT ) != 0;

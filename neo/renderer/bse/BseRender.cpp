@@ -17,6 +17,11 @@ Doom 3 GPL Source Code (see ArbProgram.h for license header)
 // each effect's segments in file order, so equal-sort translucent surfaces overlap as in retail.
 // The effect geometry never reaches ray tracing (a continuous dynamic model) and writes no motion
 // vectors (translucent): FSR2's reactive mask covers it as it covers Doom 3's particles.
+//
+// A segment whose material is lit (Quake 4's model particles: grenades in flight) cannot be lit as
+// frame-temporary geometry - light interactions come from an entity's model. Such an effect gets
+// a second render entity, its model (idRenderModelBseLit) a snapshot of the lit segments rebuilt
+// every frame, as Doom 3's particle models are; it receives lights, casts no shadow.
 
 #include "sys/platform.h"
 #include "framework/Common.h"
@@ -50,6 +55,7 @@ public:
 };
 
 static idRenderModelBse *		bseModel = NULL;
+static class idRenderModelBseLit *	bseLitModel = NULL;
 static idList<idBseEffect *>	bseEffects;			// every played effect
 static idList<idBseEffect *>	bseTestEffects;		// testEffect's
 static idRandom					bseRandom;
@@ -89,6 +95,127 @@ bool BSE_ViewOrigin( const idRenderWorld *world, idVec3 &origin ) {
 	return true;
 }
 
+const srfTriangles_t *BSE_ModelGeometry( const idRenderModel *model ) {
+	if ( model == NULL || model->NumSurfaces() <= 0 ) {
+		return NULL;
+	}
+	return model->Surface( 0 )->geometry;
+}
+
+// what a segment draws with: its particles' material (a model particle's too, not the model's own)
+static const idMaterial *BSE_SegmentMaterial( const idEffectSegment *tmpl ) {
+	return tmpl->particle.material;
+}
+
+// a segment drawn by the effect's lit entity
+static bool BSE_SegmentIsLit( const idEffectSegment *tmpl ) {
+	if ( !tmpl->enabled || !tmpl->hasParticles ) {
+		return false;
+	}
+	const idMaterial *material = BSE_SegmentMaterial( tmpl );
+	return material != NULL && material->ReceivesLighting();
+}
+
+static bool BSE_DeclHasLitSegments( const idDeclEffect *decl ) {
+	for ( int i = 0; i < decl->GetNumSegments(); i++ ) {
+		if ( BSE_SegmentIsLit( &decl->GetSegment( i ) ) ) {
+			return true;
+		}
+	}
+	return false;
+}
+
+// an effect no owner has updated to the view's time yet (a new one, or testEffect's) runs to it
+static void BSE_ServiceForView( idBseEffect *effect, const viewDef_t *view ) {
+	if ( view->renderView.time > effect->serviceTime ) {
+		effect->UpdateFromOwner( effect->owner, MS2SEC( view->renderView.time ) );
+		effect->finished = effect->Service( MS2SEC( view->renderView.time ) ) || effect->finished;
+		effect->serviceTime = view->renderView.time;
+	}
+}
+
+// the viewer of view in the frame of an entity at origin, axis
+static bseView_t BSE_EffectView( const viewDef_t *view, const idVec3 &origin, const idMat3 &axis ) {
+	bseView_t v;
+	v.origin = axis.Transpose() * ( view->renderView.vieworg - origin );
+	v.left = axis.Transpose() * view->renderView.viewaxis[1];
+	v.up = axis.Transpose() * view->renderView.viewaxis[2];
+	return v;
+}
+
+// building space, reused: geometry is copied out to frame or model memory once built
+static idBseGeometry			bseGeometry;
+
+/*
+===============================================================================
+
+	the lit model: an effect's lit segments as a snapshot model of its second entity
+
+===============================================================================
+*/
+
+class idRenderModelBseLit : public idRenderModelStatic {
+public:
+	virtual dynamicModel_t		IsDynamicModel() const { return DM_CONTINUOUS; }
+	virtual idRenderModel *		InstantiateDynamicModel( const struct renderEntity_s *ent, const struct viewDef_s *view, idRenderModel *cachedModel );
+	virtual idBounds			Bounds( const struct renderEntity_s *ent ) const {
+									return ent != NULL ? ent->bounds : bounds;
+								}
+};
+
+idRenderModel *idRenderModelBseLit::InstantiateDynamicModel( const struct renderEntity_s *ent, const struct viewDef_s *view, idRenderModel *cachedModel ) {
+	delete cachedModel;
+	// a model trace, or no effect: nothing to show
+	if ( ent == NULL || view == NULL || ent->callbackData == NULL || !BSE_Render() ) {
+		return NULL;
+	}
+	idBseEffect *effect = static_cast<idBseEffect *>( ent->callbackData );
+	if ( bseEffects.FindIndex( effect ) < 0 ) {
+		return NULL;
+	}
+	BSE_ServiceForView( effect, view );
+
+	idRenderModelStatic *snapshot = new idRenderModelStatic;
+	snapshot->InitEmpty( "_BSE_LIT_SNAPSHOT" );
+	const bseView_t viewer = BSE_EffectView( view, ent->origin, ent->axis );
+	const float time = MS2SEC( view->renderView.time );
+	idBounds bounds;
+	bounds.Clear();
+	for ( int i = 0; i < effect->segments.Num(); i++ ) {
+		const idBseSegment &segment = effect->segments[i];
+		if ( segment.particles.Num() == 0 || !BSE_SegmentIsLit( segment.tmpl ) ) {
+			continue;
+		}
+		const idMaterial *material = BSE_SegmentMaterial( segment.tmpl );
+		if ( !material->IsDrawn() ) {
+			continue;
+		}
+		bseGeometry.Clear();
+		effect->BuildSegment( segment, time, viewer, bseGeometry );
+		if ( bseGeometry.NumIndexes() == 0 ) {
+			continue;
+		}
+		srfTriangles_t *tri = R_AllocStaticTriSurf();
+		R_AllocStaticTriSurfVerts( tri, bseGeometry.NumVerts() );
+		R_AllocStaticTriSurfIndexes( tri, bseGeometry.NumIndexes() );
+		memcpy( tri->verts, bseGeometry.verts.Ptr(), bseGeometry.NumVerts() * sizeof( idDrawVert ) );
+		memcpy( tri->indexes, bseGeometry.indexes.Ptr(), bseGeometry.NumIndexes() * sizeof( glIndex_t ) );
+		tri->numVerts = bseGeometry.NumVerts();
+		tri->numIndexes = bseGeometry.NumIndexes();
+		tri->bounds = bseGeometry.bounds;
+		tri->tangentsCalculated = true;		// the model's own, turned with it
+		tri->facePlanesCalculated = false;	// derived when a light needs them
+		modelSurface_t surf;
+		surf.id = i;
+		surf.shader = material;
+		surf.geometry = tri;
+		snapshot->AddSurface( surf );
+		bounds.AddBounds( tri->bounds );
+	}
+	snapshot->bounds = bounds;
+	return snapshot;
+}
+
 /*
 ===============================================================================
 
@@ -97,24 +224,23 @@ bool BSE_ViewOrigin( const idRenderWorld *world, idVec3 &origin ) {
 ===============================================================================
 */
 
-// the effect's render entity, if it is still the effect's (a map load frees every entity)
-static idRenderEntityLocal *BSE_EntityDef( const idBseEffect *effect ) {
+// one of the effect's render entities, if it is still the effect's (a map load frees every entity)
+static idRenderEntityLocal *BSE_EntityDef( const idBseEffect *effect, int handle, const idRenderModel *model ) {
 	idRenderWorldLocal *world = static_cast<idRenderWorldLocal *>( effect->world );
-	const int handle = effect->entityHandle;
 	if ( world == NULL || handle < 0 || handle >= world->entityDefs.Num() ) {
 		return NULL;
 	}
 	idRenderEntityLocal *def = world->entityDefs[handle];
-	if ( def == NULL || def->parms.hModel != bseModel || def->parms.callbackData != effect ) {
+	if ( def == NULL || def->parms.hModel != model || def->parms.callbackData != effect ) {
 		return NULL;
 	}
 	return def;
 }
 
-static void BSE_FillEntity( const idBseEffect *effect, renderEntity_t &ent ) {
+static void BSE_FillEntity( const idBseEffect *effect, renderEntity_t &ent, bool lit ) {
 	const bseEffectParms_t &parms = effect->owner;
 	memset( &ent, 0, sizeof( ent ) );
-	ent.hModel = bseModel;
+	ent.hModel = lit ? static_cast<idRenderModel *>( bseLitModel ) : static_cast<idRenderModel *>( bseModel );
 	ent.callbackData = const_cast<idBseEffect *>( effect );
 	ent.origin = effect->currentOrigin;
 	ent.axis = effect->currentAxis;
@@ -124,7 +250,7 @@ static void BSE_FillEntity( const idBseEffect *effect, renderEntity_t &ent ) {
 	}
 	ent.noShadow = true;
 	ent.noSelfShadow = true;
-	ent.noDynamicInteractions = true;
+	ent.noDynamicInteractions = !lit;
 	ent.suppressSurfaceInViewID = parms.suppressSurfaceInViewID;
 	ent.allowSurfaceInViewID = parms.allowSurfaceInViewID;
 	ent.weaponDepthHack = parms.weaponDepthHack;
@@ -133,12 +259,15 @@ static void BSE_FillEntity( const idBseEffect *effect, renderEntity_t &ent ) {
 }
 
 static void BSE_SyncEntity( idBseEffect *effect ) {
-	if ( BSE_EntityDef( effect ) == NULL ) {
-		return;
-	}
 	renderEntity_t ent;
-	BSE_FillEntity( effect, ent );
-	effect->world->UpdateEntityDef( effect->entityHandle, &ent );
+	if ( BSE_EntityDef( effect, effect->entityHandle, bseModel ) != NULL ) {
+		BSE_FillEntity( effect, ent, false );
+		effect->world->UpdateEntityDef( effect->entityHandle, &ent );
+	}
+	if ( BSE_EntityDef( effect, effect->litHandle, bseLitModel ) != NULL ) {
+		BSE_FillEntity( effect, ent, true );
+		effect->world->UpdateEntityDef( effect->litHandle, &ent );
+	}
 }
 
 /*
@@ -153,6 +282,7 @@ idBseEffect *BSE_PlayEffect( idRenderWorld *world, const bseEffectParms_t &parms
 	idBseEffect *effect = new idBseEffect;
 	effect->world = world;
 	effect->entityHandle = -1;
+	effect->litHandle = -1;
 	effect->serviceTime = timeMs - 1;		// the frame's first view services it
 	effect->Init( parms, MS2SEC( timeMs ) );
 	if ( BSE_Debug() ) {
@@ -160,8 +290,12 @@ idBseEffect *BSE_PlayEffect( idRenderWorld *world, const bseEffectParms_t &parms
 	}
 
 	renderEntity_t ent;
-	BSE_FillEntity( effect, ent );
+	BSE_FillEntity( effect, ent, false );
 	effect->entityHandle = world->AddEntityDef( &ent );
+	if ( BSE_DeclHasLitSegments( parms.effect ) ) {
+		BSE_FillEntity( effect, ent, true );
+		effect->litHandle = world->AddEntityDef( &ent );
+	}
 	bseEffects.Append( effect );
 	return effect;
 }
@@ -200,8 +334,11 @@ void BSE_FreeEffect( idBseEffect *effect ) {
 	if ( effect == NULL ) {
 		return;
 	}
-	if ( BSE_EntityDef( effect ) != NULL ) {
+	if ( BSE_EntityDef( effect, effect->entityHandle, bseModel ) != NULL ) {
 		effect->world->FreeEntityDef( effect->entityHandle );
+	}
+	if ( BSE_EntityDef( effect, effect->litHandle, bseLitModel ) != NULL ) {
+		effect->world->FreeEntityDef( effect->litHandle );
 	}
 	bseEffects.Remove( effect );
 	bseTestEffects.Remove( effect );
@@ -253,12 +390,33 @@ static int BSE_SortFarthestFirst( const void *a, const void *b ) {
 	return da < db ? 1 : ( da > db ? -1 : 0 );
 }
 
+// geometry as a frame-temporary draw surface of the entity
+static void R_AddBseGeometry( viewEntity_t *vEntity, const idMaterial *material, const idBseGeometry &geo ) {
+	if ( geo.NumIndexes() == 0 ) {
+		return;
+	}
+	idRenderEntityLocal *def = vEntity->entityDef;
+	srfTriangles_t *tri = (srfTriangles_t *)R_ClearedFrameAlloc( sizeof( *tri ) );
+	tri->numVerts = geo.NumVerts();
+	tri->numIndexes = geo.NumIndexes();
+	tri->verts = (idDrawVert *)R_FrameAlloc( tri->numVerts * sizeof( idDrawVert ) );
+	tri->indexes = (glIndex_t *)R_FrameAlloc( tri->numIndexes * sizeof( glIndex_t ) );
+	memcpy( tri->verts, geo.verts.Ptr(), tri->numVerts * sizeof( idDrawVert ) );
+	memcpy( tri->indexes, geo.indexes.Ptr(), tri->numIndexes * sizeof( glIndex_t ) );
+	tri->bounds = geo.bounds;
+	tri->ambientCache = vertexCache.AllocFrameTemp( tri->verts, tri->numVerts * sizeof( idDrawVert ) );
+	if ( tri->ambientCache == NULL ) {
+		return;
+	}
+	R_AddDrawSurf( tri, vEntity, &def->parms, material, vEntity->scissorRect );
+}
+
 /*
 ================
 R_AddBseEffectSurfaces
 
 One effect's particles for this view: per drawn segment, in file order, a frame-temporary
-surface of sprites (other particle kinds: S3).
+surface of its particles, then one of their motion trails. Lit segments are the lit entity's.
 ================
 */
 static void R_AddBseEffectSurfaces( viewEntity_t *vEntity ) {
@@ -274,62 +432,31 @@ static void R_AddBseEffectSurfaces( viewEntity_t *vEntity ) {
 		return;
 	}
 
-	// an effect no owner has updated to this time yet (a new one, or testEffect's)
-	if ( view->renderView.time > effect->serviceTime ) {
-		effect->UpdateFromOwner( effect->owner, MS2SEC( view->renderView.time ) );
-		effect->finished = effect->Service( MS2SEC( view->renderView.time ) ) || effect->finished;
-		effect->serviceTime = view->renderView.time;
-	}
+	BSE_ServiceForView( effect, view );
 	if ( !BSE_Render() ) {
 		return;
 	}
 
-	// the viewer's left and up axes in the effect's frame
-	const idMat3 &axis = def->parms.axis;
-	const idVec3 viewLeft = axis.Transpose() * view->renderView.viewaxis[1];
-	const idVec3 viewUp = axis.Transpose() * view->renderView.viewaxis[2];
+	const bseView_t viewer = BSE_EffectView( view, def->parms.origin, def->parms.axis );
 	const float time = MS2SEC( view->renderView.time );
-
 	for ( int i = 0; i < effect->segments.Num(); i++ ) {
 		const idBseSegment &segment = effect->segments[i];
 		const idEffectSegment *tmpl = segment.tmpl;
 		if ( !tmpl->enabled || !tmpl->hasParticles || segment.particles.Num() == 0 ) {
 			continue;
 		}
-		if ( tmpl->particle.type != EFFECT_PARTICLE_SPRITE ) {
-			continue;		// lines, oriented quads, bolts, strips, models: S3
+		const idMaterial *material = BSE_SegmentMaterial( tmpl );
+		if ( material != NULL && material->IsDrawn() && !material->ReceivesLighting() ) {
+			bseGeometry.Clear();
+			effect->BuildSegment( segment, time, viewer, bseGeometry );
+			R_AddBseGeometry( vEntity, material, bseGeometry );
 		}
-		const idMaterial *material = tmpl->particle.material;
-		if ( material == NULL || !material->IsDrawn() ) {
-			continue;
+		const idMaterial *trailMaterial = tmpl->particle.trailMaterial;
+		if ( tmpl->particle.trailType == EFFECT_TRAIL_MOTION && trailMaterial != NULL && trailMaterial->IsDrawn() ) {
+			bseGeometry.Clear();
+			effect->BuildMotionTrails( segment, time, viewer, bseGeometry );
+			R_AddBseGeometry( vEntity, trailMaterial, bseGeometry );
 		}
-
-		const int maxQuads = segment.particles.Num();
-		srfTriangles_t *tri = (srfTriangles_t *)R_ClearedFrameAlloc( sizeof( *tri ) );
-		tri->verts = (idDrawVert *)R_FrameAlloc( maxQuads * 4 * sizeof( idDrawVert ) );
-		tri->indexes = (glIndex_t *)R_FrameAlloc( maxQuads * 6 * sizeof( glIndex_t ) );
-		tri->bounds.Clear();
-		const int quads = effect->BuildSprites( segment, time, viewLeft, viewUp, tri->verts, maxQuads, tri->bounds );
-		if ( quads == 0 ) {
-			continue;
-		}
-		for ( int q = 0; q < quads; q++ ) {
-			glIndex_t *index = tri->indexes + q * 6;
-			const int base = q * 4;
-			index[0] = base + 0;
-			index[1] = base + 1;
-			index[2] = base + 2;
-			index[3] = base + 0;
-			index[4] = base + 2;
-			index[5] = base + 3;
-		}
-		tri->numVerts = quads * 4;
-		tri->numIndexes = quads * 6;
-		tri->ambientCache = vertexCache.AllocFrameTemp( tri->verts, tri->numVerts * sizeof( idDrawVert ) );
-		if ( tri->ambientCache == NULL ) {
-			continue;
-		}
-		R_AddDrawSurf( tri, vEntity, &def->parms, material, vEntity->scissorRect );
 	}
 }
 
@@ -453,6 +580,8 @@ void BSE_Init( void ) {
 	if ( bseModel == NULL ) {
 		bseModel = new idRenderModelBse;
 		bseModel->InitEmpty( "_BSE_EFFECT" );
+		bseLitModel = new idRenderModelBseLit;
+		bseLitModel->InitEmpty( "_BSE_EFFECT_LIT" );
 	}
 	bseRandom.SetSeed( 0x5eed );
 
@@ -479,6 +608,7 @@ void BSE_WorldFreed( idRenderWorld *world ) {
 		if ( bseEffects[i]->world == world ) {
 			bseEffects[i]->world = NULL;
 			bseEffects[i]->entityHandle = -1;
+			bseEffects[i]->litHandle = -1;
 		}
 	}
 	for ( int i = 0; i < bseWorldViews.Num(); i++ ) {
@@ -500,4 +630,8 @@ void BSE_Shutdown( void ) {
 	bseWorldViews.Clear();
 	delete bseModel;
 	bseModel = NULL;
+	delete bseLitModel;
+	bseLitModel = NULL;
+	bseGeometry.verts.Clear();
+	bseGeometry.indexes.Clear();
 }

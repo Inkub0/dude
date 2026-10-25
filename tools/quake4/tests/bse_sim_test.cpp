@@ -17,6 +17,12 @@
 	    reading of the motion (velocity, gravity, envelopes);
 	  - the most particles alive per segment against its budget.
 
+	Geometry (S3): ten times a second every segment's particles and motion trails are built for
+	a viewer as the renderer builds them - sprites, oriented quads, lines, bolts, strips, models
+	(a stand-in cube for every model) and burn trails. Gate: every vertex finite, every index
+	inside its geometry, whole triangles. Reported per particle kind: the segments drawn and the
+	most vertices one segment took; and how many named trail segments received particles.
+
 	Built and run by tools/quake4/test_bse_sim.sh. No game, no window, no GPU.
 */
 
@@ -88,6 +94,45 @@ float BSE_GameGravity( void ) { return GRAVITY; }
 bool BSE_ViewOrigin( const idRenderWorld *world, idVec3 &origin ) { return false; }	// no player: full detail
 idRandom &BSE_Random( void ) { return simRandom; }
 
+// every model particle's model: a cube 8 units across, its faces' own vertices
+static idDrawVert cubeVerts[24];
+static glIndex_t cubeIndexes[36];
+static srfTriangles_t cubeTri;
+const srfTriangles_t *BSE_ModelGeometry( const idRenderModel *model ) {
+	if ( cubeTri.numVerts == 0 ) {
+		for ( int face = 0; face < 6; face++ ) {
+			const int axis = face % 3;
+			const float sign = face < 3 ? -1.0f : 1.0f;
+			idVec3 normal( vec3_origin );
+			normal[axis] = sign;
+			const idVec3 u = axis == 0 ? idVec3( 0, 1, 0 ) : idVec3( 1, 0, 0 );
+			const idVec3 v = normal.Cross( u );
+			for ( int k = 0; k < 4; k++ ) {
+				idDrawVert &dv = cubeVerts[face * 4 + k];
+				dv.Clear();
+				const float a = ( k == 1 || k == 2 ) ? 1.0f : -1.0f;
+				const float b = ( k >= 2 ) ? 1.0f : -1.0f;
+				dv.xyz = ( normal + u * a + v * b ) * 4.0f;
+				dv.st.Set( a * 0.5f + 0.5f, b * 0.5f + 0.5f );
+				dv.normal = normal;
+				dv.tangents[0] = u;
+				dv.tangents[1] = v;
+			}
+			const int base = face * 4;
+			const int tri[6] = { 0, 1, 2, 0, 2, 3 };
+			for ( int k = 0; k < 6; k++ ) {
+				cubeIndexes[face * 6 + k] = base + tri[k];
+			}
+		}
+		cubeTri.verts = cubeVerts;
+		cubeTri.indexes = cubeIndexes;
+		cubeTri.numVerts = 24;
+		cubeTri.numIndexes = 36;
+		cubeTri.bounds = idBounds( idVec3( -4, -4, -4 ), idVec3( 4, 4, 4 ) );
+	}
+	return model != NULL ? &cubeTri : NULL;
+}
+
 static bool ReadEntry( std::istream &in, std::string &name, std::string &data ) {
 	std::string lengthLine;
 	if ( !std::getline( in, name ) || !std::getline( in, lengthLine ) ) {
@@ -100,6 +145,53 @@ static bool ReadEntry( std::istream &in, std::string &name, std::string &data ) 
 
 static bool Finite( const idVec3 &v ) {
 	return std::isfinite( v.x ) && std::isfinite( v.y ) && std::isfinite( v.z );
+}
+
+// per particle kind: the segments drawn, their vertices, the most one segment took
+typedef struct {
+	long	segments;
+	long	verts;
+	int		maxVerts;
+	long	trailSegments;		// motion trail ribbons
+	int		maxTrailVerts;
+	std::string	maxEffect;		// the effect of the largest segment
+} kindStats_t;
+static kindStats_t kindStats[EFFECT_PARTICLE_LIGHT + 1];
+static long badGeometry = 0;
+static const char *currentEffect = "";		// a vertex not finite, an index outside, a broken triangle
+static int namedTrails = 0, namedTrailsFed = 0;
+
+static void CheckGeometry( const idBseGeometry &geo, int kind, bool trail ) {
+	for ( int v = 0; v < geo.NumVerts(); v++ ) {
+		const idDrawVert &dv = geo.verts[v];
+		if ( !std::isfinite( dv.xyz.x ) || !std::isfinite( dv.xyz.y ) || !std::isfinite( dv.xyz.z ) ||
+				!std::isfinite( dv.st.x ) || !std::isfinite( dv.st.y ) ) {
+			badGeometry++;
+		}
+	}
+	if ( geo.NumIndexes() % 3 != 0 ) {
+		badGeometry++;
+	}
+	for ( int i = 0; i < geo.NumIndexes(); i++ ) {
+		if ( geo.indexes[i] < 0 || geo.indexes[i] >= geo.NumVerts() ) {
+			badGeometry++;
+		}
+	}
+	if ( geo.NumVerts() == 0 || kind < 0 || kind > EFFECT_PARTICLE_LIGHT ) {
+		return;
+	}
+	kindStats_t &k = kindStats[kind];
+	if ( trail ) {
+		k.trailSegments++;
+		k.maxTrailVerts = Max( k.maxTrailVerts, geo.NumVerts() );
+	} else {
+		k.segments++;
+		k.verts += geo.NumVerts();
+		if ( geo.NumVerts() > k.maxVerts ) {
+			k.maxVerts = geo.NumVerts();
+			k.maxEffect = currentEffect;
+		}
+	}
 }
 
 typedef struct {
@@ -128,9 +220,15 @@ static simResult_t Simulate( const idDeclEffect *decl, bool loop, float seconds 
 	idBseEffect effect;
 	effect.world = NULL;
 	effect.entityHandle = -1;
+	effect.litHandle = -1;
 	effect.Init( parms, 0.0f );
-	const idVec3 left( 0.0f, 1.0f, 0.0f ), up( 0.0f, 0.0f, 1.0f );
-	std::vector<idDrawVert> verts;
+	// a viewer off to the side, looking back at the effect
+	bseView_t view;
+	view.origin.Set( -150.0f, 40.0f, 30.0f );
+	view.left.Set( 0.0f, 1.0f, 0.0f );
+	view.up.Set( 0.0f, 0.0f, 1.0f );
+	idBseGeometry geo;
+	std::vector<bool> fed( effect.segments.Num(), false );
 	for ( int frame = 1; frame <= (int)( seconds * 60.0f ); frame++ ) {
 		const float t = frame / 60.0f;
 		effect.UpdateFromOwner( parms, t );
@@ -157,22 +255,30 @@ static simResult_t Simulate( const idDeclEffect *decl, bool loop, float seconds 
 					r.outside++;
 				}
 			}
-			if ( segment.tmpl->hasParticles && segment.tmpl->particle.type == EFFECT_PARTICLE_SPRITE && segment.particles.Num() ) {
-				verts.resize( segment.particles.Num() * 4 );
-				idBounds b;
-				b.Clear();
-				const int quads = effect.BuildSprites( segment, t, left, up, verts.data(), segment.particles.Num(), b );
-				for ( int v = 0; v < quads * 4; v++ ) {
-					if ( !Finite( verts[v].xyz ) ) {
-						r.notFinite++;
-					}
-				}
+			if ( segment.particles.Num() > 0 ) {
+				fed[s] = true;
+			}
+			if ( segment.tmpl->hasParticles && segment.particles.Num() && frame % 6 == 0 ) {
+				geo.Clear();
+				effect.BuildSegment( segment, t, view, geo );
+				CheckGeometry( geo, segment.tmpl->particle.type, false );
+				geo.Clear();
+				effect.BuildMotionTrails( segment, t, view, geo );
+				CheckGeometry( geo, segment.tmpl->particle.type, true );
 			}
 		}
 		if ( over && !loop ) {
 			r.ended = true;
 			r.endTime = t;
 			break;
+		}
+	}
+	if ( !loop ) {
+		for ( int s = 0; s < effect.segments.Num(); s++ ) {
+			if ( effect.segments[s].tmpl->type == EFFECT_SEG_TRAIL && effect.segments[s].tmpl->enabled ) {
+				namedTrails++;
+				namedTrailsFed += fed[s] ? 1 : 0;
+			}
 		}
 	}
 	return r;
@@ -230,6 +336,7 @@ int main( int argc, char **argv ) {
 				}
 			}
 
+			currentEffect = decl->GetName();
 			const simResult_t once = Simulate( decl, false, 120.0f );
 			const simResult_t looped = Simulate( decl, true, Max( 1.0f, Min( 30.0f, decl->GetMaxDuration() * 3.0f ) ) );
 			notFinite += once.notFinite + looped.notFinite;
@@ -258,5 +365,16 @@ int main( int argc, char **argv ) {
 	printf( "== not finite: %d; non-looping effects that do not end: %d; segments over budget: %d\n", notFinite, notEnded, overBudget );
 	printf( "== computed radius vs the file's size: %d equal (within 1), %d within 10%%, %d further off\n", radiusMatch, radiusWithin10, radiusOff );
 	printf( "== effects whose particles go beyond twice their radius - past the retail formula's reach (over 5%% of samples): %d of %d\n", leaving, withParticles );
-	return ( failed > 0 || notFinite > 0 || notEnded > 0 || overBudget > 0 ) ? 1 : 0;
+	static const char *kindNames[] = { "sprite", "line", "oriented", "electricity", "debris", "model", "linked", "decal", "light" };
+	printf( "== geometry, ten times a second (kind: segments drawn, vertices, most in one segment; motion trails):\n" );
+	for ( int k = 0; k <= EFFECT_PARTICLE_LIGHT; k++ ) {
+		const kindStats_t &ks = kindStats[k];
+		if ( ks.segments || ks.trailSegments ) {
+			printf( "   %-12s %8ld %10ld %6d   trails %6ld, most %d   (largest: %s)\n", kindNames[k], ks.segments, ks.verts, ks.maxVerts,
+				ks.trailSegments, ks.maxTrailVerts, ks.maxEffect.c_str() );
+		}
+	}
+	printf( "== named trail segments that received particles (once): %d of %d\n", namedTrailsFed, namedTrails );
+	printf( "== bad geometry (vertex not finite, index outside, broken triangle): %ld\n", badGeometry );
+	return ( failed > 0 || notFinite > 0 || notEnded > 0 || overBudget > 0 || badGeometry > 0 ) ? 1 : 0;
 }
