@@ -300,10 +300,9 @@ void idChoiceWindow::UpdateChoicesAndVals( void ) {
 	idStr str2, str3;
 	idLexer src;
 
-	// DUDE: read both lists from the gui state now. choiceVals.Length() below always re-read it,
-	// but choicesStr only followed it on the window's next StateChanged, so a "gui::" list set
-	// after the gui loaded (Quake 4's devices, aspects, player models) had its values parsed
-	// against the old, empty choices for a frame - and warned "value count unequal"
+	// DUDE: read both lists from the gui state now when bound to it ("gui::..." - Quake 4's
+	// devices, aspects, player models): choiceVals.Length() below re-reads it, choicesStr would
+	// only follow on the window's next StateChanged
 	choicesStr.Update();
 	choiceVals.Update();
 
@@ -422,6 +421,17 @@ void idChoiceWindow::PostParse() {
 		choiceVals.Set( R_GetVidModeValsString(injectCustomMode) );
 	}
 	// DG end
+
+	// DUDE: Quake 4's menus take their values from the gui state ("gui::aspect_values"), as their
+	// choices. "choices" is a register, bound to the state when parsed; "values" is not, so it
+	// kept the text "gui::..." itself - one value against the state's choices: "value count
+	// unequal to choices count", and a pick past the first had no value of its own. Bound the same
+	// way now (not made a register: that would change the saved GUI layout). Doom 3's menus give
+	// literal values, untouched.
+	if ( idStr::Icmpn( choiceVals.c_str(), "gui::", 5 ) == 0 ) {
+		const idStr reference = choiceVals.c_str();
+		choiceVals.Init( reference, this );
+	}
 
 	UpdateChoicesAndVals();
 
