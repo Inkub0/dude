@@ -1,6 +1,6 @@
 windowDef Desktop {
 	//arl; start
-	#include "guis/_cst_anchor.pd"
+	#include "guis/_dude_anchor.pd"
 	scaleto43 0
 	//arl; end
 	rect		0 ,0 ,640 ,480

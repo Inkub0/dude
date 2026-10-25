@@ -26,10 +26,12 @@ fi
 # the game takes +commands: anything else would reach the engine glued to run.sh's last
 # "+set fs_savepath <dir>" and become part of the save path ("<dir> --d3" - saves the load menu
 # never lists)
-if [ "${1:-}" != "${1#--}" ]; then
+case "${1:-}" in
+--*)
 	echo "run-asan.sh: unknown option '$1' (--d3 or --q4 first; game arguments are +commands)" >&2
 	exit 1
-fi
+	;;
+esac
 
 if [ ! -f "$ASAN_BUILD/CMakeCache.txt" ]; then
 	[ -f "$DUDE/build/CMakeCache.txt" ] || { echo "run-asan.sh: configure build/ first (./build.sh)" >&2; exit 1; }
