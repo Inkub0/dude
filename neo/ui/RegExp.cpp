@@ -397,6 +397,13 @@ void idRegisterList::ReadFromSaveGame( idFile *savefile ) {
 	int i, num;
 
 	savefile->Read( &num, sizeof( num ) );
+	// DUDE: a GUI's saved state follows the file it was saved with, window by window; read
+	// against another version of that file (a GUI mod installed or removed since) it is out of
+	// step - this count is where that shows. Stop the load instead of reading past the list.
+	if ( num != regs.Num() ) {
+		common->Error( "The savegame's GUI state does not match the GUI files now installed (%d registers saved, %d now): "
+			"was a GUI mod (a widescreen pack, a HUD) added or removed since the game was saved?", num, regs.Num() );
+	}
 	for ( i = 0; i < num; i++ ) {
 		regs[i]->ReadFromSaveGame( savefile );
 	}
