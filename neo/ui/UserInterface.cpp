@@ -327,6 +327,8 @@ vehicles' ("gui_hud"). Of those, a scope or noise composed to cover the screen i
 kept whole. The cinematic bars and the weapons' zoom views span the screen: none of them.
 ================
 */
+extern idCVar cst_hudAdjustAspect;
+
 static void AnchorQuake4Hud( idWindow *desktop, const char *qpath ) {
 	static const struct {
 		const char *	gui;
@@ -362,6 +364,23 @@ static void AnchorQuake4Hud( idWindow *desktop, const char *qpath ) {
 		{ "guis/cursor.gui",		"crossDesc",	idDeviceContext::CST_ANCHOR_CENTER_CENTER },
 	};
 
+	// DUDE's layout, with the HUD kept in shape (user's choice, 2026-10-25): the health and armor
+	// bars - a pair Raven centred on the screen, 52 units right of the ammo bar - move up to it,
+	// 11 apart like the pair itself. The group windows span the screen at x 0; set, not moved,
+	// so a savegame's restored rects are not moved twice
+	static const struct {
+		const char *	gui;
+		const char *	window;
+		float			x;
+	} moves[] = {
+		{ "guis/hud.gui",			"p_health",		-41.0f },	// ammo bar ends at 138, health starts at 190, armor at 326 (health ends at 315)
+		{ "guis/hud.gui",			"p_armor",		-41.0f },
+		{ "guis/hud.gui",			"p_health_mp",	-41.0f },
+		{ "guis/hud.gui",			"p_armor_mp",	-41.0f },
+		{ "guis/hud_strogg.gui",	"p_health",		-40.0f },	// 139, 190, 330 (319)
+		{ "guis/hud_strogg.gui",	"p_armor",		-40.0f },
+	};
+
 	if ( desktop == NULL || GameTitle::Get().title != GAME_TITLE_QUAKE4 ) {
 		return;
 	}
@@ -373,6 +392,14 @@ static void AnchorQuake4Hud( idWindow *desktop, const char *qpath ) {
 		for ( int j = 0; j < (int)( sizeof( fixes ) / sizeof( fixes[0] ) ); j++ ) {
 			if ( idStr::Icmp( qpath, fixes[j].gui ) == 0 ) {
 				desktop->SetChildCstAnchor( fixes[j].window, fixes[j].anchor );
+			}
+		}
+		if ( cst_hudAdjustAspect.GetBool() ) {		// else the retail layout, stretched
+			for ( int j = 0; j < (int)( sizeof( moves ) / sizeof( moves[0] ) ); j++ ) {
+				if ( idStr::Icmp( qpath, moves[j].gui ) != 0 ) {
+					continue;
+				}
+				desktop->SetChildRectX( moves[j].window, moves[j].x );
 			}
 		}
 		return;
