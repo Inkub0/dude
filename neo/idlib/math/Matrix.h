@@ -415,6 +415,12 @@ public:
 	friend void		TransposeMultiply( const idMat3 &inv, const idMat3 &b, idMat3 &dst );
 	friend idMat3	SkewSymmetric( idVec3 const &src );
 
+	// helpers Quake 4's game code uses (Raven added them to its idlib); not virtual, no data.
+	// Each turns the rows by 'degrees', right-handed about the axis.
+	void			RotateAbsolute( int worldAxis, float degrees );		// about world x, y or z (0, 1, 2)
+	void			RotateRelative( int rowAxis, float degrees );		// about this matrix's own row 0, 1 or 2
+	void			RotateArbitrary( const idVec3 &axis, float degrees );	// about a unit vector
+
 private:
 	idVec3			mat[ 3 ];
 };

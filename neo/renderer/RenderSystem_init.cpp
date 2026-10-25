@@ -3406,6 +3406,8 @@ idRenderSystemLocal::Clear
 */
 void idRenderSystemLocal::Clear( void ) {
 	registered = false;
+	specialEffects = 0;
+	memset( specialEffectParms, 0, sizeof( specialEffectParms ) );
 	frameCount = 0;
 	viewCount = 0;
 	staticAllocCount = 0;

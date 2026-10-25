@@ -111,6 +111,8 @@ public:
 	int						AddSide( idMapBrushSide *side ) { return sides.Append( side ); }
 	idMapBrushSide *		GetSide( int i ) const { return sides[i]; }
 	unsigned int			GetGeometryCRC( void ) const;
+							// moves the brush by delta, the textures staying where they are on its faces
+	void					TranslateSelf( const idVec3 &delta );
 
 protected:
 	int						numSides;
@@ -217,6 +219,11 @@ public:
 	void					RemoveAllEntities();
 	void					RemovePrimitiveData();
 	bool					HasPrimitiveData() { return hasPrimitiveData; }
+
+							// Quake 4's processing after Parse() (its game calls it; Radiant used to do it on
+							// save): every func_group's primitives move into the worldspawn, translated by
+							// the group's origin, and the func_groups go
+	void					Resolve( void );
 
 protected:
 	float					version;

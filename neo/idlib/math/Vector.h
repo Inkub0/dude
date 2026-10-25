@@ -389,6 +389,25 @@ public:
 
 	void			Lerp( const idVec3 &v1, const idVec3 &v2, const float l );
 	void			SLerp( const idVec3 &v1, const idVec3 &v2, const float l );
+
+	// helpers Quake 4's game code uses (Raven added them to its idlib); not virtual, no data
+	idVec3 &		operator=( const idVec2 &a );				// x and y from a, z kept
+	idVec3			ToNormal( void ) const;						// normalized copy
+	idMat3			ToMat3( int axis ) const;					// as ToMat3(), with this vector as row 'axis'
+	float			Dist( const idVec3 &p ) const;				// distance to p (LengthFast precision)
+	float			DistXY( const idVec3 &p ) const;			// distance to p in the XY plane (LengthFast precision)
+	float			Dist2XY( const idVec3 &p ) const;			// squared distance to p in the XY plane
+					// distance to the segment start -> end; scale is where this point projects on the
+					// segment: < 0 before start, 0..1 on it, > 1 beyond end
+	float			DistToLineSeg( const idVec3 &start, const idVec3 &end, float &scale ) const;
+					// moves this point to its closest point on the segment; false when that is an end point
+	bool			ProjectToLineSeg( const idVec3 &start, const idVec3 &end );
+					// replaces this vector with its projection on u, returns the projection's scale of u
+	float			ProjectOntoVector( const idVec3 &u );
+	bool			IsLeftOf( const idVec3 &start, const idVec3 &end ) const;	// in the XY plane
+	bool			IsZero( void ) const;						// every component is +0 or -0
+					// each component c becomes c + c * range[i] * random.CRandomFloat()
+	idVec3			Random( const idVec3 &range, idRandom &random ) const;
 };
 
 extern idVec3 vec3_origin;
@@ -801,6 +820,47 @@ ID_INLINE bool idVec3::ProjectAlongPlane( const idVec3 &normal, const float epsi
 	cross *= overBounce * ( normal * (*this) ) / len;
 	(*this) -= cross;
 	return true;
+}
+
+ID_INLINE idVec3 &idVec3::operator=( const idVec2 &a ) {
+	x = a.x;
+	y = a.y;
+	return *this;
+}
+
+ID_INLINE idVec3 idVec3::ToNormal( void ) const {
+	idVec3 n = *this;
+	n.Normalize();
+	return n;
+}
+
+ID_INLINE float idVec3::Dist( const idVec3 &p ) const {
+	return ( *this - p ).LengthFast();
+}
+
+ID_INLINE float idVec3::DistXY( const idVec3 &p ) const {
+	return idVec3( x - p.x, y - p.y, 0.0f ).LengthFast();
+}
+
+ID_INLINE float idVec3::Dist2XY( const idVec3 &p ) const {
+	return ( p.x - x ) * ( p.x - x ) + ( p.y - y ) * ( p.y - y );
+}
+
+ID_INLINE bool idVec3::IsLeftOf( const idVec3 &start, const idVec3 &end ) const {
+	// twice the signed area of the triangle (this, start, end), shoelace order: positive when
+	// the three run counter-clockwise, i.e. this point is left of start -> end
+	const float area2 = ( start.x * end.y - start.y * end.x ) + ( end.x * y - end.y * x ) + ( x * start.y - y * start.x );
+	return area2 > 0.0f;
+}
+
+ID_INLINE bool idVec3::IsZero( void ) const {
+	return x == 0.0f && y == 0.0f && z == 0.0f;
+}
+
+ID_INLINE float idVec3::ProjectOntoVector( const idVec3 &u ) {
+	const float scale = ( *this * u ) / u.LengthSqr();
+	*this = u * scale;
+	return scale;
 }
 
 

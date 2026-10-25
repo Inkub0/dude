@@ -392,6 +392,7 @@ public:
 	virtual const idDict *	GetMapDecl( int i );
 	virtual void			FindMapScreenshot( const char *path, char *buf, int len );
 	virtual bool			FilenameCompare( const char *s1, const char *s2 ) const;
+	virtual idFile *		GetNewFileMemory( void ) { return new idFile_Memory(); }	// Quake 4
 
 	static void				Dir_f( const idCmdArgs &args );
 	static void				DirTree_f( const idCmdArgs &args );

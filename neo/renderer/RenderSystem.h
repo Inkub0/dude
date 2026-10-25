@@ -211,6 +211,16 @@ typedef struct {
 	const char *	gpuDriver;
 } renderFrameStats_t;
 
+// Quake 4's full-screen effects (idRenderSystem::SetSpecialEffect); the values are its scripts'
+typedef enum {
+	SPECIAL_EFFECT_NONE		= 0,
+	SPECIAL_EFFECT_BLUR		= 0x00000001,
+	SPECIAL_EFFECT_AL		= 0x00000002,
+	SPECIAL_EFFECT_MAX
+} ESpecialEffectType;
+
+const int MAX_SPECIAL_EFFECT_PARMS = 8;
+
 class idRenderSystem {
 public:
 
@@ -320,6 +330,27 @@ public:
 	virtual void			GetFrameStats( renderFrameStats_t &stats ) = 0;
 	// keep the backend GPU frame timer running for the benchmark (no-op on the legacy GL path)
 	virtual void			SetGpuTimerRequested( bool on ) = 0;
+
+	// ---- Quake 4 game library (appended; a dhewm3 game library's vtable is unchanged) -----
+							// Raven's name for drawing a copy of the rendered view (its D3D path flipped the
+							// texture coordinates; here it is DrawStretchPic, as Doom 3 draws _currentRender)
+	void					DrawStretchCopy( float x, float y, float w, float h, float s1, float t1, float s2, float t2, const idMaterial *material ) {
+								DrawStretchPic( x, y, w, h, s1, t1, s2, t2, material );
+							}
+							// texture streaming for cinematics, a console feature: nothing to do here
+	enum TextureTrackCommand {
+		TEXTURE_TRACK_BEGIN,
+		TEXTURE_TRACK_UPDATE,
+		TEXTURE_TRACK_END
+	};
+	void					TrackTextureUsage( TextureTrackCommand command, int frametime = 0, const char *name = NULL ) {}
+							// Raven's developer graph overlay; DUDE has none
+	void					DebugGraph( float cur, float min, float max, const idVec4 &color ) {}
+							// the full-screen effects scripts switch (sys.setSpecialEffect): which are on, their
+							// parameters, and all off at map end
+	virtual void			SetSpecialEffect( ESpecialEffectType which, bool enabled ) = 0;
+	virtual void			SetSpecialEffectParm( ESpecialEffectType which, int parm, float value ) = 0;
+	virtual void			ShutdownSpecialEffects( void ) = 0;
 };
 
 extern idRenderSystem *			renderSystem;

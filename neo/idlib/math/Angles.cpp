@@ -241,3 +241,16 @@ idAngles::ToString
 const char *idAngles::ToString( int precision ) const {
 	return idStr::FloatArrayToString( ToFloatPtr(), GetDimension(), precision );
 }
+
+/*
+=================
+idAngles::Random
+=================
+*/
+idAngles idAngles::Random( const idVec3 &range, idRandom &random ) const {
+	idAngles a = *this;
+	for ( int i = 0; i < GetDimension(); i++ ) {
+		a[i] += a[i] * range[i] * random.CRandomFloat();
+	}
+	return a;
+}

@@ -254,6 +254,8 @@ public:
 	virtual void			AddToReadCount( int c ) = 0;
 							// look for a dynamic module
 	virtual void			FindDLL( const char *basename, char dllPath[ MAX_OSPATH ] ) = 0;
+							// Quake 4's form (Raven's checksum update has no counterpart)
+	void					FindDLL( const char *basename, char dllPath[ MAX_OSPATH ], bool updateChecksum ) { FindDLL( basename, dllPath ); }
 							// case sensitive filesystems use an internal directory cache
 							// the cache is cleared when calling OpenFileWrite and RemoveFile
 							// in some cases you may need to use this directly
@@ -287,6 +289,12 @@ public:
 
 							// ignore case and seperator char distinctions
 	virtual bool			FilenameCompare( const char *s1, const char *s2 ) const = 0;
+
+	// ---- Quake 4 game library (appended; a dhewm3 game library's vtable is unchanged) -----
+							// a new, empty memory file the caller owns
+	virtual idFile *		GetNewFileMemory( void ) = 0;
+							// Raven warned about files loaded while this was off (not precached); DUDE does not
+	void					SetIsFileLoadingAllowed( bool mode ) {}
 };
 
 extern idFileSystem *		fileSystem;

@@ -183,7 +183,23 @@ typedef struct aasFeature_s {
 	unsigned char				normaly;
 	unsigned char				height;				// 72 standing / 48 crouched in the retail files
 	unsigned char				weight;
+
+								// defined by the Quake 4 game library (its tactical search), never by the engine
+	idVec3 &					Normal( void );
+	idVec3 &					Origin( void );
+	void						DrawDebugInfo( int index = -1 );
+	int							GetLookPos( idVec3 &lookPos, const idVec3 &aimAtOrigin, const float leanDistance = 16.0f );
 } aasFeature_t;
+
+// Quake 4 tactical feature flags (aasFeature_t::flags)
+#define FEATURE_COVER				BIT(0)		// gives cover
+#define FEATURE_LOOK_LEFT			BIT(1)		// attack by leaning left
+#define FEATURE_LOOK_RIGHT			BIT(2)		// attack by leaning right
+#define FEATURE_LOOK_OVER			BIT(3)		// attack by leaning over the cover
+#define FEATURE_CORNER_LEFT			BIT(4)		// a left corner
+#define FEATURE_CORNER_RIGHT		BIT(5)		// a right corner
+#define FEATURE_PINCH				BIT(6)		// a tight spot between two larger areas
+#define FEATURE_VANTAGE				BIT(7)		// a good view over the sampled area
 
 // DUDE: a Quake 4 area's run in the feature index - Raven's aasArea_t numFeatures / firstFeature,
 // kept beside the areas because Doom 3 game libraries read aasArea_t inline
@@ -264,6 +280,9 @@ public:
 								// DUDE: Quake 4 - the file has tactical features (appended: an idAASFile's
 								// settings are read inline by game libraries, and it is that class's last member)
 	bool						generateTacticalFeatures;
+								// DUDE: Quake 4's debug drawing of this size (aas_showAreas 3), appended the same way
+	idVec4						debugColor;
+	bool						debugDraw;
 
 public:
 								idAASSettings( void );
@@ -346,6 +365,8 @@ public:
 	bool						IsDummyFile( void ) const { return areas.Num() == 0; }
 	int							GetNumFeatures( void ) const { return features.Num(); }
 	const aasFeature_t &		GetFeature( int index ) const { return features[index]; }
+								// Quake 4's tactical search keeps a scratch weight in each feature
+	aasFeature_t &				GetFeature( int index ) { return features[index]; }
 	int							GetNumFeatureIndexes( void ) const { return featureIndex.Num(); }
 	const aasIndex_t &			GetFeatureIndex( int index ) const { return featureIndex[index]; }
 	void						GetAreaFeatures( int areaNum, int &firstFeature, int &numFeatures ) const {
@@ -376,6 +397,16 @@ public:
 	virtual bool				Trace( aasTrace_t &trace, const idVec3 &start, const idVec3 &end ) const = 0;
 	virtual void				PrintInfo( void ) const = 0;
 
+	// ---- Quake 4 game library (appended; a dhewm3 game library's vtable is unchanged) -----
+	virtual size_t				GetMemorySize( void ) const = 0;
+								// Raven's form (the CRC does not decide whether a file is a dummy)
+	bool						IsDummyFile( unsigned int mapFileCRC ) const { return IsDummyFile(); }
+								// the top of an area (Raven's aasArea_t::ceiling, derived at load for its files;
+								// 0 for a Doom 3 file)
+	float						GetAreaCeiling( int areaNum ) const {
+									return ( areaNum >= 0 && areaNum < areaCeilings.Num() ) ? areaCeilings[areaNum] : 0.0f;
+								}
+
 protected:
 	idStr						name;
 	unsigned int				crc;
@@ -396,6 +427,7 @@ protected:
 	idList<aasAreaFeatures_t>	areaFeatures;		// per area, parallel to areas
 	idList<aasIndex_t>			featureIndex;
 	idList<aasFeature_t>		features;
+	idList<float>				areaCeilings;		// per area, parallel to areas
 };
 
 #endif /* !__AASFILE_H__ */

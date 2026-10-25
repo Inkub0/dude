@@ -2599,6 +2599,25 @@ void idRenderModelStatic::ReadFromDemoFile( class idDemoFile *f ) {
 
 /*
 ================
+idRenderModelStatic::GetSurfaceMask
+================
+*/
+int idRenderModelStatic::GetSurfaceMask( const char *surface ) const {
+	int mask = 0;
+	if ( surface == NULL || !surface[0] ) {
+		return mask;
+	}
+	for ( int i = 0; i < surfaces.Num() && i < 32; i++ ) {
+		const idMaterial *shader = surfaces[i].shader;
+		if ( shader != NULL && idStr::Icmp( shader->GetName(), surface ) == 0 ) {
+			mask |= 1 << i;
+		}
+	}
+	return mask;
+}
+
+/*
+================
 idRenderModelStatic::WriteToDemoFile
 ================
 */

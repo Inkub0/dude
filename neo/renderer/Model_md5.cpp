@@ -2021,7 +2021,10 @@ idRenderModel *idRenderModelMD5::InstantiateDynamicModel( const struct renderEnt
 
 		shader = R_RemapShaderBySkin( shader, ent->customSkin, ent->customShader );
 
-		if ( !shader || ( !shader->IsDrawn() && !shader->SurfaceCastsShadow() ) ) {
+		// DUDE: Quake 4's hidden surfaces (idRenderEntityLocal::suppressSurfaceMask)
+		const bool maskedOut = i < 32 && ( r_instancingSurfaceMask & ( 1 << i ) ) != 0;
+
+		if ( !shader || maskedOut || ( !shader->IsDrawn() && !shader->SurfaceCastsShadow() ) ) {
 			staticModel->DeleteSurfaceWithId( i );
 			mesh->surfaceNum = -1;
 			continue;
@@ -2119,6 +2122,25 @@ const char *idRenderModelMD5::GetJointName( jointHandle_t handle ) const {
 	}
 
 	return joints[ handle ].name;
+}
+
+/*
+====================
+idRenderModelMD5::GetSurfaceMask
+====================
+*/
+int idRenderModelMD5::GetSurfaceMask( const char *surface ) const {
+	int mask = 0;
+	if ( surface == NULL || !surface[0] ) {
+		return mask;
+	}
+	for ( int i = 0; i < meshes.Num() && i < 32; i++ ) {
+		const idMaterial *shader = meshes[i].shader;
+		if ( shader != NULL && idStr::Icmp( shader->GetName(), surface ) == 0 ) {
+			mask |= 1 << i;
+		}
+	}
+	return mask;
 }
 
 /*

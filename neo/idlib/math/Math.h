@@ -104,6 +104,8 @@ template<class T> ID_INLINE T	Square( T x ) { return x * x; }
 template<class T> ID_INLINE T	Cube( T x ) { return x * x * x; }
 
 
+class idVec2;
+
 class idMath {
 public:
 
@@ -200,6 +202,14 @@ public:
 	static float				BitsToFloat( int i, int exponentBits, int mantissaBits );
 
 	static int					FloatHash( const float *array, const int numFloats );
+
+	// helpers Quake 4's game code uses (Raven added them to its idlib)
+	static float				Lerp( float start, float end, float frac );		// frac clamped to 0..1
+	static float				Lerp( const idVec2 &range, float frac );		// Lerp( range[0], range[1], frac )
+								// start -> mid while frac goes 0 -> 0.5, mid -> end while it goes 0.5 -> 1
+	static float				MidPointLerp( float start, float mid, float end, float frac );
+								// decibels to a linear gain, doubling every 6 dB; 0 below -60 dB
+	static float				dBToScale( float db );
 
 	static const float			PI;							// pi
 	static const float			TWO_PI;						// pi * 2

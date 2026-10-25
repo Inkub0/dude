@@ -259,6 +259,12 @@ ID_INLINE idDecl *idDeclAllocator( void ) {
 class idMaterial;
 class idDeclSkin;
 class idSoundShader;
+class idDeclTable;
+class idDeclMaterialType;
+class idDeclLipSync;
+class idDeclPlayback;
+class idDeclEffect;
+class idPlaybackData;
 
 class idDeclManager {
 public:
@@ -331,6 +337,38 @@ public:
 	virtual const idMaterial *		MaterialByIndex( int index, bool forceParse = true ) = 0;
 	virtual const idDeclSkin *		SkinByIndex( int index, bool forceParse = true ) = 0;
 	virtual const idSoundShader *	SoundByIndex( int index, bool forceParse = true ) = 0;
+
+	// ---- Quake 4 game library (appended; a dhewm3 game library's vtable is unchanged) -----
+									// Raven's forms of FindType and RegisterDeclFolder: DUDE keeps no parsed-decl
+									// cache (noCaching), and its decl folders are searched recursively
+	const idDecl *					FindType( declType_t type, const char *name, bool makeDefault, bool noCaching ) {
+										return FindType( type, name, makeDefault );
+									}
+	void							RegisterDeclFolderWrapper( const char *folder, const char *extension, declType_t defaultType,
+																bool unique = false, bool norecurse = false ) {
+										RegisterDeclFolder( folder, extension, defaultType );
+									}
+									// Quake 4's decl types (framework/DeclQuake4.h), and its table lookup
+	virtual const idDeclTable *			FindTable( const char *name, bool makeDefault = true ) = 0;
+	virtual const idDeclMaterialType *	FindMaterialType( const char *name, bool makeDefault = true ) = 0;
+	virtual const idDeclLipSync *		FindLipSync( const char *name, bool makeDefault = true ) = 0;
+	virtual const idDeclPlayback *		FindPlayback( const char *name, bool makeDefault = true ) = 0;
+	virtual const idDeclEffect *		FindEffect( const char *name, bool makeDefault = true ) = 0;
+	virtual const idDeclPlayback *		PlaybackByIndex( int index, bool forceParse = true ) = 0;
+									// a playback's state at now (ms into it); button changes and impulses
+									// since last go to pbd's callback. True once it has finished - and for no
+									// playback at all
+	virtual bool						GetPlaybackData( const idDeclPlayback *playback, int control, int now, int last, idPlaybackData *pbd ) = 0;
+									// recording one (g_recordPlayback): begin, add a sample at now (ms), finish
+									// and write it to its file
+	virtual void						StartPlaybackRecord( idDeclPlayback *playback ) = 0;
+	virtual bool						SetPlaybackData( idDeclPlayback *playback, int now, int control, idPlaybackData *pbd ) = 0;
+	virtual bool						FinishPlayback( idDeclPlayback *playback ) = 0;
+									// base_<n> for the first n no decl of the type is named
+	virtual idStr						GetNewName( declType_t type, const char *base ) = 0;
+									// a decl of the type with a base of its own, outside the manager's lists;
+									// the caller deletes both (Quake 4's decl validation)
+	virtual idDecl *					AllocateDecl( declType_t type ) = 0;
 };
 
 extern idDeclManager *		declManager;

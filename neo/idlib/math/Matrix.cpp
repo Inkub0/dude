@@ -610,6 +610,57 @@ idMat3 &idMat3::InertiaRotateSelf( const idMat3 &rotation ) {
 }
 
 /*
+============
+idMat3::RotateAbsolute, RotateRelative, RotateArbitrary
+
+The rotation matrices act on row vectors (v * R), like the rows of an axis matrix. A world-axis
+rotation applied after the matrix (this * R) turns its rows about the world axis; applied before
+(R * this) it turns them about the matrix's own row.
+============
+*/
+static idMat3 Mat3_AxisRotation( int axis, float degrees ) {
+	idMat3 r = mat3_identity;
+	float s, c;
+
+	idMath::SinCos( DEG2RAD( degrees ), s, c );
+	const int a = ( axis + 1 ) % 3, b = ( axis + 2 ) % 3;		// the plane the rotation turns
+	r[a][a] = c;
+	r[a][b] = s;
+	r[b][a] = -s;
+	r[b][b] = c;
+	return r;
+}
+
+void idMat3::RotateAbsolute( int worldAxis, float degrees ) {
+	if ( worldAxis < 0 || worldAxis > 2 ) {
+		assert( !"idMat3::RotateAbsolute: the axis is 0, 1 or 2" );
+		return;
+	}
+	*this *= Mat3_AxisRotation( worldAxis, degrees );
+}
+
+void idMat3::RotateRelative( int rowAxis, float degrees ) {
+	if ( rowAxis < 0 || rowAxis > 2 ) {
+		assert( !"idMat3::RotateRelative: the axis is 0, 1 or 2" );
+		return;
+	}
+	*this = Mat3_AxisRotation( rowAxis, degrees ) * (*this);
+}
+
+void idMat3::RotateArbitrary( const idVec3 &axis, float degrees ) {
+	float s, c;
+
+	idMath::SinCos( DEG2RAD( degrees ), s, c );
+	// Rodrigues' rotation about the unit vector, transposed for row vectors
+	const float t = 1.0f - c;
+	const idVec3 &n = axis;
+	const idMat3 r( c + t * n.x * n.x,			t * n.x * n.y + s * n.z,	t * n.x * n.z - s * n.y,
+					t * n.x * n.y - s * n.z,	c + t * n.y * n.y,			t * n.y * n.z + s * n.x,
+					t * n.x * n.z + s * n.y,	t * n.y * n.z - s * n.x,	c + t * n.z * n.z );
+	*this *= r;
+}
+
+/*
 =============
 idMat3::ToString
 =============

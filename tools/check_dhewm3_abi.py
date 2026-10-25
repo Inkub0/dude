@@ -31,6 +31,7 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 ALLOW_APPEND = {
     'idMaterial': 'decl, allocated by the decl manager; inline getters read the old fields at their old offsets',
     'idSoundShader': 'decl, allocated by the decl manager',
+    'idDeclAF': 'decl, allocated by the decl manager (Quake 4 fastEval appended)',
     'idDecl': 'never grows here; listed with its decls',
     'srfTriangles_s': 'allocated by the engine (R_AllocStaticTriSurf); games hold pointers',
     'idAASFile': 'allocated by the AAS file manager; games read it through its accessors',

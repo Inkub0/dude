@@ -149,6 +149,8 @@ public:
 	const idKeyValue *	MatchPrefix( const char *prefix, const idKeyValue *lastMatch = NULL ) const;
 						// randomly chooses one of the key/value pairs with the given key prefix and returns it's value
 	const char *		RandomPrefix( const char *prefix, idRandom &random ) const;
+						// as above, defaultValue when no key has the prefix (Quake 4's game code)
+	const char *		RandomPrefix( const char *prefix, idRandom &random, const char *defaultValue ) const;
 
 	void				WriteToFileHandle( idFile *f ) const;
 	void				ReadFromFileHandle( idFile *f );

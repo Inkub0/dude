@@ -33,51 +33,6 @@ If you have questions concerning this license or the applicable additional terms
 
 /*
 =================
-idDeclTable::TableLookup
-=================
-*/
-float idDeclTable::TableLookup( float index ) const {
-	int iIndex;
-	float iFrac;
-
-	int domain = values.Num() - 1;
-
-	if ( domain <= 1 ) {
-		return 1.0f;
-	}
-
-	if ( clamp ) {
-		index *= (domain-1);
-		if ( index >= domain - 1 ) {
-			return values[domain - 1];
-		} else if ( index <= 0 ) {
-			return values[0];
-		}
-		iIndex = idMath::Ftoi( index );
-		iFrac = index - iIndex;
-	} else {
-		index *= domain;
-
-		if ( index < 0 ) {
-			index += domain * idMath::Ceil( -index / domain );
-		}
-
-		iIndex = idMath::FtoiFast( idMath::Floor( index ) );
-		iFrac = index - iIndex;
-		iIndex = iIndex % domain;
-	}
-
-	if ( !snap ) {
-		// we duplicated the 0 index at the end at creation time, so we
-		// don't need to worry about wrapping the filter
-		return values[iIndex] * ( 1.0f - iFrac ) + values[iIndex + 1] * iFrac;
-	}
-
-	return values[iIndex];
-}
-
-/*
-=================
 idDeclTable::Size
 =================
 */

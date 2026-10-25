@@ -346,7 +346,25 @@ void idInternalCVar::Set( const char *newValue, bool force, bool fromServer ) {
 		}
 	}
 
-	if ( valueString.Icmp( newValue ) == 0 ) {
+	// Quake 4's value rules
+	idStr adjusted;
+	if ( flags & ( CVAR_SPECIAL_CONCAT | CVAR_STRIPTRAILING ) ) {
+		adjusted = newValue;
+		if ( flags & CVAR_SPECIAL_CONCAT ) {
+			// "^ 1Name" from the console's tokenizer is the colour code "^1Name"
+			for ( int i = adjusted.Length() - 2; i >= 0; i-- ) {
+				if ( adjusted[i] == C_COLOR_ESCAPE && adjusted[i + 1] == ' ' ) {
+					adjusted = idStr( adjusted, 0, i + 1 ) + idStr( adjusted, i + 2, adjusted.Length() );
+				}
+			}
+		}
+		if ( flags & CVAR_STRIPTRAILING ) {
+			adjusted.StripTrailing( '/' );
+		}
+		newValue = adjusted.c_str();
+	}
+
+	if ( ( flags & CVAR_CASE_SENSITIVE ) ? valueString.Cmp( newValue ) == 0 : valueString.Icmp( newValue ) == 0 ) {
 		return;
 	}
 
@@ -1248,8 +1266,8 @@ void idCVarSystemLocal::Restart_f( const idCmdArgs &args ) {
 	for ( i = 0; i < localCVarSystem.cvars.Num(); i++ ) {
 		cvar = localCVarSystem.cvars[i];
 
-		// don't mess with rom values
-		if ( cvar->flags & ( CVAR_ROM | CVAR_INIT ) ) {
+		// don't mess with rom values (nor Quake 4's CVAR_NORESET ones)
+		if ( cvar->flags & ( CVAR_ROM | CVAR_INIT | CVAR_NORESET ) ) {
 			continue;
 		}
 

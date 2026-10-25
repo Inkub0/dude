@@ -467,6 +467,11 @@ public:
 
 	virtual void			OpenURL( const char *url, bool quit ) = 0;
 	virtual void			StartProcess( const char *exePath, bool quit ) = 0;
+
+	// Quake 4's x87 checks: DUDE's maths runs on SSE, where the x87 stack is never left holding
+	// values, so it is always empty and has no state to report (non-virtual; vtable unchanged)
+	bool					FPU_StackIsEmpty( void ) { return true; }
+	const char *			FPU_GetState( void ) { return ""; }
 };
 
 extern idSys *				sys;

@@ -62,6 +62,7 @@ public:
 	virtual void				PushPointIntoAreaNum( int areaNum, idVec3 &point ) const;
 	virtual bool				Trace( aasTrace_t &trace, const idVec3 &start, const idVec3 &end ) const;
 	virtual void				PrintInfo( void ) const;
+	virtual size_t				GetMemorySize( void ) const;
 
 public:
 	bool						Load( const idStr &fileName, unsigned int mapFileCRC );
@@ -72,6 +73,7 @@ public:
 	void						Optimize( void );
 	void						LinkReversedReachability( void );
 	void						FinishAreas( void );
+	void						FinishAreaCeilings( void );	// DUDE: Quake 4
 
 	void						Clear( void );
 	void						DeleteReachabilities( void );

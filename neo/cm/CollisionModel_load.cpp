@@ -3654,8 +3654,16 @@ bool idCollisionModelManagerLocal::GetModelPolygon( cmHandle_t model, int polygo
 idCollisionModelManagerLocal::LoadModel
 ==================
 */
-cmHandle_t idCollisionModelManagerLocal::LoadModel( const char *modelName, const bool precache ) {
+cmHandle_t idCollisionModelManagerLocal::LoadModel( const char *modelNameArg, const bool precache ) {
 	int handle;
+
+	// DUDE: model names are compared as paths with forward slashes. Quake 4's maps write
+	// entity clipmodel keys with backslashes ("models\mapobjects\...\medium1_low.lwo") while its
+	// .cm files name the model with forward slashes, so the file loaded but never matched and the
+	// render model was converted again. Doom 3 maps and mods that do the same benefit alike.
+	idStr canonicalName = modelNameArg;
+	canonicalName.BackSlashesToSlashes();
+	const char *modelName = canonicalName.c_str();
 
 	handle = FindModel( modelName );
 	if ( handle >= 0 ) {

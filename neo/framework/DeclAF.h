@@ -195,6 +195,9 @@ public:
 	bool					selfCollision;
 	idList<idDeclAF_Body *>			bodies;
 	idList<idDeclAF_Constraint *>	constraints;
+							// DUDE: Quake 4's settings keyword "fastEval" - evaluate the figure without
+							// what some uses do not need (appended: the decl manager allocates decls)
+	bool					fastEval;
 
 private:
 	bool					ParseContents( idLexer &src, int &c ) const;

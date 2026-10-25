@@ -235,6 +235,20 @@ public:
 	virtual const idDeclSkin *		SkinByIndex( int index, bool forceParse = true );
 	virtual const idSoundShader *	SoundByIndex( int index, bool forceParse = true );
 
+	// Quake 4 game library
+	virtual const idDeclTable *			FindTable( const char *name, bool makeDefault = true );
+	virtual const idDeclMaterialType *	FindMaterialType( const char *name, bool makeDefault = true );
+	virtual const idDeclLipSync *		FindLipSync( const char *name, bool makeDefault = true );
+	virtual const idDeclPlayback *		FindPlayback( const char *name, bool makeDefault = true );
+	virtual const idDeclEffect *		FindEffect( const char *name, bool makeDefault = true );
+	virtual const idDeclPlayback *		PlaybackByIndex( int index, bool forceParse = true );
+	virtual bool						GetPlaybackData( const idDeclPlayback *playback, int control, int now, int last, idPlaybackData *pbd );
+	virtual void						StartPlaybackRecord( idDeclPlayback *playback );
+	virtual bool						SetPlaybackData( idDeclPlayback *playback, int now, int control, idPlaybackData *pbd );
+	virtual bool						FinishPlayback( idDeclPlayback *playback );
+	virtual idStr						GetNewName( declType_t type, const char *base );
+	virtual idDecl *					AllocateDecl( declType_t type );
+
 public:
 	static void					MakeNameCanonical( const char *name, char *result, int maxLength );
 	idDeclLocal *				FindTypeWithoutParsing( declType_t type, const char *name, bool makeDefault = true );
@@ -868,7 +882,7 @@ void idDeclManagerLocal::Init( void ) {
 		RegisterDeclType( "lipSync",		DECL_LIPSYNC,		idDeclAllocator<idDeclLipSync> );
 		RegisterDeclType( "playback",		DECL_PLAYBACK,		idDeclAllocator<idDeclPlayback> );
 		RegisterDeclType( "effect",			DECL_EFFECT,		idDeclAllocator<idDeclEffect> );
-		RegisterDeclType( "playerModel",	DECL_PLAYER_MODEL,	idDeclAllocator<idDeclEntityDef> );
+		RegisterDeclType( "playerModel",	DECL_PLAYER_MODEL,	idDeclAllocator<idDeclPlayerModel> );
 	}
 
 	// DUDE: Quake 4's material templates, before the materials that use them
@@ -1618,6 +1632,98 @@ const idSoundShader *idDeclManagerLocal::FindSound( const char *name, bool makeD
 
 const idSoundShader *idDeclManagerLocal::SoundByIndex( int index, bool forceParse ) {
 	return static_cast<const idSoundShader *>( DeclByIndex( DECL_SOUND, index, forceParse ) );
+}
+
+/*
+===================
+idDeclManagerLocal::FindTable, FindMaterialType, FindLipSync, FindPlayback, FindEffect, PlaybackByIndex
+
+Quake 4's typed lookups (its decl types are registered for that title only, so for Doom 3
+these find nothing, or the default decl when makeDefault asks for one).
+===================
+*/
+const idDeclTable *idDeclManagerLocal::FindTable( const char *name, bool makeDefault ) {
+	return static_cast<const idDeclTable *>( FindType( DECL_TABLE, name, makeDefault ) );
+}
+
+const idDeclMaterialType *idDeclManagerLocal::FindMaterialType( const char *name, bool makeDefault ) {
+	return static_cast<const idDeclMaterialType *>( FindType( DECL_MATERIALTYPE, name, makeDefault ) );
+}
+
+const idDeclLipSync *idDeclManagerLocal::FindLipSync( const char *name, bool makeDefault ) {
+	return static_cast<const idDeclLipSync *>( FindType( DECL_LIPSYNC, name, makeDefault ) );
+}
+
+const idDeclPlayback *idDeclManagerLocal::FindPlayback( const char *name, bool makeDefault ) {
+	return static_cast<const idDeclPlayback *>( FindType( DECL_PLAYBACK, name, makeDefault ) );
+}
+
+const idDeclEffect *idDeclManagerLocal::FindEffect( const char *name, bool makeDefault ) {
+	return static_cast<const idDeclEffect *>( FindType( DECL_EFFECT, name, makeDefault ) );
+}
+
+const idDeclPlayback *idDeclManagerLocal::PlaybackByIndex( int index, bool forceParse ) {
+	return static_cast<const idDeclPlayback *>( DeclByIndex( DECL_PLAYBACK, index, forceParse ) );
+}
+
+/*
+===================
+idDeclManagerLocal::GetPlaybackData, StartPlaybackRecord, SetPlaybackData, FinishPlayback
+
+Quake 4's playbacks (idDeclPlayback): the game counts in milliseconds, a playback in seconds.
+===================
+*/
+bool idDeclManagerLocal::GetPlaybackData( const idDeclPlayback *playback, int control, int now, int last, idPlaybackData *pbd ) {
+	if ( playback == NULL ) {
+		return true;
+	}
+	return playback->GetCurrentData( control, MS2SEC( now ), MS2SEC( last ), pbd );
+}
+
+void idDeclManagerLocal::StartPlaybackRecord( idDeclPlayback *playback ) {
+	if ( playback != NULL ) {
+		playback->StartRecording();
+	}
+}
+
+bool idDeclManagerLocal::SetPlaybackData( idDeclPlayback *playback, int now, int control, idPlaybackData *pbd ) {
+	return playback != NULL && playback->RecordSample( MS2SEC( now ), control, pbd );
+}
+
+bool idDeclManagerLocal::FinishPlayback( idDeclPlayback *playback ) {
+	return playback != NULL && playback->FinishRecording();
+}
+
+/*
+===================
+idDeclManagerLocal::GetNewName
+===================
+*/
+idStr idDeclManagerLocal::GetNewName( declType_t type, const char *base ) {
+	for ( int n = 1; ; n++ ) {
+		idStr name = va( "%s_%d", base, n );
+		if ( FindType( type, name, false ) == NULL ) {
+			return name;
+		}
+	}
+}
+
+/*
+===================
+idDeclManagerLocal::AllocateDecl
+===================
+*/
+idDecl *idDeclManagerLocal::AllocateDecl( declType_t type ) {
+	idDeclType *declType = ( type >= 0 && type < declTypes.Num() ) ? declTypes[type] : NULL;
+	if ( declType == NULL || declType->allocator == NULL ) {
+		return NULL;
+	}
+	idDecl *decl = declType->allocator();
+	idDeclLocal *base = new idDeclLocal;
+	base->self = decl;
+	base->type = type;
+	decl->base = base;
+	return decl;
 }
 
 /*

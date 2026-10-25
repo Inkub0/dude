@@ -41,6 +41,7 @@ idRenderEntityLocal::idRenderEntityLocal() {
 	dynamicModel			= NULL;
 	dynamicModelFrameCount	= 0;
 	cachedDynamicModel		= NULL;
+	suppressSurfaceMask		= 0;
 	referenceBounds			= bounds_zero;
 	viewCount				= 0;
 	viewEntity				= NULL;

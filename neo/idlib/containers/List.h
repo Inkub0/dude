@@ -86,6 +86,7 @@ class idList {
 public:
 
 	typedef int		cmp_t( const type *, const type * );
+	typedef int		filter_t( const type * );			// Quake 4's server browser filters
 	typedef type	new_t( void );
 
 					idList( int newgranularity = 16 );
@@ -131,6 +132,14 @@ public:
 	void			SortSubSection( int startIndex, int endIndex, cmp_t *compare = ( cmp_t * )&idListSortCompare<type> );
 	void			Swap( idList<type> &other );						// swap the contents of the lists
 	void			DeleteContents( bool clear );						// delete the contents of the list
+
+	// helpers Quake 4's game code uses (Raven added them to its idlib); not virtual, no data
+	int				TypeSize( void ) const { return sizeof( type ); }	// size of an element
+	void			RemoveNull( void );									// remove every NULL element (pointer lists)
+	bool			RemoveRange( int low, int high );					// remove the elements low..high, inclusive
+	void			StackAdd( const type & obj ) { Append( obj ); }		// the list as a stack: push
+	void			StackPop( void ) { RemoveIndex( num - 1 ); }		// pop
+	type &			StackTop( void ) { assert( num > 0 ); return list[ num - 1 ]; }	// top
 
 #if __cplusplus >= 201103L || defined(_MSVC_LANG) && _MSVC_LANG >= 201103L
 	// begin and end allow using C++11 for(ElemType& e : myIdlist) { ... }
@@ -236,6 +245,43 @@ ID_INLINE void idList<type>::DeleteContents( bool clear ) {
 		Clear();
 	} else {
 		memset( list, 0, size * sizeof( type ) );
+	}
+}
+
+/*
+================
+idList<type>::RemoveRange
+
+Removes the elements low..high, both included, moving the rest down once.
+================
+*/
+template< class type >
+ID_INLINE bool idList<type>::RemoveRange( int low, int high ) {
+	assert( low >= 0 && high < num && low <= high );
+	if ( low < 0 || high >= num || low > high ) {
+		return false;
+	}
+	const int count = high - low + 1;
+	for ( int i = high + 1; i < num; i++ ) {
+		list[ i - count ] = list[ i ];
+	}
+	num -= count;
+	return true;
+}
+
+/*
+================
+idList<type>::RemoveNull
+
+Removes every NULL element, keeping the order of the rest.
+================
+*/
+template< class type >
+ID_INLINE void idList<type>::RemoveNull( void ) {
+	for ( int i = num - 1; i >= 0; i-- ) {
+		if ( !list[ i ] ) {
+			RemoveIndex( i );
+		}
 	}
 }
 

@@ -572,12 +572,16 @@ idDict::RandomPrefix
 ================
 */
 const char *idDict::RandomPrefix( const char *prefix, idRandom &random ) const {
+	return RandomPrefix( prefix, random, "" );
+}
+
+const char *idDict::RandomPrefix( const char *prefix, idRandom &random, const char *defaultValue ) const {
 	int count;
 	const int MAX_RANDOM_KEYS = 2048;
 	const char *list[MAX_RANDOM_KEYS];
 	const idKeyValue *kv;
 
-	list[0] = "";
+	list[0] = defaultValue;
 	for ( count = 0, kv = MatchPrefix( prefix ); kv && count < MAX_RANDOM_KEYS; kv = MatchPrefix( prefix, kv ) ) {
 		list[count++] = kv->GetValue().c_str();
 	}

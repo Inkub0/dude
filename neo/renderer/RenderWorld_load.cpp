@@ -700,7 +700,7 @@ void idRenderWorldLocal::ClearPortalStates() {
 
 	// flood fill all area connections
 	for ( i = 0 ; i < numPortalAreas ; i++ ) {
-		for ( j = 0 ; j < NUM_PORTAL_ATTRIBUTES ; j++ ) {
+		for ( j = 0 ; j < NUM_PORTAL_ATTRIBUTES_LOCAL ; j++ ) {
 			connectedAreaNum++;
 			FloodConnectedAreas( &portalAreas[i], j );
 		}

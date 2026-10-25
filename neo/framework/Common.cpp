@@ -66,6 +66,7 @@ If you have questions concerning this license or the applicable additional terms
 
 #include "GameCallbacks_local.h"
 #include "Session_local.h" // DG: For FT_IsDemo/isDemo() hack
+#include "quake4/GameLoaderQ4.h"
 
 #define	MAX_PRINT_MSG_SIZE	4096
 #define MAX_WARNING_LIST	256
@@ -252,6 +253,16 @@ public:
 
 	// DG end
 
+	// Quake 4 game library (idCommon's appended entries)
+	virtual int					GetUserCmdHz( void ) const { return USERCMD_HZ; }
+	virtual int					GetUserCmdMSec( void ) const { return USERCMD_MSEC; }
+	virtual bool				DoingDeclValidation( void ) { return false; }
+	virtual int					GetRModeForMachineSpec( int machineSpec ) const;
+	virtual void				SetDesiredMachineSpec( int machineSpec );
+	virtual void				RunAlwaysThinkGUIs( int time );
+	virtual void				LoadToolsDLL( void ) {}
+	virtual void				ModViewThink( void ) {}
+
 	void						InitGame( void );
 	void						ShutdownGame( bool reloading );
 
@@ -297,6 +308,7 @@ private:
 	idStrList					errorList;
 
 	uintptr_t					gameDLL;
+	bool						gameIsQuake4;		// DUDE: game / gameEdit are the Quake 4 library's adapters
 
 	idLangDict					languageDict;
 
@@ -416,6 +428,38 @@ void idCommonLocal::GetPendingViewAngleDelta( float &yaw, float &pitch ) {
 
 /*
 ==================
+idCommonLocal::GetRModeForMachineSpec, SetDesiredMachineSpec
+
+Quake 4's multiplayer menu: the resolution a machine spec preset picks (Com_SetMachineSpec's),
+and taking the spec the player chose.
+==================
+*/
+int idCommonLocal::GetRModeForMachineSpec( int machineSpec ) const {
+	switch ( machineSpec ) {
+		case 3:	return 5;		// ultra
+		case 2:	return 4;		// high
+		default:	return 3;		// medium, low
+	}
+}
+
+void idCommonLocal::SetDesiredMachineSpec( int machineSpec ) {
+	com_machineSpec.SetInteger( machineSpec );
+}
+
+/*
+==================
+idCommonLocal::RunAlwaysThinkGUIs
+
+Quake 4: GUIs whose windows are marked "alwaysThink" (WIN_ALWAYSTHINK) keep their timelines
+running while not drawn. The flag is parsed; running those windows comes with the in-game GUI
+work (docs/quake4-port.md 5.6, Q5.5) - until then they advance when drawn, as in Doom 3.
+==================
+*/
+void idCommonLocal::RunAlwaysThinkGUIs( int time ) {
+}
+
+/*
+==================
 idCommonLocal::idCommonLocal
 ==================
 */
@@ -432,6 +476,7 @@ idCommonLocal::idCommonLocal( void ) {
 	rd_flush = NULL;
 
 	gameDLL = 0;
+	gameIsQuake4 = false;
 
 #ifdef ID_WRITE_VERSION
 	config_compressor = NULL;
@@ -3185,6 +3230,10 @@ void idCommonLocal::LoadGameDLL( void ) {
 
 	gameDLL = 0;
 
+	// DUDE: the null game speaks Doom 3's game interface whatever the title; the Quake 4
+	// title's own library speaks Quake 4's (quake4/GameLoaderQ4.h)
+	bool nullGame = idStr::Icmp( fs_game, GAME_NULL_LIBRARY ) == 0;
+
 	sys->DLL_GetFileName(fs_game, dll, sizeof(dll));
 	LoadGameDLLbyName(dll, fs_game, s);
 
@@ -3217,6 +3266,7 @@ void idCommonLocal::LoadGameDLL( void ) {
 							 "(free-fly spectator, no gameplay)\n", title.displayName, dll );
 			sys->DLL_GetFileName(GAME_NULL_LIBRARY, dll, sizeof(dll));
 			LoadGameDLLbyName(dll, NULL, s);
+			nullGame = true;
 		}
 	}
 
@@ -3234,6 +3284,16 @@ void idCommonLocal::LoadGameDLL( void ) {
 		common->FatalError( "couldn't find game DLL API" );
 		return;
 	}
+
+	if ( title.title == GAME_TITLE_QUAKE4 && !nullGame ) {
+		if ( !GameQ4_Load( (void *)GetGameAPI, &game, &gameEdit ) ) {
+			Sys_DLL_Unload( gameDLL );
+			gameDLL = 0;
+			common->FatalError( "'%s' is not a Quake 4 game library for this engine", s.c_str() );
+			return;
+		}
+		gameIsQuake4 = true;
+	} else {
 
 	gameImport.version					= GAME_API_VERSION;
 	gameImport.sys						= ::sys;
@@ -3262,6 +3322,8 @@ void idCommonLocal::LoadGameDLL( void ) {
 	game								= gameExport.game;
 	gameEdit							= gameExport.gameEdit;
 
+	}
+
 #endif
 
 	// initialize the game object
@@ -3284,6 +3346,10 @@ void idCommonLocal::UnloadGameDLL( void ) {
 
 #ifdef __DOOM_DLL__
 
+	if ( gameIsQuake4 ) {
+		GameQ4_Unload();
+		gameIsQuake4 = false;
+	}
 	if ( gameDLL ) {
 		Sys_DLL_Unload( gameDLL );
 		gameDLL = 0;

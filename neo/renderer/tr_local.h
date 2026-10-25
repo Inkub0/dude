@@ -298,6 +298,11 @@ public:
 	idInteraction *			lastInteraction;
 
 	bool					needsPortalSky;
+
+	// DUDE: Quake 4's renderEntity suppressSurfaceMask, set by its render world facade: bit i hides
+	// an MD5 model's mesh i (idRenderModel::GetSurfaceMask) when the model is posed, so every pass
+	// that draws or shadows the posed model leaves it out. Doom 3 never sets it.
+	int						suppressSurfaceMask;
 };
 
 
@@ -787,6 +792,15 @@ public:
 	virtual void			CaptureRenderToFile( const char *fileName, bool fixAlpha );
 	virtual void			UnCrop();
 	virtual bool			UploadImage( const char *imageName, const byte *data, int width, int height );
+	virtual void			SetSpecialEffect( ESpecialEffectType which, bool enabled );
+	virtual void			SetSpecialEffectParm( ESpecialEffectType which, int parm, float value );
+	virtual void			ShutdownSpecialEffects( void );
+
+public:
+	// Quake 4's full-screen effects as its scripts set them (SetSpecialEffect); recorded here,
+	// drawn by the post-process passes once they exist (docs/quake4-port.md 5.6)
+	int						specialEffects;			// ESpecialEffectType bits that are on
+	float					specialEffectParms[SPECIAL_EFFECT_MAX][MAX_SPECIAL_EFFECT_PARMS];
 
 public:
 	// internal functions
@@ -1696,6 +1710,8 @@ bool R_IssueEntityDefCallback( idRenderEntityLocal *def );
 idRenderModel *R_EntityDefDynamicModel( idRenderEntityLocal *def );
 // DUDE: apply the fill-light frees / moves R_UpdateEmissiveLights queued (end of frame, after the back end)
 void R_FlushEmissiveLightChanges( void );
+// DUDE: the suppressSurfaceMask of the entity whose MD5 model is being posed now (0 otherwise)
+extern int r_instancingSurfaceMask;
 
 viewEntity_t *R_SetEntityDefViewEntity( idRenderEntityLocal *def );
 viewLight_t *R_SetLightDefViewLight( idRenderLightLocal *def );

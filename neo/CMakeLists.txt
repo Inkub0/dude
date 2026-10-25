@@ -967,6 +967,16 @@ always_optimize_sourcefile(framework/minizip/unzip.cpp)
 
 add_globbed_headers(src_framework "framework")
 
+# DUDE: the engine's side of the Quake 4 game interface (docs/quake4-port.md 5.6)
+set(src_quake4
+	quake4/CollisionModelManagerQ4.cpp
+	quake4/GameQ4.cpp
+	quake4/RenderWorldQ4.cpp
+	quake4/SoundSystemQ4.cpp
+)
+
+add_globbed_headers(src_quake4 "quake4")
+
 set(src_cm
 	cm/CollisionModel_contacts.cpp
 	cm/CollisionModel_contents.cpp
@@ -1346,6 +1356,7 @@ set(src_debuggerServer
 set(src_core
 	${src_renderer}
 	${src_framework}
+	${src_quake4}
 	${src_cm}
 	${src_dmap}
 	${src_aas}

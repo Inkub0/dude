@@ -3,7 +3,11 @@
 Status (2026-10-24): **Q0-Q3 done and on master** (Q3, world formats: merge 714881e7 - all 31
 campaign maps load and quit cleanly in the null game on Vulkan and OpenGL3, `cm`/`aas`
 self-checks clean, `airdefense1` user-verified on both renderers; the collision API additions
-moved to Q5). Next: Q4 (BSE) or Q5 (game library), §6. Goal: **DUDE runs the retail Quake 4 (2005,
+moved to Q5). **Q5 (game library) started 2026-10-24** (user: Q5 before Q4, BSE later),
+plan in §5.6: Q5.0 (dhewm3 ABI) merged, Q5.1 (build + inventory) and Q5.2 (idlib layer, 4214
+-> 2349 errors, 0 in idlib) done on `feat/quake4-game-library`; Q5.3 (engine interfaces) in
+done: the game library compiles and links (q4base.so), Doom 3 + RoE smoke test passed
+(user, 2026-10-24); Q5.4 (engine facades and the Quake 4 loader) built, its boot gate pending. Goal: **DUDE runs the retail Quake 4 (2005,
 Raven Software, idTech4) single-player campaign natively** — its own `q4base/*.pk4` assets,
 its own game logic, on DUDE's GL3 and Vulkan backends, with DUDE's enhancement tiers
 (PBR, tessellation, RT) available as opt-in on top. Multiplayer is out of scope for v1 (§9).
@@ -717,6 +721,221 @@ particles do today).
 4. Output `q4base.so`/`.dll` (named after the title's base folder, like `base.so`) next to
    `build/dude`; `LoadGameDLLbyName` already searches next
    to the binary first (how `d3le.so` is found today).
+
+**Q5 plan (2026-10-24).** Decisions (user): start from the **pristine SDK**, take ideas from
+the other ports (idTech4A++, OpenQ4) where they help, build our own port with **fidelity and
+performance** as the goals; repository `~/dude-quake4-game` (local git, never pushed).
+
+- **Source (done):** `~/dude-quake4-game` commit `94a1fdc` = the SDK 1.4.2 `source/` tree +
+  Raven's `EULA.Development Kit.rtf` + `readme.txt`, unmodified, from the initial import of
+  the full SDK installer in `FriskTheFallenHuman/quake4sdk` (`0682c1b8`); an independent 2015
+  copy (`Reddragoon244/Quake-4-Source-Code`, `de2da6b`) matches all 718 source files byte for
+  byte after line-ending normalisation. Not used: the `Xanz/Quake4SDK` mirror chosen at Q0 -
+  its "formatting fixes" re-braced the whole tree and it changes maths and MP code. That
+  repository's (EULA) README states licence, layout and provenance.
+- **Include architecture:** every SDK game file starts with `#include "../idlib/precompiled.h"`,
+  which pulls in the SDK's copies of the engine interfaces (`framework/`, `renderer/`, `sound/`,
+  `cm/`, `aas/`, `bse/`, `ui/`, `sys/`) and Raven's `game/Game.h`. Those can never be what the
+  library compiles against: every type that crosses the boundary (`idStr`, `idDict`, `idList`,
+  `idVec*`, `idBounds`, `renderEntity_t`, `trace_t`, `usercmd_t` …) must have DUDE's layout. So
+  the game repository turns its engine headers into one-line forwarders to DUDE's (`-I
+  <dude>/neo`, `#include <framework/Common.h>`), replaces `precompiled.h` with an adapter
+  (DUDE's idlib + a Raven idlib layer: Raven-only helpers from the SDK's own idlib where they
+  do not cross the boundary, adapters where they do), and points `game/Game.h` at DUDE's
+  `framework/Game.h`. SP `game/` only; `mpgame/` is Q9.
+- **Engine side (DUDE, GPL, our own declarations):** the §5.4 union, driven by what the SP game
+  actually fails to compile against - nothing speculative: `idGame`/`idGameEdit`/`gameImport`/
+  `gameExport` (Q4 entries with defaults, MP blocks stubbed), `renderEntity_t`/`renderLight_t`
+  fields and the effect calls, the sound facade (`worldId`, emitter handles), the collision
+  facade (`idCollisionModel`, map-scoped; trace `materialType` = the material's own, §5.3), the
+  decl accessors of Q2's decl types, UI / common / file-system extras, and a **no-op BSE
+  manager** (every effect call accepted, nothing drawn) until Q4 brings the real one.
+  **The dhewm3 game ABI stays frozen (user, 2026-10-24: binary compatibility with dhewm3 mods
+  is DUDE's main strength).** `GAME_API_VERSION` stays 9 and no struct or interface a dhewm3
+  game library compiles against changes layout, vtable order or signatures; a mod built
+  against dhewm3 1.5.5's headers loads and runs unchanged. Quake 4 gets its **own** interface
+  layer instead of growing the shared one: its game library receives the same `gameImport_t`,
+  asks the engine for the Quake 4 interfaces through the existing extension point
+  `idCommon::GetAdditionalFunction` (a new `FunctionType`; dhewm3 added that call exactly so
+  the ABI need not change), and gets **facade objects** - a Quake 4 render world, sound
+  system, collision manager, BSE manager, decl accessors - declared in new DUDE headers of our
+  own (Quake 4-shaped `renderEntity_t` etc. live there, converted to the engine's internal
+  structs by the facade; Doom 3's headers do not grow). The game's `idGame` is a subclass
+  whose Quake 4 entries are appended after Doom 3's, and the engine calls them only for the
+  Quake 4 title. This also means fewer patches to Raven's game code (the facades take Quake
+  4's signatures as they are) - better for fidelity.
+  **Audit (2026-10-24, 93 game-visible headers vs `upstream/master` = dhewm3 1.5.5):** 17
+  changed; the Quake 4 work kept them ABI-safe (appended enum values, appended virtuals on
+  engine-implemented classes, fields appended to engine-allocated objects), but three older
+  DUDE changes break dhewm3 binaries: `shaderStage_t` grew (parallax / tessellation fields), so
+  the inline `idMaterial::GetStage(i)` of a dhewm3 build strides wrongly - dhewm3's own
+  `Player.cpp` PDA-video code does that and would read garbage for stage 1+; `idRenderWorld::
+  Trace` gained a 7th parameter (`skipDecals`), which a dhewm3 caller never passes; and
+  `glyphInfo_t` changed from int to float metrics (Q1, Raven fonts) - unused by game code but
+  part of the public header. They get fixed first, and a layout/vtable diff against dhewm3
+  1.5.5's headers (GCC `-fdump-lang-class`) guards it from then on.
+- **Steps and gates:**
+  0. **Q5.0 dhewm3 ABI** - the ABI diff tool, then the three breaks above fixed. Gate: diff
+     clean; Doom 3 + RoE unchanged (user). **DONE 2026-10-24, merged (`380e99fa`):**
+     `tools/check_dhewm3_abi.py` found a fourth break (`glconfig_s` mid-struct fields); all
+     four fixed, 0 breaks over 543 records / 64 vtables / 851 enumerators; user-verified with
+     dhewm3 1.5.5's own `base.so` / `d3xp.so` loaded into DUDE (`docs/mod-dll-compatibility.md`
+     §7.4).
+  1. **Q5.1 build skeleton** - `tools/quake4/build-q4game.sh` (DUDE) + CMake (game repo), the
+     include architecture above, and a compile-error inventory tool (errors grouped by missing
+     symbol / header), so the remaining work is a measured list. Gate: the build runs end to
+     end and the inventory is recorded here.
+     **Built 2026-10-24.** Game repo: `CMakeLists.txt` (sources = Raven's `game.vcproj`, 159;
+     includes = DUDE's `neo/` + `build/` only; DUDE's game-library flags; `Q4SDK` as Raven's
+     SDK build had it; links DUDE's `libidlib.a`) and `source/idlib/precompiled.h` replaced by
+     the adapter. DUDE: `tools/quake4/build-q4game.sh` (reads `base.so`'s flags from `build/`,
+     keeps only external include paths - never `neo/game` -, builds, copies `q4base.so` next to
+     `build/dude`; `--inventory`) and `tools/quake4/q4game_inventory.py` (syntax-only pass over
+     the compile database, errors de-duplicated across sources and grouped). **First inventory:**
+     159/159 sources fail, 4214 distinct errors, no missing header. By owner:
+
+     | Work package | Largest items (distinct errors) |
+     |---|---|
+     | **Raven `game/Game.h`** - game-side definitions the adapter no longer pulls in (split it: game-side part stays in the game repo, interface part comes from DUDE) | `SND_CHANNEL_*` 286, `debugInfoProc_t` 113, `demoState_t` 34, `userOrigin_t` 22, `ClientStats_t` 12; plus the Quake 4 `idGame`/`idGameEdit` entries the game defines (68 + 12 definitions without declaration) |
+     | **Raven idlib layer** (Q5.2) | `RV_*` heap macros 140, `MA_*` / `MEM_*` allocation tags 128, `rvPair` 73, `rvRandom` 42, `idBitMsg` / `idBitMsgDelta` (`WriteLong`/`ReadLong` …) 152, `idVec3` 45 / `idBounds` 14 extras, template arity 82, `Lexer` (LexerFactory) 34 |
+     | **Engine: common / cvars / files / network** | `idCommon` 312 (`GetLocalizedString` …), `CVAR_*` 41, `idCVarHelp` 33 (Raven's `framework/CVarSystem.h`), `idFile` 28, `idNetworkSystem` 25 |
+     | **Engine: sound** (`worldId`, emitter handles, Raven channel names) | `idSoundSystem` 79, `refSound_t` 88, `SOUNDWORLD_*` 62 |
+     | **Engine: collision** | `idCollisionModel` 156, `idCollisionModelManager` 18, `contactInfo_t` 28 (`materialType`) |
+     | **Engine: effects / BSE** (no-op manager until Q4) | `rvClientEffect` 116, `PlayEffect` 82, `renderEffect` / `renderEffect_t` 123, `effectCategory_t` 16 |
+     | **Engine: decls** (Q2's types under Raven's class names) | `rvDeclMatType` 68, `rvDeclPlayback` / `Data` 68, `rvDeclLipSync` 25, `rvDeclPlayerModel` 15, `idDeclManager` 58 |
+     | **Engine: renderer / UI / input** | `RF_*` 26, `idRenderWorld` 16, `idRenderSystem` 10, `SHADERPARM_*` 15, `idUserInterface` 9, `IMPULSE_*` 46 |
+     | **64-bit cleanliness** | 47 pointer-to-int casts |
+     | **Cascades** (game classes that failed to parse because of the above; expected to vanish) | `idGameLocal` 89, `idClipModel` 42, MP stats (`rankedPlayers`, `statQueue`) …, 412 unclassified |
+
+     Order: the `game/Game.h` split and the idlib layer first (they cascade the most), then the
+     engine packages one by one, re-running the inventory after each.
+  2. **Q5.2 idlib layer** - every idlib error gone. Gate: `idlib`-attributed errors 0.
+     **Done 2026-10-24: 4214 -> 2349 distinct errors, 0 attributed to idlib; the rest are engine
+     interfaces (Q5.3), 64-bit casts and their cascades.** Split by where a piece can live:
+     - **Raven's methods on id's classes go into DUDE's idlib**, written for DUDE (GPL, Raven's
+       code read for semantics only), all non-virtual, no data, so `check_dhewm3_abi.py` stays
+       at 0 breaks: `idVec3` `ToNormal` / `ToMat3( axis )` / `Dist` / `DistXY` / `Dist2XY` /
+       `DistToLineSeg` / `ProjectToLineSeg` / `ProjectOntoVector` / `IsLeftOf` / `IsZero` /
+       `Random`; `idAngles` `Length` / `Random` / `Remap` / `Scale`; `idBounds` `Size` /
+       `Contains` / `ShortestDistance` / `FindEdgePoint` / `FindVectorToEdge`; `idMath` `Lerp`
+       (clamped) / `MidPointLerp` / `dBToScale`; `idMat3` `RotateAbsolute` / `RotateRelative` /
+       `RotateArbitrary`; `idBitMsg` / `idBitMsgDelta` `*Long` (= `*Int`), `GetRemainingData`,
+       `GetReadData`, `InitReading` / `InitWriting`, `*DeltaVec3` / `*DeltaMat3`; `idStr`
+       `ReplaceChar`, `Filter` defaulting to case-sensitive; `idDict::RandomPrefix` with a
+       default; `idList` `TypeSize` / `RemoveNull` / `StackAdd` / `StackPop` / `StackTop`;
+       `idMapFile::Resolve` (+ `idMapBrush::TranslateSelf`, texture-locked).
+       **Checked against Raven's own implementations** (scratch harness on `libidlib.a`, not
+       committed - it holds SDK code): 200 000 random cases bit-identical, except
+       `RotateArbitrary` (closed form vs Raven's five-matrix product) within 4e-7. `Resolve` over
+       the 63 retail `.map` files: entity / primitive counts as expected in all 51 maps with
+       func_groups; 9017 func_groups have an origin, and their primitives are stored relative to
+       it (6082 of 6086 far-off patches sit near 0), so the translation Raven added is needed;
+       the brush texture lock holds on every brush tried. id's `Parse()` already applies the
+       worldspawn keys Raven moved into `Resolve` (`removeEntities*`, `overrideMaterial`,
+       `forceEntityNames`; no retail map uses them), so DUDE's `Resolve` is the func_group step.
+     - **Raven-only types, globals and macros live in the game repo** as Raven wrote them
+       (`source/idlib/RavenIdlib.h/.cpp`): allocation tags + heap macros (no-ops on the PC),
+       `rvRandom` (seed pinned to 32 bits: Raven's `unsigned long` is 64 on LP64 and broke its
+       0..32767 range), `rvPair`, `rvSphericalInterpolate`, `rvBits` / `rvPool` /
+       `rvIndexPool`, `idMsgQueue` / `idBitMsgQueue` (the engine's own `idMsgQueue` is never
+       included by the game and not exported), `SignZero`, `vec4_one`, Raven's colour / icon /
+       escape macros.
+     - **Raven members whose behaviour has quirks the game shipped with stay Raven's code**, as
+       free functions the game calls by a new name (marked patches): the `idList` heap
+       (`rvListHeapAdd` / `rvListHeapPop` - the sift-down always takes the left child),
+       `rvStr::Split` (takes a length for an end index inside quotes), `rvStr::RemoveEscapes` /
+       `IcmpNoEscape` / `IsEscape` (drops the character after an unremoved `^`), and
+       `rvListRemoveContents` (needs `EV_Remove`, so it was game-side in Raven too).
+     - **Mechanical game patches:** `idMath::INT_MIN/INT_MAX` -> `INT_MIN/INT_MAX`,
+       `idMath::FLOAT_EPSILON` -> `FLT_EPSILON`, allocator memory-tag template arguments dropped,
+       `LexerFactory` -> `idLexer` (Raven's binary lexer only ran under `com_binaryRead`), the
+       map-file resolved flag kept in `idGameLocal` (`mapFileResolved`), and `idGameEdit`'s map
+       export (an editor merge workflow DUDE's `idMapFile` does not have) reports no export
+       entities.
+  3. **Q5.3 engine interfaces** - the union, item by item from the inventory, Doom 3 libraries
+     rebuilt and unchanged in behaviour, the ABI diff against dhewm3 1.5.5 clean. Gate:
+     `q4base.so` compiles and links; Doom 3 + RoE smoke test by the user.
+     **As built (2026-10-24), refining the facade plan above.** Two kinds of difference, two
+     mechanisms:
+     - **Quake 4 asks the same interface for more** (common, cvars, files, sys, UI, network,
+       render system, models, decls, AAS): the methods are added to DUDE's interfaces - inline
+       where they need nothing from the engine (`GetLocalizedString`, `DebuggerCheckBreakpoint`
+       over `FT_UpdateDebugger`, `ReadSyncId`, ...), appended virtuals otherwise; cvar flags and
+       portal bits as appended enum values. `check_dhewm3_abi.py` stays at 0 breaks.
+     - **Quake 4 reshaped a type** (render entities and lights, model traces, user commands,
+       traces and contacts with a material type, sounds addressed by world id and handle,
+       collision models as objects, effects, the game interface itself): `neo/quake4/` declares
+       Quake 4's versions under names of their own (`renderEntityQ4_t`, `idRenderWorldQ4`,
+       `idSoundSystemQ4`, `idCollisionModelManagerQ4`, `idEffectManagerQ4`, `idGameQ4`, ...),
+       written from the game's call sites, and `quake4/GameNamesQ4.h` - included only by the
+       game library, after every engine header - maps Raven's names onto them. Handing a Doom
+       3 struct where a Quake 4 one is expected is therefore a compile error, never a silent
+       layout mismatch (a shared header that only forward-declares `struct renderEntity_s`
+       would otherwise accept either). Inline conversions (`R_RenderEntityQ4ToEngine`,
+       `R_ModelBoundsQ4`) live in those headers so the game and the facades share them.
+     - **The handshake:** instead of the `GetAdditionalFunction` route sketched above, the
+       engine loads the Quake 4 library (title profile) with its own import block,
+       `gameImportQ4_t` - the engine's systems where they are shared, the Quake 4 facades where
+       not - and an engine-side adapter presents `idGameQ4` to the session as an `idGame`
+       (Q5.4). Doom 3's `GetGameAPI` path and `GAME_API_VERSION` 9 are untouched.
+     - **Engine work it took:** a real playback runtime (`idDeclPlayback`: samples carried
+       over, uniform cubic B-splines for position and angles, button / impulse events with
+       their time into the frame; OpenQ4's decompile-derived reading consulted for the format,
+       none of its code used), `idDeclPlayerModel`, `idDeclAF::fastEval`, AAS area ceilings,
+       sound-shader and lip-sync accessors, Raven's material sorts (`SS_PREGUI` = -2.5, between
+       Doom 3's subview -3 and GUI -2).
+     - **Recorded gaps** (interface in place, behaviour to come): `RunAlwaysThinkGUIs`, the
+       script full-screen effects (medlabs' blur), `^i` text icons, multiplayer and voice
+       entries (Q9), editor bits.
+     Inventory: 2349 -> 1756 (shared interfaces) -> 68 (the Quake 4 layer) -> 0: the 64-bit
+     cleanliness of the event and script system came from dhewm3's own x86_64 fixes of the
+     same id code (`d92d4ba8`, `506ea7b3`, `ce976c47`, `db4aca78`, `4244436d`, `fb3f0cc2`,
+     `76a9fdce`, `3ad384a0`), applied hunk by hunk to Raven's copies (game repo `bcff329`).
+     **All 160 sources compile and `q4base.so` links** (game repo `bcff329`, DUDE this
+     commit): its undefined symbols are libc and the C++ runtime only, `GetGameAPI` its
+     export - `idDeclTable::TableLookup` (vehicle hover physics) moved inline for that.
+     **Gate passed 2026-10-24:** the Doom 3 + RoE smoke test (the engine headers both game
+     libraries build against changed: appended virtuals, cvar flags, decl and idlib additions).
+     Silent 64-bit risks the compiler cannot see (Raven's own additions to the script system,
+     `long` in its code) are a Q5.5 check.
+  4. **Q5.4 load** - `q4base.so` replaces the null game under `run-q4.sh`: `GetGameAPI`,
+     `Init`, main menu with the game's cvars (the sweep's `mainmenu.gui` cvar warnings gone),
+     clean quit. Gate: boot + quit on both backends, no new warnings.
+     **As built (2026-10-24), `neo/quake4/*.cpp`, engine-only:** `LoadGameDLL` hands the Quake 4
+     title's own library (never the null game, which speaks Doom 3's interface on any title)
+     `gameImportQ4_t` through `GameQ4_Load` (`quake4/GameLoaderQ4.h`) and installs two adapters
+     as the engine's `game` / `gameEdit`: `idGame` onto `idGameQ4` (user commands converted per
+     client, render worlds wrapped, `SaveGame` as `ST_REGULAR`, no time groups - the renderer's
+     time-group clock is the game time) and Doom 3's `idGameEdit` - defined by the engine only
+     here, under `__DOOM_DLL__`, hidden like every engine symbol - onto `idGameEditQ4`. Facades:
+     - **sound** (`SoundSystemQ4.cpp`): world ids resolve to the session's game and menu sound
+       worlds; a handle is the engine emitter's own index, so it survives save games; distances
+       are map units in the game and metres in the engine (`SOUND_Q4_UNITS_TO_METERS`, also in
+       `idSoundShader::GetParms(Q4)`); `CurrentlyPlaying(channel)` reads the emitter's channels.
+     - **collision** (`CollisionModelManagerQ4.cpp`): map models are the engine's handles, kept by
+       name across `FreeMap` (the game may still hold them); trace-model models keep their trace
+       model and take the engine's reusable slot (`SetupTrmModel`) per query, as Doom 3's
+       `idClipModel` does; contacts carry the material's own material type.
+     - **render world** (`RenderWorldQ4.cpp`): the game's `renderEntityQ4_t` is kept per handle
+       (`GetRenderEntity`, deferred callbacks through an engine trampoline that converts the
+       result); sound handles become emitters; `RF_PORTAL_SKY` views become the renderer's portal
+       sky subview of the next view (§5.7); `FindVisibleAreas` = areas connected through
+       view-open portals (the renderer decides sky per view anyway). Area connectivity now floods
+       a fourth attribute, `PS_BLOCK_GRAVITY` (`NUM_PORTAL_ATTRIBUTES_LOCAL`, engine-internal;
+       Doom 3 never sets the bit).
+     - **effects:** `AddEffectDef` declines every effect (the game drops it) until phase Q4.
+     Accepted and dropped for now (no renderer / mixer slot): `suppressSurfaceMask`,
+     `overlayShader`, shadow LOD, light `detailLevel` / `noDynamicShadows` / `globalLight`,
+     per-view weapon depth hack, doppler, pitch shift, wet/dry mix; the game's
+     `SetupLoadingGui` (the session fills Quake 4's loading screen from the mapDef); snapshots
+     and voice (Q9). Builds clean on Linux and the Windows cross-build; `check_dhewm3_abi.py`
+     0 breaks; the Doom 3 libraries are untouched by this step.
+  5. **Q5.5 airdefense1** - spawn, HUD, weapons, AI, scripts, triggers; then VO + lipsync,
+     cinematics (`md5camera`), save + load, the transition to `airdefense2`; an ASAN pass.
+     Gate: the phase gate (§6).
+- **Performance:** 64-bit, the engine's compiler flags (SSE4.1 baseline), no debug-only cost in
+  release builds; the game's frame cost is measured at Q5.5 (`com_speeds`-style split) and
+  compared with Doom 3's on a comparable map.
 
 ### 5.7 The null game (engine, GPL, small, high leverage)
 

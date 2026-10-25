@@ -30,6 +30,7 @@ If you have questions concerning this license or the applicable additional terms
 #define __BITMSG_H__
 
 #include "idlib/math/Vector.h"
+#include "idlib/math/Matrix.h"
 #include "idlib/Dict.h"
 #include "framework/Common.h"
 
@@ -136,6 +137,15 @@ public:
 
 	static int		DirToBits( const idVec3 &dir, int numBits );
 	static idVec3	BitsToDir( int bits, int numBits );
+
+	// what Quake 4's game code calls these (Raven's idlib): Long for the 32-bit Int, the
+	// remaining-data typo fixed, and the unread part of the message
+	void			WriteLong( int c ) { WriteInt( c ); }
+	void			WriteDeltaLong( int oldValue, int newValue ) { WriteDeltaInt( oldValue, newValue ); }
+	int				ReadLong( void ) const { return ReadInt(); }
+	int				ReadDeltaLong( int oldValue ) const { return ReadDeltaInt( oldValue ); }
+	int				GetRemainingData( void ) const { return GetRemaingData(); }
+	const byte *	GetReadData( void ) const { return readData + readCount; }
 
 private:
 	byte *			writeData;			// pointer to data for writing
@@ -499,6 +509,18 @@ public:
 	int				ReadDeltaShortCounter( int oldValue ) const;
 	int				ReadDeltaIntCounter( int oldValue ) const;
 
+	// what Quake 4's game code calls these (Raven's idlib), and its vector/matrix deltas
+	void			InitWriting( const idBitMsg *base, idBitMsg *newBase, idBitMsg *delta ) { Init( base, newBase, delta ); }
+	void			InitReading( const idBitMsg *base, idBitMsg *newBase, const idBitMsg *delta ) { Init( base, newBase, delta ); }
+	void			WriteLong( int c ) { WriteInt( c ); }
+	void			WriteDeltaLong( int oldValue, int newValue ) { WriteDeltaInt( oldValue, newValue ); }
+	int				ReadLong( void ) const { return ReadInt(); }
+	int				ReadDeltaLong( int oldValue ) const { return ReadDeltaInt( oldValue ); }
+	void			WriteDeltaVec3( const idVec3 &oldValue, const idVec3 &newValue );
+	void			WriteDeltaMat3( const idMat3 &oldValue, const idMat3 &newValue );
+	idVec3			ReadDeltaVec3( const idVec3 &oldValue ) const;
+	idMat3			ReadDeltaMat3( const idMat3 &oldValue ) const;
+
 private:
 	const idBitMsg *base;			// base
 	idBitMsg *		newBase;		// new base
@@ -537,6 +559,34 @@ ID_INLINE void idBitMsgDelta::Init( const idBitMsg *base, idBitMsg *newBase, con
 
 ID_INLINE bool idBitMsgDelta::HasChanged( void ) const {
 	return changed;
+}
+
+ID_INLINE void idBitMsgDelta::WriteDeltaVec3( const idVec3 &oldValue, const idVec3 &newValue ) {
+	for ( int i = 0; i < 3; i++ ) {
+		WriteDeltaFloat( oldValue[i], newValue[i] );
+	}
+}
+
+ID_INLINE void idBitMsgDelta::WriteDeltaMat3( const idMat3 &oldValue, const idMat3 &newValue ) {
+	for ( int i = 0; i < 3; i++ ) {
+		WriteDeltaVec3( oldValue[i], newValue[i] );
+	}
+}
+
+ID_INLINE idVec3 idBitMsgDelta::ReadDeltaVec3( const idVec3 &oldValue ) const {
+	idVec3 v;
+	for ( int i = 0; i < 3; i++ ) {
+		v[i] = ReadDeltaFloat( oldValue[i] );
+	}
+	return v;
+}
+
+ID_INLINE idMat3 idBitMsgDelta::ReadDeltaMat3( const idMat3 &oldValue ) const {
+	idMat3 m;
+	for ( int i = 0; i < 3; i++ ) {
+		m[i] = ReadDeltaVec3( oldValue[i] );
+	}
+	return m;
 }
 
 ID_INLINE void idBitMsgDelta::WriteChar( int c ) {

@@ -792,6 +792,37 @@ void idRenderSystemLocal::SetGpuTimerRequested( bool on ) {
 
 /*
 =============
+idRenderSystemLocal::SetSpecialEffect, SetSpecialEffectParm, ShutdownSpecialEffects
+
+Quake 4 (scripts' sys.setSpecialEffect): which full-screen effects are on and their
+parameters. Kept per effect; the passes that draw them read specialEffects.
+=============
+*/
+void idRenderSystemLocal::SetSpecialEffect( ESpecialEffectType which, bool enabled ) {
+	if ( which <= SPECIAL_EFFECT_NONE || which >= SPECIAL_EFFECT_MAX ) {
+		return;
+	}
+	if ( enabled ) {
+		specialEffects |= which;
+	} else {
+		specialEffects &= ~which;
+	}
+}
+
+void idRenderSystemLocal::SetSpecialEffectParm( ESpecialEffectType which, int parm, float value ) {
+	if ( which <= SPECIAL_EFFECT_NONE || which >= SPECIAL_EFFECT_MAX || parm < 0 || parm >= MAX_SPECIAL_EFFECT_PARMS ) {
+		return;
+	}
+	specialEffectParms[which][parm] = value;
+}
+
+void idRenderSystemLocal::ShutdownSpecialEffects( void ) {
+	specialEffects = 0;
+	memset( specialEffectParms, 0, sizeof( specialEffectParms ) );
+}
+
+/*
+=============
 EndFrame
 
 Returns the number of msec spent in the back end

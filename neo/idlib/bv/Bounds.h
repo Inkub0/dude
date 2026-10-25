@@ -109,6 +109,18 @@ public:
 	void			AxisProjection( const idVec3 &dir, float &min, float &max ) const;
 	void			AxisProjection( const idVec3 &origin, const idMat3 &axis, const idVec3 &dir, float &min, float &max ) const;
 
+	// helpers Quake 4's game code uses (Raven added them to its idlib); not virtual, no data
+	idVec3			Size( void ) const;								// b[1] - b[0]
+	idBounds &		ExpandSelf( const idVec3 &d );					// grown by d on each axis, both ways
+	bool			Contains( const idBounds &a ) const;			// a lies inside these bounds, touching included
+	float			ShortestDistance( const idVec3 &point ) const;	// 0 inside, else distance to the closest point
+					// the point where the ray from start along dir leaves the bounds - found by casting
+					// back along -dir from start + dir * (radius of the bounds about their center)
+	idVec3			FindEdgePoint( const idVec3 &dir ) const;		// start = center
+	idVec3			FindEdgePoint( const idVec3 &start, const idVec3 &dir ) const;
+	idVec3			FindVectorToEdge( const idVec3 &dir ) const;	// FindEdgePoint( center, dir ) - center
+	idVec3			FindVectorToEdge( const idVec3 &start, const idVec3 &dir ) const;
+
 private:
 	idVec3			b[2];
 };
@@ -358,6 +370,25 @@ ID_INLINE bool idBounds::ContainsPoint( const idVec3 &p ) const {
 	if ( p[0] < b[0][0] || p[1] < b[0][1] || p[2] < b[0][2]
 		|| p[0] > b[1][0] || p[1] > b[1][1] || p[2] > b[1][2] ) {
 		return false;
+	}
+	return true;
+}
+
+ID_INLINE idBounds &idBounds::ExpandSelf( const idVec3 &d ) {
+	b[0] -= d;
+	b[1] += d;
+	return *this;
+}
+
+ID_INLINE idVec3 idBounds::Size( void ) const {
+	return b[1] - b[0];
+}
+
+ID_INLINE bool idBounds::Contains( const idBounds &a ) const {
+	for ( int i = 0; i < 3; i++ ) {
+		if ( a.b[0][i] < b[0][i] || a.b[1][i] > b[1][i] ) {
+			return false;
+		}
 	}
 	return true;
 }

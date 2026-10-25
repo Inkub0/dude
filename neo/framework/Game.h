@@ -35,6 +35,7 @@ If you have questions concerning this license or the applicable additional terms
 #include "framework/UsercmdGen.h"
 #include "renderer/RenderWorld.h"
 #include "sound/sound.h"
+#include "framework/GameReturn.h"	// gameReturn_t, allowReply_t, escReply_t (shared with Quake 4's interface)
 
 class idAASFileManager;
 class idCollisionModelManager;
@@ -52,29 +53,6 @@ class idNetworkSystem;
 ===============================================================================
 */
 
-typedef struct {
-	char		sessionCommand[MAX_STRING_CHARS];	// "map", "disconnect", "victory", etc
-	int			consistencyHash;					// used to check for network game divergence
-	int			health;
-	int			heartRate;
-	int			stamina;
-	int			combat;
-	bool		syncNextGameFrame;					// used when cinematics are skipped to prevent session from simulating several game frames to
-													// keep the game time in sync with real time
-} gameReturn_t;
-
-typedef enum {
-	ALLOW_YES = 0,
-	ALLOW_BADPASS,	// core will prompt for password and connect again
-	ALLOW_NOTYET,	// core will wait with transmitted message
-	ALLOW_NO		// core will abort with transmitted message
-} allowReply_t;
-
-typedef enum {
-	ESC_IGNORE = 0,	// do nothing
-	ESC_MAIN,		// start main menu GUI
-	ESC_GUI			// set an explicit GUI
-} escReply_t;
 
 class idGame {
 public:

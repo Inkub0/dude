@@ -97,7 +97,10 @@ public:
 	// the game-facing interface gains them with the Quake 4 game library (docs/quake4-port.md 5.4).
 	void						SetInteractive( bool b ) { interactive = b; }
 	void						SetLightColor( const idVec4 &color ) { lightColor = color; }
-	const idVec4 &				GetLightColor( void ) const { return lightColor; }
+	virtual idVec4				GetLightColor( void ) { return lightColor; }
+	virtual void				SetStateVec4( const char *varName, const idVec4 &vector ) { state.SetVec4( varName, vector ); }
+	virtual void				ClearState( void ) { state.Clear(); }
+	virtual bool				GetMaxTextIndex( const char *windowName, const char *text, wrapInfo_t &wrapInfo ) const;
 
 private:
 	bool						active;
@@ -158,8 +161,18 @@ public:
 	virtual idUserInterface *	FindDemoGui( const char *qpath );
 	virtual	idListGUI *			AllocListGUI( void ) const;
 	virtual void				FreeListGUI( idListGUI *listgui );
+	virtual void				RegisterIcon( const char *code, const char *shader, int x, int y, int w, int h );
+
+								// Quake 4: a "^i<code>" icon, NULL when none is registered
+	struct guiIcon_t {
+		idStr					code;
+		const idMaterial *		material;
+		int						x, y, w, h;			// -1: the whole material
+	};
+	const guiIcon_t *			FindIcon( const char *code ) const;
 
 private:
+	idList<guiIcon_t>			icons;
 	idRectangle					screenRect;
 	idDeviceContext				dc;
 
