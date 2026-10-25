@@ -4409,8 +4409,10 @@ void idWindow::AutoAnchorHudChildren( float x, float y, bool overlay ) {
 			continue;
 		}
 		// text keeps to where it is written - left-aligned text by its start (a target's name
-		// beside the crosshair, room to the screen edge after it), right-aligned by its end
-		if ( textOnly && r.w < HUD_FULL_WIDTH ) {
+		// beside the crosshair, room to the screen edge after it), right-aligned by its end;
+		// a line as wide as the screen too, unless centred (Doom 3's left-aligned messages and
+		// right-aligned hit counter keep to their sides, as the WideGuis pack anchors them)
+		if ( textOnly && ( r.w < HUD_FULL_WIDTH || align != 1 ) ) {
 			if ( align == 1 ) {
 				r.x += r.w * 0.5f;
 			} else if ( align == 2 ) {
