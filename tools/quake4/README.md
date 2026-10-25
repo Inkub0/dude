@@ -60,6 +60,15 @@ Q4BASE="/path/to/Quake 4/q4base" python3 tools/quake4/q4_inventory.py > /tmp/q4_
   (`DewmAAS "1.08"`) and of Doom 3 + RoE + Lost Mission (`1.07`). Reports failures and warnings
   (the loader's feature self-check included), areas, clusters, dummy files, tactical features.
   Needs a configured `build/`.
+- `test_effect_parse.sh` (+ `tests/effect_parse_test.cpp`, `tests/decl_stub.h`, `q4_effect_census.py`) —
+  BSE effects (docs/quake4-bse.md): compiles the engine's effect decl parser
+  (`neo/renderer/bse/DeclEffect.cpp`) with the real `idLexer` and stand-in decl / model managers that
+  record every name, splits each retail `.fx` into decls as the decl manager does and parses all 1172.
+  Gate: 0 failures, 0 parse warnings, 29 control effects as designed, and every count and sum the
+  parser stored equal to `q4_effect_census.py census` (its own tokenizer and grammar walk of the
+  text). Also prints the names the retail data lacks (`refs`). Needs a configured `build/`.
+- `q4_effect_census.py census|compare|refs` — the independent effect census above; `refs <q4base>
+  <parser output>` resolves tables, materials, sound shaders, effects, entity defs and models.
 - `check_engine_strings.py [q4base]` — every `#str_` id the engine source uses, resolved as the
   engine does (exact, Quake 4's `#str_1…` renumbering, the English fallbacks of
   `AddEngineStringFallbacks`) against Doom 3's and Quake 4's tables: unresolved ids per title

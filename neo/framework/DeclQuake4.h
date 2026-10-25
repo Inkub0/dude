@@ -8,7 +8,8 @@ Doom 3 GPL Source Code (see ArbProgram.h for license header)
 // Quake 4 game title (GameTitle), next to Doom 3's: materialType, lipSync, playback, effect
 // (and playerModel, which is an idDeclEntityDef dictionary). Written from the retail files'
 // grammar; the accessors are what the Quake 4 game library and the renderer will need, and
-// grow with them.
+// grow with them. The effect decl belongs to the effect system (renderer/bse/DeclEffect.h,
+// included here so every user of these decl types sees it).
 
 #ifndef __DECLQUAKE4_H__
 #define __DECLQUAKE4_H__
@@ -22,6 +23,7 @@ Doom 3 GPL Source Code (see ArbProgram.h for license header)
 #include "framework/DeclManager.h"
 #include "framework/DeclEntityDef.h"
 #include "framework/CVarSystem.h"
+#include "renderer/bse/DeclEffect.h"
 
 /*
 ===============================================================================
@@ -224,33 +226,6 @@ private:
 	bool					ParseSequence( idLexer &src );
 	bool					ParseData( idLexer &src );
 	bool					ParseButtons( idLexer &src );
-};
-
-/*
-===============================================================================
-
-	idDeclEffect - effects/<name>.fx (Raven's BSE)
-
-	For now the decl checks the effect is well formed (balanced, with its top-level
-	segments) and counts its segments; the effect grammar and runtime are their own phase
-	(docs/quake4-port.md Q4, section 5.5).
-
-===============================================================================
-*/
-
-class idDeclEffect : public idDecl {
-public:
-	virtual size_t			Size( void ) const;
-	virtual const char *	DefaultDefinition( void ) const;
-	virtual bool			Parse( const char *text, const int textLength );
-	virtual void			FreeData( void );
-
-	float					GetSize( void ) const { return size; }			// bounding radius
-	int						GetNumSegments( void ) const { return numSegments; }
-
-private:
-	float					size;
-	int						numSegments;
 };
 
 /*

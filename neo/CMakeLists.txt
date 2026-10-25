@@ -978,6 +978,12 @@ set(src_quake4
 
 add_globbed_headers(src_quake4 "quake4")
 
+# DUDE: Quake 4's effect system, Raven's BSE (docs/quake4-bse.md); its headers come with
+# src_renderer's
+set(src_bse
+	renderer/bse/DeclEffect.cpp
+)
+
 set(src_cm
 	cm/CollisionModel_contacts.cpp
 	cm/CollisionModel_contents.cpp
@@ -1358,6 +1364,7 @@ set(src_core
 	${src_renderer}
 	${src_framework}
 	${src_quake4}
+	${src_bse}
 	${src_cm}
 	${src_dmap}
 	${src_aas}
