@@ -1325,7 +1325,13 @@ void idSessionLocal::HandleInGameCommands( const char *menuCommand ) {
 idSessionLocal::DispatchCommand
 ==============
 */
-void idSessionLocal::DispatchCommand( idUserInterface *gui, const char *menuCommand, bool doIngame ) {
+void idSessionLocal::DispatchCommand( idUserInterface *gui, const char *menuCommandIn, bool doIngame ) {
+	// DUDE: our own copy. The command is the clicked window's text, and a handler can reload that
+	// window's GUI before the command is done with - loading a game from the death screen's list
+	// runs ExecuteMapChange, whose uiManager->Reload( true ) rebuilds every GUI - and the in-game
+	// pass below then read the freed text (ASAN heap-use-after-free; id's code, Doom 3 too)
+	const idStr menuCommandCopy = menuCommandIn != NULL ? menuCommandIn : "";
+	const char *menuCommand = menuCommandCopy.c_str();
 
 	if ( !gui ) {
 		gui = guiActive;
