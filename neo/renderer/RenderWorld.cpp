@@ -524,6 +524,8 @@ static const idMaterial *R_ForcedAmbientMaterial( void ) {
 	if ( material == NULL ) {
 		idDecl *decl = declManager->CreateNewDecl( DECL_MATERIAL, name, "materials/_dude_engine.mtr" );
 		decl->SetText( va( "material %s\n{\n\tambientLight\n\tlightFalloffImage _white\n\t{\n\t\tmap _white\n\t\tcolored\n\t}\n}\n", name ) );
+		// CreateNewDecl parsed its default text already: parse this one instead
+		decl->Invalidate();
 		material = declManager->FindMaterial( name );
 	}
 	return material;
