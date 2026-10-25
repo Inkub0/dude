@@ -7,9 +7,11 @@ ecfd905b): the retail campaign is playable with `q4base.so` built from the SDK g
 RoE / Lost Mission smoke-tested and ASAN-clean. After Q5, on master 54f75e4b: Quake 4's menu
 settings (§5.2: linear `s_volume`, the retail ambient / music mix, devices by name, the resolution
 and aspect lists, `r_skipSky`), the game's linear sound volumes, shader and game pitch shift,
-hidden surfaces on static models, slider clicks in unanchored menus. Since (branches, pending
-merge): `r_forceAmbient`, vanilla ambient-light shading on the RHI (a Doom 3 fix), English under
-the chosen language. Closed without work: doppler (no retail sound asks for it, vehicles pass no
+hidden surfaces on static models, slider clicks in unanchored menus. Then, on master
+392d67d4: `r_forceAmbient`, vanilla ambient-light shading on the RHI (a Doom 3 fix), English under
+the chosen language, French / Italian / Spanish lip sync (the lexer reads Western European
+letters), the HUDs kept in shape on a wide screen (Quake 4's and Doom 3's own - the WideGuis pack
+no longer needed for the HUD, crosshair and death screen), a crash loading from the death screen. Closed without work: doppler (no retail sound asks for it, vehicles pass no
 velocity), ragdolls stopping in odd poses (retail data: every character AF has `maxMoveTime 7`),
 ray-traced BLASes holding a static model's hidden surfaces (retail hides surfaces on MD5 models
 only, whose posed model the RT tiers already use). **Next: Q4 (BSE effects)**, then the DUDE SDK
