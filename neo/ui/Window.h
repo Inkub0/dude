@@ -354,8 +354,6 @@ public:
 	void		AutoAnchorHud		( bool overlay );
 	// DUDE: the CST anchor of the child window of that name, at any depth; false when there is none
 	bool		SetChildCstAnchor	( const char *childName, int anchor );
-	// DUDE: the x of the rect of the child window of that name, at any depth; false when there is none
-	bool		SetChildRectX		( const char *childName, float x );
 
 	bool		UpdateFromDictionary ( idDict& dict );
 

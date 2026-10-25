@@ -4391,23 +4391,6 @@ bool idWindow::SetChildCstAnchor( const char *childName, int anchor ) {
 
 /*
 ================
-idWindow::SetChildRectX
-================
-*/
-bool idWindow::SetChildRectX( const char *childName, float x ) {
-	drawWin_t *dw = FindChildByName( childName );
-	if ( dw == NULL ) {
-		return false;
-	}
-	idWinRectangle &r = ( dw->simp != NULL ) ? dw->simp->rect : dw->win->rect;
-	idRectangle moved = r;
-	moved.x = x;
-	r = moved;
-	return true;
-}
-
-/*
-================
 idWindow::AutoAnchorHud
 
 The desktop of a HUD (overlay: only its lines of text as wide as the screen)
