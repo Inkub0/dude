@@ -13,8 +13,9 @@ Doom 3 GPL Source Code (see ArbProgram.h for license header)
 //
 // Hidden surfaces (suppressSurfaceMask) go to the engine entity: an MD5 model leaves them out when
 // posed, a static model is drawn from a copy without them (R_EntityDefDynamicModel); the ray traced
-// tiers' shared model BLASes still hold a static model's hidden surfaces. An overlayShader is a
-// second engine entity drawing the model with it.
+// tiers' shared model BLASes still hold a static model's hidden surfaces - unseen in the retail
+// game, which hides surfaces on MD5 models only (whose posed model the RT tiers use). An
+// overlayShader is a second engine entity drawing the model with it.
 //
 // Not carried over yet - accepted and dropped, the renderer has no slot for them:
 // shadowLODDistance / suppressLOD, a light's detailLevel,

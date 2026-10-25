@@ -1,13 +1,19 @@
 # Quake 4 on DUDE — milestone plan (draft 2026-10-15)
 
-Status (2026-10-24): **Q0-Q3 done and on master** (Q3, world formats: merge 714881e7 - all 31
-campaign maps load and quit cleanly in the null game on Vulkan and OpenGL3, `cm`/`aas`
-self-checks clean, `airdefense1` user-verified on both renderers; the collision API additions
-moved to Q5). **Q5 (game library) started 2026-10-24** (user: Q5 before Q4, BSE later),
-plan in §5.6: Q5.0 (dhewm3 ABI) merged, Q5.1 (build + inventory) and Q5.2 (idlib layer, 4214
--> 2349 errors, 0 in idlib) done on `feat/quake4-game-library`; Q5.3 (engine interfaces) in
-done: the game library compiles and links (q4base.so), Doom 3 + RoE smoke test passed
-(user, 2026-10-24); Q5.4 (engine facades and the Quake 4 loader) built, its boot gate pending. Goal: **DUDE runs the retail Quake 4 (2005,
+Status (2026-10-25): **Q0-Q3 and Q5 done and on master.** Q3 (world formats, merge 714881e7):
+all 31 campaign maps load and quit cleanly on Vulkan and OpenGL3. Q5 (game library, merge
+ecfd905b): the retail campaign is playable with `q4base.so` built from the SDK game repository
+(§5.6) - `airdefense1` and `airdefense2` user-verified, the dhewm3 fix audit applied, Doom 3 /
+RoE / Lost Mission smoke-tested and ASAN-clean. After Q5, on master 54f75e4b: Quake 4's menu
+settings (§5.2: linear `s_volume`, the retail ambient / music mix, devices by name, the resolution
+and aspect lists, `r_skipSky`), the game's linear sound volumes, shader and game pitch shift,
+hidden surfaces on static models, slider clicks in unanchored menus. Since (branches, pending
+merge): `r_forceAmbient`, vanilla ambient-light shading on the RHI (a Doom 3 fix), English under
+the chosen language. Closed without work: doppler (no retail sound asks for it, vehicles pass no
+velocity), ragdolls stopping in odd poses (retail data: every character AF has `maxMoveTime 7`),
+ray-traced BLASes holding a static model's hidden surfaces (retail hides surfaces on MD5 models
+only, whose posed model the RT tiers already use). **Next: Q4 (BSE effects)**, then the DUDE SDK
+for Quake 4 modders (after BSE, which extends the game-engine interface). Goal: **DUDE runs the retail Quake 4 (2005,
 Raven Software, idTech4) single-player campaign natively** — its own `q4base/*.pk4` assets,
 its own game logic, on DUDE's GL3 and Vulkan backends, with DUDE's enhancement tiers
 (PBR, tessellation, RT) available as opt-in on top. Multiplayer is out of scope for v1 (§9).
@@ -924,9 +930,10 @@ performance** as the goals; repository `~/dude-quake4-game` (local git, never pu
        a fourth attribute, `PS_BLOCK_GRAVITY` (`NUM_PORTAL_ATTRIBUTES_LOCAL`, engine-internal;
        Doom 3 never sets the bit).
      - **effects:** `AddEffectDef` declines every effect (the game drops it) until phase Q4.
-     Accepted and dropped for now (no renderer / mixer slot): `suppressSurfaceMask`,
-     `overlayShader`, shadow LOD, light `detailLevel` / `noDynamicShadows` / `globalLight`,
-     per-view weapon depth hack, doppler, pitch shift, wet/dry mix; the game's
+     Accepted and dropped for now (no renderer / mixer slot): shadow LOD, light
+     `detailLevel` / `noDynamicShadows` / `globalLight`, per-view weapon depth hack, doppler
+     (retail never asks for it), wet/dry mix (`suppressSurfaceMask`, `overlayShader` and pitch
+     shift came after, 2026-10-25); the game's
      `SetupLoadingGui` (the session fills Quake 4's loading screen from the mapDef); snapshots
      and voice (Q9). Builds clean on Linux and the Windows cross-build; `check_dhewm3_abi.py`
      0 breaks; the Doom 3 libraries are untouched by this step.
