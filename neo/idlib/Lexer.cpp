@@ -280,6 +280,27 @@ void idLexer::SetPunctuations( const punctuation_t *p ) {
 
 /*
 ================
+LexerHighLetter
+
+DUDE: a Western European letter past ASCII (Windows-1252 0x8A 0x8C 0x8E 0x9A 0x9C 0x9E 0x9F - the
+S, OE, Z carons and ligatures and Y diaeresis - and 0xC0 to 0xFF but for the multiplication and
+division signs), read as part of a name like a-z. id's lexer compared a signed char, so every
+byte past 127 was white space; Raven's (Quake 4's idlib) tests the byte against a letter table,
+and its game code reads localized words with it - the French, Italian and Spanish lip-sync
+phrases (Italian "<e-grave>"), where white space dropped the word and the phrase then failed to
+parse. Every other byte past 127 stays white space, as before.
+================
+*/
+static ID_INLINE bool LexerHighLetter( int c ) {
+	c &= 0xFF;
+	if ( c >= 0xC0 ) {
+		return c != 0xD7 && c != 0xF7;
+	}
+	return c == 0x8A || c == 0x8C || c == 0x8E || c == 0x9A || c == 0x9C || c == 0x9E || c == 0x9F;
+}
+
+/*
+================
 idLexer::ReadWhiteSpace
 
 Reads spaces, tabs, C-like comments etc.
@@ -289,7 +310,7 @@ When a newline character is found the scripts line counter is increased.
 int idLexer::ReadWhiteSpace( void ) {
 	while(1) {
 		// skip white space
-		while(*idLexer::script_p <= ' ') {
+		while(*idLexer::script_p <= ' ' && !LexerHighLetter( *idLexer::script_p ) ) {
 			if (!*idLexer::script_p) {
 				return 0;
 			}
@@ -545,7 +566,7 @@ int idLexer::ReadName( idToken *token ) {
 	} while ((c >= 'a' && c <= 'z') ||
 				(c >= 'A' && c <= 'Z') ||
 				(c >= '0' && c <= '9') ||
-				c == '_' ||
+				c == '_' || LexerHighLetter( c ) ||
 				// if treating all tokens as strings, don't parse '-' as a seperate token
 				((idLexer::flags & LEXFL_ONLYSTRINGS) && (c == '-')) ||
 				// if special path name characters are allowed
@@ -881,7 +902,7 @@ int idLexer::ReadToken( idToken *token ) {
 		// if names are allowed to start with a number
 		if ( idLexer::flags & LEXFL_ALLOWNUMBERNAMES ) {
 			c = *idLexer::script_p;
-			if ( (c >= 'a' && c <= 'z') ||	(c >= 'A' && c <= 'Z') || c == '_' ) {
+			if ( (c >= 'a' && c <= 'z') ||	(c >= 'A' && c <= 'Z') || c == '_' || LexerHighLetter( c ) ) {
 				if ( !idLexer::ReadName( token ) ) {
 					return 0;
 				}
@@ -895,7 +916,7 @@ int idLexer::ReadToken( idToken *token ) {
 		}
 	}
 	// if there is a name
-	else if ( (c >= 'a' && c <= 'z') ||	(c >= 'A' && c <= 'Z') || c == '_' ) {
+	else if ( (c >= 'a' && c <= 'z') ||	(c >= 'A' && c <= 'Z') || c == '_' || LexerHighLetter( c ) ) {
 		if ( !idLexer::ReadName( token ) ) {
 			return 0;
 		}
