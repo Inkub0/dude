@@ -1,4 +1,5 @@
-// Translated from glprogs/ambientLight.vfp (fragment program).
+// Translated from glprogs/ambientLight.vfp (fragment program) - but shaded like vanilla Doom 3, which
+// lit ambient lights with interaction.vfp (see main).
 
 #include "renderparms.glsl"
 
@@ -26,25 +27,32 @@ void main() {
 	vec4 bump = texture( u_bumpMap, var_TexBump );
 	vec3 localNormal = vec3( bump.a, bump.y, bump.z ) * 2.0 - 1.0;
 
-	// Transform into ambient map space using a 3x3 matrix multiply
-	mat3 toGlobal = mat3( var_ToGlobalRow0, var_ToGlobalRow1, var_ToGlobalRow2 );
-	vec3 globalNormal = toGlobal * localNormal;
+	// DUDE: Doom 3's own ambient shading. id shipped this program (glprogs/ambientLight.vfp) for an
+	// ambient cube of COLOURS but never used it: vanilla draws an ambientLight material with the
+	// interaction program, the "_ambient" cube standing in for the normalization cube map - a
+	// constant DIRECTION (tr.ambientLightVector), unpacked and dotted with the bump-mapped normal,
+	// no specular. Read as a colour (as this shader did) that vector is ( 1.0, 0.11, 0.89 ): every
+	// ambient light came out magenta and flat. The cube holds one texel; any direction reads it.
+	vec3 ambientDir = texture( u_ambientCubeMap, vec3( 0.0, 0.0, 1.0 ) ).rgb * 2.0 - 1.0;
 
-	// DUDE GTAO C.2 (docs/ssao-gtao.md): bias the ambient sampling direction toward the
-	// bent normal (average unoccluded direction) so the ambient responds to macro
-	// occlusion, not just the surface normal. The bent normal is view-space in the AO
-	// buffer's GBA; rotate it to world with the inverse view rotation (v * M == Mᵀ * v,
-	// M = world->eye view matrix), then blend by u_localParam1.x. u_localParam0.zw give
-	// the AO uv (shared with the C.1 occlusion multiply below).
-	vec3 shadeNormal = globalNormal;
+	// DUDE GTAO C.2 (docs/ssao-gtao.md): bias the shading normal toward the bent normal (average
+	// unoccluded direction) so the ambient responds to macro occlusion, not just the surface
+	// normal. The bent normal is view-space in the AO buffer's GBA; rotate it to world with the
+	// inverse view rotation (v * M == Mt * v, M = world->eye view matrix), then into tangent
+	// space: var_ToGlobalRow0..2 are the rows of the tangent->world rotation, so the matrix built
+	// from them as COLUMNS is its transpose, world->tangent. u_localParam0.zw give the AO uv
+	// (shared with the C.1 occlusion multiply below).
+	vec3 shadeNormal = localNormal;
 	if ( u_localParam1.x > 0.0 ) {
 		vec3 bentView  = texture( u_ssao, gl_FragCoord.xy * u_localParam0.zw ).gba * 2.0 - 1.0;
 		vec3 bentWorld = bentView * mat3( u_modelViewMatrix );
-		shadeNormal = normalize( mix( globalNormal, bentWorld, u_localParam1.x ) );
+		mat3 worldToLocal = mat3( var_ToGlobalRow0, var_ToGlobalRow1, var_ToGlobalRow2 );
+		vec3 bentLocal = normalize( worldToLocal * bentWorld );
+		shadeNormal = normalize( mix( normalize( localNormal ), bentLocal, u_localParam1.x ) );
 	}
 
-	// Do all lookups as rgb-only where possible and combine multiplies
-	vec3 ambient = texture( u_ambientCubeMap, shadeNormal ).rgb;
+	// a negative dot clamps, as the fixed-point colour output of the vanilla program did
+	vec3 ambient = vec3( max( dot( ambientDir, shadeNormal ), 0.0 ) );
 	vec3 diff = texture( u_diffuseMap, var_TexDiffuse ).rgb;
 	vec3 falloff = texture( u_lightFalloff, var_TexFalloff ).rgb;
 	vec3 proj = textureProj( u_lightProjection, var_TexProjection ).rgb;
