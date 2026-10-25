@@ -58,6 +58,15 @@ public:
 	virtual bool			GetAdditionalFunction( FunctionType ft, FunctionPointer *out_fnptr, void **out_userArg ) { return false; }
 	virtual float			GetTicInterpolation( void ) { return 0.0f; }
 	virtual void			GetPendingViewAngleDelta( float &yaw, float &pitch ) { yaw = pitch = 0.0f; }
+	// the Quake 4 game library's additions (framework/Common.h)
+	virtual int				GetUserCmdHz( void ) const { return 60; }
+	virtual int				GetUserCmdMSec( void ) const { return 16; }
+	virtual bool			DoingDeclValidation( void ) { return false; }
+	virtual int				GetRModeForMachineSpec( int machineSpec ) const { return 0; }
+	virtual void			SetDesiredMachineSpec( int machineSpec ) {}
+	virtual void			RunAlwaysThinkGUIs( int time ) {}
+	virtual void			LoadToolsDLL( void ) {}
+	virtual void			ModViewThink( void ) {}
 
 private:
 	static void				Fail( const char *prefix, const char *fmt, va_list arg ) {
