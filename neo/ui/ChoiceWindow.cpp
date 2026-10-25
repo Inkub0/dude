@@ -300,6 +300,13 @@ void idChoiceWindow::UpdateChoicesAndVals( void ) {
 	idStr str2, str3;
 	idLexer src;
 
+	// DUDE: read both lists from the gui state now. choiceVals.Length() below always re-read it,
+	// but choicesStr only followed it on the window's next StateChanged, so a "gui::" list set
+	// after the gui loaded (Quake 4's devices, aspects, player models) had its values parsed
+	// against the old, empty choices for a frame - and warned "value count unequal"
+	choicesStr.Update();
+	choiceVals.Update();
+
 	if ( latchedChoices.Icmp( choicesStr ) ) {
 		choices.Clear();
 		src.FreeSource();
