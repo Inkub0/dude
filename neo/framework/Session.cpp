@@ -372,6 +372,7 @@ void idSessionLocal::Clear() {
 
 	insideUpdateScreen = false;
 	insideExecuteMapChange = false;
+	loadClickPending = false;
 
 	loadingSaveGame = false;
 	savegameFile = NULL;
@@ -1887,15 +1888,21 @@ void idSessionLocal::LoadLoadingGui( const char *mapName ) {
 	// give the gamecode a chance to override
 	game->GetMapLoadingGUI( guiMap );
 
+	// DUDE: a Quake 4 mapDef can name its own loading screen ("loadgui": airdefense1's
+	// guis/loading/intro.gui); Doom 3's mapDefs have no such key
+	const idDeclEntityDef *mapDef = FindMapDef( mapName );
+	const char *mapDefGui = mapDef != NULL ? mapDef->dict.GetString( "loadgui" ) : "";
+
 	if ( uiManager->CheckGui( guiMap ) ) {
 		guiLoading = uiManager->FindGui( guiMap, true, false, true );
+	} else if ( mapDefGui[0] != '\0' && uiManager->CheckGui( mapDefGui ) ) {
+		guiLoading = uiManager->FindGui( mapDefGui, true, false, true );
 	} else {
 		guiLoading = uiManager->FindGui( GameTitle::Get().loadingGui, true, false, true );
 	}
 	guiLoading->SetStateFloat( "map_loading", 0.0f );
 	// DUDE: Quake 4's loading screen (guis/loading/generic.gui) shows the level's picture and
 	// name from its mapDef; Doom 3's mapDefs have no loadimage and its per-map GUIs carry both
-	const idDeclEntityDef *mapDef = FindMapDef( mapName );
 	if ( mapDef != NULL && mapDef->dict.GetString( "loadimage" )[0] != '\0' ) {
 		guiLoading->SetStateString( "loading_bkgnd", mapDef->dict.GetString( "loadimage" ) );
 		guiLoading->SetStateString( "loading_levelname",
@@ -1965,6 +1972,12 @@ void idSessionLocal::ExecuteMapChange( bool noFadeWipe ) {
 
 	// close console and remove any prints from the notify lines
 	console->Close();
+
+	// DUDE: a loading screen still waiting for its click (a map started from its console) is done
+	loadClickPending = false;
+	if ( guiActive != NULL && guiActive == guiLoading ) {
+		guiActive = NULL;
+	}
 
 	if ( IsMultiplayer() ) {
 		// make sure the mp GUI isn't up, or when players get back in the
@@ -2191,8 +2204,17 @@ void idSessionLocal::ExecuteMapChange( bool noFadeWipe ) {
 		}
 	}
 
-	// capture the current screen and start a wipe
-	StartWipe( "wipe2Material" );
+	// DUDE: Quake 4 keeps a new map's loading screen up until the player clicks: its loading GUIs
+	// turn "loading" into "click to continue" on a FinishedLoading event and send "close" from a
+	// full-screen button. A loaded savegame goes straight in, as in retail. The fade into the game
+	// starts with the click (HandleLoadingCommands).
+	const bool clickToContinue = GameTitle::Get().title == GAME_TITLE_QUAKE4 && guiLoading != NULL &&
+		!loadingSaveGame && !idAsyncNetwork::IsActive() && cvarSystem->GetCVarBool( "com_clickToContinue" );
+
+	if ( !clickToContinue ) {
+		// capture the current screen and start a wipe
+		StartWipe( "wipe2Material" );
+	}
 
 	usercmdGen->Clear();
 
@@ -2212,13 +2234,22 @@ void idSessionLocal::ExecuteMapChange( bool noFadeWipe ) {
 
 	Sys_SetPhysicalWorkMemory( -1, -1 );
 
-	// set the game sound world for playback
-	soundSystem->SetPlayingSoundWorld( sw );
+	if ( clickToContinue ) {
+		// the loading screen's sounds play until the click; the game's wait, paused
+		soundSystem->SetPlayingSoundWorld( menuSoundWorld );
+		if ( !sw->IsPaused() ) {
+			sw->Pause();
+		}
+		loadClickPending = true;		// the next frame shows it (callers clear the active GUI first)
+	} else {
+		// set the game sound world for playback
+		soundSystem->SetPlayingSoundWorld( sw );
 
-	// when loading a save game the sound is paused
-	if ( sw->IsPaused() ) {
-		// unpause the game sound world
-		sw->UnPause();
+		// when loading a save game the sound is paused
+		if ( sw->IsPaused() ) {
+			// unpause the game sound world
+			sw->UnPause();
+		}
 	}
 
 	// restart entity sound playback
@@ -2227,6 +2258,39 @@ void idSessionLocal::ExecuteMapChange( bool noFadeWipe ) {
 	// we are valid for game draws now
 	mapSpawned = true;
 	Sys_ClearEvents();
+}
+
+/*
+===============
+idSessionLocal::HandleLoadingCommands
+
+What Quake 4's loading screen sends once the map is in: "play <sound>" (its own sounds),
+"unmute" and "close" - the player clicked: back to the game's sounds, and fade into the game.
+===============
+*/
+static const char *HandleLoadingGuiCommand( const char *menuCommand ) {
+	sessLocal.HandleLoadingCommands( menuCommand );
+	return "";		// handled
+}
+
+void idSessionLocal::HandleLoadingCommands( const char *menuCommand ) {
+	idCmdArgs args;
+	args.TokenizeString( menuCommand, false );
+	for ( int i = 0; i < args.Argc(); ) {
+		const char *cmd = args.Argv( i++ );
+		if ( !idStr::Icmp( cmd, "play" ) ) {
+			if ( i < args.Argc() ) {
+				// the loading screen's own sound world until the click, the game's after it
+				idSoundWorld *world = guiActive == guiLoading ? menuSoundWorld : sw;
+				world->PlayShaderDirectly( args.Argv( i++ ) );
+			}
+		} else if ( !idStr::Icmp( cmd, "unmute" ) || !idStr::Icmp( cmd, "close" ) ) {
+			if ( guiActive == guiLoading ) {
+				ExitMenu();		// the game's sounds, unpaused
+				StartWipe( "wipe2Material" );
+			}
+		}
+	}
 }
 
 /*
@@ -3035,7 +3099,7 @@ void idSessionLocal::Draw() {
 	D3P_ScopedCPUSample(Session_Draw);
 	bool fullConsole = false;
 
-	if ( insideExecuteMapChange ) {
+	if ( insideExecuteMapChange || loadClickPending ) {
 		if ( guiLoading ) {
 			guiLoading->Redraw( com_frameTime );
 		}
@@ -3303,6 +3367,24 @@ void idSessionLocal::Frame() {
 			authMsg.Empty();
 			authEmitTimeout = 0;
 			SetCDKeyGuiVars();
+		}
+	}
+
+	// DUDE: a new Quake 4 map's loading screen, kept up for its click (ExecuteMapChange): the
+	// GUI becomes the active one (no game tics run under it), then hears that loading finished -
+	// after SetGUI, whose first event would swallow the sound the GUI starts then
+	if ( loadClickPending ) {
+		loadClickPending = false;
+		if ( mapSpawned && guiActive == NULL && guiLoading != NULL ) {
+			SetGUI( guiLoading, HandleLoadingGuiCommand );
+			guiLoading->HandleNamedEvent( "FinishedLoading" );
+		} else {
+			// something else took the screen (a message box): the game's sounds back, straight in
+			soundSystem->SetPlayingSoundWorld( sw );
+			if ( sw->IsPaused() ) {
+				sw->UnPause();
+			}
+			StartWipe( "wipe2Material" );
 		}
 	}
 

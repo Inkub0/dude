@@ -483,7 +483,16 @@ Version-tolerant parsing, both formats through one code path:
   its dressing and its player start. Also from the mapDef: Quake 4's loading screen
   (`guis/loading/generic.gui`) gets `loading_bkgnd` = `loadimage` and `loading_levelname`, which
   DUDE never set (every Quake 4 map loaded on a blank screen); only a mapDef with a `loadimage`
-  does that, so Doom 3's loading GUIs are untouched. **Quake 4 inline statics stay solid**
+  does that, so Doom 3's loading GUIs are untouched. A mapDef's `loadgui` names its own loading
+  screen (retail: only `airdefense1`, `guis/loading/intro.gui` with the `e3_load` Quake 4 logo);
+  DUDE used `generic.gui` for it until 2026-10-26. **Click to continue** (2026-10-26, as retail):
+  once a *new* map is in (not a loaded savegame, not multiplayer), the session keeps the loading
+  screen up as its active GUI (no game tics, game sounds paused) and sends it `FinishedLoading`;
+  Quake 4's loading GUIs then show "click to continue", play `load_screen_ready`, and on the click
+  send `unmute ; close ; play load_screen_click` - the session resumes the game's sounds and fades
+  into the game (`idSessionLocal::HandleLoadingCommands`). `com_clickToContinue 0` (Quake 4 only,
+  archived, default 1) goes straight in. Doom 3's loading GUIs have no such event, and the wait is
+  gated on the Quake 4 title. **Quake 4 inline statics stay solid**
   (SDK `idStaticEntity::Spawn`: "inline models can be solid") - unlike Doom 3, where `Hide()`
   zeroes their contents - so terrain dmap merged into the world keeps its own `.cm` collision
   (Q5's game does this itself; a null-game floor drop that left them out sank the intro

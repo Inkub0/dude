@@ -226,6 +226,7 @@ public:
 	idSoundWorld *		menuSoundWorld;			// so the game soundWorld can be muted
 
 	bool				insideExecuteMapChange;	// draw loading screen and update
+	bool				loadClickPending;		// DUDE: a new Quake 4 map is in; its loading screen waits for a click
 												// screen on prints
 	int					bytesNeededForMapLoad;	//
 
@@ -383,6 +384,7 @@ public:
 	void				HandleChatMenuCommands( const char *menuCommand );
 	void				HandleIntroMenuCommands( const char *menuCommand );
 	void				HandleRestartMenuCommands( const char *menuCommand );
+	void				HandleLoadingCommands( const char *menuCommand );
 	// DUDE: the same restart.gui serves both deaths; an Ultra Nightmare death hides its Restart and
 	// Load rows and shows a red GAME OVER banner in their place, a normal death puts everything back
 	void				ConfigureRestartMenu( bool ultraNightmareDeath );

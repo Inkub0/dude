@@ -17,6 +17,8 @@ Doom 3 GPL Source Code (see ArbProgram.h for license header)
 //   r_forceAmbient      Force ambient light / Ambient brightness (1.4 patch): 0 off (retail's
 //                       default), the menu's toggle sets 0.7 - one shadowless ambient light over
 //                       the whole map (RenderWorld.cpp R_UpdateForcedAmbientLights)
+//   com_clickToContinue DUDE's: 1 (retail) - a new map's loading screen waits for a click;
+//                       0 goes straight in. Loaded savegames never wait.
 //   s_useOpenAL, r_useSmp, in_freeLook, the multiplayer and voice chat ones:
 //                       accepted so the menu works, no effect (DUDE always uses OpenAL and its
 //                       own threading, mouse look is always on, multiplayer is not implemented)
@@ -80,6 +82,8 @@ void Q4Settings_Init( void ) {
 	q4_deviceName		= new idCVar( "s_deviceName", "", CVAR_SOUND | CVAR_ARCHIVE, "Quake 4 menu: the sound device (DUDE's s_device follows it; applied by s_restart)" );
 	q4_skipSky			= new idCVar( "r_skipSky", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "Quake 4: 'Enable detailed sky' off - no portal sky view" );
 
+	new idCVar( "com_clickToContinue", "1", CVAR_SYSTEM | CVAR_ARCHIVE | CVAR_BOOL,
+		"Quake 4: a new map's loading screen waits for a click to continue, as retail (0: straight into the game; loaded savegames never wait)" );
 	new idCVar( "s_useOpenAL", "1", CVAR_SOUND | CVAR_ARCHIVE | CVAR_BOOL, "Quake 4 menu: sound system - DUDE always uses OpenAL" );
 	new idCVar( "r_useSmp", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "Quake 4 menu: multiple CPU optimization - DUDE uses its own threading" );
 	new idCVar( "in_freeLook", "1", CVAR_SYSTEM | CVAR_ARCHIVE | CVAR_BOOL, "Quake 4 menu: free look - mouse look is always on in DUDE" );
