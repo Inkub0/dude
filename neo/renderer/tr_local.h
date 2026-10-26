@@ -448,6 +448,9 @@ typedef struct viewDef_s {
 	// large: the level-change wipe capture is 2048x1024 on a 1440p window, which passes a
 	// 1715x965 (r_fsrScale 0.67) test. Subviews inherit it; every test also excludes isSubview.
 	bool				isWindowView;
+	// DUDE: a top-level view the game rendered inside a CropRenderSize (double vision, berserk vision,
+	// screenshots): the game's own picture of the player's view, rendered small and captured
+	bool				isCropView;
 
 	bool				isEditor;
 

@@ -589,10 +589,13 @@ staging, so the sky never takes the frame's once-per-frame slots.
 */
 bool R_PortalSkyRender( void ) {
 	viewDef_t *parent = tr.viewDef;
-	// the player's view, and a glass probe face (bakeGlassProbe: six tile-sized top-level views
-	// that are not window views) - else the probe's sky directions show whatever _currentRender
-	// last held through RoE's portal_sky surfaces, a stale picture of the player's view
-	if ( parent == NULL || parent->isSubview || ( !parent->isWindowView && !tr.takingEnvProbe )
+	// the player's view, a glass probe face (bakeGlassProbe: six tile-sized top-level views that
+	// are not window views) - else the probe's sky directions show whatever _currentRender last
+	// held through RoE's portal_sky surfaces, a stale picture of the player's view - and the
+	// player's view as the game renders it into a crop: Quake 4's, RoE's and Lost Mission's double
+	// vision and berserk vision (the original games rendered their sky there too; without it the
+	// sky stayed black)
+	if ( parent == NULL || parent->isSubview || ( !parent->isWindowView && !parent->isCropView && !tr.takingEnvProbe )
 	     || parent->viewEntitys == NULL ) {
 		return false;
 	}

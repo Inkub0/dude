@@ -914,6 +914,9 @@ void idRenderWorldLocal::RenderScene( const renderView_t *renderView ) {
 	}
 
 
+	// DUDE: inside the game's CropRenderSize (R_PortalSkyRender gives such a view its sky too)
+	parms->isCropView = tr.currentRenderCrop > 0;
+
 	// save this world for use by some console commands
 	tr.primaryWorld = this;
 	tr.primaryRenderView = *renderView;
