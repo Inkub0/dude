@@ -377,8 +377,10 @@ idEditField::KeyDownEvent
 void idEditField::KeyDownEvent( int key ) {
 	int		len;
 
-	// shift-insert is paste
-	if ( ( ( key == K_INS ) || ( key == K_KP_INS ) ) && idKeyInput::IsDown( K_SHIFT ) ) {
+	// shift-insert is paste; so is ctrl-v (DUDE: with SDL2 a ctrl-letter never arrives as a typed
+	// character, so CharEvent's ctrl-v check below never saw it)
+	if ( ( ( ( key == K_INS ) || ( key == K_KP_INS ) ) && idKeyInput::IsDown( K_SHIFT ) ) ||
+			( key == 'v' && idKeyInput::IsDown( K_CTRL ) ) ) {
 		ClearAutoComplete();
 		Paste();
 		return;
