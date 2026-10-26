@@ -15,8 +15,8 @@ no longer needed for the HUD, crosshair and death screen), a crash loading from 
 velocity), ragdolls stopping in odd poses (retail data: every character AF has `maxMoveTime 7`),
 ray-traced BLASes holding a static model's hidden surfaces (retail hides surfaces on MD5 models
 only, whose posed model the RT tiers already use). **Now: Q4 (BSE effects)** - plan, measured
-grammar and progress in [quake4-bse.md](quake4-bse.md); S1 (the effect decl) and S2 (runtime, sprites) on
-master, S3 (every particle kind, trails) built 2026-10-25 - then
+grammar and progress in [quake4-bse.md](quake4-bse.md); S1 (the effect decl), S2 (runtime, sprites) and S3
+(every particle kind, trails; gate passed 2026-10-26) on master, S4 (lights, sounds, decals) next - then
 the DUDE SDK for Quake 4 modders (after BSE, which extends the game-engine interface). Goal: **DUDE runs the retail Quake 4 (2005,
 Raven Software, idTech4) single-player campaign natively** — its own `q4base/*.pk4` assets,
 its own game logic, on DUDE's GL3 and Vulkan backends, with DUDE's enhancement tiers

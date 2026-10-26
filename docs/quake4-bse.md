@@ -1,9 +1,10 @@
 # Quake 4 effects (BSE) on DUDE — phase Q4
 
-Status (2026-10-25): **plan approved; S1 (the effect decl) and S2 (the runtime and sprites)
-done and on master; S3 (every drawn particle kind and the trails) built, at its gate.** Effects
-play and draw every particle kind; sounds, lights, decals, physics and view effects come with
-S4-S6.
+Status (2026-10-26): **plan approved; S1 (the effect decl), S2 (the runtime and sprites) and S3
+(every drawn particle kind and the trails) done and on master.** Effects play and draw every
+particle kind; sounds, lights, decals, physics and view effects come with S4-S6. Visual checks
+go through the user's Quake 4 Effect Browser (a claude.ai page listing all 1172 effects, what
+DUDE draws of each, the command that plays it, and a saved "Checked" tick per effect).
 
 Raven's BSE (their effects runtime, linked into the closed Quake 4 engine) plays the 1172
 `effects/**/*.fx` decls of the retail paks: muzzle flashes, impacts, explosions, beams, ambient
@@ -132,9 +133,11 @@ Domains (count, values): `point` 11835 (n), `box` 11531 (2n), `line` 4862 (2n), 
   `textures/decals/goospread`, `textures/decals/hurt03`; model `models/misc/rock_chunk.ase`;
   sound shader `effects_acid_burn2`; the trail `sparktrail` of `monsters/harvester/hit_walker`.
 - `models/misc/rock_chunk.ase` is named by the model particles of `materials/concrete.fx`,
-  `materials/gravel.fx` and `materials/rock.fx` (surface impacts). Doom 3's model manager draws a
-  missing model as its default box: compare these impacts with retail in S3 before choosing what
-  the particle draws.
+  `materials/gravel.fx` and `materials/rock.fx`. Doom 3's model manager draws a missing model as
+  its default box (retail's falls back to its `_default` model). **Retail never plays these three
+  effects** (checked 2026-10-26: no map, entity def, script, material, effect or game source
+  names them; the weapons' concrete and rock impacts are their own `impact_concrete` /
+  `impact_rock` effects), so no player sees what draws there; only `testEffect` shows it.
 
 ## 3. Runtime design (approved 2026-10-25)
 
@@ -284,7 +287,7 @@ every in-game check; nothing here launches the game.
 |---|---|---|
 | **S1 Decl** — **BUILT 2026-10-25** | The grammar of §2: `neo/renderer/bse/DeclEffect.{h,cpp}`, strict value counts, references through the decl / model managers, named trails resolved | `tools/quake4/test_effect_parse.sh` (below) |
 | S2 Runtime + sprites — **DONE 2026-10-25** (gate passed: user firefights in Quake 4 and Doom 3, ASAN clean on both) | Manager, effect instances behind the render world calls, timing (start, duration, count, spawner bursts, loops, delay segments, looping ambient effects already in full flow), domains and modifiers, envelopes, motion, `locked` / `attenuation` / `detail` / `density` / `particleCap`, sprites, segment draw order, `testEffect` | Offline simulation over every retail emitter (no NaN, population follows the emission rate, particles stay within the decl's `size`); the user compares 10 sprite-only effects covering every domain, modifier and envelope option with retail on GL3 and Vulkan (`moveables/barrel/debris_fly`, `monsters/scientist/obscuring_cloud`, `weapons/nailgun/guide`, `ambient/dustedge_mp`, `monsters/teleport_dropper/blast_exhaust`, `monsters/fatty/ambient_acid`, `steam/mcc_vent_slow`, `smoke/air_defense_hillsa`, `mapobjects/casket_door2_inv`, `levels/dispersal/supportbreak`); an airdefense1 fight; no FSR2 ghosting; ASAN `--q4`; Doom 3 / RoE smoke |
-| S3 Particle kinds — **BUILT 2026-10-25**, at its gate | line, oriented, electricity, linked, model; `motion` / `burn` / named trails | Offline geometry test; the user compares `weapons/nailgun/impact_default`, `ambient/acid_react_waste`, `weapons/lightninggun/tube` + `impact`, `weapons/railgun/trail`, `monsters/strogg_flyer/bomb_fly`, `moveables/barrel/explode`, `weapons/nailgun/impact_glass`, `monsters/makron/blaster_fly`, `monsters/gunner/grenade_burst`; lightning gun and railgun in play |
+| S3 Particle kinds — **DONE 2026-10-26** (gate passed: all 20 comparisons ticked, play checks, ASAN clean) | line, oriented, electricity, linked, model; `motion` / `burn` / named trails | Offline geometry test; the user compares `weapons/nailgun/impact_default`, `ambient/acid_react_waste`, `weapons/lightninggun/tube` + `impact`, `weapons/railgun/trail`, `monsters/strogg_flyer/bomb_fly`, `moveables/barrel/explode`, `weapons/nailgun/impact_glass`, `monsters/makron/blaster_fly`, `monsters/gunner/grenade_burst`; lightning gun and railgun in play |
 | S4 Lights, sounds, decals | light segments as render lights; sound segments on the effect's emitter (`EffectDefHasSound`, random sample choice); decal segments projected | Rocket light, impact decals, impact sounds varying per shot; a busy fight on `dude_rtx 2` with no device loss; GL3 and Vulkan |
 | S5 Physics and children | traces through `Translation`, bounce / remove, impact and timeout effects, nested effect segments, debris through `SpawnClientMoveable`, `entityDef` on other kinds, `persist` | Offline physics test; wall impacts, `wounds/blood`, harvester claw debris, turret deaths, `bse_physics` / `bse_debris`; ASAN |
 | S6 View effects | `shake` scaled by distance, `doubleVision`, `tunnel` | Explosions shake by distance, `mapobjects/buzzsaw_chop`, the intro blur |
@@ -385,6 +388,18 @@ fastest) rather than every rendered frame, so it does not flicker faster at high
 3. FSR2 on: no ghosting behind bolts and trails.
 4. `tools/run-asan.sh --q4` for a few minutes of play: no report.
 5. Doom 3 / RoE smoke.
+
+**S3 gate result (2026-10-26, user):** all 20 comparisons look like retail and are ticked
+"Checked" on the Effect Browser; the play checks are fine. The concrete / rock item fell away:
+those effects are never played by retail (§2), so nothing in play triggers them. The gate's ASAN
+runs found no memory error but stopped on a debug `assert` (Doom 3's 10000-unit limit in
+`BoundsInAreas`, passed by an effect bound to airdefense1's convoy truck, whose animation spans
+55000 units - retail data; fixed for Quake 4's facade only) and showed a minute-long hitch when
+skipping the intro (fixed: effect bounds taken per rendered scene, not per game tic - §4 S2 as
+built). Found and fixed on the way: a failed `assert` now leaves a backtrace (crash handler takes
+SIGTRAP; `run-asan.sh` reports it with a symbolized stack), Ctrl+V pastes in the console (it never
+did with SDL2), and `testEffect` shows an effect for 4 s or its whole play, then frees it. Merged to
+master with those fixes.
 
 **S1 as built.** `idDeclEffect` parses into DUDE's templates (`idEffectSegment`,
 `idEffectParticle`, `effectParm_t` = start domain + envelope + end domain per parameter). A
