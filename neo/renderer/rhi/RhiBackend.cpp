@@ -2794,11 +2794,13 @@ static bool RB_RHI_RenderSoftParticleStage( rhi::RHI *r, const viewDef_t *viewDe
 	parms.particleRadius[0] = surf->particle_radius;
 	parms.particleRadius[1] = 1.0f / fadeRange;
 	parms.particleRadius[2] = 1.0f / surf->particle_radius;
-	// DUDE env[23].w: a depth-tested soft surface (DSF_SOFT_DEPTH_TESTED, Quake 4 effects) fades over
-	// half its radius in front of the scene rather than over a sphere about the sprite
+	// DUDE env[23].w: a depth-tested soft surface (DSF_SOFT_DEPTH_TESTED, Quake 4 effects) draws as it
+	// would without softening, but fades out over the last few units in front of what it cuts into -
+	// only the hard line where the sprite meets a wall or the floor goes (12 units, or half the
+	// particle when smaller); no fade near the viewer either
 	const bool depthTested = ( surf->dsFlags & DSF_SOFT_DEPTH_TESTED ) != 0;
 	if ( depthTested ) {
-		parms.particleRadius[1] = 2.0f / surf->particle_radius;
+		parms.particleRadius[1] = 1.0f / Min( 12.0f, surf->particle_radius * 0.5f );
 		parms.particleRadius[3] = 1.0f;
 	}
 
