@@ -19,7 +19,8 @@ layout(location = 0) out vec4 fragColor;
 
 void main() {
 	vec2 depth_consts = DUDE_DEPTH_CONSTS();	// this view's pair (u_depthParms); falls back to the play-time constants
-	 vec2 depthTc = gl_FragCoord.xy * u_depthTexRecip.xy;
+	 // .zw: the view's first pixel in the target (a cropped view on Vulkan; else 0)
+	 vec2 depthTc = ( gl_FragCoord.xy - u_depthTexRecip.zw ) * u_depthTexRecip.xy;
 	 float rawSceneDepth = min(texture(u_currentDepth, depthTc).x, 0.9994);
 
 	 // recover linear eye depth (Doom units) for both the occluding scene and

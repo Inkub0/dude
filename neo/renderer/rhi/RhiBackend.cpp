@@ -1869,6 +1869,15 @@ static void RB_RHI_RenderCustomStage( rhi::RHI *r, const viewDef_t *viewDef, con
 	ap.fenv[1][0] = 1.0f / w;
 	ap.fenv[1][1] = 1.0f / h;
 	ap.fenv[1][3] = 1.0f;
+	// DUDE env[31].y (Vulkan, prelude.vk.glsl RB_WPOS): the height of the target this view draws
+	// into, so fragment.position.y = height - gl_FragCoord.y is GL's bottom-up window row. A view
+	// the game renders into a crop (double vision, berserk vision) is flipped against the whole
+	// target and lands on its bottom rows; height - fragY then runs 0..h as on GL, where the old
+	// 1/env[1].y (the view's own h) went negative and the heat haze read one row of _currentRender.
+	// 0 elsewhere: RB_WPOS keeps the view height, unchanged for full views.
+	if ( rhi::GetActiveBackendType() == rhi::BT_VULKAN && viewDef->isCropView && r->SceneImageHeight() > 0 ) {
+		ap.fenv[31][1] = (float)r->SceneImageHeight();
+	}
 	if ( globalImages->currentDepthImage->uploadWidth > 0 ) {
 		ap.fenv[22][0] = 1.0f / globalImages->currentDepthImage->uploadWidth;
 		ap.fenv[22][1] = 1.0f / globalImages->currentDepthImage->uploadHeight;
@@ -1971,8 +1980,11 @@ RB_RHI_VkScreenRowOffset
 
 DUDE: u_windowCoord.w of the screen-position stages on Vulkan (heat haze, portal sky, the portal
 sky composite): screenTc.y = ( fragY * -1/h + w ) * screenCorrection.y, with Vulkan's top-down
-gl_FragCoord.y. 1.0 maps a view that starts at the image's top row, the value these stages always
-used (checked on full-window and cropped renders). A glass probe face is different: it renders at
+gl_FragCoord.y. 1.0 maps a view that starts at the image's top row: a full view. A view the game
+renders into a crop (double vision, berserk vision) does not - Vulkan flips its GL bottom-left
+viewport against the whole target (VulkanBackend::ApplyDynState: y = targetH - vpY), so it lands
+on the target's bottom rows - and takes ( imageH - y ) / h like a probe face (2026-10-26: Quake 4's
+double vision drew its heat haze from one row of _currentRender). A glass probe face is different: it renders at
 the tile size straight into the window-sized scene image (RB_RHI_HdrBeginFrame routes no frame
 target while baking), where the GL->VK flip puts its GL bottom-left viewport on the image's rows
 [imageH - y - h, imageH - y) - 1184..1440 for a 256 face at 1440, where the probe's captures also
@@ -1981,7 +1993,10 @@ top of its capture.
 =============
 */
 static float RB_RHI_VkScreenRowOffset( rhi::RHI *r, const viewDef_t *viewDef ) {
-	if ( !tr.takingEnvProbe ) {
+	// a view filling the target from its top: 1.0. A glass probe face, and a view the game renders
+	// into a crop (double vision, berserk vision: Vulkan flips its GL bottom-left viewport onto the
+	// target's bottom rows), sit elsewhere in the image
+	if ( !tr.takingEnvProbe && !viewDef->isCropView ) {
 		return 1.0f;
 	}
 	const int imageH = r->SceneImageHeight();
@@ -2049,12 +2064,11 @@ static void RB_RHI_RenderBuiltinArbStage( rhi::RHI *r, const viewDef_t *viewDef,
 	parms.screenCorrection[1] = (float)h / potH;
 	parms.windowCoord[0] = 1.0f / w;
 	// this path only runs on Vulkan: top-down gl_FragCoord vs the GL-layout capture —
-	// the shaders add u_windowCoord.w to the row term (0 on GL). The offset is 1.0:
+	// the shaders add u_windowCoord.w to the row term (0 on GL):
 	// screenTc = (fragY*(-1/h) + w.w) * screenCorrection.y, and screenCorrection already
-	// carries h/potH, so w.w must be 1.0 for fragY 0..h -> V h/potH..0. The old
-	// vidHeight/h only equalled 1.0 when h==vidHeight; in a sub-window render (berserk
-	// crops the scene, h != vidHeight) it shifted the sample, so _currentRender heat-haze
-	// blood decals showed a shrunk copy of the window. 1.0 is correct at any viewport size.
+	// carries h/potH, so w.w is 1.0 for a view on the target's rows 0..h (a full view), and
+	// ( targetH - y ) / h for one elsewhere (a cropped view, a probe face):
+	// RB_RHI_VkScreenRowOffset. (The old vidHeight/h only equalled 1.0 when h==vidHeight.)
 	parms.windowCoord[1] = -1.0f / h;
 	parms.windowCoord[3] = RB_RHI_VkScreenRowOffset( r, viewDef );	// 1.0 but in a glass probe face
 
@@ -2796,6 +2810,15 @@ static bool RB_RHI_RenderSoftParticleStage( rhi::RHI *r, const viewDef_t *viewDe
 	parms.depthTexRecip[0] = 1.0f / globalImages->currentDepthImage->uploadWidth;
 	rhi::FillDepthParms( parms, backEnd.viewDef ? backEnd.viewDef->projectionMatrix : NULL );	// this view's depth -> view z pair (cinematics cram the near plane)
 	parms.depthTexRecip[1] = 1.0f / globalImages->currentDepthImage->uploadHeight;
+	// env[22].zw: this view's first pixel in the target. Vulkan's depth capture puts the view's
+	// rectangle at the image's corner (top-down) and gl_FragCoord is the target's: a view the game
+	// renders into a crop lands on the target's bottom rows, so its fragments step back to the
+	// capture's origin. 0 for full views, and on GL (the crop sits at the target's origin there).
+	if ( rhi::GetActiveBackendType() == rhi::BT_VULKAN && viewDef->isCropView && r->SceneImageHeight() > 0 ) {
+		const int viewH = viewDef->viewport.y2 - viewDef->viewport.y1 + 1;
+		parms.depthTexRecip[2] = (float)( tr.viewportOffset[0] + viewDef->viewport.x1 );
+		parms.depthTexRecip[3] = (float)( r->SceneImageHeight() - ( tr.viewportOffset[1] + viewDef->viewport.y1 + viewH ) );
+	}
 
 	// DUDE smoke-darkness blend: dim smoke/steam/dust where the scene behind it is
 	// dark, so puffs fade into shadow instead of reading as grey blobs. Snapshot the
