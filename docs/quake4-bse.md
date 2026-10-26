@@ -317,8 +317,10 @@ inline min/max accessors (ABI-neutral).
 Cvars (Quake 4 title only, as `SettingsQ4.cpp`'s; Doom 3's list is unchanged): `bse_enabled`,
 `bse_render`, `bse_scale` (archived, 1), `bse_maxParticles` (2048), `bse_debug` (1 logs effects
 starting, looping, stopping, ending). `testEffect <effect> [once]` (Quake 4, cheat) plays an effect
-80 units in front of the view facing it, where `spawn func_fx` puts one; `testEffect` alone
-removes it.
+80 units in front of the view facing it, where `spawn func_fx` puts one, looping (or once) for 4
+seconds or its whole play when that is longer; then it stops spawning, its particles die out and it
+is freed (2026-10-26, at the user's request: it used to stay until removed). `testEffect` alone
+removes it at once.
 
 Offline (`tools/quake4/test_bse_sim.sh`, the runtime with the real parsers and the retail
 tables, every effect played once and looping at 60 Hz): no value that is not finite, every

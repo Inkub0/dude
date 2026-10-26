@@ -297,9 +297,10 @@ idBseEffect *	BSE_PlayEffect( idRenderWorld *world, const bseEffectParms_t &parm
 				// the owner's new state; true when the effect is over and can be freed
 bool			BSE_UpdateEffect( idBseEffect *effect, const bseEffectParms_t &parms, int timeMs );
 void			BSE_StopEffect( idBseEffect *effect );				// no more spawns; live particles die out
-				// before a scene of world renders: the entities of its effects serviced since, with their
-				// particles' bounds (a cinematic skip runs many game tics and renders none)
-void			BSE_SyncWorld( idRenderWorld *world );
+				// before a scene of world renders at timeMs: the entities of its effects serviced since, with
+				// their particles' bounds (a cinematic skip runs many game tics and renders none); also runs
+				// testEffect's effects, which no game owner services
+void			BSE_SyncWorld( idRenderWorld *world, int timeMs );
 void			BSE_FreeEffect( idBseEffect *effect );
 float			BSE_EffectDuration( const idBseEffect *effect );	// seconds
 				// an effect decl's own length, when no effect plays it

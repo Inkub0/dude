@@ -57,7 +57,13 @@ public:
 static idRenderModelBse *		bseModel = NULL;
 static class idRenderModelBseLit *	bseLitModel = NULL;
 static idList<idBseEffect *>	bseEffects;			// every played effect
-static idList<idBseEffect *>	bseTestEffects;		// testEffect's
+// testEffect's: no game owner services them; they stop spawning at stopTime (ms) and go once over
+typedef struct {
+	idBseEffect *	effect;
+	int				stopTime;
+} bseTestEffect_t;
+static idList<bseTestEffect_t>	bseTestEffects;
+const int						BSE_TEST_MIN_MSEC = 4000;	// testEffect shows an effect at least this long
 static idRandom					bseRandom;
 
 // the last top-level view of each render world: the player's view, for distance attenuation and
@@ -330,9 +336,24 @@ BSE_SyncWorld
 The entities of world's effects that were serviced since their last update, with their particles'
 bounds: done once before a scene renders rather than every game tic, so game tics that render
 nothing (a skipped cinematic runs a minute of them in one frame) pay only for the simulation.
+First, testEffect's effects run to the scene's time (timeMs): no game owner services them.
 ================
 */
-void BSE_SyncWorld( idRenderWorld *world ) {
+void BSE_SyncWorld( idRenderWorld *world, int timeMs ) {
+	// testEffect's run to the scene's time (no game owner does), stop on time and go once over
+	for ( int i = 0; i < bseTestEffects.Num(); i++ ) {
+		idBseEffect *effect = bseTestEffects[i].effect;
+		if ( effect->world != world ) {
+			continue;
+		}
+		if ( !effect->stopped && timeMs >= bseTestEffects[i].stopTime ) {
+			BSE_StopEffect( effect );
+		}
+		if ( BSE_UpdateEffect( effect, effect->owner, timeMs ) ) {
+			BSE_FreeEffect( effect );		// drops it from bseTestEffects
+			i--;
+		}
+	}
 	for ( int i = 0; i < bseEffects.Num(); i++ ) {
 		idBseEffect *effect = bseEffects[i];
 		if ( effect->world == world && effect->entityDirty ) {
@@ -363,7 +384,11 @@ void BSE_FreeEffect( idBseEffect *effect ) {
 		effect->world->FreeEntityDef( effect->litHandle );
 	}
 	bseEffects.Remove( effect );
-	bseTestEffects.Remove( effect );
+	for ( int i = 0; i < bseTestEffects.Num(); i++ ) {
+		if ( bseTestEffects[i].effect == effect ) {
+			bseTestEffects.RemoveIndex( i-- );
+		}
+	}
 	delete effect;
 }
 
@@ -532,7 +557,7 @@ void R_AddBseSurfaces( void ) {
 
 static void BSE_ClearTestEffects( void ) {
 	while ( bseTestEffects.Num() > 0 ) {
-		BSE_FreeEffect( bseTestEffects[0] );
+		BSE_FreeEffect( bseTestEffects[0].effect );
 	}
 }
 
@@ -541,15 +566,16 @@ static void BSE_ClearTestEffects( void ) {
 BSE_TestEffect_f
 
 testEffect <effect> [once]: plays an effect 80 units in front of the view, facing it - where the
-game's "spawn func_fx fx <effect>" puts one, so the two compare - looping unless "once". A beam
+game's "spawn func_fx fx <effect>" puts one, so the two compare - looping unless "once", for 4
+seconds or its whole play when that is longer; then it stops and its particles die out. A beam
 (an effect reaching to an end origin) ends 256 units to the viewer's right; the end is printed,
-for func_fx's "endOrigin". testEffect alone removes it.
+for func_fx's "endOrigin". testEffect alone removes it at once.
 ================
 */
 static void BSE_TestEffect_f( const idCmdArgs &args ) {
 	BSE_ClearTestEffects();
 	if ( args.Argc() < 2 ) {
-		common->Printf( "usage: testEffect <effect> [once]   (no effect: remove the test effect)\n" );
+		common->Printf( "usage: testEffect <effect> [once]   (shown for 4 s or its whole play; no effect: remove it now)\n" );
 		return;
 	}
 	const idDeclEffect *decl = static_cast<const idDeclEffect *>( declManager->FindType( DECL_EFFECT, args.Argv( 1 ), false ) );
@@ -591,9 +617,13 @@ static void BSE_TestEffect_f( const idCmdArgs &args ) {
 		common->Printf( "testEffect: '%s' does not play (bse_enabled?)\n", decl->GetName() );
 		return;
 	}
-	bseTestEffects.Append( effect );
-	common->Printf( "testEffect: '%s'%s, %d segments, %g s, radius %g\n", decl->GetName(), parms.loop ? " looping" : "",
-		decl->GetNumSegments(), decl->GetMaxDuration(), effect->boundsRadius );
+	// on show for 4 seconds, or its whole play when that is longer; then its particles die out
+	bseTestEffect_t &test = bseTestEffects.Alloc();
+	test.effect = effect;
+	const int showMsec = Max( BSE_TEST_MIN_MSEC, (int)idMath::Ceil( decl->GetMaxDuration() * 1000.0f ) );
+	test.stopTime = view.time + showMsec;
+	common->Printf( "testEffect: '%s'%s, %d segments, %g s per play, radius %g; shown for %g s\n", decl->GetName(),
+		parms.loop ? " looping" : " once", decl->GetNumSegments(), decl->GetMaxDuration(), effect->boundsRadius, MS2SEC( showMsec ) );
 }
 
 /*
@@ -627,7 +657,7 @@ void BSE_Init( void ) {
 		bse_debug			= new idCVar( "bse_debug", "0", CVAR_RENDERER | CVAR_INTEGER, "Quake 4 effects: 1 = log effects as they start, loop, stop and end" );
 	}
 	cmdSystem->AddCommand( "testEffect", BSE_TestEffect_f, CMD_FL_RENDERER | CMD_FL_CHEAT,
-		"Quake 4: plays an effect in front of the view, as 'spawn func_fx fx <effect>' does - testEffect <effect> [once]",
+		"Quake 4: plays an effect in front of the view for 4 s or its whole play, as 'spawn func_fx fx <effect>' does - testEffect <effect> [once]",
 		idCmdSystem::ArgCompletion_Decl<DECL_EFFECT> );
 }
 

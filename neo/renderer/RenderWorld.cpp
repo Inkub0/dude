@@ -821,7 +821,7 @@ void idRenderWorldLocal::RenderScene( const renderView_t *renderView ) {
 	const double startTimeF = Sys_MillisecondsPrecise();
 
 	// DUDE: Quake 4's effects serviced since the last scene move their entities now
-	BSE_SyncWorld( this );
+	BSE_SyncWorld( this, renderView->time );
 
 	// setup view parms for the initial view
 	//
