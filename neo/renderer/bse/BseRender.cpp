@@ -873,11 +873,16 @@ static void R_AddBseGeometry( viewEntity_t *vEntity, const idMaterial *material,
 	}
 	// DUDE bse_softParticles (opt-in): sprites and oriented quads fade against the scene's depth, as
 	// Doom 3's particles do with r_useSoftParticles, over the segment's average particle size
+	// keeping the depth test (DSF_SOFT_DEPTH_TESTED): fire behind a car's bonnet stays hidden by it
 	float softRadius = -1.0f;
 	if ( soft && geo.sizeCount > 0 && bse_softParticles != NULL && bse_softParticles->GetBool() ) {
 		softRadius = Max( 1.0f, geo.sizeSum / geo.sizeCount );
 	}
+	const int before = tr.viewDef->numDrawSurfs;
 	R_AddDrawSurf( tri, vEntity, &def->parms, material, vEntity->scissorRect, softRadius );
+	if ( softRadius > 0.0f && tr.viewDef->numDrawSurfs == before + 1 ) {
+		tr.viewDef->drawSurfs[before]->dsFlags |= DSF_SOFT_DEPTH_TESTED;
+	}
 }
 
 /*

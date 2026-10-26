@@ -2794,6 +2794,13 @@ static bool RB_RHI_RenderSoftParticleStage( rhi::RHI *r, const viewDef_t *viewDe
 	parms.particleRadius[0] = surf->particle_radius;
 	parms.particleRadius[1] = 1.0f / fadeRange;
 	parms.particleRadius[2] = 1.0f / surf->particle_radius;
+	// DUDE env[23].w: a depth-tested soft surface (DSF_SOFT_DEPTH_TESTED, Quake 4 effects) fades over
+	// half its radius in front of the scene rather than over a sphere about the sprite
+	const bool depthTested = ( surf->dsFlags & DSF_SOFT_DEPTH_TESTED ) != 0;
+	if ( depthTested ) {
+		parms.particleRadius[1] = 2.0f / surf->particle_radius;
+		parms.particleRadius[3] = 1.0f;
+	}
 
 	// env[24]: colour-channel mask added to the fade multiplier. Additive blends
 	// fade their RGB; alpha blends fade their alpha (leave the rest at 1).
@@ -2909,7 +2916,7 @@ static bool RB_RHI_RenderSoftParticleStage( rhi::RHI *r, const viewDef_t *viewDe
 	// depth test off (the shader fades against captured depth); strip alpha-test
 	// bits, which the soft-particle shader doesn't implement
 	rhi::PipelineDesc pd;
-	pd.stateBits = ( pStage->drawStateBits & ~GLS_ATEST_BITS ) | GLS_DEPTHFUNC_ALWAYS;
+	pd.stateBits = ( pStage->drawStateBits & ~GLS_ATEST_BITS ) | ( depthTested ? 0 : GLS_DEPTHFUNC_ALWAYS );
 	pd.shader = prog;
 	pd.vertexLayout = rhi::VL_DRAWVERT;
 	pd.cullType = RB_RHI_CullFor( viewDef, surf->material->GetCullType() );
