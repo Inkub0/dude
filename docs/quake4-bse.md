@@ -2,8 +2,8 @@
 
 Status (2026-10-26): **plan approved; S1 (the effect decl), S2 (the runtime and sprites), S3
 (every drawn particle kind and the trails), S4 (lights, sounds, decals) and S5 (particle physics,
-impacts, debris, nested effects) done and on master; S6 (view effects) built on
-`feat/quake4-bse-view-effects`, its gate pending.** Effects draw every particle kind, light their
+impacts, debris, nested effects) and S6 (view effects) done and on master; S7 (cvars and
+tools) is next.** Effects draw every particle kind, light their
 surroundings, play their sounds, leave their decals, collide with the world, throw debris, start
 their child effects and shake or blur the player's view. Visual checks
 go through the user's Quake 4 Effect Browser (a claude.ai page listing all 1172 effects, what
@@ -375,7 +375,7 @@ every in-game check; nothing here launches the game.
 | S3 Particle kinds — **DONE 2026-10-26** (gate passed: all 20 comparisons ticked, play checks, ASAN clean) | line, oriented, electricity, linked, model; `motion` / `burn` / named trails | Offline geometry test; the user compares `weapons/nailgun/impact_default`, `ambient/acid_react_waste`, `weapons/lightninggun/tube` + `impact`, `weapons/railgun/trail`, `monsters/strogg_flyer/bomb_fly`, `moveables/barrel/explode`, `weapons/nailgun/impact_glass`, `monsters/makron/blaster_fly`, `monsters/gunner/grenade_burst`; lightning gun and railgun in play |
 | S4 Lights, sounds, decals — **DONE 2026-10-26** (gate passed: 12 effects ticked, play checks, no device loss, ASAN clean) | light segments as render lights; sound segments on the effect's emitter (`EffectDefHasSound`, random sample choice); decal segments projected | Rocket light, impact decals, impact sounds varying per shot; a busy fight on `dude_rtx 2` with no device loss; GL3 and Vulkan |
 | S5 Physics and children — **DONE 2026-10-26** (gate passed: all 16 effects, play checks, ASAN clean) | traces through `Translation`, bounce / remove, impact and timeout effects, nested effect segments, debris through `SpawnClientMoveable`, `entityDef` on other kinds, `persist` | Offline physics test; wall impacts, `wounds/blood`, harvester claw debris, turret deaths, `bse_physics` / `bse_debris`; ASAN |
-| S6 View effects — **BUILT 2026-10-26** (gate pending) | `shake` scaled by distance, `doubleVision`, `tunnel` | Explosions shake by distance, `mapobjects/buzzsaw_chop`, the intro blur |
+| S6 View effects — **DONE 2026-10-26** (gate passed: the view effects, the intro blur after two renderer fixes) | `shake` scaled by distance, `doubleVision`, `tunnel` | Explosions shake by distance, `mapobjects/buzzsaw_chop`, the intro blur |
 | S7 Cvars and tools | the retail `bse_*` cvars, rate limits, `bseSweep` + log summary, debug overlay, opt-in extras, performance | quake4-port.md §6's Q4 gate: `bseSweep` clean over all 1172, ~20 effects signed off against retail, OpenQ4's prose checklist, Doom 3 / RoE / LM smoke, ABI 0 breaks |
 
 `testEffect` moves from S7 into S2: every later gate needs it.
@@ -517,6 +517,25 @@ unchanged. `test_effect_parse.sh` 1172 / 0 failed; ABI 0 breaks; Linux and Windo
    buzzsaw hit on the player (shake and double vision - `testEffect` cannot show those, they act
    only at the effect's origin).
 3. Retail side by side for one of them (the strength of a near rocket impact's shake).
+
+**S6 gate result (2026-10-26, user): passed, merged to master.** Shakes ticked on the Effect
+Browser (rocket and grenade impacts by distance, `camerashakelarge`, the gladiator's footstomp,
+`levels/core/doors`). The intro blur (`cinematics/intro/blur`) found two renderer bugs in views the
+game renders into a crop - Quake 4's double vision renders the player's view into
+`CropRenderSize( 512, 256 )`, which DUDE's own Doom 3 code no longer does on GL3/Vulkan, so no gate
+had exercised it:
+- the portal sky was black: `R_PortalSkyRender` served window-sized views only (`fix(renderer)`
+  40e86b95: a view rendered while a crop is active, `viewDef_t::isCropView`, qualifies);
+- on Vulkan the fire effects' heat haze (`gfx/effects/energy_sparks/warp_mask`) drew discs of one
+  row of `_currentRender`: Vulkan puts a crop on the target's bottom rows, and its screen lookups
+  assumed a view starts at the top (`fix(vulkan)` 51adf8ea: the transpiled ARB `fragment.position`,
+  the screen texgen / sky composite row offset and the soft particles' depth lookup use the
+  view's own rows).
+After both, the blur is right on Vulkan (user). Left as a follow-up (§6): with `r_hdr` the blur's
+frames skip the HDR tone map - a frame goes through the HDR buffer only when it has a full-window
+world view, and the double vision frame's only world view is the crop - so bright fire looks
+hotter for the blur's 5 s (the untone-mapped, retail look); RoE / Lost Mission with
+`g_lowresFullscreenFX 1` likewise.
 
 **S5 gate result (2026-10-26, user, ASAN build): passed, merged to master.** 15 of the 16 stage-5
 effects ticked on the Effect Browser, and the 16th passed as well (below); impacts, bounces, drips, gibs, acid pools, debris (`harvester/claw_dirt` and the others) and
@@ -666,6 +685,14 @@ in both games, the screenshots compare directly. `func_fx` also takes `endOrigin
 `_alpha` / `_brightness`.
 
 ## 6. Follow-ups
+
+- **HDR for views rendered into a crop** (queued 2026-10-26, user): Quake 4's double vision frames
+  (and RoE / Lost Mission's with `g_lowresFullscreenFX 1`) have no full-window world view, so
+  `RB_RHI_FrameHasWorldScene` keeps them off the HDR path - no tone map or `r_hdrExposure` for the
+  blur's seconds, a visible exposure jump on HDR setups. Option: let a cropped world view route the
+  frame through the HDR buffer; to work out first: the order of the 2D double vision composite and
+  the HUD against the tone map resolve, eye adaptation (measure the crop or hold), FSR2 (built for
+  one full-window view). Own branch and test round.
 
 - After the BSE particle path is done: reuse it to fix Doom 3's particle buffer churn on Vulkan
   (`idRenderModelPrt` snapshots → frame-temporary memory), as the user asked on 2026-10-25.
