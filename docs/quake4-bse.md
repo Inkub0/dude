@@ -3,7 +3,7 @@
 Status (2026-10-26): **plan approved; S1 (the effect decl), S2 (the runtime and sprites), S3
 (every drawn particle kind and the trails), S4 (lights, sounds, decals) and S5 (particle physics,
 impacts, debris, nested effects) and S6 (view effects) done and on master; S7 (cvars and
-tools) is next.** Effects draw every particle kind, light their
+tools, the Quake 4 phase gate) built on `feat/quake4-bse-cvars-tools`, its gate pending.** Effects draw every particle kind, light their
 surroundings, play their sounds, leave their decals, collide with the world, throw debris, start
 their child effects and shake or blur the player's view. Visual checks
 go through the user's Quake 4 Effect Browser (a claude.ai page listing all 1172 effects, what
@@ -61,6 +61,9 @@ own code and the consultation is recorded in the commit message and in the table
 | Physics (S5, §3.4): the trace over the last 0.1 s of motion from 0.1 s after the birth or bounce, against solids and render-model clip; one random impact effect at the hit point along the normal, behind the rate limit; the bounce (mirror, scale, motion restarts from the hit point, envelopes keep their clock; rest below 50 units/s off a floor facing against gravity by more than 45°); `remove`; the timeout effect at the death point along the direction of travel; debris placement (the effect's original frame, the velocity in the current one), spin (the end rotation, start not added) and lifetime 0; the nested segment's one child per window at the current origin and axis; `entityDef` on the other kinds only precached; the cvar defaults (1) | **decompile-derived, consulted 2026-10-26 (S5)**: OpenQ4 `src/bse` (`BSE_Particle.cpp` `RunPhysics` / `Bounce` / `CheckTimeoutEffect` / `rvDebrisParticle::FinishSpawn` / `EvaluatePosition` / `EvaluateVelocity`, `BSE_Particle.h`, `BSE_SegmentRuntime.cpp` `PlayEffect` / `UpdateGenericParticles`, `BSE_Segment.cpp`, `BSE_ParseParticle2.cpp` `ParseImpact` / `entityDef`, `BSE_Manager.cpp`) **cross-checked against idTech4A++ `raven/bse`** (`BSE_Particle.cpp`, `BSE_Segment.cpp`, `BSE_ParseParticle2.cpp`) - read for these behaviours only, re-expressed in DUDE's own code (`BseEffect.cpp`, `BseRender.cpp`), nothing copied. Both trees descend from the same recreation (Justin Marshall's Quake 4 BSE), so they are not independent: where they agree DUDE follows them; where they differ the user decides (below) |
 | View effects (S6): that the game shows them (`StartViewEffect( type, time, scale )`; the player view's `SetShakeParms` / `SetDoubleVisionParms` take `time` as the finish time in seconds of game time, `SetTunnelParms` as a length; the game ignores shakes in multiplayer) | the SDK (`game/Game_local.cpp` `StartViewEffect`, `game/PlayerView.h`) |
 | View effects (S6): one request per window; the finish time = the segment's start + its duration × the distance attenuation of §3.1 (player to the effect's bounds); the strength = the segment's `scale` × the owner's attenuation, by the same ramp over the player's distance to the effect's origin; `scale` defaults to 1 | **decompile-derived, consulted 2026-10-26 (S6)**: OpenQ4 `src/bse` (`BSE_Segment.cpp` `rvSegment::Check`, `AttenuateDuration`; `BSE_Effect.cpp` `GetAttenuation`, `GetOriginAttenuation`; `BSE_SegmentTemplate.cpp` `Init`) and idTech4A++ `raven/bse` (`BSE_Segment.cpp`, `BSE_Effect.cpp`, `BSE_Manager.cpp`, `BSE_SegmentTemplate.*`) - the two agree on all of it; re-expressed in DUDE's own code, nothing copied |
+| The retail cvars - names, defaults (`bse_maxParticles` 2048, `bse_rateLimit` 3.0) and help texts - and the `bseLog` / `bseStats` commands with their help texts and output lines; `bse_debug`'s levels Off / On / Extra; `bse_rateLimit` 3 "showing all shotgun pellet impacts" (patch 1.4) | the retail executable's strings (`Quake4.exe`, read with `strings`: data, not code) and `CHANGES_14.txt` |
+| That the game charges `EC_IMPACT` per hitscan impact (`bse->Filtered` / `CanPlayRateLimited`) and never calls `UpdateRateTimes` | the SDK (`game/Entity.cpp`, `game/Game_local.cpp`, `game/Game_network.cpp`) |
+| Rate limits (S7): per category a budget; an impact or particle impact costs 0.1 × `bse_rateCost` (the rest free); once more than half of `bse_rateLimit` is spent, an effect plays only while cost + spent stays under a random fraction of the limit; a limit of 0.1 or less is no limit; the budgets pay back 0.1 per `StartFrame` (a game tic); `bse_singleEffect` filters by name in `PlayEffect` as well as in the game's `Filtered` | **decompile-derived, consulted 2026-10-26 (S7)**: OpenQ4 `src/bse/BSE_Manager.cpp` (`Filtered`, `CanPlayRateLimited`, `UpdateRateTimes`, `effectCosts`, `PlayEffect`) and idTech4A++ `raven/bse/BSE_Manager.cpp` (the same functions). They differ: OpenQ4 replaced retail's per-`StartFrame` payback with a wall-clock one (25/s, limit 6, deterministic refusal) because multiplayer clients never reach `StartFrame` and their buckets filled for good; idTech4A++ keeps the per-call payback and the random refusal but never fills its cost table. **The user chose (2026-10-26) retail's arithmetic with idTech4A++'s random refusal and OpenQ4's costs**, the payback counted in elapsed 60 Hz game tics (identical in single player, and right for a multiplayer client later). Also differing, chosen with it: no limit at 0.1 or less (idTech4A++; OpenQ4 0), `bse_singleEffect` matched ignoring case (OpenQ4; idTech4A++ case-sensitive) |
 | Where the two references differ (S5), and the user's choice (2026-10-26): the trace contents - OpenQ4 `SOLID \| RENDERMODEL` ("the game's shot mask", listed among its corrections against the retail 1.4.2 executable), idTech4A++ `SOLID \| OPAQUE`; when a bounce comes to rest - OpenQ4 below speed² 2500 off a floor, idTech4A++ whenever the unnormalised velocity·normal is under -0.707 (every hit into a surface: no hop would survive, and its `BSE_BOUNCE_LIMIT` goes unused). **The user chose OpenQ4's for both**, to be confirmed against retail at the S5 gate (sparks hopping before they settle; blood landing on a corpse). Also differing, with no user call needed: the bounce frame (idTech4A++ and OpenQ4's own changelog: the particle's birth frame; OpenQ4's current code: the effect's current frame - DUDE keeps the birth frame, identical for effects that do not turn) | user decision, recorded per the rule that reference discrepancies go to the user |
 
 ## 2. The grammar (measured)
@@ -363,6 +366,32 @@ The rules `neo/renderer/bse/BseEffect.cpp` implements; sources in the table of �
 - Requests reach the game at its effect frame bracket like child effects (§3.4), at most 64 a
   bracket.
 
+### 3.6 Cvars and tools (S7, in DUDE's words)
+
+- **Cvars** (Quake 4 only; help texts retail's): `bse_enabled`, `bse_render`, `bse_debug` (1: plays,
+  loops, stops, frees in retail's words; 2: also, once a second, the effects, particles, traces,
+  requests and rate-limited effects), `bse_showBounds` (1: each effect's bounds, 2: and its live
+  particles'), `bse_physics`, `bse_debris`, `bse_scale` (archived), `bse_singleEffect` (only effects
+  whose name contains it play - checked when any effect plays and in the game's filter),
+  `bse_maxParticles` 2048, `bse_rateLimit` 3, `bse_rateCost` 1. DUDE's own: `bse_softParticles`
+  (0; effect sprites and oriented quads fade where they meet the scene, over the segment's average
+  particle size, through the soft particle path Doom 3's particles use).
+- **Rate limits**: hitscan impacts (the game asks) and particle impact effects (BSE physics) each
+  spend from their own budget; the arithmetic is in §1's S7 row. In single player the budget pays
+  back every game tic, so one impact a tic is free; a burst plays its first ~15 impacts for
+  certain, the next ones ever more rarely, none past ~30.
+- **Particle lives** are clamped to 60 s, retail's (no retail particle asks for more).
+- **bseLog**: every effect played since the game started, with its plays and loops, and how many of
+  the registered effects that is. **bseStats [all]**: the loaded effect decls' segment counts, how
+  many were never referenced, segments per effect, the share of segments with particles, and the
+  most particles one play of such a segment has alive (DUDE's reading of retail's lines); `all`
+  parses every effect first.
+- **bseSweep [filter] [quit] | stop** (DUDE): plays every effect (or those whose name contains the
+  filter), twelve at a time in a 4 x 3 grid in front of the view, each once and for at most 2.5 s;
+  after each batch it lists the effects that played while the engine gave warnings (their text is
+  just above in the log), and at the end the effects that did not play or parse and the most
+  particles one effect had alive. `quit` quits when done.
+
 ## 4. Stages and gates
 
 One branch per stage, merged to master at its gate after the user's verification. The user runs
@@ -376,7 +405,7 @@ every in-game check; nothing here launches the game.
 | S4 Lights, sounds, decals — **DONE 2026-10-26** (gate passed: 12 effects ticked, play checks, no device loss, ASAN clean) | light segments as render lights; sound segments on the effect's emitter (`EffectDefHasSound`, random sample choice); decal segments projected | Rocket light, impact decals, impact sounds varying per shot; a busy fight on `dude_rtx 2` with no device loss; GL3 and Vulkan |
 | S5 Physics and children — **DONE 2026-10-26** (gate passed: all 16 effects, play checks, ASAN clean) | traces through `Translation`, bounce / remove, impact and timeout effects, nested effect segments, debris through `SpawnClientMoveable`, `entityDef` on other kinds, `persist` | Offline physics test; wall impacts, `wounds/blood`, harvester claw debris, turret deaths, `bse_physics` / `bse_debris`; ASAN |
 | S6 View effects — **DONE 2026-10-26** (gate passed: the view effects, the intro blur after two renderer fixes) | `shake` scaled by distance, `doubleVision`, `tunnel` | Explosions shake by distance, `mapobjects/buzzsaw_chop`, the intro blur |
-| S7 Cvars and tools | the retail `bse_*` cvars, rate limits, `bseSweep` + log summary, debug overlay, opt-in extras, performance | quake4-port.md §6's Q4 gate: `bseSweep` clean over all 1172, ~20 effects signed off against retail, OpenQ4's prose checklist, Doom 3 / RoE / LM smoke, ABI 0 breaks |
+| S7 Cvars and tools — **BUILT 2026-10-26** (gate pending) | the retail `bse_*` cvars, rate limits, `bseSweep` + log summary, debug overlay, opt-in extras, performance | quake4-port.md §6's Q4 gate: `bseSweep` clean over all 1172, ~20 effects signed off against retail, OpenQ4's prose checklist, Doom 3 / RoE / LM smoke, ABI 0 breaks |
 
 `testEffect` moves from S7 into S2: every later gate needs it.
 
@@ -517,6 +546,63 @@ unchanged. `test_effect_parse.sh` 1172 / 0 failed; ABI 0 breaks; Linux and Windo
    buzzsaw hit on the player (shake and double vision - `testEffect` cannot show those, they act
    only at the effect's origin).
 3. Retail side by side for one of them (the strength of a near rocket impact's shake).
+
+**S7 as built.** `neo/renderer/bse/BseTools.cpp` (new): `bseLog`, `bseStats`, `bseSweep`.
+`BseRender.cpp`: the cvars of §3.6, the rate limiter and filter (`BSE_Filtered`,
+`BSE_CanPlayRateLimited`, `BSE_UpdateRateTimes`, `BSE_ResetRateTimes`), the name filter in
+`BSE_PlayEffect`, retail's debug lines ("BSE: Play %d: %s at %g", "BSE: Stop: %s", "BSE: Free: %s"),
+`bse_showBounds` drawn before each scene, the `bse_debug 2` counters, soft particles on effect
+surfaces, and `testEffect`'s placement as `BSE_StartTestEffect` (which `bseSweep` reuses). The Quake
+4 facade (`quake4/RenderWorldQ4.cpp`) answers the game's `Filtered` / `CanPlayRateLimited` from it
+and pays the budgets back at `StartFrame`; a new map resets them (`quake4/GameQ4.cpp`). The runtime
+counts an effect's loops for `bseLog` and the segment's average sprite size for soft particles;
+particle lives are clamped to retail's 60 s (the code said 300, the docs 60: no retail particle
+differs). `framework/Common` gained `Com_NumWarnings()` (a free function: the `idCommon`
+interface is unchanged) for the sweep's report. Offline tests unchanged (the sim's output is
+identical); parse test 1172 / 0; ABI 0 breaks; Linux and Windows builds; `q4base.so` rebuilt.
+
+**OpenQ4's prose checklist** (its "Retail Parity Audit", §1) against DUDE:
+
+| Audit item | DUDE |
+|---|---|
+| Spawn domains: retail sampler table, cube-face order, rectangle outlines, spirals, the bounds literals | S2 (§3.1) |
+| Model spawn domains | no retail effect uses one (§2): not built |
+| Segment costs from retail's base-cost table; the `bse_debug 2` cost overlay | not built: `bse_debug 2` prints DUDE's counters instead |
+| Segment bounds, spawn volume, furthest distance with gravity | S2 (the bounds formula) |
+| Particle life clamped to 60 s, trail counts truncated | S2 / S3; the clamp fixed to 60 s in S7 |
+| Model particles trace as points; debris precaches its entity def | S5 |
+| A missing child effect plays nothing | S5 |
+| Segment timing (`Check`): fast-forward, constant emitters, spawner truncation, one-shot segments | S2 |
+| Sounds: volume / pitch before start, one-shot per loop, looping latched, random diversity | S4 |
+| Child effects only in a connected area, without the end origin | S5 |
+| 0.016 s look-ahead; interval attenuation's direction; lights initialised only when fresh | S2 / S4 |
+| Decals sized from `size.x`, turned by `rotate.x` | S4 |
+| Electricity: surface from the live bolts, bend points, winding, fork width | S3 |
+| Loop / ambient latched; two loops of history for ambient effects | S2 |
+| Spawn order, generated normals, friction as a vector, end-origin resampling | S2 / S3 |
+| Line, linked, debris overrides; debris hands off at birth | S3 / S5 |
+| Bounces keep their frame and come to rest; traces include render models; impact and timeout effects respect the connected area | S5 |
+| Envelopes at the rate fixed at spawn | S2 |
+| Vertex colours: additive fades through RGB, bytes wrap; faded particles still draw; generated lines collapse without velocity | S2 / S3 |
+| Light particles: raw tint, unsigned radius clamp, default light shader | S4 |
+| `TableLookup` 1.0 for one-value tables; effects drawn farthest first | S2 |
+| The client effect owns its sound emitter | the game library (SDK 1.4.2 code) |
+| `bseStats` / `bseLog`; `bse_showBounds` an integer; `bse_scale` archived | S7 |
+| Retail quirks: `linearSpacing` extrapolation, colour byte wrap | S2 |
+| OpenQ4's deliberate divergences (time-based limiter, presentation clock, service budgets, soft particles, …) | not taken, except soft particles as an opt-in (`bse_softParticles` 0) |
+
+**S7 gate (user) = the Quake 4 phase gate** (quake4-port.md §6, row Q4):
+1. `bseSweep` in a map (e.g. `map game/airdefense1`, then `bseSweep`; about 100 batches, a few
+   minutes): the summary line with nothing that did not play or parse; the batches that gave
+   warnings, and their warning text, to look at together (known: the data's missing names, §2).
+2. The Effect Browser's "Stage 7 gate": 20 effects next to retail (`testEffect` in DUDE,
+   `spawn func_fx fx <effect> loop 1` in retail from the same `setviewpos`).
+3. The cvars: `bse_singleEffect rocket` (only rocket effects play), `bse_showBounds 1` / `2`,
+   `bse_debug 1` / `2`, `bseLog`, `bseStats all`, `bse_softParticles 1` (smoke and fire sprites
+   soften against walls and the floor, GL3 and Vulkan); a shotgun at a wall (every pellet's impact
+   shows, as retail 1.4's limit promises).
+4. `tools/run-asan.sh --q4` during a sweep; Doom 3 / RoE / Lost Mission smoke (the session's
+   warning counter and the scene hook are shared); ABI 0 breaks (done).
 
 **S6 gate result (2026-10-26, user): passed, merged to master.** Shakes ticked on the Effect
 Browser (rocket and grenade impacts by distance, `camerashakelarge`, the gladiator's footstomp,

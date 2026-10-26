@@ -38,6 +38,11 @@ extern idCVar *	bse_maxParticles;	// the most particles a segment holds
 extern idCVar *	bse_debug;
 extern idCVar *	bse_physics;		// particles collide (impact blocks)
 extern idCVar *	bse_debris;			// debris particles become game entities
+extern idCVar *	bse_showBounds;		// draw each effect's bounds (2: and its live particles')
+extern idCVar *	bse_singleEffect;	// only effects whose name contains it play
+extern idCVar *	bse_rateLimit;		// the most an effect category may spend at once
+extern idCVar *	bse_rateCost;		// what one effect of a category costs, times its own cost
+extern idCVar *	bse_softParticles;	// DUDE: effect sprites fade against the scene's depth (opt-in)
 
 ID_INLINE bool	BSE_Enabled( void ) { return bse_enabled == NULL || bse_enabled->GetBool(); }
 ID_INLINE bool	BSE_Render( void ) { return bse_render == NULL || bse_render->GetBool(); }
@@ -47,9 +52,17 @@ ID_INLINE int	BSE_Debug( void ) { return bse_debug != NULL ? bse_debug->GetInteg
 ID_INLINE bool	BSE_Physics( void ) { return bse_physics == NULL || bse_physics->GetBool(); }
 ID_INLINE bool	BSE_Debris( void ) { return bse_debris == NULL || bse_debris->GetBool(); }
 
+// what an effect is played for, for the rate limits: Quake 4's effectCategory_t (EC_*), in its order
+typedef enum {
+	BSE_CATEGORY_IGNORE,			// not limited
+	BSE_CATEGORY_IMPACT,			// a hitscan impact (the game asks)
+	BSE_CATEGORY_IMPACT_PARTICLES,	// a particle's impact effect (BSE physics)
+	BSE_CATEGORY_NUM
+} bseCategory_t;
+
 const float BSE_FUTURE				= 0.016f;	// emitters spawn this far past the time they are serviced at
 const float BSE_TIME_EPSILON		= 0.002f;
-const float BSE_MAX_LIFE			= 300.0f;	// seconds
+const float BSE_MAX_LIFE			= 60.0f;	// seconds: a particle lives at most this long (retail's clamp)
 const int	BSE_MAX_PARTICLES		= 2048;		// per segment
 const int	BSE_MAX_TRAIL_COUNT		= 2500;		// motion / burn trail steps
 const int	BSE_MAX_FORKS			= 16;		// electricity
@@ -132,8 +145,8 @@ typedef struct {
 // a segment's geometry as it is built: grows as needed, kept for reuse
 class idBseGeometry {
 public:
-							idBseGeometry( void ) { verts.SetGranularity( 1024 ); indexes.SetGranularity( 1024 ); bounds.Clear(); }
-	void					Clear( void ) { verts.SetNum( 0, false ); indexes.SetNum( 0, false ); bounds.Clear(); }
+							idBseGeometry( void ) { verts.SetGranularity( 1024 ); indexes.SetGranularity( 1024 ); Clear(); }
+	void					Clear( void ) { verts.SetNum( 0, false ); indexes.SetNum( 0, false ); bounds.Clear(); sizeSum = 0.0f; sizeCount = 0; }
 	int						NumVerts( void ) const { return verts.Num(); }
 	int						NumIndexes( void ) const { return indexes.Num(); }
 	idDrawVert &			AddVert( const idVec3 &xyz, float s, float t, const byte rgba[4] );
@@ -142,6 +155,8 @@ public:
 	idList<idDrawVert>		verts;
 	idList<glIndex_t>		indexes;
 	idBounds				bounds;
+	float					sizeSum;			// sprites and oriented quads drawn: their sizes, for an average
+	int						sizeCount;
 };
 
 class idBseEffect;
@@ -256,6 +271,7 @@ public:
 	float					lastTime;
 	float					currentTime;
 	bool					looping;
+	int						loops;				// loops played (bseLog)
 	bool					ambient;
 	bool					stopped;
 	bool					inConnectedArea;
@@ -371,6 +387,28 @@ float			BSE_DeclDuration( const idDeclEffect *decl );
 				// the Quake 4 game's effect frame bracket (bse->StartFrame / EndFrame): queued child effects and
 				// debris go to the game
 void			BSE_DeliverRequests( void );
+				// filtering and rate limits (Quake 4's bse->Filtered / CanPlayRateLimited / UpdateRateTimes): an
+				// effect is filtered out when bse_singleEffect is set and not in its name, or its category is over
+				// its rate budget; the budgets drain 0.1 per 60 Hz game tic, as retail's did once per StartFrame
+bool			BSE_Filtered( const char *name, bseCategory_t category );
+bool			BSE_CanPlayRateLimited( bseCategory_t category );
+void			BSE_UpdateRateTimes( void );
+void			BSE_ResetRateTimes( void );				// a new map
+
+				// tools (BseTools.cpp): bseLog, bseStats, bseSweep
+void			BSE_InitTools( void );
+void			BSE_ShutdownTools( void );
+void			BSE_ToolsEffectPlayed( const idDeclEffect *decl );
+void			BSE_ToolsEffectFreed( const idBseEffect *effect );
+void			BSE_SweepFrame( idRenderWorld *world, int timeMs );	// bseSweep's next batch when due
+bool			BSE_TestEffectsPlaying( void );			// testEffect's (and bseSweep's) effects still live
+void			BSE_ClearTestEffects( void );			// frees them now
+const idList<idBseEffect *> &	BSE_PlayingEffects( void );
+const renderView_t *	BSE_ShownView( const idRenderWorld *world );	// the last top-level view of world, NULL: none
+				// testEffect's placement and play: an effect in front of the view (offset: along the view's
+				// right and up axes), shown for showMsec; NULL when it does not play
+idBseEffect *	BSE_StartTestEffect( const idDeclEffect *decl, const renderView_t &view, bool loop, const idVec2 &offset,
+					int showMsec, bool verbose );
 
 				// renderer: an entity drawn by an effect; R_AddModelSurfaces hands its effects here and
 				// draws them once all entities are done, farthest first

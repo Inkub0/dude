@@ -743,24 +743,32 @@ void FreeRenderWorldsQ4( void ) {
 /*
 ===============================================================================
 
-	idEffectManagerQ4Local - the game's questions to the effect system. Filtering and rate
-	limits come with phase Q4 S7 (bse_singleEffect, bse_rateLimit): until then every effect plays.
-	The game's frame bracket is where the effects' requests reach it (child effects, debris).
+	idEffectManagerQ4Local - the game's questions to the effect system: filtering (bse_singleEffect)
+	and rate limits (bse_rateLimit / bse_rateCost, renderer/bse/BseRender.cpp). The game's frame
+	bracket pays the rate budgets back and is where the effects' requests reach it (child effects,
+	debris, view effects).
 
 ===============================================================================
 */
 
+// the game's effect categories are the effect runtime's, in the same order
+static_assert( (int)EC_IGNORE == (int)BSE_CATEGORY_IGNORE && (int)EC_IMPACT == (int)BSE_CATEGORY_IMPACT &&
+	(int)EC_IMPACT_PARTICLES == (int)BSE_CATEGORY_IMPACT_PARTICLES && (int)EC_MAX == (int)BSE_CATEGORY_NUM, "effect categories" );
+
 class idEffectManagerQ4Local : public idEffectManagerQ4 {
 public:
-	virtual bool			Filtered( const char *name, effectCategory_t category ) { return false; }
-	virtual bool			CanPlayRateLimited( effectCategory_t category ) { return true; }
+	virtual bool			Filtered( const char *name, effectCategory_t category ) { return BSE_Filtered( name, (bseCategory_t)category ); }
+	virtual bool			CanPlayRateLimited( effectCategory_t category ) { return BSE_CanPlayRateLimited( (bseCategory_t)category ); }
 	virtual float			EffectDuration( const idRenderEffectQ4 *def ) {
 								if ( def == NULL ) {
 									return 0.0f;
 								}
 								return def->effect != NULL ? BSE_EffectDuration( def->effect ) : BSE_DeclDuration( def->decl );
 							}
-	virtual void			StartFrame( void ) { BSE_DeliverRequests(); }		// asked for since the last frame (testEffect, views)
+	virtual void			StartFrame( void ) {
+								BSE_UpdateRateTimes();		// retail's payback per game tic
+								BSE_DeliverRequests();		// asked for since the last frame (testEffect, views)
+							}
 	virtual void			EndFrame( void ) { BSE_DeliverRequests(); }		// asked for by this frame's effects
 };
 

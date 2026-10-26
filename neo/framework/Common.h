@@ -336,6 +336,10 @@ public:
 
 extern idCommon *		common;
 
+// DUDE: how many warnings common->Warning has given since the start (engine tools count what a step
+// added; a free function, so the idCommon interface game libraries see is unchanged)
+int		Com_NumWarnings( void );
+
 // DUDE: parallel image load. A worker thread calls Com_BeginThreadCapture() on entry
 // and Com_EndThreadCapture() before exit; while active, all common->Printf/Warning/
 // Error output from that thread is buffered instead of touching the console, warning

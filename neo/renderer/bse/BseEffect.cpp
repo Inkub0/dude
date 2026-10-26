@@ -30,6 +30,11 @@ idCVar *bse_maxParticles = NULL;
 idCVar *bse_debug = NULL;
 idCVar *bse_physics = NULL;
 idCVar *bse_debris = NULL;
+idCVar *bse_showBounds = NULL;
+idCVar *bse_singleEffect = NULL;
+idCVar *bse_rateLimit = NULL;
+idCVar *bse_rateCost = NULL;
+idCVar *bse_softParticles = NULL;
 
 // a sound segment's channel on the effect's emitter: the first after the sound system's "any"
 // channel (SCHANNEL_ONE), plus the segment's index, as retail
@@ -1246,6 +1251,7 @@ void idBseEffect::Init( const bseEffectParms_t &parms, float time ) {
 	duration = 0.0f;
 	lastTime = currentTime = time;
 	looping = parms.loop;
+	loops = 0;
 	ambient = parms.ambient;
 	stopped = false;
 	finished = false;
@@ -1505,6 +1511,7 @@ void idBseEffect::LoopSegments( float time ) {
 			segments[i].InitTime( this, time );
 		}
 	}
+	loops++;
 	if ( BSE_Debug() ) {
 		common->Printf( "BSE: '%s' loops (%g s)\n", decl->GetName(), duration );
 	}
@@ -1963,6 +1970,10 @@ bool idBseEffect::BuildParticle( const idBseSegment &segment, const bseParticle_
 	byte rgba[4];
 	ParticleColor( tmplP, color, override, rgba );
 	const idVec3 facing = view.up.Cross( view.left );
+	if ( tmplP.type == EFFECT_PARTICLE_SPRITE || tmplP.type == EFFECT_PARTICLE_ORIENTED ) {
+		geo.sizeSum += idMath::Fabs( size.x );		// the segment's soft particle radius (bse_softParticles)
+		geo.sizeCount++;
+	}
 
 	switch ( tmplP.type ) {
 		case EFFECT_PARTICLE_SPRITE: {

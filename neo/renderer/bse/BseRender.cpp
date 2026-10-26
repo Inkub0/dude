@@ -213,12 +213,15 @@ static int						bseNumRequests[BSE_REQUEST_NUM];
 static const int				bseMaxRequests[BSE_REQUEST_NUM] = { BSE_MAX_EFFECT_REQUESTS, BSE_MAX_DEBRIS_REQUESTS, BSE_MAX_VIEW_REQUESTS };
 static int						bseDroppedRequests = 0;
 static bool						bseServicingForView = false;	// no traces while a view is built
+static int						bseRateRefused = 0;				// bse_debug 2's counters
+static int						bseTraces = 0;
 
 bool BSE_Trace( idBseEffect *effect, const idVec3 &start, const idVec3 &end, idVec3 &endPos, idVec3 &normal ) {
 	idGameQ4 *game = GameQ4();
 	if ( game == NULL || bseServicingForView || !GameQ4_MapActive() || effect->world == NULL ) {
 		return false;
 	}
+	bseTraces++;
 	traceQ4_t trace;
 	idVec3 source = start, dest = end;
 	game->Translation( trace, source, dest, NULL, BSE_TRACE_CONTENTS );
@@ -231,7 +234,78 @@ bool BSE_Trace( idBseEffect *effect, const idVec3 &start, const idVec3 &end, idV
 }
 
 bool BSE_CanPlayImpactEffect( void ) {
-	return EffectManagerQ4()->CanPlayRateLimited( EC_IMPACT_PARTICLES );
+	return BSE_CanPlayRateLimited( BSE_CATEGORY_IMPACT_PARTICLES );
+}
+
+/*
+================
+rate limits
+
+What retail's effect manager does with bse_rateLimit / bse_rateCost (OpenQ4 src/bse and idTech4A++
+raven/bse consulted 2026-10-26; the user chose this reading): each category keeps a budget it spends
+0.1 x bse_rateCost per effect (retail's costs: impacts and particle impacts 0.1, the rest free).
+Once a category has spent more than half of bse_rateLimit, an effect plays only while its cost plus
+what is spent stays under a random fraction of the limit - the closer to the limit, the rarer.
+bse_rateLimit 0.1 or less: no limit. The budgets pay back 0.1 per 60 Hz game tic (retail: once per
+StartFrame, its game tic) - counted in tics since the last payback rather than in calls, so the
+limiter cannot shut on a path that never reaches StartFrame (a multiplayer client, later).
+================
+*/
+static const float		bseEffectCosts[BSE_CATEGORY_NUM] = { 0.0f, 0.1f, 0.1f };
+const float				BSE_RATE_PAYBACK = 0.1f;		// per game tic
+static float			bseEffectRates[BSE_CATEGORY_NUM];
+static int				bseRateTic = -1;				// com_ticNumber at the last payback
+static idRandom			bseRateRandom;
+
+void BSE_ResetRateTimes( void ) {
+	memset( bseEffectRates, 0, sizeof( bseEffectRates ) );
+	bseRateTic = com_ticNumber;
+}
+
+void BSE_UpdateRateTimes( void ) {
+	const int tic = com_ticNumber;
+	if ( bseRateTic < 0 || tic < bseRateTic ) {
+		bseRateTic = tic;
+		return;
+	}
+	const int tics = tic - bseRateTic;
+	if ( tics == 0 ) {
+		return;
+	}
+	bseRateTic = tic;
+	for ( int i = 0; i < BSE_CATEGORY_NUM; i++ ) {
+		bseEffectRates[i] = Max( 0.0f, bseEffectRates[i] - BSE_RATE_PAYBACK * tics );
+	}
+}
+
+bool BSE_CanPlayRateLimited( bseCategory_t category ) {
+	if ( category <= BSE_CATEGORY_IGNORE || category >= BSE_CATEGORY_NUM ) {
+		return true;
+	}
+	const float limit = bse_rateLimit != NULL ? bse_rateLimit->GetFloat() : 3.0f;
+	if ( limit <= 0.1f ) {
+		return true;
+	}
+	BSE_UpdateRateTimes();
+	float &spent = bseEffectRates[category];
+	const float cost = bseEffectCosts[category] * ( bse_rateCost != NULL ? bse_rateCost->GetFloat() : 1.0f );
+	if ( limit * 0.5f < spent && cost + spent > bseRateRandom.RandomFloat() * limit ) {
+		bseRateRefused++;
+		return false;
+	}
+	spent += cost;
+	return true;
+}
+
+bool BSE_Filtered( const char *name, bseCategory_t category ) {
+	if ( name == NULL ) {
+		return true;
+	}
+	const char *single = bse_singleEffect != NULL ? bse_singleEffect->GetString() : "";
+	if ( single[0] != '\0' && idStr::FindText( name, single, false ) < 0 ) {
+		return true;
+	}
+	return !BSE_CanPlayRateLimited( category );
 }
 
 static bseRequest_t *BSE_NewRequest( idBseEffect *effect, bseRequestKind_t kind ) {
@@ -294,6 +368,20 @@ view takes the end time as its finish time) go to the game, in the order asked.
 */
 void BSE_DeliverRequests( void ) {
 	idGameQ4 *game = GameQ4();
+	// bse_debug 2: the effects' counters, once a second
+	static int lastReport = 0, requested = 0;
+	requested += bseRequests.Num();
+	const int now = Sys_Milliseconds();
+	if ( BSE_Debug() >= 2 && now - lastReport >= 1000 ) {
+		int particles = 0;
+		for ( int i = 0; i < bseEffects.Num(); i++ ) {
+			particles += bseEffects[i]->CountParticles();
+		}
+		common->Printf( "BSE: %d effects, %d particles; last second: %d traces, %d requests, %d rate-limited\n",
+			bseEffects.Num(), particles, bseTraces, requested, bseRateRefused );
+		lastReport = now;
+		bseTraces = bseRateRefused = requested = 0;
+	}
 	if ( bseRequests.Num() == 0 && bseDroppedRequests == 0 ) {
 		return;
 	}
@@ -583,6 +671,11 @@ idBseEffect *BSE_PlayEffect( idRenderWorld *world, const bseEffectParms_t &parms
 	if ( !BSE_Enabled() || parms.effect == NULL || world == NULL || bseModel == NULL ) {
 		return NULL;
 	}
+	// bse_singleEffect: only the effects it names play, whoever plays them (as retail's PlayEffect)
+	if ( BSE_Filtered( parms.effect->GetName(), BSE_CATEGORY_IGNORE ) ) {
+		return NULL;
+	}
+	BSE_ToolsEffectPlayed( parms.effect );
 	idBseEffect *effect = new idBseEffect;
 	effect->world = world;
 	effect->entityHandle = -1;
@@ -591,7 +684,8 @@ idBseEffect *BSE_PlayEffect( idRenderWorld *world, const bseEffectParms_t &parms
 	effect->serviceTime = timeMs - 1;		// the frame's first view services it
 	effect->Init( parms, MS2SEC( timeMs ) );
 	if ( BSE_Debug() ) {
-		common->Printf( "BSE: '%s' starts at %d%s\n", parms.effect->GetName(), timeMs, parms.loop ? ", looping" : "" );
+		static int plays = 0;
+		common->Printf( "BSE: Play %d: %s at %g\n", ++plays, parms.effect->GetName(), MS2SEC( timeMs ) );
 	}
 
 	renderEntity_t ent;
@@ -637,6 +731,8 @@ First, testEffect's effects run to the scene's time (timeMs): no game owner serv
 ================
 */
 void BSE_SyncWorld( idRenderWorld *world, int timeMs ) {
+	BSE_SweepFrame( world, timeMs );		// bseSweep's next batch, when one is running and due
+
 	// testEffect's run to the scene's time (no game owner does), stop on time and go once over
 	for ( int i = 0; i < bseTestEffects.Num(); i++ ) {
 		idBseEffect *effect = bseTestEffects[i].effect;
@@ -663,6 +759,15 @@ void BSE_SyncWorld( idRenderWorld *world, int timeMs ) {
 			effect->entityDirty = false;
 		}
 		BSE_SyncLights( effect, time );
+		// bse_showBounds: the effect's bounds (yellow: what the renderer culls it by), 2: and its live
+		// particles' (cyan)
+		const int showBounds = bse_showBounds != NULL ? bse_showBounds->GetInteger() : 0;
+		if ( showBounds > 0 ) {
+			world->DebugBox( colorYellow, idBox( effect->localBounds, effect->currentOrigin, effect->currentAxis ) );
+			if ( showBounds > 1 && !effect->particleBounds.IsCleared() ) {
+				world->DebugBox( colorCyan, idBox( effect->particleBounds, effect->currentOrigin, effect->currentAxis ) );
+			}
+		}
 	}
 }
 
@@ -670,7 +775,7 @@ void BSE_StopEffect( idBseEffect *effect ) {
 	if ( effect != NULL ) {
 		effect->Stop();
 		if ( BSE_Debug() ) {
-			common->Printf( "BSE: '%s' stops\n", effect->decl->GetName() );
+			common->Printf( "BSE: Stop: %s\n", effect->decl->GetName() );
 		}
 	}
 }
@@ -679,6 +784,10 @@ void BSE_FreeEffect( idBseEffect *effect ) {
 	if ( effect == NULL ) {
 		return;
 	}
+	if ( BSE_Debug() ) {
+		common->Printf( "BSE: Free: %s\n", effect->decl->GetName() );
+	}
+	BSE_ToolsEffectFreed( effect );
 	if ( BSE_EntityDef( effect, effect->entityHandle, bseModel ) != NULL ) {
 		effect->world->FreeEntityDef( effect->entityHandle );
 	}
@@ -745,7 +854,7 @@ static int BSE_SortFarthestFirst( const void *a, const void *b ) {
 }
 
 // geometry as a frame-temporary draw surface of the entity
-static void R_AddBseGeometry( viewEntity_t *vEntity, const idMaterial *material, const idBseGeometry &geo ) {
+static void R_AddBseGeometry( viewEntity_t *vEntity, const idMaterial *material, const idBseGeometry &geo, bool soft = false ) {
 	if ( geo.NumIndexes() == 0 ) {
 		return;
 	}
@@ -762,7 +871,13 @@ static void R_AddBseGeometry( viewEntity_t *vEntity, const idMaterial *material,
 	if ( tri->ambientCache == NULL ) {
 		return;
 	}
-	R_AddDrawSurf( tri, vEntity, &def->parms, material, vEntity->scissorRect );
+	// DUDE bse_softParticles (opt-in): sprites and oriented quads fade against the scene's depth, as
+	// Doom 3's particles do with r_useSoftParticles, over the segment's average particle size
+	float softRadius = -1.0f;
+	if ( soft && geo.sizeCount > 0 && bse_softParticles != NULL && bse_softParticles->GetBool() ) {
+		softRadius = Max( 1.0f, geo.sizeSum / geo.sizeCount );
+	}
+	R_AddDrawSurf( tri, vEntity, &def->parms, material, vEntity->scissorRect, softRadius );
 }
 
 /*
@@ -803,7 +918,7 @@ static void R_AddBseEffectSurfaces( viewEntity_t *vEntity ) {
 		if ( material != NULL && material->IsDrawn() && !material->ReceivesLighting() ) {
 			bseGeometry.Clear();
 			effect->BuildSegment( segment, time, viewer, bseGeometry );
-			R_AddBseGeometry( vEntity, material, bseGeometry );
+			R_AddBseGeometry( vEntity, material, bseGeometry, true );
 		}
 		const idMaterial *trailMaterial = tmpl->particle.trailMaterial;
 		if ( tmpl->particle.trailType == EFFECT_TRAIL_MOTION && trailMaterial != NULL && trailMaterial->IsDrawn() ) {
@@ -862,7 +977,15 @@ void R_AddBseSurfaces( void ) {
 ===============================================================================
 */
 
-static void BSE_ClearTestEffects( void ) {
+const idList<idBseEffect *> &BSE_PlayingEffects( void ) {
+	return bseEffects;
+}
+
+const renderView_t *BSE_ShownView( const idRenderWorld *world ) {
+	return BSE_WorldView( world );
+}
+
+void BSE_ClearTestEffects( void ) {
 	while ( bseTestEffects.Num() > 0 ) {
 		BSE_FreeEffect( bseTestEffects[0].effect );
 	}
@@ -897,18 +1020,39 @@ static void BSE_TestEffect_f( const idCmdArgs &args ) {
 		common->Printf( "testEffect: no map is shown\n" );
 		return;
 	}
+	const bool loop = !( args.Argc() > 2 && !idStr::Icmp( args.Argv( 2 ), "once" ) );
+	const int showMsec = Max( BSE_TEST_MIN_MSEC, (int)idMath::Ceil( decl->GetMaxDuration() * 1000.0f ) );
+	if ( BSE_StartTestEffect( decl, *shown, loop, vec2_origin, showMsec, true ) == NULL ) {
+		common->Printf( "testEffect: '%s' does not play (bse_enabled? bse_singleEffect?)\n", decl->GetName() );
+	}
+}
 
-	const renderView_t &view = *shown;
+/*
+================
+BSE_StartTestEffect
+
+testEffect's play: 80 units in front of the view facing it (offset along the view's right and up
+axes), where the game's "spawn func_fx" puts one; an effect with a decal on the surface in view,
+facing out of it; a beam ending 256 units to the viewer's right; a sound emitter of its own.
+On show for showMsec (then it stops spawning and its particles die out).
+================
+*/
+idBseEffect *BSE_StartTestEffect( const idDeclEffect *decl, const renderView_t &view, bool loop, const idVec2 &offset,
+		int showMsec, bool verbose ) {
+	idRenderWorld *world = session != NULL ? session->rw : NULL;
+	if ( world == NULL || decl == NULL ) {
+		return NULL;
+	}
 	const float yaw = view.viewaxis[0].ToYaw();
 	bseEffectParms_t parms;
 	memset( &parms, 0, sizeof( parms ) );
 	parms.effect = decl;
 	parms.startTime = MS2SEC( view.time );
-	parms.origin = view.vieworg + idAngles( 0.0f, yaw, 0.0f ).ToForward() * 80.0f;
+	parms.origin = view.vieworg + idAngles( 0.0f, yaw, 0.0f ).ToForward() * 80.0f - view.viewaxis[1] * offset.x + view.viewaxis[2] * offset.y;
 	parms.axis = idAngles( 0.0f, yaw + 180.0f, 0.0f ).ToMat3();
 	parms.gravity.Set( 0.0f, 0.0f, -BSE_GameGravity() );
 	parms.attenuation = 1.0f;
-	parms.loop = !( args.Argc() > 2 && !idStr::Icmp( args.Argv( 2 ), "once" ) );
+	parms.loop = loop;
 	parms.inConnectedArea = true;
 	// a sound emitter of its own (a game effect's comes from the game)
 	parms.referenceSoundHandle = decl->HasSound() ? SoundSystemQ4()->AllocSoundEmitter( SOUNDWORLD_GAME ) : -1;
@@ -923,18 +1067,24 @@ static void BSE_TestEffect_f( const idCmdArgs &args ) {
 	}
 	if ( decal ) {
 		modelTrace_t trace;
-		if ( world->Trace( trace, view.vieworg, view.vieworg + view.viewaxis[0] * 2048.0f, 0.0f, true ) ) {
+		// along the view (testEffect), or towards a placement off the view's centre (bseSweep)
+		const idVec3 dir = offset == vec2_origin ? view.viewaxis[0] : ( parms.origin - view.vieworg ).ToNormal();
+		if ( world->Trace( trace, view.vieworg, view.vieworg + dir * 2048.0f, 0.0f, true ) ) {
 			parms.origin = trace.point + trace.normal;
 			parms.axis = trace.normal.ToMat3();
-			common->Printf( "testEffect: on the surface in view at %s\n", parms.origin.ToString( 0 ) );
-		} else {
+			if ( verbose ) {
+				common->Printf( "testEffect: on the surface in view at %s\n", parms.origin.ToString( 0 ) );
+			}
+		} else if ( verbose ) {
 			common->Printf( "testEffect: no surface in view for its decal; played in the air\n" );
 		}
 	}
 	if ( decl->UsesEndOrigin() ) {
 		parms.hasEndOrigin = true;
 		parms.endOrigin = parms.origin - view.viewaxis[1] * 256.0f;
-		common->Printf( "testEffect: beam from %s to endOrigin \"%s\"\n", parms.origin.ToString( 0 ), parms.endOrigin.ToString( 0 ) );
+		if ( verbose ) {
+			common->Printf( "testEffect: beam from %s to endOrigin \"%s\"\n", parms.origin.ToString( 0 ), parms.endOrigin.ToString( 0 ) );
+		}
 	}
 
 	idBseEffect *effect = BSE_PlayEffect( world, parms, view.time );
@@ -942,16 +1092,20 @@ static void BSE_TestEffect_f( const idCmdArgs &args ) {
 		if ( parms.referenceSoundHandle > 0 ) {
 			SoundSystemQ4()->FreeSoundEmitter( SOUNDWORLD_GAME, parms.referenceSoundHandle, true );
 		}
-		common->Printf( "testEffect: '%s' does not play (bse_enabled?)\n", decl->GetName() );
-		return;
+		return NULL;
 	}
-	// on show for 4 seconds, or its whole play when that is longer; then its particles die out
 	bseTestEffect_t &test = bseTestEffects.Alloc();
 	test.effect = effect;
-	const int showMsec = Max( BSE_TEST_MIN_MSEC, (int)idMath::Ceil( decl->GetMaxDuration() * 1000.0f ) );
 	test.stopTime = view.time + showMsec;
-	common->Printf( "testEffect: '%s'%s, %d segments, %g s per play, radius %g; shown for %g s\n", decl->GetName(),
-		parms.loop ? " looping" : " once", decl->GetNumSegments(), decl->GetMaxDuration(), effect->boundsRadius, MS2SEC( showMsec ) );
+	if ( verbose ) {
+		common->Printf( "testEffect: '%s'%s, %d segments, %g s per play, radius %g; shown for %g s\n", decl->GetName(),
+			parms.loop ? " looping" : " once", decl->GetNumSegments(), decl->GetMaxDuration(), effect->boundsRadius, MS2SEC( showMsec ) );
+	}
+	return effect;
+}
+
+bool BSE_TestEffectsPlaying( void ) {
+	return bseTestEffects.Num() > 0;
 }
 
 /*
@@ -977,15 +1131,28 @@ void BSE_Init( void ) {
 	}
 	if ( bse_enabled == NULL ) {
 		// created now that the title is known (idCVar registers itself once the static list is in)
-		bse_enabled			= new idCVar( "bse_enabled", "1", CVAR_RENDERER | CVAR_BOOL, "Quake 4 effects: play them (0: no effect starts)" );
-		bse_render			= new idCVar( "bse_render", "1", CVAR_RENDERER | CVAR_BOOL, "Quake 4 effects: draw them" );
+		// the help texts are retail's (its executable's strings), with DUDE's notes in brackets
+		bse_enabled			= new idCVar( "bse_enabled", "1", CVAR_RENDERER | CVAR_BOOL, "set to false to disable all effects" );
+		bse_render			= new idCVar( "bse_render", "1", CVAR_RENDERER | CVAR_BOOL, "disable effect rendering" );
+		bse_debug			= new idCVar( "bse_debug", "0", CVAR_RENDERER | CVAR_INTEGER,
+								"display debug info about effect [0 off; 1 on: plays, loops, stops, frees; 2 extra: and once a second the effects, particles, traces, requests and rate-limited effects]", 0.0f, 2.0f );
+		bse_showBounds		= new idCVar( "bse_showBounds", "0", CVAR_RENDERER | CVAR_INTEGER,
+								"display debug bounding boxes effect [1: each effect's bounds, yellow; 2: and its live particles', cyan]", 0.0f, 2.0f );
+		bse_physics			= new idCVar( "bse_physics", "1", CVAR_RENDERER | CVAR_BOOL, "disable effect physics" );
+		bse_debris			= new idCVar( "bse_debris", "1", CVAR_RENDERER | CVAR_BOOL, "disable effect debris" );
 		bse_scale			= new idCVar( "bse_scale", "1", CVAR_RENDERER | CVAR_FLOAT | CVAR_ARCHIVE,
-								"Quake 4 effects: detail 0-1 - emitters spawn between their lowest and highest count by it, and a segment shows from its detail level up", 0.0f, 1.0f );
-		bse_maxParticles	= new idCVar( "bse_maxParticles", "2048", CVAR_RENDERER | CVAR_INTEGER, "Quake 4 effects: the most particles one segment holds", 0.0f, 2048.0f );
-		bse_debug			= new idCVar( "bse_debug", "0", CVAR_RENDERER | CVAR_INTEGER, "Quake 4 effects: 1 = log effects as they start, loop, stop and end" );
-		bse_physics			= new idCVar( "bse_physics", "1", CVAR_RENDERER | CVAR_BOOL, "Quake 4 effects: particles with an impact block collide (bounce, go, play impact effects)" );
-		bse_debris			= new idCVar( "bse_debris", "1", CVAR_RENDERER | CVAR_BOOL, "Quake 4 effects: debris particles become game entities" );
+								"effect scalability amount [0-1: emitters spawn between their lowest and highest count by it, and a segment shows from its detail level up]", 0.0f, 1.0f );
+		bse_singleEffect	= new idCVar( "bse_singleEffect", "", CVAR_RENDERER,
+								"set to the name of the effect that is only played [any effect whose name contains it, case ignored]", idCmdSystem::ArgCompletion_Decl<DECL_EFFECT> );
+		bse_maxParticles	= new idCVar( "bse_maxParticles", "2048", CVAR_RENDERER | CVAR_INTEGER, "max number of particles allowed per segment", 0.0f, 2048.0f );
+		bse_rateLimit		= new idCVar( "bse_rateLimit", "3.0", CVAR_RENDERER | CVAR_FLOAT,
+								"rate limit for spawned effects [what impact effects may spend at once; 0.1 or less: no limit]" );
+		bse_rateCost		= new idCVar( "bse_rateCost", "1", CVAR_RENDERER | CVAR_FLOAT, "rate cost multiplier for spawned effects" );
+		bse_softParticles	= new idCVar( "bse_softParticles", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL,
+								"DUDE: effect sprites fade where they meet the scene, like Doom 3's soft particles (non-vanilla; GL3/Vulkan with r_useSoftParticles' depth capture)" );
 	}
+	BSE_ResetRateTimes();
+	BSE_InitTools();
 	effectPrecacheEntityDef = BSE_PrecacheEntityDef;
 	cmdSystem->AddCommand( "testEffect", BSE_TestEffect_f, CMD_FL_RENDERER | CMD_FL_CHEAT,
 		"Quake 4: plays an effect in front of the view for 4 s or its whole play, as 'spawn func_fx fx <effect>' does - testEffect <effect> [once]",
@@ -1029,6 +1196,7 @@ void BSE_Shutdown( void ) {
 	bseDroppedRequests = 0;
 	effectPrecacheEntityDef = NULL;
 	cmdSystem->RemoveCommand( "testEffect" );
+	BSE_ShutdownTools();
 	bseWorldViews.Clear();
 	delete bseModel;
 	bseModel = NULL;

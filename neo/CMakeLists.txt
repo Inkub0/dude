@@ -983,6 +983,7 @@ add_globbed_headers(src_quake4 "quake4")
 set(src_bse
 	renderer/bse/BseEffect.cpp
 	renderer/bse/BseRender.cpp
+	renderer/bse/BseTools.cpp
 	renderer/bse/DeclEffect.cpp
 )
 

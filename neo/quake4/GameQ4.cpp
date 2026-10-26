@@ -24,6 +24,7 @@ Doom 3 GPL Source Code (see ArbProgram.h for license header)
 #include "renderer/ModelManager.h"
 #include "ui/UserInterface.h"
 #include "tools/compilers/aas/AASFileManager.h"
+#include "renderer/bse/BseEffect.h"
 
 #include "quake4/EngineQ4.h"
 #include "quake4/GameLoaderQ4.h"
@@ -105,10 +106,12 @@ public:
 	// the game's sounds go to the session's game sound world by id (SoundSystemQ4)
 	virtual void				InitFromNewMap( const char *mapName, idRenderWorld *renderWorld, idSoundWorld *soundWorld, bool isServer, bool isClient, int randseed ) {
 									gameQ4MapActive = true;
+									BSE_ResetRateTimes();		// as retail's effect manager at a level load
 									gameQ4->InitFromNewMap( mapName, RenderWorldQ4( renderWorld ), isServer, isClient, randseed );
 								}
 	virtual bool				InitFromSaveGame( const char *mapName, idRenderWorld *renderWorld, idSoundWorld *soundWorld, idFile *saveGameFile ) {
 									gameQ4MapActive = true;
+									BSE_ResetRateTimes();
 									return gameQ4->InitFromSaveGame( mapName, RenderWorldQ4( renderWorld ), saveGameFile );
 								}
 	virtual void				SaveGame( idFile *saveGameFile ) { gameQ4->SaveGame( saveGameFile, ST_REGULAR ); }

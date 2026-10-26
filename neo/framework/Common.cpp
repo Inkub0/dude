@@ -68,6 +68,7 @@ If you have questions concerning this license or the applicable additional terms
 #include "Session_local.h" // DG: For FT_IsDemo/isDemo() hack
 #include "quake4/GameLoaderQ4.h"
 #include "quake4/SettingsQ4.h"
+#include <atomic>
 
 #define	MAX_PRINT_MSG_SIZE	4096
 #define MAX_WARNING_LIST	256
@@ -778,9 +779,17 @@ idCommonLocal::Warning
 prints WARNING %s and adds the warning message to a queue to be printed later on
 ==================
 */
+static std::atomic<int> comNumWarnings( 0 );		// DUDE: Com_NumWarnings (parallel-load workers warn too)
+
+int Com_NumWarnings( void ) {
+	return comNumWarnings.load();
+}
+
 void idCommonLocal::Warning( const char *fmt, ... ) {
 	va_list		argptr;
 	char		msg[MAX_PRINT_MSG_SIZE];
+
+	comNumWarnings++;
 
 	va_start( argptr, fmt );
 	idStr::vsnPrintf( msg, sizeof(msg), fmt, argptr );
