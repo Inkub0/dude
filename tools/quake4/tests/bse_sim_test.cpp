@@ -27,6 +27,19 @@
 	finite, radius at least 1); every decal's projection is checked (gate: four finite corners);
 	sounds are counted as they start (a stand-in shader 1.5 s long, never looping).
 
+	Physics, impacts, debris, nested effects (S5): every effect plays inside a closed room (a box
+	the stand-in trace collides with, as the game's Translation would) and the effects it asks the
+	game to play - impact, timeout and nested effects - are played back the way the game does
+	(once, where asked; children of children up to three deep), each in the same room. The child
+	effects are the real retail decls (a name the data lacks is a defaulted decl and plays nothing).
+	Gate: no request that is not finite (origin, axis, velocity, spin) and no debris without an
+	entity def; no particle that bounces or goes on impact crosses a wall while a trace covers it
+	(retail's untraced first moments after a birth or a bounce are reported apart); every child
+	chain ends; the live effects stay under the world's limit. Reported: trace hits, bounces, particles come to rest,
+	the requests by kind (most in one game frame against the engine's per-frame limits), the
+	debris entity defs asked for. The looping run ends with a stop: the effect (persisting
+	particles included) must then end within 65 s.
+
 	Built and run by tools/quake4/test_bse_sim.sh. No game, no window, no GPU.
 */
 
@@ -51,8 +64,10 @@
 #include "decl_stub.h"
 #include "effect_decls.h"
 
-// the retail tables, by name
+// the retail tables and effects, by name
 static std::map<std::string, idDeclTable *> tables;
+static std::map<std::string, idDeclEffect *> effectsByName;
+static idDeclEffect *FindEffectByName( const char *name );
 static idDeclTable *defaultTable = NULL;
 alignas( 64 ) static unsigned char standIn[256];
 
@@ -75,7 +90,7 @@ static struct {
 							}
 	const idMaterial *		FindMaterial( const char *name, bool makeDefault = true ) { return reinterpret_cast<const idMaterial *>( standIn ); }
 	const idSoundShader *	FindSound( const char *name, bool makeDefault = true ) { return reinterpret_cast<const idSoundShader *>( standIn ); }
-	const idDeclEffect *	FindEffect( const char *name, bool makeDefault = true ) { return reinterpret_cast<const idDeclEffect *>( standIn ); }
+	const idDeclEffect *	FindEffect( const char *name, bool makeDefault = true ) { return FindEffectByName( name ); }
 } declManagerStub;
 
 static struct {
@@ -90,6 +105,29 @@ static struct {
 
 #include "framework/DeclTable.cpp"
 #include "renderer/bse/BseEffect.cpp"
+
+static bool Finite( const idVec3 &v ) {
+	return std::isfinite( v.x ) && std::isfinite( v.y ) && std::isfinite( v.z );
+}
+
+// every effect decl of the files, made before any is parsed so references find them; a name the
+// files lack is a defaulted decl (the default effect: plays nothing), as the decl manager makes
+static std::map<std::string, idDeclBaseStub *> effectBases;
+static int missingEffects = 0;
+static idDeclEffect *FindEffectByName( const char *name ) {
+	const std::string key = Lower( name );
+	auto it = effectsByName.find( key );
+	if ( it != effectsByName.end() ) {
+		return it->second;
+	}
+	idDeclEffect *decl = new idDeclEffect;
+	idDeclBaseStub *base = new idDeclBaseStub( decl, DECL_EFFECT, name, "_missing", 0 );
+	base->MakeDefault();
+	effectsByName[key] = decl;
+	effectBases[key] = base;
+	missingEffects++;
+	return decl;
+}
 
 // the runtime's engine hooks
 static const float GRAVITY = 1066.0f;
@@ -163,6 +201,104 @@ const srfTriangles_t *BSE_ModelGeometry( const idRenderModel *model ) {
 	return model != NULL ? &cubeTri : NULL;
 }
 
+/*
+	physics: the room every effect plays in - a closed box about the origin (the effect's origin is
+	128 units above the floor, 192 from the walls), solid outside. A point that crosses one of its
+	planes from inside stops there, a little short along its motion, as the collision model's own
+	traces do (CM_CLIP_EPSILON); the contact normal points into the room.
+*/
+static const idBounds simRoom( idVec3( -192.0f, -192.0f, -128.0f ), idVec3( 192.0f, 192.0f, 256.0f ) );
+static long traces = 0, traceHits = 0;
+bool BSE_Trace( idBseEffect *effect, const idVec3 &start, const idVec3 &end, idVec3 &endPos, idVec3 &normal ) {
+	traces++;
+	const idVec3 delta = end - start;
+	float best = 2.0f;
+	int bestAxis = -1, bestSide = 0;
+	for ( int axis = 0; axis < 3; axis++ ) {
+		for ( int side = 0; side < 2; side++ ) {
+			const float plane = simRoom[side][axis];
+			// distances inside the room are positive
+			const float d0 = side ? plane - start[axis] : start[axis] - plane;
+			const float d1 = side ? plane - end[axis] : end[axis] - plane;
+			if ( d0 >= 0.0f && d1 < 0.0f ) {
+				const float f = d0 / ( d0 - d1 );
+				if ( f < best ) {
+					best = f;
+					bestAxis = axis;
+					bestSide = side;
+				}
+			}
+		}
+	}
+	if ( bestAxis < 0 ) {
+		return false;
+	}
+	const float length = delta.Length();
+	const float back = length > 0.0f ? Min( best, 0.25f / length ) : 0.0f;
+	endPos = start + delta * ( best - back );
+	normal.Zero();
+	normal[bestAxis] = bestSide ? -1.0f : 1.0f;
+	traceHits++;
+	return true;
+}
+bool BSE_CanPlayImpactEffect( void ) { return true; }		// the rate limit comes with S7
+
+// the requests to the game: checked, counted, and the effects played back by the simulation
+typedef struct {
+	const idDeclEffect *	child;
+	idVec3					origin;
+	idMat3					axis;
+	int						depth;		// the asking effect's depth + 1
+} simRequest_t;
+static std::vector<simRequest_t> pendingRequests;
+static int requestDepth = 0;			// the depth of the effect being serviced
+static long badRequests = 0, impactRequests = 0, timeoutRequests = 0, nestedRequests = 0, debrisRequests = 0;
+static long frameEffectRequests = 0, frameDebrisRequests = 0;
+static long maxFrameEffectRequests = 0, maxFrameDebrisRequests = 0;
+static std::map<std::string, long> debrisDefs;
+static std::string maxRequestEffect;
+
+static bool FiniteAxis( const idMat3 &axis ) {
+	for ( int i = 0; i < 3; i++ ) {
+		if ( !std::isfinite( axis[i].x ) || !std::isfinite( axis[i].y ) || !std::isfinite( axis[i].z ) || idMath::Fabs( axis[i].Length() - 1.0f ) > 1e-3f ) {
+			return false;
+		}
+	}
+	return true;
+}
+
+void BSE_RequestEffect( idBseEffect *effect, const idDeclEffect *child, const idVec3 &origin, const idMat3 &axis ) {
+	if ( !std::isfinite( origin.x ) || !std::isfinite( origin.y ) || !std::isfinite( origin.z ) || !FiniteAxis( axis ) ) {
+		badRequests++;
+		return;
+	}
+	// which kind: a nested segment's effect, an impact effect, or else a timeout effect
+	bool nested = false, impact = false;
+	for ( int i = 0; i < effect->decl->GetNumSegments(); i++ ) {
+		const idEffectSegment &seg = effect->decl->GetSegment( i );
+		nested = nested || ( seg.type == EFFECT_SEG_EFFECT && seg.effect == child );
+		impact = impact || seg.particle.impactEffects.FindIndex( child ) >= 0;
+	}
+	( nested ? nestedRequests : impact ? impactRequests : timeoutRequests )++;
+	frameEffectRequests++;
+	if ( child->GetNumSegments() == 0 ) {
+		return;		// a missing child: the engine never sends it
+	}
+	simRequest_t r = { child, origin, axis, requestDepth + 1 };
+	pendingRequests.push_back( r );
+}
+
+void BSE_RequestDebris( idBseEffect *effect, const char *entityDef, const idVec3 &origin, const idMat3 &axis,
+		const idVec3 &velocity, const idVec3 &angularVelocity ) {
+	if ( entityDef == NULL || entityDef[0] == '\0' || !Finite( origin ) || !Finite( velocity ) || !Finite( angularVelocity ) || !FiniteAxis( axis ) ) {
+		badRequests++;
+		return;
+	}
+	debrisRequests++;
+	frameDebrisRequests++;
+	debrisDefs[Lower( entityDef )]++;
+}
+
 static bool ReadEntry( std::istream &in, std::string &name, std::string &data ) {
 	std::string lengthLine;
 	if ( !std::getline( in, name ) || !std::getline( in, lengthLine ) ) {
@@ -171,10 +307,6 @@ static bool ReadEntry( std::istream &in, std::string &name, std::string &data ) 
 	data.assign( std::stoul( lengthLine ), '\0' );
 	in.read( &data[0], data.size() );
 	return true;
-}
-
-static bool Finite( const idVec3 &v ) {
-	return std::isfinite( v.x ) && std::isfinite( v.y ) && std::isfinite( v.z );
 }
 
 // per particle kind: the segments drawn, their vertices, the most one segment took
@@ -232,20 +364,116 @@ typedef struct {
 	long	samples;
 	long	outside;			// particle samples beyond twice the decl's radius (+1): further than the retail bounds formula reaches
 	int		overBudget;
+	bool	endedAfterStop;		// the looping run: over within 65 s of its stop
 } simResult_t;
 
-static simResult_t Simulate( const idDeclEffect *decl, bool loop, float seconds ) {
-	simResult_t r;
-	memset( &r, 0, sizeof( r ) );
+// the effects one run plays: the effect tested and the children it had the game play
+typedef struct {
+	idBseEffect *		effect;
+	bseEffectParms_t	parms;
+	int					depth;		// 0: the effect tested
+} simEffect_t;
+static const int SIM_MAX_DEPTH = 3;			// children of children of children
+static const int SIM_MAX_LIVE = 512;		// effects alive at once in one run
+static long escapes = 0, gapEscapes = 0, bounces = 0, rests = 0, childrenPlayed = 0, childrenTooDeep = 0, worldFull = 0, childrenNotEnded = 0;
+static int maxLive = 0;
+static std::vector<std::string> escapeNotes;
+
+static bseEffectParms_t SimParms( const idDeclEffect *decl, bool loop, const idVec3 &origin, const idMat3 &axis, float time ) {
 	bseEffectParms_t parms;
 	memset( &parms, 0, sizeof( parms ) );
 	parms.effect = decl;
-	parms.axis.Identity();
+	parms.startTime = time;
+	parms.origin = origin;
+	parms.axis = axis;
 	parms.gravity.Set( 0.0f, 0.0f, -GRAVITY );
 	parms.attenuation = 1.0f;
 	parms.loop = loop;
 	parms.inConnectedArea = true;
 	parms.shaderParms[0] = parms.shaderParms[1] = parms.shaderParms[2] = parms.shaderParms[3] = parms.shaderParms[6] = 1.0f;
+	return parms;
+}
+
+// physics after a service at t: bounces and rests counted. A particle that bounces or goes on impact
+// and crossed a wall since the last frame, while the trace covered that frame (it traces its last
+// 0.1 s once 0.1 s have passed since it moved off), must have been caught. Retail's trace leaves a
+// slice untraced - the first trace waits for 0.1 s of motion and then starts 0.1 s back from its
+// own time, a frame after the motion began - so a fast particle can cross a wall there and go on
+// through it (the collision model's point traces are one-sided); those are counted apart.
+static void CheckPhysics( const idBseEffect &effect, float t ) {
+	const idBounds room = simRoom.Expand( 0.5f );
+	for ( int s = 0; s < effect.segments.Num(); s++ ) {
+		const idBseSegment &segment = effect.segments[s];
+		const idEffectParticle &tmplP = segment.tmpl->particle;
+		if ( !tmplP.hasPhysics ) {
+			continue;
+		}
+		const bool contained = tmplP.bounce != 0.0f || tmplP.remove != 0.0f;
+		for ( int i = 0; i < segment.particles.Num(); i++ ) {
+			const bseParticle_t &p = segment.particles[i];
+			if ( p.motionStartTime == t && p.motionStartTime != p.startTime ) {
+				( p.stationary ? rests : bounces )++;
+			}
+			if ( !contained || t - p.motionStartTime < BSE_PHYSICS_SAMPLE || t >= p.endTime - BSE_TIME_EPSILON ) {
+				continue;
+			}
+			const idVec3 now = effect.ToWorld( effect.EvaluatePosition( p, tmplP, t ) );
+			if ( room.ContainsPoint( now ) ) {
+				continue;
+			}
+			const idVec3 from = effect.ToWorld( effect.EvaluatePosition( p, tmplP, p.motionStartTime ) );
+			if ( !room.ContainsPoint( from ) ) {
+				continue;		// born in the wall: the trace starts in solid
+			}
+			const idVec3 before = effect.ToWorld( effect.EvaluatePosition( p, tmplP, t - 1.0f / 60.0f ) );
+			if ( !room.ContainsPoint( before ) ) {
+				gapEscapes++;	// out before this frame: through retail's untraced slice
+				continue;
+			}
+			escapes++;
+			if ( escapeNotes.size() < 10 ) {
+				escapeNotes.push_back( std::string( "  escaped the room: " ) + effect.decl->GetName() + " segment " + std::to_string( s ) );
+			}
+		}
+	}
+}
+
+// the requests of this game frame: the effects go to the game (played once, where asked)
+static void DeliverRequests( std::vector<simEffect_t> &world, float t ) {
+	maxFrameEffectRequests = Max( maxFrameEffectRequests, frameEffectRequests );
+	maxFrameDebrisRequests = Max( maxFrameDebrisRequests, frameDebrisRequests );
+	if ( frameEffectRequests + frameDebrisRequests > 0 && frameEffectRequests == maxFrameEffectRequests ) {
+		maxRequestEffect = currentEffect;
+	}
+	frameEffectRequests = frameDebrisRequests = 0;
+	for ( const simRequest_t &r : pendingRequests ) {
+		if ( r.depth > SIM_MAX_DEPTH ) {
+			childrenTooDeep++;
+			continue;
+		}
+		if ( (int)world.size() >= SIM_MAX_LIVE ) {
+			worldFull++;
+			continue;
+		}
+		simEffect_t child;
+		child.parms = SimParms( r.child, false, r.origin, r.axis, t );
+		child.depth = r.depth;
+		child.effect = new idBseEffect;
+		child.effect->world = NULL;
+		child.effect->entityHandle = -1;
+		child.effect->litHandle = -1;
+		child.effect->Init( child.parms, t );
+		world.push_back( child );
+		childrenPlayed++;
+	}
+	pendingRequests.clear();
+	maxLive = Max( maxLive, (int)world.size() );
+}
+
+static simResult_t Simulate( const idDeclEffect *decl, bool loop, float seconds ) {
+	simResult_t r;
+	memset( &r, 0, sizeof( r ) );
+	const bseEffectParms_t parms = SimParms( decl, loop, vec3_origin, mat3_identity, 0.0f );
 
 	idBseEffect effect;
 	effect.world = NULL;
@@ -259,59 +487,115 @@ static simResult_t Simulate( const idDeclEffect *decl, bool loop, float seconds 
 	view.up.Set( 0.0f, 0.0f, 1.0f );
 	idBseGeometry geo;
 	std::vector<bool> fed( effect.segments.Num(), false );
-	for ( int frame = 1; frame <= (int)( seconds * 60.0f ); frame++ ) {
+	std::vector<simEffect_t> children;
+	bool rootOver = false;
+	const int lastFrame = (int)( seconds * 60.0f );
+	const int stopFrame = loop ? lastFrame : -1;
+	const int finalFrame = lastFrame + 65 * 60;		// the stopped run and the children have 65 s to end
+	for ( int frame = 1; frame <= finalFrame; frame++ ) {
 		const float t = frame / 60.0f;
-		effect.UpdateFromOwner( parms, t );
-		const bool over = effect.Service( t );
-		for ( int s = 0; s < effect.segments.Num(); s++ ) {
-			const idBseSegment &segment = effect.segments[s];
-			if ( segment.particles.Num() > segment.budget ) {
-				r.overBudget++;
-			}
-			for ( int i = 0; i < segment.particles.Num(); i++ ) {
-				idVec3 pos, size, rotate;
-				idVec4 tint;
-				if ( !effect.EvaluateParticle( segment.particles[i], segment.tmpl->particle, t, pos, tint, size, rotate ) ) {
-					continue;
+		if ( frame == stopFrame ) {
+			effect.Stop();
+		}
+		if ( !rootOver ) {
+			requestDepth = 0;
+			effect.UpdateFromOwner( parms, t );
+			const bool over = effect.Service( t );
+			CheckPhysics( effect, t );
+			for ( int s = 0; s < effect.segments.Num(); s++ ) {
+				const idBseSegment &segment = effect.segments[s];
+				if ( segment.particles.Num() > segment.budget ) {
+					r.overBudget++;
 				}
-				if ( !Finite( pos ) || !Finite( size ) || !Finite( rotate ) || !std::isfinite( tint.w ) ) {
-					r.notFinite++;
-					continue;
+				for ( int i = 0; i < segment.particles.Num(); i++ ) {
+					idVec3 pos, size, rotate;
+					idVec4 tint;
+					if ( !effect.EvaluateParticle( segment.particles[i], segment.tmpl->particle, t, pos, tint, size, rotate ) ) {
+						continue;
+					}
+					if ( !Finite( pos ) || !Finite( size ) || !Finite( rotate ) || !std::isfinite( tint.w ) ) {
+						r.notFinite++;
+						continue;
+					}
+					if ( frame > lastFrame ) {
+						continue;		// after the stop: only what is left dying out
+					}
+					const float d = pos.Length();
+					r.maxDistance = Max( r.maxDistance, d );
+					r.samples++;
+					if ( d > 2.0f * effect.boundsRadius + 1.0f ) {
+						r.outside++;
+					}
 				}
-				const float d = pos.Length();
-				r.maxDistance = Max( r.maxDistance, d );
-				r.samples++;
-				if ( d > 2.0f * effect.boundsRadius + 1.0f ) {
-					r.outside++;
+				if ( segment.particles.Num() > 0 ) {
+					fed[s] = true;
+				}
+				if ( segment.tmpl->type == EFFECT_SEG_LIGHT && frame % 6 == 0 ) {
+					bseLight_t light;
+					if ( effect.EvaluateLight( segment, t, light ) ) {
+						lightsEvaluated++;
+						if ( !Finite( light.origin ) || !Finite( light.color ) || !Finite( light.radius ) ||
+								light.radius.x < 1.0f || light.radius.y < 1.0f || light.radius.z < 1.0f ) {
+							badLights++;
+						}
+					}
+				}
+				if ( segment.tmpl->hasParticles && segment.particles.Num() && frame % 6 == 0 ) {
+					geo.Clear();
+					effect.BuildSegment( segment, t, view, geo );
+					CheckGeometry( geo, segment.tmpl->particle.type, false );
+					geo.Clear();
+					effect.BuildMotionTrails( segment, t, view, geo );
+					CheckGeometry( geo, segment.tmpl->particle.type, true );
 				}
 			}
-			if ( segment.particles.Num() > 0 ) {
-				fed[s] = true;
+			if ( over && ( !loop || frame >= stopFrame ) ) {
+				rootOver = true;
+				if ( !loop ) {
+					r.ended = true;
+					r.endTime = t;
+				} else {
+					r.endedAfterStop = true;
+				}
 			}
-			if ( segment.tmpl->type == EFFECT_SEG_LIGHT && frame % 6 == 0 ) {
-				bseLight_t light;
-				if ( effect.EvaluateLight( segment, t, light ) ) {
-					lightsEvaluated++;
-					if ( !Finite( light.origin ) || !Finite( light.color ) || !Finite( light.radius ) ||
-							light.radius.x < 1.0f || light.radius.y < 1.0f || light.radius.z < 1.0f ) {
-						badLights++;
+		}
+
+		// the children the game plays: serviced like any effect, freed once over
+		for ( size_t c = 0; c < children.size(); c++ ) {
+			requestDepth = children[c].depth;
+			idBseEffect *child = children[c].effect;
+			child->UpdateFromOwner( children[c].parms, t );
+			const bool over = child->Service( t );
+			CheckPhysics( *child, t );
+			for ( int s = 0; s < child->segments.Num(); s++ ) {
+				const idBseSegment &segment = child->segments[s];
+				for ( int i = 0; i < segment.particles.Num(); i++ ) {
+					idVec3 pos, size, rotate;
+					idVec4 tint;
+					if ( child->EvaluateParticle( segment.particles[i], segment.tmpl->particle, t, pos, tint, size, rotate ) &&
+							( !Finite( pos ) || !Finite( size ) || !Finite( rotate ) || !std::isfinite( tint.w ) ) ) {
+						r.notFinite++;
 					}
 				}
 			}
-			if ( segment.tmpl->hasParticles && segment.particles.Num() && frame % 6 == 0 ) {
-				geo.Clear();
-				effect.BuildSegment( segment, t, view, geo );
-				CheckGeometry( geo, segment.tmpl->particle.type, false );
-				geo.Clear();
-				effect.BuildMotionTrails( segment, t, view, geo );
-				CheckGeometry( geo, segment.tmpl->particle.type, true );
+			if ( over ) {
+				delete child;
+				children.erase( children.begin() + c-- );
 			}
 		}
-		if ( over && !loop ) {
-			r.ended = true;
-			r.endTime = t;
+		DeliverRequests( children, t );
+
+		// a one-shot run is over once it and its children are; a looping one runs to its stop first
+		if ( rootOver && children.empty() && pendingRequests.empty() && ( !loop || frame >= stopFrame ) ) {
 			break;
 		}
+		if ( !loop && !rootOver && frame >= lastFrame ) {
+			break;		// does not end in time: reported
+		}
+	}
+	childrenNotEnded += (long)children.size();
+	for ( simEffect_t &c : children ) {
+		delete c.effect;
 	}
 	if ( !loop ) {
 		for ( int s = 0; s < effect.segments.Num(); s++ ) {
@@ -346,17 +630,53 @@ int main( int argc, char **argv ) {
 	}
 	printf( "== %d tables\n", (int)tables.size() );
 
-	int effects = 0, failed = 0, notFinite = 0, notEnded = 0, overBudget = 0;
+	int effects = 0, failed = 0, notFinite = 0, notEnded = 0, overBudget = 0, notEndedAfterStop = 0;
 	int radiusMatch = 0, radiusWithin10 = 0, radiusOff = 0, withParticles = 0, leaving = 0;
 	std::vector<std::string> notes;
-	std::string name, data;
-	while ( ReadEntry( std::cin, name, data ) ) {
-		std::vector<declText_t> texts;
-		SplitDecls( name.c_str(), data, texts );
-		for ( const declText_t &text : texts ) {
-			idDeclEffect *decl = new idDeclEffect;
-			idDeclBaseStub *base = new idDeclBaseStub( decl, DECL_EFFECT, text.name, name.c_str(), text.line );
-			if ( !base->ParseText( data.data() + text.offset, text.length ) ) {
+
+	// every decl first, so the effects they name (impact, timeout, nested) are the real ones
+	typedef struct {
+		std::string		file;
+		declText_t		text;
+		idDeclEffect *	decl;
+		idDeclBaseStub *base;
+	} simDecl_t;
+	std::vector<std::string> files;
+	std::vector<simDecl_t> decls;
+	{
+		std::string name, data;
+		std::vector<std::string> datas;
+		while ( ReadEntry( std::cin, name, data ) ) {
+			files.push_back( name );
+			datas.push_back( data );
+		}
+		for ( size_t f = 0; f < files.size(); f++ ) {
+			std::vector<declText_t> texts;
+			SplitDecls( files[f].c_str(), datas[f], texts );
+			for ( const declText_t &text : texts ) {
+				simDecl_t d;
+				d.file = datas[f].substr( text.offset, text.length );
+				d.text = text;
+				d.decl = new idDeclEffect;
+				d.base = new idDeclBaseStub( d.decl, DECL_EFFECT, text.name, files[f].c_str(), text.line );
+				effectsByName[Lower( text.name.c_str() )] = d.decl;
+				effectBases[Lower( text.name.c_str() )] = d.base;
+				decls.push_back( d );
+			}
+		}
+		for ( simDecl_t &d : decls ) {
+			d.text.offset = 0;
+			if ( !d.base->ParseText( d.file.data(), (int)d.file.size() ) ) {
+				d.decl = NULL;
+			}
+		}
+	}
+
+	for ( const simDecl_t &d : decls ) {
+		const declText_t &text = d.text;
+		idDeclEffect *decl = d.decl;
+		{
+			if ( decl == NULL ) {
 				failed++;
 				continue;
 			}
@@ -380,6 +700,10 @@ int main( int argc, char **argv ) {
 			const simResult_t once = Simulate( decl, false, 120.0f );
 			const simResult_t looped = Simulate( decl, true, Max( 1.0f, Min( 30.0f, decl->GetMaxDuration() * 3.0f ) ) );
 			notFinite += once.notFinite + looped.notFinite;
+			if ( !looped.endedAfterStop ) {
+				notEndedAfterStop++;
+				notes.push_back( std::string( "  does not end within 65 s of its stop: " ) + text.name.c_str() );
+			}
 			overBudget += once.overBudget + looped.overBudget;
 			if ( !once.ended ) {
 				notEnded++;
@@ -401,6 +725,9 @@ int main( int argc, char **argv ) {
 	for ( const std::string &n : notes ) {
 		printf( "%s\n", n.c_str() );
 	}
+	for ( const std::string &n : escapeNotes ) {
+		printf( "%s\n", n.c_str() );
+	}
 	printf( "== %d effects simulated (%d failed to parse), %d with particles\n", effects, failed, withParticles );
 	printf( "== not finite: %d; non-looping effects that do not end: %d; segments over budget: %d\n", notFinite, notEnded, overBudget );
 	printf( "== computed radius vs the file's size: %d equal (within 1), %d within 10%%, %d further off\n", radiusMatch, radiusWithin10, radiusOff );
@@ -419,5 +746,25 @@ int main( int argc, char **argv ) {
 	printf( "== lights evaluated ten times a second: %ld, bad (not finite, radius under 1): %ld\n", lightsEvaluated, badLights );
 	printf( "== sounds started: %ld (emitter updates %ld, stops %ld); decals projected: %ld, bad (or bad sound parms): %ld\n",
 		soundsStarted, soundUpdates, soundsStopped, decalsProjected, badDecals );
-	return ( failed > 0 || notFinite > 0 || notEnded > 0 || overBudget > 0 || badGeometry > 0 || badLights > 0 || badDecals > 0 ) ? 1 : 0;
+	printf( "== physics in the room: %ld traces, %ld hits, %ld bounces, %ld came to rest; crossed a wall under a trace: %ld (through the untraced slice, as retail: %ld samples)\n",
+		traces, traceHits, bounces, rests, escapes, gapEscapes );
+	printf( "== requests to the game: impact effects %ld, timeout effects %ld, nested effects %ld, debris %ld; bad (not finite, no entity def): %ld\n",
+		impactRequests, timeoutRequests, nestedRequests, debrisRequests, badRequests );
+	printf( "== most in one game frame: %ld effects (limit 256; %s), %ld debris (limit 128)\n",
+		maxFrameEffectRequests, maxRequestEffect.c_str(), maxFrameDebrisRequests );
+	printf( "== children played back: %ld (deeper than %d: %ld; world full at %d: %ld; most alive in one run: %d; not ended: %ld); names the data lacks: %d\n",
+		childrenPlayed, SIM_MAX_DEPTH, childrenTooDeep, SIM_MAX_LIVE, worldFull, maxLive, childrenNotEnded, missingEffects );
+	printf( "== looping effects that do not end within 65 s of their stop: %d\n", notEndedAfterStop );
+	printf( "== debris entity defs asked for: %d", (int)debrisDefs.size() );
+	int shown = 0;
+	for ( const auto &d : debrisDefs ) {
+		printf( "%s %s x%ld", shown++ ? "," : "", d.first.c_str(), d.second );
+		if ( shown >= 8 ) {
+			printf( ", ..." );
+			break;
+		}
+	}
+	printf( "\n" );
+	const bool physicsBad = escapes > 0 || badRequests > 0 || childrenNotEnded > 0 || worldFull > 0 || notEndedAfterStop > 0;
+	return ( failed > 0 || notFinite > 0 || notEnded > 0 || overBudget > 0 || badGeometry > 0 || badLights > 0 || badDecals > 0 || physicsBad ) ? 1 : 0;
 }

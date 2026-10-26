@@ -26,6 +26,11 @@ idSoundSystemQ4 *			SoundSystemQ4( void );
 idCollisionModelManagerQ4 *	CollisionModelManagerQ4( void );
 idEffectManagerQ4 *			EffectManagerQ4( void );
 
+// the loaded Quake 4 game library (NULL: none), and whether it has a map loading or loaded - the
+// effect runtime's way to the game (physics traces, child effects, debris, entity def precache)
+idGameQ4 *					GameQ4( void );
+bool						GameQ4_MapActive( void );
+
 // the Quake 4 face of a render world: one per engine render world, made on first use; all of
 // them go with FreeRenderWorldsQ4 (the game library's unload)
 idRenderWorldQ4 *			RenderWorldQ4( idRenderWorld *renderWorld );

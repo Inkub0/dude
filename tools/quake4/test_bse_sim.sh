@@ -4,6 +4,9 @@
 # (build/libidlib.a), loads the retail envelope tables, and plays every retail effect once and
 # looping at 60 Hz, evaluating every live particle each frame (tests/bse_sim_test.cpp). Gate: no
 # number that is not finite, every non-looping effect ends, no segment over its particle budget.
+# Physics (S5): every effect plays in a closed room; bounces, removals and rests are checked, the
+# child effects it asks the game for are played back (real decls, three deep) and the requests
+# counted and checked (finite, bounded, every chain ends, every stopped looping effect ends).
 # Also reports how the particles' reach compares with each effect's radius by the retail bounds
 # formula, and that radius against the file's own "size". Needs a configured build/. Q4BASE
 # overrides the data path. Never starts the game.

@@ -32,6 +32,7 @@ Doom 3 GPL Source Code (see ArbProgram.h for license header)
 
 static idGameQ4 *		gameQ4 = NULL;
 static idGameEditQ4 *	gameEditQ4 = NULL;
+static bool				gameQ4MapActive = false;	// from the start of a map's load to its shutdown
 
 /*
 ===============
@@ -103,13 +104,15 @@ public:
 
 	// the game's sounds go to the session's game sound world by id (SoundSystemQ4)
 	virtual void				InitFromNewMap( const char *mapName, idRenderWorld *renderWorld, idSoundWorld *soundWorld, bool isServer, bool isClient, int randseed ) {
+									gameQ4MapActive = true;
 									gameQ4->InitFromNewMap( mapName, RenderWorldQ4( renderWorld ), isServer, isClient, randseed );
 								}
 	virtual bool				InitFromSaveGame( const char *mapName, idRenderWorld *renderWorld, idSoundWorld *soundWorld, idFile *saveGameFile ) {
+									gameQ4MapActive = true;
 									return gameQ4->InitFromSaveGame( mapName, RenderWorldQ4( renderWorld ), saveGameFile );
 								}
 	virtual void				SaveGame( idFile *saveGameFile ) { gameQ4->SaveGame( saveGameFile, ST_REGULAR ); }
-	virtual void				MapShutdown( void ) { gameQ4->MapShutdown(); }
+	virtual void				MapShutdown( void ) { gameQ4->MapShutdown(); gameQ4MapActive = false; }
 	virtual void				CacheDictionaryMedia( const idDict *dict ) { gameQ4->CacheDictionaryMedia( dict ); }
 	virtual void				SpawnPlayer( int clientNum ) { gameQ4->SpawnPlayer( clientNum ); }
 
@@ -305,6 +308,25 @@ void GameQ4_Unload( void ) {
 	FreeRenderWorldsQ4();
 	gameQ4 = NULL;
 	gameEditQ4 = NULL;
+	gameQ4MapActive = false;
+}
+
+idGameQ4 *GameQ4( void ) {
+	return gameQ4;
+}
+
+bool GameQ4_MapActive( void ) {
+	return gameQ4 != NULL && gameQ4MapActive;
+}
+
+#else
+
+idGameQ4 *GameQ4( void ) {
+	return NULL;
+}
+
+bool GameQ4_MapActive( void ) {
+	return false;
 }
 
 #endif /* __DOOM_DLL__ */

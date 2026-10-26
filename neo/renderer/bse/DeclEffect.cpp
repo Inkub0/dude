@@ -19,6 +19,8 @@ Doom 3 GPL Source Code (see ArbProgram.h for license header)
 #include "renderer/ModelManager.h"
 #include "renderer/bse/DeclEffect.h"
 
+void ( *effectPrecacheEntityDef )( const char *name ) = NULL;
+
 /*
 ===============================================================================
 
@@ -504,6 +506,9 @@ static bool ParseEffectParticle( idLexer &src, idEffectParticle &particle ) {
 		} else if ( !token.Icmp( "entityDef" ) ) {
 			ok = ParseEffectName( src, "entityDef", name );
 			particle.entityDef = name;
+			if ( ok && effectPrecacheEntityDef != NULL ) {
+				effectPrecacheEntityDef( name );
+			}
 			key = EFFECT_PKEY_ENTITYDEF;
 		} else if ( !token.Icmp( "model" ) ) {
 			ok = ParseEffectName( src, "model", name );

@@ -313,6 +313,11 @@ public:
 #define EFFECT_KEY_SIZE						BIT( 0 )
 #define EFFECT_KEY_CUTOFF_DISTANCE			BIT( 1 )
 
+// an entity def a particle names (debris becomes one; on the other kinds retail only precaches it):
+// its media load with the effect rather than at the first spawn. Set by the Quake 4 title (the
+// game precaches), NULL elsewhere and offline.
+extern void		( *effectPrecacheEntityDef )( const char *name );
+
 // how many components a parameter has for a particle type (sprite size 2, line size 1, ...)
 int		EffectParmComponents( effectParticleType_t type, int parm );
 // the lowest and highest value a domain gives each component (a domain not given: defaultValue)

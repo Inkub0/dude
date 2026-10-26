@@ -28,6 +28,8 @@ idCVar *bse_render = NULL;
 idCVar *bse_scale = NULL;
 idCVar *bse_maxParticles = NULL;
 idCVar *bse_debug = NULL;
+idCVar *bse_physics = NULL;
+idCVar *bse_debris = NULL;
 
 // a sound segment's channel on the effect's emitter: the first after the sound system's "any"
 // channel (SCHANNEL_ONE), plus the segment's index, as retail
@@ -588,9 +590,16 @@ bool idBseSegment::Check( idBseEffect *effect, float time ) {
 			}
 			expired = true;
 			return true;
+		case EFFECT_SEG_EFFECT:
+			// once per window, where the effect is now, played once and without the end origin -
+			// only while the owner is in an area connected to the player's
+			if ( tmpl->effect != NULL && effect->inConnectedArea ) {
+				BSE_RequestEffect( effect, tmpl->effect, effect->currentOrigin, effect->currentAxis );
+			}
+			expired = true;
+			return true;
 		default:
-			// trails follow their particles; delays only time the loop; nested effects and view
-			// effects come with S5-S6
+			// trails follow their particles; delays only time the loop; view effects come with S6
 			expired = true;
 			return true;
 	}
@@ -686,6 +695,10 @@ idBseSegment::Spawn
 ================
 */
 void idBseSegment::Spawn( idBseEffect *effect, float birthTime, float fraction, const idVec3 *trailOffset, const idMat3 *trailAxis ) {
+	if ( tmpl->particle.type == EFFECT_PARTICLE_DEBRIS ) {
+		SpawnDebris( effect, birthTime, fraction );		// the game's entity from birth: takes no slot
+		return;
+	}
 	if ( particles.Num() >= budget ) {
 		return;		// as in retail: no free particle, no spawn
 	}
@@ -820,6 +833,7 @@ void idBseSegment::SpawnParticle( idBseEffect *effect, bseParticle_t &p, float b
 
 	memset( &p, 0, sizeof( p ) );
 	p.startTime = birthTime;
+	p.motionStartTime = birthTime;
 	p.lastTrailTime = birthTime;
 	p.fraction = fraction;
 	p.locked = ( tmpl->flags & EFFECT_SEGMENT_LOCKED ) != 0;
@@ -891,11 +905,7 @@ void idBseSegment::SpawnParticle( idBseEffect *effect, bseParticle_t &p, float b
 		// born where the effect was at the birth time within the frame
 		p.initOrigin = effect->currentOrigin;
 		p.initAxis = effect->currentAxis;
-		const float dt = effect->currentTime - effect->lastTime;
-		if ( dt >= 0.002f ) {
-			const float stillToMove = 1.0f - ( birthTime - effect->lastTime ) / dt;
-			p.initPos -= effect->currentAxis.Transpose() * ( ( effect->currentOrigin - effect->lastOrigin ) * stillToMove );
-		}
+		p.initPos -= effect->BirthOffset( birthTime );
 	}
 	if ( trailOffset != NULL ) {
 		p.initPos += *trailOffset;
@@ -1035,8 +1045,9 @@ void idBseSegment::EmitTrail( idBseEffect *effect, bseParticle_t &p, float time 
 idBseSegment::UpdateParticles
 
 Drops the particles that are over by time - all of a stopped effect's but those that persist. A
-constant segment's particles live as long as the effect. Particles with a named trail leave its
-particles up to time first.
+constant segment's particles live as long as the effect. A particle that dies of age plays its
+timeout effect; one with an impact block traces its motion first (and may bounce or go). Particles
+with a named trail then leave its particles up to time.
 ================
 */
 bool idBseSegment::UpdateParticles( idBseEffect *effect, float time ) {
@@ -1047,12 +1058,22 @@ bool idBseSegment::UpdateParticles( idBseEffect *effect, float time ) {
 	HandleSound( effect, time );
 	int kept = 0;
 	for ( int i = 0; i < particles.Num(); i++ ) {
-		if ( smoker ) {
-			EmitTrail( effect, particles[i], time );
+		bseParticle_t &p = particles[i];
+		bool remove;
+		if ( infinite ) {
+			RunPhysics( effect, p, time );
+			remove = effect->stopped;
+		} else if ( p.endTime - BSE_TIME_EPSILON <= time ) {
+			PlayTimeoutEffect( effect, p, time );
+			remove = true;
+		} else {
+			remove = RunPhysics( effect, p, time );
 		}
-		bool remove = infinite ? effect->stopped : ( particles[i].endTime - BSE_TIME_EPSILON <= time );
 		if ( effect->stopped && !persist ) {
 			remove = true;
+		}
+		if ( smoker ) {
+			EmitTrail( effect, p, time );
 		}
 		if ( !remove ) {
 			if ( kept != i ) {
@@ -1063,6 +1084,135 @@ bool idBseSegment::UpdateParticles( idBseEffect *effect, float time ) {
 	}
 	particles.SetNum( kept, false );
 	return kept > 0;
+}
+
+/*
+================
+idBseSegment::RunPhysics
+
+A particle with an impact block traces the point it was 0.1 s ago (or at its last bounce, if
+later) to where it is now, through the game's world. On a hit it plays one of its impact effects at
+the hit point, facing out of the surface (subject to the game's rate limit, and only while the owner
+is in an area connected to the player's), bounces when its bounce is not 0 and goes when "remove"
+says so. A particle at rest no longer traces. Returns true when the particle goes.
+================
+*/
+bool idBseSegment::RunPhysics( idBseEffect *effect, bseParticle_t &p, float time ) {
+	const idEffectParticle &tmplP = tmpl->particle;
+	if ( !tmplP.hasPhysics || p.stationary || !BSE_Physics() ) {
+		return false;
+	}
+	if ( time - p.motionStartTime < BSE_PHYSICS_SAMPLE ) {
+		return false;
+	}
+	const float from = Max( p.motionStartTime, time - BSE_PHYSICS_SAMPLE );
+	const idVec3 start = effect->ToWorld( effect->EvaluatePosition( p, tmplP, from ) );
+	const idVec3 end = effect->ToWorld( effect->EvaluatePosition( p, tmplP, time ) );
+	idVec3 endPos, normal;
+	if ( !BSE_Trace( effect, start, end, endPos, normal ) ) {
+		return false;
+	}
+
+	if ( tmplP.impactEffects.Num() > 0 && BSE_CanPlayImpactEffect() ) {
+		if ( effect->inConnectedArea ) {
+			const idDeclEffect *child = tmplP.impactEffects[BSE_Random().RandomInt( tmplP.impactEffects.Num() )];
+			if ( child != NULL ) {
+				BSE_RequestEffect( effect, child, endPos, normal.ToMat3() );
+			}
+		}
+	}
+	if ( tmplP.bounce != 0.0f ) {
+		Bounce( effect, p, endPos, normal, time );
+	}
+	return tmplP.remove != 0.0f;
+}
+
+/*
+================
+idBseSegment::Bounce
+
+The velocity at the impact, mirrored in the surface and scaled by the bounce; the motion starts
+again from the hit point (colour, size and the other envelopes keep their clock). The new start is
+kept in the particle's own frame - the effect's frame at birth for an unlocked particle, so its
+gravity still points down. Slower than 50 units a second off a floor (a surface facing against
+gravity by more than 45 degrees), it comes to rest.
+================
+*/
+void idBseSegment::Bounce( idBseEffect *effect, bseParticle_t &p, const idVec3 &endPos, const idVec3 &normal, float time ) {
+	const idMat3 &frameAxis = p.locked ? effect->currentAxis : p.initAxis;
+	const idVec3 &frameOrigin = p.locked ? effect->currentOrigin : p.initOrigin;
+
+	idVec3 velocity = frameAxis * effect->EvaluateVelocity( p, time );
+	velocity -= normal * ( 2.0f * ( velocity * normal ) );
+	velocity *= tmpl->particle.bounce;
+
+	p.velocity = frameAxis.Transpose() * velocity;
+	p.initPos = frameAxis.Transpose() * ( endPos - frameOrigin );
+	p.motionStartTime = time;
+
+	idVec3 down = effect->gravity;
+	if ( p.velocity.LengthSqr() < BSE_BOUNCE_REST_SPEED_SQR && down.LengthSqr() > 0.0f ) {
+		down.Normalize();
+		if ( normal * down < -idMath::SQRT_1OVER2 ) {
+			p.stationary = true;
+			p.velocity.Zero();
+		}
+	}
+}
+
+/*
+================
+idBseSegment::PlayTimeoutEffect
+
+A particle that dies of age plays one of its timeout effects where it is, facing its direction of
+travel (along x when it has none) - only while the owner is in an area connected to the player's.
+================
+*/
+void idBseSegment::PlayTimeoutEffect( idBseEffect *effect, const bseParticle_t &p, float time ) {
+	const idEffectParticle &tmplP = tmpl->particle;
+	if ( tmplP.timeoutEffects.Num() == 0 || !effect->inConnectedArea ) {
+		return;
+	}
+	const idDeclEffect *child = tmplP.timeoutEffects[BSE_Random().RandomInt( tmplP.timeoutEffects.Num() )];
+	if ( child == NULL ) {
+		return;
+	}
+	const idVec3 position = effect->ToWorld( effect->EvaluatePosition( p, tmplP, time ) );
+	idVec3 direction = effect->currentAxis * effect->ToCurrentFrame( p, effect->EvaluateVelocity( p, time ) );
+	if ( direction.LengthSqr() > 1e-8f ) {
+		direction.Normalize();
+	} else {
+		direction.Set( 1.0f, 0.0f, 0.0f );
+	}
+	BSE_RequestEffect( effect, child, position, direction.ToMat3() );
+}
+
+/*
+================
+idBseSegment::SpawnDebris
+
+A debris particle is the game's from birth: a client moveable of its entityDef, placed and moving as
+the particle would be born, spinning by its end rotation (radians per second, the start not added
+even for "relative"), with the entity def's own lifetime. As in retail the place is taken in the
+effect's original frame (where it started) and the velocity in its current one.
+================
+*/
+void idBseSegment::SpawnDebris( idBseEffect *effect, float birthTime, float fraction ) {
+	const idEffectParticle &tmplP = tmpl->particle;
+	if ( !BSE_Debris() || tmplP.entityDef.IsEmpty() ) {
+		return;
+	}
+	bseParticle_t p;
+	SpawnParticle( effect, p, birthTime, fraction, NULL, NULL );
+	if ( p.locked ) {
+		p.initPos -= effect->BirthOffset( birthTime );		// placed as an unlocked particle is, locked or not
+	}
+	idVec3 spin = p.rotateEnd;
+	if ( tmplP.parms[EFFECT_PARM_ROTATE].end.flags & EFFECT_DOMAIN_RELATIVE ) {
+		spin -= p.rotateStart;
+	}
+	const idVec3 origin = effect->originalOrigin + effect->originalAxis * p.initPos;
+	BSE_RequestDebris( effect, tmplP.entityDef.c_str(), origin, effect->currentAxis, effect->currentAxis * p.velocity, spin );
 }
 
 /*
@@ -1094,6 +1244,7 @@ void idBseEffect::Init( const bseEffectParms_t &parms, float time ) {
 	shortestDistance = originDistance = 0.0f;
 
 	originalOrigin = currentOrigin = lastOrigin = parms.origin;
+	originalAxis = parms.axis;
 	currentAxis = parms.axis;
 	currentVelocity.Zero();
 	hasEndOrigin = parms.hasEndOrigin;
@@ -1376,22 +1527,25 @@ orbit angles. Colour and the rest follow their envelopes.
 */
 idVec3 idBseEffect::EvaluatePosition( const bseParticle_t &p, const idEffectParticle &tmplP, float time ) const {
 	const float life = p.endTime - p.startTime;
-	const float t = Max( 0.0f, time - p.startTime );
+	const float t = Max( 0.0f, time - p.motionStartTime );		// motion runs from the birth or the last bounce
 	const effectParm_t *parms = tmplP.parms;
 
-	idVec3 position = p.initPos + p.velocity * t;
-	if ( p.hasOffset ) {
-		idVec3 angle, offset;
-		BSE_EvaluateEnvelope( parms[EFFECT_PARM_ANGLE].envelope, p.angleStart.ToFloatPtr(), p.angleEnd.ToFloatPtr(), 3, t, p.oneOverLife, angle.ToFloatPtr() );
-		BSE_EvaluateEnvelope( parms[EFFECT_PARM_OFFSET].envelope, p.offsetStart.ToFloatPtr(), p.offsetEnd.ToFloatPtr(), 3, t, p.oneOverLife, offset.ToFloatPtr() );
-		const idAngles orbit( RAD2DEG( angle.x ), RAD2DEG( angle.y ), RAD2DEG( angle.z ) );
-		position += orbit.ToMat3() * offset;
-	}
-	const float halfT2 = 0.5f * t * t;
-	position += p.acceleration * halfT2;
-	if ( p.friction.LengthSqr() != 0.0f ) {
-		const float lifeLength = Max( BSE_TIME_EPSILON, life );
-		position += p.friction * ( ( idMath::Exp( ( lifeLength - halfT2 ) / lifeLength ) - 1.0f ) * halfT2 * halfT2 * ( 1.0f / 3.0f ) );
+	idVec3 position = p.initPos;		// a particle at rest stays where it landed
+	if ( !p.stationary ) {
+		position += p.velocity * t;
+		if ( p.hasOffset ) {
+			idVec3 angle, offset;
+			BSE_EvaluateEnvelope( parms[EFFECT_PARM_ANGLE].envelope, p.angleStart.ToFloatPtr(), p.angleEnd.ToFloatPtr(), 3, t, p.oneOverLife, angle.ToFloatPtr() );
+			BSE_EvaluateEnvelope( parms[EFFECT_PARM_OFFSET].envelope, p.offsetStart.ToFloatPtr(), p.offsetEnd.ToFloatPtr(), 3, t, p.oneOverLife, offset.ToFloatPtr() );
+			const idAngles orbit( RAD2DEG( angle.x ), RAD2DEG( angle.y ), RAD2DEG( angle.z ) );
+			position += orbit.ToMat3() * offset;
+		}
+		const float halfT2 = 0.5f * t * t;
+		position += p.acceleration * halfT2;
+		if ( p.friction.LengthSqr() != 0.0f ) {
+			const float lifeLength = Max( BSE_TIME_EPSILON, life );
+			position += p.friction * ( ( idMath::Exp( ( lifeLength - halfT2 ) / lifeLength ) - 1.0f ) * halfT2 * halfT2 * ( 1.0f / 3.0f ) );
+		}
 	}
 	if ( !p.locked ) {
 		// from the frame at birth to the current one
@@ -1472,6 +1626,17 @@ void idBseEffect::ParticleColor( const idEffectParticle &tmplP, const idVec4 &co
 
 // a vector of a particle's own frame in the effect's current frame (an unlocked particle keeps
 // the frame it was born in)
+// how far the effect still had to move, at birthTime within the last service's frame, to where it
+// is now (current frame): what an unlocked particle born then is shifted back by
+idVec3 idBseEffect::BirthOffset( float birthTime ) const {
+	const float dt = currentTime - lastTime;
+	if ( dt < 0.002f ) {
+		return vec3_origin;
+	}
+	const float stillToMove = 1.0f - ( birthTime - lastTime ) / dt;
+	return currentAxis.Transpose() * ( ( currentOrigin - lastOrigin ) * stillToMove );
+}
+
 idVec3 idBseEffect::ToCurrentFrame( const bseParticle_t &p, const idVec3 &v ) const {
 	return p.locked ? v : currentAxis.Transpose() * ( p.initAxis * v );
 }
@@ -1481,11 +1646,14 @@ idVec3 idBseEffect::ToCurrentFrame( const bseParticle_t &p, const idVec3 &v ) co
 idBseEffect::EvaluateVelocity
 
 The derivative Quake 4 takes of the motion, in the particle's own frame: a named trail's
-particles and a "generatedLine" line point along it.
+particles and a "generatedLine" line point along it. A particle at rest points along x.
 ================
 */
 idVec3 idBseEffect::EvaluateVelocity( const bseParticle_t &p, float time ) const {
-	const float t = Max( 0.0f, time - p.startTime );
+	if ( p.stationary ) {
+		return idVec3( 1.0f, 0.0f, 0.0f );
+	}
+	const float t = Max( 0.0f, time - p.motionStartTime );
 	idVec3 velocity = p.velocity + p.acceleration * t;
 	if ( p.friction.LengthSqr() != 0.0f ) {
 		const float life = Max( BSE_TIME_EPSILON, p.endTime - p.startTime );

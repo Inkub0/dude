@@ -745,6 +745,7 @@ void FreeRenderWorldsQ4( void ) {
 
 	idEffectManagerQ4Local - the game's questions to the effect system. Filtering and rate
 	limits come with phase Q4 S7 (bse_singleEffect, bse_rateLimit): until then every effect plays.
+	The game's frame bracket is where the effects' requests reach it (child effects, debris).
 
 ===============================================================================
 */
@@ -759,8 +760,8 @@ public:
 								}
 								return def->effect != NULL ? BSE_EffectDuration( def->effect ) : BSE_DeclDuration( def->decl );
 							}
-	virtual void			StartFrame( void ) {}
-	virtual void			EndFrame( void ) {}
+	virtual void			StartFrame( void ) { BSE_DeliverRequests(); }		// asked for since the last frame (testEffect, views)
+	virtual void			EndFrame( void ) { BSE_DeliverRequests(); }		// asked for by this frame's effects
 };
 
 idEffectManagerQ4 *EffectManagerQ4( void ) {

@@ -36,12 +36,16 @@ extern idCVar *	bse_render;			// draw them
 extern idCVar *	bse_scale;			// detail 0-1: emitter counts, segment detail levels
 extern idCVar *	bse_maxParticles;	// the most particles a segment holds
 extern idCVar *	bse_debug;
+extern idCVar *	bse_physics;		// particles collide (impact blocks)
+extern idCVar *	bse_debris;			// debris particles become game entities
 
 ID_INLINE bool	BSE_Enabled( void ) { return bse_enabled == NULL || bse_enabled->GetBool(); }
 ID_INLINE bool	BSE_Render( void ) { return bse_render == NULL || bse_render->GetBool(); }
 ID_INLINE float	BSE_Scale( void ) { return bse_scale != NULL ? bse_scale->GetFloat() : 1.0f; }
 ID_INLINE int	BSE_MaxParticles( void ) { return bse_maxParticles != NULL ? bse_maxParticles->GetInteger() : 2048; }
 ID_INLINE int	BSE_Debug( void ) { return bse_debug != NULL ? bse_debug->GetInteger() : 0; }
+ID_INLINE bool	BSE_Physics( void ) { return bse_physics == NULL || bse_physics->GetBool(); }
+ID_INLINE bool	BSE_Debris( void ) { return bse_debris == NULL || bse_debris->GetBool(); }
 
 const float BSE_FUTURE				= 0.016f;	// emitters spawn this far past the time they are serviced at
 const float BSE_TIME_EPSILON		= 0.002f;
@@ -54,6 +58,8 @@ const int	BSE_MAX_BOLT_POINTS		= 255;		// electricity: points of a branch
 const int	BSE_MAX_BOLT_VERTS		= 16384;	// electricity: a segment's vertices (retail's surface; bolts past it are cut)
 const int	BSE_MAX_SURFACE_VERTS	= 10000;	// the other kinds, and motion trails: retail's surfaces; particles past them are not drawn
 const int	BSE_MAX_SURFACE_INDEXES	= 30000;
+const float BSE_PHYSICS_SAMPLE		= 0.1f;		// a physics trace covers the particle's last 0.1 s of motion
+const float BSE_BOUNCE_REST_SPEED_SQR	= 2500.0f;	// a bounce slower than 50 units/s off a floor comes to rest
 
 // what plays an effect: the Quake 4 game's renderEffect_t, or testEffect
 typedef struct {
@@ -88,6 +94,8 @@ typedef struct {
 typedef struct {
 	float					startTime;
 	float					endTime;
+	float					motionStartTime;	// where the motion runs from: the birth, or the last bounce
+	bool					stationary;			// came to rest on a floor
 	float					oneOverLife;		// fixed at birth: envelopes run at the rate set then
 	float					fraction;			// the spawn fraction linearSpacing domains use
 	bool					locked;				// moves with the effect; otherwise stays where it was born
@@ -185,6 +193,11 @@ private:
 	void					RefreshLengths( idBseEffect *effect );
 	void					EmitTrail( idBseEffect *effect, bseParticle_t &p, float time );
 	void					Insert( const bseParticle_t &p );
+							// physics (an impact block): the trace over the last moments of motion; true: remove
+	bool					RunPhysics( idBseEffect *effect, bseParticle_t &p, float time );
+	void					Bounce( idBseEffect *effect, bseParticle_t &p, const idVec3 &endPos, const idVec3 &normal, float time );
+	void					PlayTimeoutEffect( idBseEffect *effect, const bseParticle_t &p, float time );
+	void					SpawnDebris( idBseEffect *effect, float birthTime, float fraction );
 	void					StartSound( idBseEffect *effect );
 	void					HandleSound( idBseEffect *effect, float time );
 	void					ProjectDecal( idBseEffect *effect );
@@ -215,6 +228,8 @@ public:
 	float					SegmentAttenuation( const idEffectSegment &segment ) const;
 							// a particle's position at time, in the effect's current frame
 	idVec3					EvaluatePosition( const bseParticle_t &p, const idEffectParticle &tmpl, float time ) const;
+							// a point of the effect's current frame in the world
+	idVec3					ToWorld( const idVec3 &v ) const { return currentOrigin + currentAxis * v; }
 							// its velocity at time, in the frame it was born in
 	idVec3					EvaluateVelocity( const bseParticle_t &p, float time ) const;
 							// a particle's state at time, in the effect's current frame; false when not alive then
@@ -247,6 +262,7 @@ public:
 	idMat3					currentAxis;
 	idVec3					currentVelocity;
 	idVec3					originalOrigin;
+	idMat3					originalAxis;
 	idVec3					originalEndOrigin;
 	idVec3					currentEndOrigin;
 	bool					hasEndOrigin;
@@ -281,6 +297,7 @@ private:
 	void					StartSegments( float time );
 	bool					SpawnAllowed( void ) const { return currentTime - lastTime > BSE_TIME_EPSILON; }
 	idVec3					ToCurrentFrame( const bseParticle_t &p, const idVec3 &v ) const;
+	idVec3					BirthOffset( float birthTime ) const;
 	byte					ColorByte( float x ) const;
 	void					ParticleColor( const idEffectParticle &tmpl, const idVec4 &color, float override, byte rgba[4] ) const;
 	bool					BuildParticle( const idBseSegment &segment, const bseParticle_t &p, float time, float override,
@@ -312,6 +329,15 @@ void			BSE_StopSound( idBseEffect *effect, int channel );
 				// a decal onto the world, as idRenderWorld::ProjectDecalOntoWorld takes it
 void			BSE_ProjectDecal( idBseEffect *effect, const idFixedWinding &winding, const idVec3 &projectionOrigin,
 					float depth, const idMaterial *material, int startTimeMs );
+				// physics: a point moving from start to end through the game's world (the game's Translation,
+				// solids and render-model clip); false when nothing is hit
+bool			BSE_Trace( idBseEffect *effect, const idVec3 &start, const idVec3 &end, idVec3 &endPos, idVec3 &normal );
+bool			BSE_CanPlayImpactEffect( void );		// the game's rate limit for particle impact effects
+				// requests to the game, delivered at its next effect frame bracket (never mid-render): an effect
+				// played once (impacts, timeouts, nested segments), and a debris entity
+void			BSE_RequestEffect( idBseEffect *effect, const idDeclEffect *child, const idVec3 &origin, const idMat3 &axis );
+void			BSE_RequestDebris( idBseEffect *effect, const char *entityDef, const idVec3 &origin, const idMat3 &axis,
+					const idVec3 &velocity, const idVec3 &angularVelocity );
 
 /*
 ===============================================================================
@@ -337,6 +363,9 @@ void			BSE_FreeEffect( idBseEffect *effect );
 float			BSE_EffectDuration( const idBseEffect *effect );	// seconds
 				// an effect decl's own length, when no effect plays it
 float			BSE_DeclDuration( const idDeclEffect *decl );
+				// the Quake 4 game's effect frame bracket (bse->StartFrame / EndFrame): queued child effects and
+				// debris go to the game
+void			BSE_DeliverRequests( void );
 
 				// renderer: an entity drawn by an effect; R_AddModelSurfaces hands its effects here and
 				// draws them once all entities are done, farthest first

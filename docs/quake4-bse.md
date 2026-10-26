@@ -1,9 +1,11 @@
 # Quake 4 effects (BSE) on DUDE — phase Q4
 
 Status (2026-10-26): **plan approved; S1 (the effect decl), S2 (the runtime and sprites), S3
-(every drawn particle kind and the trails) and S4 (lights, sounds, decals) done and on master.**
-Effects draw every particle kind, light their surroundings, play their sounds and leave their
-decals; impacts, debris and nested effects (S5) and view effects (S6) come next. Visual checks
+(every drawn particle kind and the trails) and S4 (lights, sounds, decals) done and on master; S5
+(particle physics, impacts, debris, nested effects) built on `feat/quake4-bse-physics`, its gate
+pending.** Effects draw every particle kind, light their surroundings, play their sounds, leave
+their decals, collide with the world, throw debris and start their child effects; view effects
+(S6) come next. Visual checks
 go through the user's Quake 4 Effect Browser (a claude.ai page listing all 1172 effects, what
 DUDE draws of each, the command that plays it, and a saved "Checked" tick per effect).
 
@@ -54,6 +56,10 @@ own code and the consultation is recorded in the commit message and in the table
 | Particle kinds and trails (§3.2): a line's lengths (sampled first, out to the end origin, turned by a generated normal, flipped, texture repeats per `tiling` units of the start length, re-sampled while the end origin or the effect moves), the line ribbon and `generatedLine`, the strip of linked particles, an oriented quad's angles (and Quake 4's normal-to-angles conversion with its straight-down quirk), a model particle's turn, scale and material, the bolt (count, jitter walk, two-level kinks, forks, defaults, the 16384-vertex surface), motion trail ribbons and burn copies, named trail emission (child frame, interval, budget), the particle velocity formula, the 10000-vertex / 30000-index surfaces, what a missing model draws | **decompile-derived, consulted 2026-10-25 (S3)**: OpenQ4 `src/bse` (`BSE_Particle.cpp`, `BSE_Particle.h`, `BSE_Segment.cpp`, `BSE_SegmentRuntime.cpp`, `BSE_Envelopes.cpp`, `BSE_ParseParticle2.cpp`, `BSE_Effect.cpp`; `idlib/math/Vector.cpp` `ToRadians`, `Radians.cpp`) - read for these behaviours only, as for S2; re-expressed in DUDE's own code (`BseEffect.cpp`, `BseRender.cpp`), nothing copied |
 | What a missing material draws, and that it is `{ map _default }` | the retail `materials/gfx.mtr` |
 | Trail ribbons and the railgun strip are two-sided (so the ribbon's alternating winding shows both halves) | the retail `materials/effects/particles_shapes.mtr`, `weapons.mtr` |
+| That effects trace (the game's `Translation`, "small portion of physics required for the effects system"), spawn debris (`SpawnClientMoveable`; a lifetime of 0 takes the entity def's `duration`), rate-limit impact particles (`EC_IMPACT_PARTICLES`), read the owner's connected-area flag (the game sets `renderEffect_t::inConnectedArea` every frame), and the `bse_physics` / `bse_debris` cvars | the SDK (`bse/BSEInterface.h`, `game/Game_local.cpp`, `game/client/ClientEffect.cpp`, `renderer/RenderWorld.h`; Xanz/Quake4SDK = `~/quake4-refs/q4sdk`) |
+| Debris hands off to a client moveable at birth; model particles trace as points; bounces come to rest below a speed limit; a missing child effect plays nothing; child, impact and timeout effects play only while the owner is in a connected area, nested ones without the end origin; debris entity defs precache their media | OpenQ4 prose (parity audit) |
+| Physics (S5, §3.4): the trace over the last 0.1 s of motion from 0.1 s after the birth or bounce, against solids and render-model clip; one random impact effect at the hit point along the normal, behind the rate limit; the bounce (mirror, scale, motion restarts from the hit point, envelopes keep their clock; rest below 50 units/s off a floor facing against gravity by more than 45°); `remove`; the timeout effect at the death point along the direction of travel; debris placement (the effect's original frame, the velocity in the current one), spin (the end rotation, start not added) and lifetime 0; the nested segment's one child per window at the current origin and axis; `entityDef` on the other kinds only precached; the cvar defaults (1) | **decompile-derived, consulted 2026-10-26 (S5)**: OpenQ4 `src/bse` (`BSE_Particle.cpp` `RunPhysics` / `Bounce` / `CheckTimeoutEffect` / `rvDebrisParticle::FinishSpawn` / `EvaluatePosition` / `EvaluateVelocity`, `BSE_Particle.h`, `BSE_SegmentRuntime.cpp` `PlayEffect` / `UpdateGenericParticles`, `BSE_Segment.cpp`, `BSE_ParseParticle2.cpp` `ParseImpact` / `entityDef`, `BSE_Manager.cpp`) **cross-checked against idTech4A++ `raven/bse`** (`BSE_Particle.cpp`, `BSE_Segment.cpp`, `BSE_ParseParticle2.cpp`) - read for these behaviours only, re-expressed in DUDE's own code (`BseEffect.cpp`, `BseRender.cpp`), nothing copied. Both trees descend from the same recreation (Justin Marshall's Quake 4 BSE), so they are not independent: where they agree DUDE follows them; where they differ the user decides (below) |
+| Where the two references differ (S5), and the user's choice (2026-10-26): the trace contents - OpenQ4 `SOLID \| RENDERMODEL` ("the game's shot mask", listed among its corrections against the retail 1.4.2 executable), idTech4A++ `SOLID \| OPAQUE`; when a bounce comes to rest - OpenQ4 below speed² 2500 off a floor, idTech4A++ whenever the unnormalised velocity·normal is under -0.707 (every hit into a surface: no hop would survive, and its `BSE_BOUNCE_LIMIT` goes unused). **The user chose OpenQ4's for both**, to be confirmed against retail at the S5 gate (sparks hopping before they settle; blood landing on a corpse). Also differing, with no user call needed: the bounce frame (idTech4A++ and OpenQ4's own changelog: the particle's birth frame; OpenQ4's current code: the effect's current frame - DUDE keeps the birth frame, identical for effects that do not turn) | user decision, recorded per the rule that reference discrepancies go to the user |
 
 ## 2. The grammar (measured)
 
@@ -301,6 +307,39 @@ The rules `neo/renderer/bse/BseEffect.cpp` implements; sources in the table of �
   (half width), turned by its rotation, onto what lies within 8 units behind the effect along its
   x axis (impacts play along the surface normal), with the particle's material.
 
+### 3.4 Physics, impacts, debris, nested effects (S5, in DUDE's words)
+
+- **Physics.** A particle with an `impact` block collides with the game's world when `bse_physics`
+  is on (1): each service traces its position 0.1 s ago (or at its birth or last bounce, if later)
+  to its position now, as a point, through the game's `Translation` against solids and models
+  that clip by their render model. Until 0.1 s have passed since the particle moved off it is not
+  traced, and at 60 Hz the first trace starts a frame after the motion did - a fast particle
+  can cross a wall in that slice and go on through it, as in retail. A particle at rest no longer
+  traces.
+- **A hit.** One of the particle's impact effects, picked at random, plays at the hit point facing
+  out of the surface - behind the game's rate limit for impact particles, and only while the
+  owner is in an area connected to the player's. A non-zero `bounce` then mirrors the particle's
+  velocity in the surface and scales it; the motion starts again from the hit point, while its
+  colour, size and other envelopes keep their clock. Slower than 50 units a second off a floor (a
+  surface facing against gravity by more than 45°), the particle comes to rest there. `remove 1`
+  ends the particle at the hit.
+- **Timeout.** A particle that dies of age plays one of its timeout effects where it is, facing
+  its direction of travel, while the owner is in a connected area.
+- **Debris.** A debris particle becomes a game entity (a client moveable of its `entityDef`) at
+  birth when `bse_debris` is on (1), and takes no particle slot: placed as an unlocked particle is
+  born (locked or not) but in the effect's original frame, moving with its velocity in the
+  effect's current frame, spinning by its end rotation in radians per second, living as long as
+  the entity def says. `entityDef` on any other particle only precaches that entity def's media
+  with the level.
+- **Nested effects.** An `effect` segment plays its effect once per window, at the effect's origin
+  and axis now, not looping and without the end origin, while the owner is in a connected area.
+- **To the game.** Child effects and debris are requests, delivered at the game's next effect frame
+  bracket (`bse->StartFrame` / `EndFrame`), at most 256 effects and 128 debris a bracket (the
+  most one retail effect asks for in one game frame: 100 and 19). A missing child effect plays
+  nothing.
+- **Persist.** Particles that persist live out their lives after the effect stops (S2), bouncing,
+  colliding and timing out as before.
+
 ## 4. Stages and gates
 
 One branch per stage, merged to master at its gate after the user's verification. The user runs
@@ -312,7 +351,7 @@ every in-game check; nothing here launches the game.
 | S2 Runtime + sprites — **DONE 2026-10-25** (gate passed: user firefights in Quake 4 and Doom 3, ASAN clean on both) | Manager, effect instances behind the render world calls, timing (start, duration, count, spawner bursts, loops, delay segments, looping ambient effects already in full flow), domains and modifiers, envelopes, motion, `locked` / `attenuation` / `detail` / `density` / `particleCap`, sprites, segment draw order, `testEffect` | Offline simulation over every retail emitter (no NaN, population follows the emission rate, particles stay within the decl's `size`); the user compares 10 sprite-only effects covering every domain, modifier and envelope option with retail on GL3 and Vulkan (`moveables/barrel/debris_fly`, `monsters/scientist/obscuring_cloud`, `weapons/nailgun/guide`, `ambient/dustedge_mp`, `monsters/teleport_dropper/blast_exhaust`, `monsters/fatty/ambient_acid`, `steam/mcc_vent_slow`, `smoke/air_defense_hillsa`, `mapobjects/casket_door2_inv`, `levels/dispersal/supportbreak`); an airdefense1 fight; no FSR2 ghosting; ASAN `--q4`; Doom 3 / RoE smoke |
 | S3 Particle kinds — **DONE 2026-10-26** (gate passed: all 20 comparisons ticked, play checks, ASAN clean) | line, oriented, electricity, linked, model; `motion` / `burn` / named trails | Offline geometry test; the user compares `weapons/nailgun/impact_default`, `ambient/acid_react_waste`, `weapons/lightninggun/tube` + `impact`, `weapons/railgun/trail`, `monsters/strogg_flyer/bomb_fly`, `moveables/barrel/explode`, `weapons/nailgun/impact_glass`, `monsters/makron/blaster_fly`, `monsters/gunner/grenade_burst`; lightning gun and railgun in play |
 | S4 Lights, sounds, decals — **DONE 2026-10-26** (gate passed: 12 effects ticked, play checks, no device loss, ASAN clean) | light segments as render lights; sound segments on the effect's emitter (`EffectDefHasSound`, random sample choice); decal segments projected | Rocket light, impact decals, impact sounds varying per shot; a busy fight on `dude_rtx 2` with no device loss; GL3 and Vulkan |
-| S5 Physics and children | traces through `Translation`, bounce / remove, impact and timeout effects, nested effect segments, debris through `SpawnClientMoveable`, `entityDef` on other kinds, `persist` | Offline physics test; wall impacts, `wounds/blood`, harvester claw debris, turret deaths, `bse_physics` / `bse_debris`; ASAN |
+| S5 Physics and children — **BUILT 2026-10-26** (gate pending) | traces through `Translation`, bounce / remove, impact and timeout effects, nested effect segments, debris through `SpawnClientMoveable`, `entityDef` on other kinds, `persist` | Offline physics test; wall impacts, `wounds/blood`, harvester claw debris, turret deaths, `bse_physics` / `bse_debris`; ASAN |
 | S6 View effects | `shake` scaled by distance, `doubleVision`, `tunnel` | Explosions shake by distance, `mapobjects/buzzsaw_chop`, the intro blur |
 | S7 Cvars and tools | the retail `bse_*` cvars, rate limits, `bseSweep` + log summary, debug overlay, opt-in extras, performance | quake4-port.md §6's Q4 gate: `bseSweep` clean over all 1172, ~20 effects signed off against retail, OpenQ4's prose checklist, Doom 3 / RoE / LM smoke, ABI 0 breaks |
 
@@ -370,6 +409,65 @@ life).
 runs of both titles with S2 left no report; the Quake 4 log's warnings are the known retail data
 quirks only. Merged to master (`ce6be7d9`). The side-by-side retail comparisons carry over to the
 S3 gate, where the effects that mix sprites with lines, oriented quads and bolts become complete.
+
+**S5 as built.** The runtime (`BseEffect.cpp`) does §3.4 through four new engine hooks:
+`BSE_Trace` (the game's `Translation`, Quake 4's `CONTENTS_SOLID | CONTENTS_RENDERMODEL`; a
+contact without a plane - the collision model's "huge translation" - is no hit),
+`BSE_CanPlayImpactEffect` (the game-facing rate limit, open until S7), `BSE_RequestEffect` and
+`BSE_RequestDebris`. A particle keeps the time its motion runs from (its birth or last bounce) and
+whether it is at rest; positions and velocities evaluate from that time. The engine side
+(`BseRender.cpp`) queues the requests, bounded, per render world (a freed world drops its own),
+and `BSE_DeliverRequests` hands them to the game from the effect manager facade's `StartFrame` /
+`EndFrame` (`quake4/RenderWorldQ4.cpp`): `game->PlayEffect` (once, no end origin, white) and
+`game->SpawnClientMoveable` (lifetime 0). Traces never run while a view is being built (an effect
+serviced for its first view skips them; the next service's 0.1 s window covers the gap). The decl
+precaches every particle's `entityDef` through a hook the Quake 4 title sets
+(`effectPrecacheEntityDef` -> `game->CacheDictionaryMedia`, only while a map loads or runs, so
+`lintDecls` does not load debris models). `quake4/EngineQ4.h` gained `GameQ4()` and
+`GameQ4_MapActive()`. New Quake 4 cvars `bse_physics` and `bse_debris` (1). No game library change;
+the dhewm3 ABI is untouched (`check_dhewm3_abi.py`: 0 breaks).
+
+Offline (`test_bse_sim.sh`): every effect now plays inside a closed room - a box the stand-in trace
+collides with as the collision model's point traces do (one-sided, stopping 0.25 short) - and the
+effects it asks the game for are played back as the game would (once, where asked, up to three
+deep), with the real retail decls as children. The child decls are all made before any decl parses,
+so impact, timeout and nested effects resolve to the effects themselves; the 6 names the data
+lacks are defaulted and play nothing. The looping run ends with a stop and must then end within
+65 s. Result: 0 values not finite, 0 bad requests (origin, axis, velocity, spin, entity def), **0
+particles crossing a wall while a trace covered them** (2350 samples went through retail's untraced
+slice: `explosions/surface/rock_exp`, `explosions/air/airburst_03`), 683517 traces, 25640 hits,
+15591 bounces, 5520 particles come to rest; 3573 impact, 341 timeout and 45 nested effect requests
+and 3437 debris (all 59 entity defs), at most 100 effects (`monsters/slash`) and 19 debris in one game
+frame; 3706 children played back, none deeper than three, at most 164 alive in one run, all ended;
+every stopped looping effect ends. The S2-S4 checks are unchanged (0 bad geometry, lights,
+decals; 29/29 trails fed). `test_effect_parse.sh` 1172 / 0 failed, 0 mismatches; Linux and Windows
+builds; `q4base.so` rebuilt.
+
+Fidelity: what both references agree on is kept, retail's untraced slice included. The bullet
+impacts S4 signed off (`weapons/*/impact_concrete`) now bounce their sparks off the floor instead of
+letting them fall through it. Child effects start through the game, which adds them on its next
+think: up to one game tic (16 ms) later than retail, whose effects called the game in the middle of
+their own service.
+
+**S5 gate (user):** on the Effect Browser, the stage selector set to stage 5, the "Stage 5 gate"
+effects (16):
+1. With `testEffect` near a floor or wall: the bullet impacts `weapons/machinegun/impact_concrete`,
+   `weapons/shotgun/impact_concrete`, `weapons/nailgun/impact_concrete` and `sparks/generic`
+   (sparks hop and settle), `moveables/barrel/explode` (bouncing chunks), `monsters/gib` (chunks
+   splat and vanish), `wounds/blood` (drips that splat on the floor once they time out),
+   `ambient/single_drip` (a drop splashing), `monsters/spiderhead/spit_impact` (an acid pool);
+   debris: `monsters/harvester/claw_metal`, `monsters/harvester/claw_dirt`,
+   `explosions/surface/turret_exp`, `vehicles/explosion_tank`, `monsters/strogg_flyer/explosion`;
+   nested: `monsters/turret/dropturret_death` (a fire column after 0.3 s; debris too),
+   `levels/convoy/ob_all` (its explosion after 1.05 s).
+2. Retail side by side (the two reference discrepancies, §1): sparks of a bullet impact on a floor -
+   do they hop a few times before settling? Blood or sparks falling onto a corpse - do they land on
+   it or pass through?
+3. In play: sparks off walls and floors, blood on the floor after a hit, gibbing, turret and
+   harvester deaths (debris flying, fading); `bse_physics 0` / `bse_debris 0` turn them off.
+4. A busy fight on GL3 and Vulkan and on `dude_rtx 2`: no device loss, no hitch from debris.
+5. `tools/run-asan.sh --q4` for a few minutes of play; Doom 3 / RoE smoke (the scene hook and the
+   game adapter are shared; Doom 3 never runs BSE).
 
 **S4 as built.** The runtime (`BseEffect.cpp`) handles the three segment kinds of §3.3 through
 engine hooks, so the offline test keeps running it: `BSE_StartSound` / `BSE_UpdateSound` /

@@ -38,6 +38,7 @@ Doom 3 GPL Source Code (see ArbProgram.h for license header)
 #include "renderer/RenderWorld_local.h"
 #include "renderer/bse/BseEffect.h"
 #include "sound/sound.h"
+#include "framework/DeclEntityDef.h"
 #include "quake4/SoundQ4.h"
 #include "quake4/EngineQ4.h"
 
@@ -163,6 +164,149 @@ void BSE_ProjectDecal( idBseEffect *effect, const idFixedWinding &winding, const
 	}
 }
 
+/*
+===============================================================================
+
+	physics, and requests to the game (BseEffect.h hooks)
+
+	A particle's trace is a query of the game's world (the game's Translation, the call Quake 4's
+	effects make), done while effects are serviced - never while a view is being built. What the
+	game is asked to do - play an impact, timeout or nested effect, spawn debris - waits in a
+	bounded queue for the game's next effect frame bracket (bse->StartFrame / EndFrame), so the
+	game spawns its client entities in its own frame and never in the middle of a render.
+
+===============================================================================
+*/
+
+// Quake 4's CONTENTS_SOLID | CONTENTS_RENDERMODEL, in the game's numbering (its Material.h): the
+// world's solids and the models that clip by their render model
+static const int		BSE_TRACE_CONTENTS = BIT( 0 ) | BIT( 11 );
+
+const int				BSE_MAX_EFFECT_REQUESTS = 256;	// waiting effects (one game frame's impacts)
+const int				BSE_MAX_DEBRIS_REQUESTS = 128;
+
+typedef struct {
+	const idRenderWorld *	world;
+	const idDeclEffect *	effect;			// NULL: debris
+	idStr					entityDef;
+	idVec3					origin;
+	idMat3					axis;
+	idVec3					velocity;
+	idVec3					angularVelocity;
+} bseRequest_t;
+
+static idList<bseRequest_t>		bseRequests;
+static int						bseNumEffectRequests = 0;
+static int						bseNumDebrisRequests = 0;
+static int						bseDroppedRequests = 0;
+static bool						bseServicingForView = false;	// no traces while a view is built
+
+bool BSE_Trace( idBseEffect *effect, const idVec3 &start, const idVec3 &end, idVec3 &endPos, idVec3 &normal ) {
+	idGameQ4 *game = GameQ4();
+	if ( game == NULL || bseServicingForView || !GameQ4_MapActive() || effect->world == NULL ) {
+		return false;
+	}
+	traceQ4_t trace;
+	idVec3 source = start, dest = end;
+	game->Translation( trace, source, dest, NULL, BSE_TRACE_CONTENTS );
+	if ( trace.fraction >= 1.0f || trace.c.normal.LengthSqr() < 0.5f ) {
+		return false;		// nothing hit (or a translation too long to trace, which has no contact plane)
+	}
+	endPos = trace.endpos;
+	normal = trace.c.normal;
+	return true;
+}
+
+bool BSE_CanPlayImpactEffect( void ) {
+	return EffectManagerQ4()->CanPlayRateLimited( EC_IMPACT_PARTICLES );
+}
+
+static bseRequest_t *BSE_NewRequest( idBseEffect *effect, bool debris ) {
+	int &num = debris ? bseNumDebrisRequests : bseNumEffectRequests;
+	if ( effect->world == NULL || num >= ( debris ? BSE_MAX_DEBRIS_REQUESTS : BSE_MAX_EFFECT_REQUESTS ) ) {
+		bseDroppedRequests++;
+		return NULL;
+	}
+	num++;
+	bseRequest_t &r = bseRequests.Alloc();
+	r.world = effect->world;
+	r.effect = NULL;
+	r.entityDef.Clear();
+	r.velocity.Zero();
+	r.angularVelocity.Zero();
+	return &r;
+}
+
+void BSE_RequestEffect( idBseEffect *effect, const idDeclEffect *child, const idVec3 &origin, const idMat3 &axis ) {
+	if ( child == NULL || child->GetState() == DS_DEFAULTED ) {
+		return;		// a missing child effect plays nothing
+	}
+	bseRequest_t *r = BSE_NewRequest( effect, false );
+	if ( r != NULL ) {
+		r->effect = child;
+		r->origin = origin;
+		r->axis = axis;
+	}
+}
+
+void BSE_RequestDebris( idBseEffect *effect, const char *entityDef, const idVec3 &origin, const idMat3 &axis,
+		const idVec3 &velocity, const idVec3 &angularVelocity ) {
+	bseRequest_t *r = BSE_NewRequest( effect, true );
+	if ( r != NULL ) {
+		r->entityDef = entityDef;
+		r->origin = origin;
+		r->axis = axis;
+		r->velocity = velocity;
+		r->angularVelocity = angularVelocity;
+	}
+}
+
+/*
+================
+BSE_DeliverRequests
+
+The game's effect frame bracket: the waiting child effects (played once, no end origin, white) and
+debris (client moveables with the entity def's own lifetime) go to the game, in the order asked.
+================
+*/
+void BSE_DeliverRequests( void ) {
+	idGameQ4 *game = GameQ4();
+	if ( bseRequests.Num() == 0 && bseDroppedRequests == 0 ) {
+		return;
+	}
+	idList<bseRequest_t> requests;
+	requests.Swap( bseRequests );		// what the game plays may ask for more: next bracket
+	const int dropped = bseDroppedRequests;
+	bseNumEffectRequests = bseNumDebrisRequests = bseDroppedRequests = 0;
+	if ( BSE_Debug() && dropped > 0 ) {
+		common->Printf( "BSE: %d child effect / debris requests over the limit were dropped\n", dropped );
+	}
+	if ( game == NULL || !GameQ4_MapActive() ) {
+		return;
+	}
+	const idVec4 white( 1.0f, 1.0f, 1.0f, 1.0f );
+	for ( int i = 0; i < requests.Num(); i++ ) {
+		const bseRequest_t &r = requests[i];
+		if ( r.effect != NULL ) {
+			game->PlayEffect( r.effect, r.origin, r.axis, false, vec3_origin, false, false, EC_IGNORE, white );
+		} else {
+			game->SpawnClientMoveable( r.entityDef.c_str(), 0, r.origin, r.axis, r.velocity, r.angularVelocity );
+		}
+	}
+}
+
+// an entity def an effect names: its media load with the level (as Quake 4's effects precache them)
+static void BSE_PrecacheEntityDef( const char *name ) {
+	idGameQ4 *game = GameQ4();
+	if ( game == NULL || !GameQ4_MapActive() ) {
+		return;
+	}
+	const idDeclEntityDef *def = static_cast<const idDeclEntityDef *>( declManager->FindType( DECL_ENTITYDEF, name, false ) );
+	if ( def != NULL ) {
+		game->CacheDictionaryMedia( &def->dict );
+	}
+}
+
 const srfTriangles_t *BSE_ModelGeometry( const idRenderModel *model ) {
 	if ( model == NULL || model->NumSurfaces() <= 0 ) {
 		return NULL;
@@ -197,7 +341,9 @@ static bool BSE_DeclHasLitSegments( const idDeclEffect *decl ) {
 static void BSE_ServiceForView( idBseEffect *effect, const viewDef_t *view ) {
 	if ( view->renderView.time > effect->serviceTime ) {
 		effect->UpdateFromOwner( effect->owner, MS2SEC( view->renderView.time ) );
+		bseServicingForView = true;		// no traces mid-render: the next service's 0.1 s window covers this one
 		effect->finished = effect->Service( MS2SEC( view->renderView.time ) ) || effect->finished;
+		bseServicingForView = false;
 		effect->serviceTime = view->renderView.time;
 		effect->entityDirty = true;
 	}
@@ -807,7 +953,10 @@ void BSE_Init( void ) {
 								"Quake 4 effects: detail 0-1 - emitters spawn between their lowest and highest count by it, and a segment shows from its detail level up", 0.0f, 1.0f );
 		bse_maxParticles	= new idCVar( "bse_maxParticles", "2048", CVAR_RENDERER | CVAR_INTEGER, "Quake 4 effects: the most particles one segment holds", 0.0f, 2048.0f );
 		bse_debug			= new idCVar( "bse_debug", "0", CVAR_RENDERER | CVAR_INTEGER, "Quake 4 effects: 1 = log effects as they start, loop, stop and end" );
+		bse_physics			= new idCVar( "bse_physics", "1", CVAR_RENDERER | CVAR_BOOL, "Quake 4 effects: particles with an impact block collide (bounce, go, play impact effects)" );
+		bse_debris			= new idCVar( "bse_debris", "1", CVAR_RENDERER | CVAR_BOOL, "Quake 4 effects: debris particles become game entities" );
 	}
+	effectPrecacheEntityDef = BSE_PrecacheEntityDef;
 	cmdSystem->AddCommand( "testEffect", BSE_TestEffect_f, CMD_FL_RENDERER | CMD_FL_CHEAT,
 		"Quake 4: plays an effect in front of the view for 4 s or its whole play, as 'spawn func_fx fx <effect>' does - testEffect <effect> [once]",
 		idCmdSystem::ArgCompletion_Decl<DECL_EFFECT> );
@@ -829,6 +978,12 @@ void BSE_WorldFreed( idRenderWorld *world ) {
 			bseWorldViews.RemoveIndex( i-- );
 		}
 	}
+	for ( int i = 0; i < bseRequests.Num(); i++ ) {
+		if ( bseRequests[i].world == world ) {
+			( bseRequests[i].effect != NULL ? bseNumEffectRequests : bseNumDebrisRequests )--;
+			bseRequests.RemoveIndex( i-- );
+		}
+	}
 }
 
 void BSE_Shutdown( void ) {
@@ -839,6 +994,9 @@ void BSE_Shutdown( void ) {
 	bseEffects.Clear();
 	bseTestEffects.Clear();
 	bseViewEntities.Clear();
+	bseRequests.Clear();
+	bseNumEffectRequests = bseNumDebrisRequests = bseDroppedRequests = 0;
+	effectPrecacheEntityDef = NULL;
 	cmdSystem->RemoveCommand( "testEffect" );
 	bseWorldViews.Clear();
 	delete bseModel;
