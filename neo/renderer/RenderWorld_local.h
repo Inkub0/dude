@@ -126,6 +126,8 @@ public:
 	virtual	int				NumAreas( void ) const;
 	virtual int				PointInArea( const idVec3 &point ) const;
 	virtual int				BoundsInAreas( const idBounds &bounds, int *areas, int maxAreas ) const;
+							// DUDE: without Doom 3's 10000-unit size check - Quake 4's boxes can be larger
+	int						BoundsInAreasAnySize( const idBounds &bounds, int *areas, int maxAreas ) const;
 	virtual	int				NumPortalsInArea( int areaNum );
 	virtual exitPortal_t	GetPortal( int areaNum, int portalNum );
 

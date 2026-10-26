@@ -1113,6 +1113,22 @@ BoundsInAreas
 ===================
 */
 int idRenderWorldLocal::BoundsInAreas( const idBounds &bounds, int *areas, int maxAreas ) const {
+	// Doom 3's maps have nothing this big: a larger box is a bug
+	assert( bounds[1][0] - bounds[0][0] < 1e4f && bounds[1][1] - bounds[0][1] < 1e4f && bounds[1][2] - bounds[0][2] < 1e4f );
+	return BoundsInAreasAnySize( bounds, areas, maxAreas );
+}
+
+/*
+===================
+BoundsInAreasAnySize
+
+DUDE: BoundsInAreas without the size check, for Quake 4 (the game's PVS through its render
+world facade). Its maps are larger and its animations can span them: an entity's bounds are its
+animation's, and airdefense1's convoy trucks drive a 55000-unit path - a box the game asks about
+when an effect bound to a truck checks whether the player can see it. Retail plays such boxes.
+===================
+*/
+int idRenderWorldLocal::BoundsInAreasAnySize( const idBounds &bounds, int *areas, int maxAreas ) const {
 	int numAreas = 0;
 
 	assert( areas );
@@ -1123,8 +1139,6 @@ int idRenderWorldLocal::BoundsInAreas( const idBounds &bounds, int *areas, int m
 		                 bounds[0][0], bounds[0][1], bounds[0][2], bounds[1][0], bounds[1][1], bounds[1][2] );
 		return numAreas;
 	}
-
-	assert( bounds[1][0] - bounds[0][0] < 1e4f && bounds[1][1] - bounds[0][1] < 1e4f && bounds[1][2] - bounds[0][2] < 1e4f );
 
 	if ( !areaNodes ) {
 		return numAreas;

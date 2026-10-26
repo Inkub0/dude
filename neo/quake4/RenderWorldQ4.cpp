@@ -591,8 +591,9 @@ int idRenderWorldQ4Local::PointInArea( const idVec3 &point ) const {
 	return renderWorld->PointInArea( point );
 }
 
+// Quake 4's boxes can pass Doom 3's 10000-unit check (animations spanning a map): retail takes them
 int idRenderWorldQ4Local::BoundsInAreas( const idBounds &bounds, int *areas, int maxAreas ) const {
-	return renderWorld->BoundsInAreas( bounds, areas, maxAreas );
+	return static_cast<idRenderWorldLocal *>( renderWorld )->BoundsInAreasAnySize( bounds, areas, maxAreas );
 }
 
 int idRenderWorldQ4Local::NumPortalsInArea( int areaNum ) {
