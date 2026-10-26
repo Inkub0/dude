@@ -810,6 +810,7 @@ void idCollisionModelManagerLocal::SetupTrmModelStructure( void ) {
 	trmBrushes[0]->b->bounds.Clear();
 	trmBrushes[0]->b->checkcount = 0;
 	trmBrushes[0]->b->contents = -1;		// all contents
+	trmBrushes[0]->b->material = trmMaterial;	// DUDE: id left it unset (SetupTrmModel sets it per model)
 	trmBrushes[0]->b->numPlanes = 0;
 }
 
@@ -883,6 +884,11 @@ cmHandle_t idCollisionModelManagerLocal::SetupTrmModel( const idTraceModel &trm,
 	// if the trace model is convex
 	if ( trm.isConvex ) {
 		// setup brush for position test
+		// DUDE: with the trace model's material, as its polygons - id never set the brush's, so a
+		// position test starting inside it (TestTrmVertsInBrush) reported a garbage contact material:
+		// Quake 4's collision facade crashed reading it when a ragdoll started overlapping another
+		// trace model (hangar1); Doom 3's game reads trace.c.material too
+		trmBrushes[0]->b->material = material;
 		trmBrushes[0]->b->numPlanes = trm.numPolys;
 		for ( i = 0; i < trm.numPolys; i++ ) {
 			trmBrushes[0]->b->planes[i] = trmPolygons[i]->p->plane;
