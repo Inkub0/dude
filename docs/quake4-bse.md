@@ -785,6 +785,15 @@ in both games, the screenshots compare directly. `func_fx` also takes `endOrigin
 
 ## 6. Follow-ups
 
+- **Interaction table overflow** (queued 2026-10-26, user: after the Q4 phase gate): the render
+  world's light-entity interaction table holds the map's entities plus 100
+  (`idRenderWorldLocal::GenerateAllInteractions`); every live effect is a render entity in DUDE (two
+  for a lit one, more with debris), so a long busy fight - and `bseSweep` - outgrows it and
+  `ResizeInteractionTable` drops it ("overflowed interactionTableWidth, dumping"): the rest of the
+  map looks interactions up the slow way. Retail's effects were not render entities. Options: grow
+  the table instead of dropping it, or keep effect entities out of it. Shared engine code: Doom 3 /
+  RoE / Lost Mission benefit too.
+
 - **HDR for views rendered into a crop** (queued 2026-10-26, user): Quake 4's double vision frames
   (and RoE / Lost Mission's with `g_lowresFullscreenFX 1`) have no full-window world view, so
   `RB_RHI_FrameHasWorldScene` keeps them off the HDR path - no tone map or `r_hdrExposure` for the
