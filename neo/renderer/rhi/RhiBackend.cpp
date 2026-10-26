@@ -3995,7 +3995,26 @@ static void RB_RHI_DrawView( rhi::RHI *r, viewDef_t *viewDef ) {
 	// path; the idImmediateMode-based views work now — on Vulkan too, M6, where
 	// RB_RenderDebugTools runs the qgl-safe subset.)
 	if ( viewDef->viewEntitys ) {
-		RB_RenderDebugTools( (drawSurf_t **)&viewDef->drawSurfs[0], viewDef->numDrawSurfs );
+		if ( rbHdrCompositeActive && viewDef == tr.primaryView && rhiHdrCompW > 0 && rhiHdrCompH > 0 ) {
+			// sub-native FSR2: the frame now draws into the display-size composite, while the view's
+			// viewport is the smaller render size - the debug lines (bse_showBounds, r_showLights, ...)
+			// landed in that corner. They take the composite's whole rect: the same projection, mapped
+			// onto the upscaled image (a screenshot renders unscaled, where the two were the same).
+			viewDef_t display = *viewDef;
+			display.viewport.x1 = display.viewport.y1 = 0;
+			display.viewport.x2 = rhiHdrCompW - 1;
+			display.viewport.y2 = rhiHdrCompH - 1;
+			display.scissor = display.viewport;
+			const viewDef_t *saved = backEnd.viewDef;
+			backEnd.viewDef = &display;
+			r->SetViewport( tr.viewportOffset[0], tr.viewportOffset[1], rhiHdrCompW, rhiHdrCompH );
+			r->SetScissor( tr.viewportOffset[0], tr.viewportOffset[1], rhiHdrCompW, rhiHdrCompH );
+			backEnd.currentScissor = display.scissor;
+			RB_RenderDebugTools( (drawSurf_t **)&viewDef->drawSurfs[0], viewDef->numDrawSurfs );
+			backEnd.viewDef = saved;
+		} else {
+			RB_RenderDebugTools( (drawSurf_t **)&viewDef->drawSurfs[0], viewDef->numDrawSurfs );
+		}
 	}
 
 	// DUDE: a portal sky subview hands its picture to the view that drew it
