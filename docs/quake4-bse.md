@@ -145,6 +145,12 @@ Domains (count, values): `point` 11835 (n), `box` 11531 (2n), `line` 4862 (2n), 
   effects** (checked 2026-10-26: no map, entity def, script, material, effect or game source
   names them; the weapons' concrete and rock impacts are their own `impact_concrete` /
   `impact_rock` effects), so no player sees what draws there; only `testEffect` shows it.
+- `explosions/surface/turret_exp` throws four debris entities (`debris_mturret_base`, `_sensor`,
+  `_barrel1`, `_barrel2`) whose models, `models/mapobjects/strogg/machines/turrets/debris/*.lwo`,
+  are not in the paks (the other 55 debris entity defs the effects name all have theirs). They fly
+  as the engine's default model, a dark box. **Retail never plays this effect either** (checked
+  2026-10-26: no map, entity def, script, effect or game source names it), so again only
+  `testEffect` shows it; kept as the data has it.
 
 ## 3. Runtime design (approved 2026-10-25)
 
@@ -468,6 +474,20 @@ effects (16):
 4. A busy fight on GL3 and Vulkan and on `dude_rtx 2`: no device loss, no hitch from debris.
 5. `tools/run-asan.sh --q4` for a few minutes of play; Doom 3 / RoE smoke (the scene hook and the
    game adapter are shared; Doom 3 never runs BSE).
+
+**S5 gate result (2026-10-26, user, ASAN build):** 15 of the 16 stage-5 effects ticked on the Effect
+Browser; impacts, bounces, drips, gibs, acid pools, debris (`harvester/claw_dirt` and the others) and
+both nested effects look right; no ASAN report. The one left unticked, `explosions/surface/turret_exp`,
+throws dark boxes: its debris models are missing from the retail data and retail never plays the
+effect (§2). The timeout direction (the particle's own world direction, not OpenQ4's
+current-frame reading) is the user's choice. `vehicles/explosion_tank` under `testEffect` costs
+frame time: per play 10 debris rigid bodies live 5 s, each trailing `fire/spot_32_trail_bigsmoke`
+(six emitters, about 30 smoke sprites of radius 50-120), and `testEffect` loops the effect for 4 s
+80 units from the eye - two or three plays at once, about 1000 large overlapping smoke quads plus
+the game's debris physics, on an ASAN build. The same per play in retail, which plays it once per
+tank death; the effect has no impact blocks, so S5's traces are not part of it. Open: a non-ASAN
+look at that cost (`testEffect effects/vehicles/explosion_tank once`), and the two retail
+side-by-sides of §1.
 
 **S4 as built.** The runtime (`BseEffect.cpp`) handles the three segment kinds of §3.3 through
 engine hooks, so the offline test keeps running it: `BSE_StartSound` / `BSE_UpdateSound` /
