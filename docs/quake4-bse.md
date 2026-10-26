@@ -1,8 +1,9 @@
 # Quake 4 effects (BSE) on DUDE — phase Q4
 
-Status (2026-10-26): **plan approved; S1 (the effect decl), S2 (the runtime and sprites) and S3
-(every drawn particle kind and the trails) done and on master.** Effects play and draw every
-particle kind; sounds, lights, decals, physics and view effects come with S4-S6. Visual checks
+Status (2026-10-26): **plan approved; S1 (the effect decl), S2 (the runtime and sprites), S3
+(every drawn particle kind and the trails) and S4 (lights, sounds, decals) done and on master.**
+Effects draw every particle kind, light their surroundings, play their sounds and leave their
+decals; impacts, debris and nested effects (S5) and view effects (S6) come next. Visual checks
 go through the user's Quake 4 Effect Browser (a claude.ai page listing all 1172 effects, what
 DUDE draws of each, the command that plays it, and a saved "Checked" tick per effect).
 
@@ -310,7 +311,7 @@ every in-game check; nothing here launches the game.
 | **S1 Decl** — **BUILT 2026-10-25** | The grammar of §2: `neo/renderer/bse/DeclEffect.{h,cpp}`, strict value counts, references through the decl / model managers, named trails resolved | `tools/quake4/test_effect_parse.sh` (below) |
 | S2 Runtime + sprites — **DONE 2026-10-25** (gate passed: user firefights in Quake 4 and Doom 3, ASAN clean on both) | Manager, effect instances behind the render world calls, timing (start, duration, count, spawner bursts, loops, delay segments, looping ambient effects already in full flow), domains and modifiers, envelopes, motion, `locked` / `attenuation` / `detail` / `density` / `particleCap`, sprites, segment draw order, `testEffect` | Offline simulation over every retail emitter (no NaN, population follows the emission rate, particles stay within the decl's `size`); the user compares 10 sprite-only effects covering every domain, modifier and envelope option with retail on GL3 and Vulkan (`moveables/barrel/debris_fly`, `monsters/scientist/obscuring_cloud`, `weapons/nailgun/guide`, `ambient/dustedge_mp`, `monsters/teleport_dropper/blast_exhaust`, `monsters/fatty/ambient_acid`, `steam/mcc_vent_slow`, `smoke/air_defense_hillsa`, `mapobjects/casket_door2_inv`, `levels/dispersal/supportbreak`); an airdefense1 fight; no FSR2 ghosting; ASAN `--q4`; Doom 3 / RoE smoke |
 | S3 Particle kinds — **DONE 2026-10-26** (gate passed: all 20 comparisons ticked, play checks, ASAN clean) | line, oriented, electricity, linked, model; `motion` / `burn` / named trails | Offline geometry test; the user compares `weapons/nailgun/impact_default`, `ambient/acid_react_waste`, `weapons/lightninggun/tube` + `impact`, `weapons/railgun/trail`, `monsters/strogg_flyer/bomb_fly`, `moveables/barrel/explode`, `weapons/nailgun/impact_glass`, `monsters/makron/blaster_fly`, `monsters/gunner/grenade_burst`; lightning gun and railgun in play |
-| S4 Lights, sounds, decals — **BUILT 2026-10-26**, at its gate | light segments as render lights; sound segments on the effect's emitter (`EffectDefHasSound`, random sample choice); decal segments projected | Rocket light, impact decals, impact sounds varying per shot; a busy fight on `dude_rtx 2` with no device loss; GL3 and Vulkan |
+| S4 Lights, sounds, decals — **DONE 2026-10-26** (gate passed: 12 effects ticked, play checks, no device loss, ASAN clean) | light segments as render lights; sound segments on the effect's emitter (`EffectDefHasSound`, random sample choice); decal segments projected | Rocket light, impact decals, impact sounds varying per shot; a busy fight on `dude_rtx 2` with no device loss; GL3 and Vulkan |
 | S5 Physics and children | traces through `Translation`, bounce / remove, impact and timeout effects, nested effect segments, debris through `SpawnClientMoveable`, `entityDef` on other kinds, `persist` | Offline physics test; wall impacts, `wounds/blood`, harvester claw debris, turret deaths, `bse_physics` / `bse_debris`; ASAN |
 | S6 View effects | `shake` scaled by distance, `doubleVision`, `tunnel` | Explosions shake by distance, `mapobjects/buzzsaw_chop`, the intro blur |
 | S7 Cvars and tools | the retail `bse_*` cvars, rate limits, `bseSweep` + log summary, debug overlay, opt-in extras, performance | quake4-port.md §6's Q4 gate: `bseSweep` clean over all 1172, ~20 effects signed off against retail, OpenQ4's prose checklist, Doom 3 / RoE / LM smoke, ABI 0 breaks |
@@ -403,6 +404,15 @@ effects - their particles are stage 3's; this stage adds the light, the sound an
 3. A busy fight on `dude_rtx 2` (Path Tracing): no device loss; GL3 and Vulkan.
 4. `tools/run-asan.sh --q4` for a few minutes of play; Doom 3 / RoE smoke (`sound.h` and the
    scene hook are shared).
+
+**S4 gate result (2026-10-26, user):** the 12 effects ticked "Checked" for stage 4 on the Effect
+Browser; rockets, bullet impacts and grenade fights right in play; the demanding fights showed no
+device loss. One crash in a busy hangar1 fight, not in the effects: a ragdoll's start-in-solid test
+(`idAF::TestSolid`) touching another trace model read the engine's trace-model brush, whose material
+id never set - an uninitialised contact material the Quake 4 collision facade dereferenced
+(`ContactToQ4`). Fixed in the engine (`fix(cm)` 68009680: the brush takes the trace model's
+material, as its polygons), which covers Doom 3, RoE and Lost Mission too; the fight replayed under
+ASAN without a crash or report. Merged to master with that fix.
 
 **S3 as built.** `BseEffect.cpp` builds every drawn kind (§3.2) into a growable geometry
 (`idBseGeometry`) for a viewer in the effect's frame - `BuildSegment` (the particles, with burn
