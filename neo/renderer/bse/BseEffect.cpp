@@ -598,8 +598,19 @@ bool idBseSegment::Check( idBseEffect *effect, float time ) {
 			}
 			expired = true;
 			return true;
+		case EFFECT_SEG_SHAKE:
+		case EFFECT_SEG_DOUBLEVISION:
+		case EFFECT_SEG_TUNNEL: {
+			// once per window: lasting the segment's duration, shortened by the player's distance to
+			// the effect, as strong as its scale by the distance to its origin
+			const float endTime = segStartTime + effect->SegmentAttenuation( *tmpl ) * ( segEndTime - segStartTime );
+			const float scale = Max( 0.0f, effect->OriginAttenuation( *tmpl ) );
+			BSE_RequestViewEffect( effect, tmpl->type, endTime, scale );
+			expired = true;
+			return true;
+		}
 		default:
-			// trails follow their particles; delays only time the loop; view effects come with S6
+			// trails follow their particles; delays only time the loop
 			expired = true;
 			return true;
 	}
@@ -1388,6 +1399,29 @@ float idBseEffect::SegmentAttenuation( const idEffectSegment &segment ) const {
 	}
 	if ( range.max - 1.0f >= shortestDistance ) {
 		return ( 1.0f - ( shortestDistance - range.min ) / ( range.max - range.min ) ) * ownerAttenuation;
+	}
+	return 0.0f;
+}
+
+/*
+================
+idBseEffect::OriginAttenuation
+
+A view effect's strength: its scale (and the owner's attenuation), full within the near distance
+(+1) of the effect's origin, fading linearly to nothing at the far one (-1).
+================
+*/
+float idBseEffect::OriginAttenuation( const idEffectSegment &segment ) const {
+	const effectRange_t &range = segment.attenuation;
+	const float full = segment.scale * ownerAttenuation;
+	if ( range.min <= 0.0f && range.max <= 0.0f ) {
+		return full;
+	}
+	if ( range.min + 1.0f > originDistance ) {
+		return full;
+	}
+	if ( range.max - 1.0f >= originDistance ) {
+		return ( 1.0f - ( originDistance - range.min ) / ( range.max - range.min ) ) * full;
 	}
 	return 0.0f;
 }

@@ -40,6 +40,11 @@
 	debris entity defs asked for. The looping run ends with a stop: the effect (persisting
 	particles included) must then end within 65 s.
 
+	View effects (S6): every shake / double vision / tunnel request is checked (an end time not
+	before the effect's start and finite, a scale finite and not negative) and counted by kind; the
+	distance ramp is checked on a retail shake (rocket impact: no scale, so 1; attenuation 200-600:
+	full at 100 units, half at 400, none at 700).
+
 	Built and run by tools/quake4/test_bse_sim.sh. No game, no window, no GPU.
 */
 
@@ -297,6 +302,19 @@ void BSE_RequestDebris( idBseEffect *effect, const char *entityDef, const idVec3
 	debrisRequests++;
 	frameDebrisRequests++;
 	debrisDefs[Lower( entityDef )]++;
+}
+
+// view effects: checked and counted, by kind (shake, double vision, tunnel)
+static long viewRequests[3], badViewRequests = 0;
+static float maxViewScale = 0.0f, maxViewTime = 0.0f;
+void BSE_RequestViewEffect( idBseEffect *effect, effectSegmentType_t type, float endTime, float scale ) {
+	if ( !std::isfinite( endTime ) || !std::isfinite( scale ) || scale < 0.0f || endTime < effect->startTime - BSE_TIME_EPSILON ) {
+		badViewRequests++;
+		return;
+	}
+	viewRequests[type == EFFECT_SEG_SHAKE ? 0 : type == EFFECT_SEG_DOUBLEVISION ? 1 : 2]++;
+	maxViewScale = Max( maxViewScale, scale );
+	maxViewTime = Max( maxViewTime, endTime - effect->currentTime );
 }
 
 static bool ReadEntry( std::istream &in, std::string &name, std::string &data ) {
@@ -722,6 +740,35 @@ int main( int argc, char **argv ) {
 		}
 	}
 
+	// the distance ramp of a retail shake: the rocket's impact (no "scale": 1; attenuation 200,600)
+	int badRamp = 0;
+	{
+		auto it = effectsByName.find( "effects/weapons/rocketlauncher/impact" );
+		const idDeclEffect *decl = it != effectsByName.end() ? it->second : NULL;
+		const idEffectSegment *shake = NULL;
+		for ( int i = 0; decl != NULL && i < decl->GetNumSegments(); i++ ) {
+			if ( decl->GetSegment( i ).type == EFFECT_SEG_SHAKE ) {
+				shake = &decl->GetSegment( i );
+			}
+		}
+		if ( shake == NULL || shake->scale != 1.0f || shake->attenuation.min != 200.0f || shake->attenuation.max != 600.0f ) {
+			badRamp++;
+		} else {
+			idBseEffect effect;
+			effect.world = NULL;
+			effect.entityHandle = effect.litHandle = -1;
+			effect.Init( SimParms( decl, false, vec3_origin, mat3_identity, 0.0f ), 0.0f );
+			const float distances[3] = { 100.0f, 400.0f, 700.0f }, expected[3] = { 1.0f, 0.5f, 0.0f };
+			for ( int i = 0; i < 3; i++ ) {
+				effect.originDistance = effect.shortestDistance = distances[i];
+				if ( idMath::Fabs( effect.OriginAttenuation( *shake ) - expected[i] ) > 1e-4f ||
+						idMath::Fabs( effect.SegmentAttenuation( *shake ) - expected[i] ) > 1e-4f ) {
+					badRamp++;
+				}
+			}
+		}
+	}
+
 	for ( const std::string &n : notes ) {
 		printf( "%s\n", n.c_str() );
 	}
@@ -765,6 +812,8 @@ int main( int argc, char **argv ) {
 		}
 	}
 	printf( "\n" );
-	const bool physicsBad = escapes > 0 || badRequests > 0 || childrenNotEnded > 0 || worldFull > 0 || notEndedAfterStop > 0;
+	printf( "== view effects: %ld shakes, %ld double visions, %ld tunnels (strongest %.2f, longest %.2f s); bad: %ld; distance ramp wrong: %d\n",
+		viewRequests[0], viewRequests[1], viewRequests[2], maxViewScale, maxViewTime, badViewRequests, badRamp );
+	const bool physicsBad = badViewRequests > 0 || badRamp > 0 || escapes > 0 || badRequests > 0 || childrenNotEnded > 0 || worldFull > 0 || notEndedAfterStop > 0;
 	return ( failed > 0 || notFinite > 0 || notEnded > 0 || overBudget > 0 || badGeometry > 0 || badLights > 0 || badDecals > 0 || physicsBad ) ? 1 : 0;
 }

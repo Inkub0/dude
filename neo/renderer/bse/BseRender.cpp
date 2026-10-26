@@ -171,7 +171,8 @@ void BSE_ProjectDecal( idBseEffect *effect, const idFixedWinding &winding, const
 
 	A particle's trace is a query of the game's world (the game's Translation, the call Quake 4's
 	effects make), done while effects are serviced - never while a view is being built. What the
-	game is asked to do - play an impact, timeout or nested effect, spawn debris - waits in a
+	game is asked to do - play an impact, timeout or nested effect, spawn debris, shake or blur the
+	player's view - waits in a
 	bounded queue for the game's next effect frame bracket (bse->StartFrame / EndFrame), so the
 	game spawns its client entities in its own frame and never in the middle of a render.
 
@@ -184,20 +185,32 @@ static const int		BSE_TRACE_CONTENTS = BIT( 0 ) | BIT( 11 );
 
 const int				BSE_MAX_EFFECT_REQUESTS = 256;	// waiting effects (one game frame's impacts)
 const int				BSE_MAX_DEBRIS_REQUESTS = 128;
+const int				BSE_MAX_VIEW_REQUESTS = 64;
+
+typedef enum {
+	BSE_REQUEST_EFFECT,				// play an effect once
+	BSE_REQUEST_DEBRIS,				// spawn a client moveable
+	BSE_REQUEST_VIEW,				// a view effect for the player
+	BSE_REQUEST_NUM
+} bseRequestKind_t;
 
 typedef struct {
 	const idRenderWorld *	world;
-	const idDeclEffect *	effect;			// NULL: debris
+	bseRequestKind_t		kind;
+	const idDeclEffect *	effect;
 	idStr					entityDef;
 	idVec3					origin;
 	idMat3					axis;
 	idVec3					velocity;
 	idVec3					angularVelocity;
+	int						viewEffect;		// VIEWEFFECT_*
+	float					endTime;		// seconds
+	float					scale;
 } bseRequest_t;
 
 static idList<bseRequest_t>		bseRequests;
-static int						bseNumEffectRequests = 0;
-static int						bseNumDebrisRequests = 0;
+static int						bseNumRequests[BSE_REQUEST_NUM];
+static const int				bseMaxRequests[BSE_REQUEST_NUM] = { BSE_MAX_EFFECT_REQUESTS, BSE_MAX_DEBRIS_REQUESTS, BSE_MAX_VIEW_REQUESTS };
 static int						bseDroppedRequests = 0;
 static bool						bseServicingForView = false;	// no traces while a view is built
 
@@ -221,15 +234,15 @@ bool BSE_CanPlayImpactEffect( void ) {
 	return EffectManagerQ4()->CanPlayRateLimited( EC_IMPACT_PARTICLES );
 }
 
-static bseRequest_t *BSE_NewRequest( idBseEffect *effect, bool debris ) {
-	int &num = debris ? bseNumDebrisRequests : bseNumEffectRequests;
-	if ( effect->world == NULL || num >= ( debris ? BSE_MAX_DEBRIS_REQUESTS : BSE_MAX_EFFECT_REQUESTS ) ) {
+static bseRequest_t *BSE_NewRequest( idBseEffect *effect, bseRequestKind_t kind ) {
+	if ( effect->world == NULL || bseNumRequests[kind] >= bseMaxRequests[kind] ) {
 		bseDroppedRequests++;
 		return NULL;
 	}
-	num++;
+	bseNumRequests[kind]++;
 	bseRequest_t &r = bseRequests.Alloc();
 	r.world = effect->world;
+	r.kind = kind;
 	r.effect = NULL;
 	r.entityDef.Clear();
 	r.velocity.Zero();
@@ -241,7 +254,7 @@ void BSE_RequestEffect( idBseEffect *effect, const idDeclEffect *child, const id
 	if ( child == NULL || child->GetState() == DS_DEFAULTED ) {
 		return;		// a missing child effect plays nothing
 	}
-	bseRequest_t *r = BSE_NewRequest( effect, false );
+	bseRequest_t *r = BSE_NewRequest( effect, BSE_REQUEST_EFFECT );
 	if ( r != NULL ) {
 		r->effect = child;
 		r->origin = origin;
@@ -251,7 +264,7 @@ void BSE_RequestEffect( idBseEffect *effect, const idDeclEffect *child, const id
 
 void BSE_RequestDebris( idBseEffect *effect, const char *entityDef, const idVec3 &origin, const idMat3 &axis,
 		const idVec3 &velocity, const idVec3 &angularVelocity ) {
-	bseRequest_t *r = BSE_NewRequest( effect, true );
+	bseRequest_t *r = BSE_NewRequest( effect, BSE_REQUEST_DEBRIS );
 	if ( r != NULL ) {
 		r->entityDef = entityDef;
 		r->origin = origin;
@@ -261,12 +274,22 @@ void BSE_RequestDebris( idBseEffect *effect, const char *entityDef, const idVec3
 	}
 }
 
+void BSE_RequestViewEffect( idBseEffect *effect, effectSegmentType_t type, float endTime, float scale ) {
+	bseRequest_t *r = BSE_NewRequest( effect, BSE_REQUEST_VIEW );
+	if ( r != NULL ) {
+		r->viewEffect = type == EFFECT_SEG_DOUBLEVISION ? VIEWEFFECT_DOUBLEVISION : type == EFFECT_SEG_TUNNEL ? VIEWEFFECT_TUNNEL : VIEWEFFECT_SHAKE;
+		r->endTime = endTime;
+		r->scale = scale;
+	}
+}
+
 /*
 ================
 BSE_DeliverRequests
 
-The game's effect frame bracket: the waiting child effects (played once, no end origin, white) and
-debris (client moveables with the entity def's own lifetime) go to the game, in the order asked.
+The game's effect frame bracket: the waiting child effects (played once, no end origin, white),
+debris (client moveables with the entity def's own lifetime) and view effects (the game's player
+view takes the end time as its finish time) go to the game, in the order asked.
 ================
 */
 void BSE_DeliverRequests( void ) {
@@ -277,9 +300,10 @@ void BSE_DeliverRequests( void ) {
 	idList<bseRequest_t> requests;
 	requests.Swap( bseRequests );		// what the game plays may ask for more: next bracket
 	const int dropped = bseDroppedRequests;
-	bseNumEffectRequests = bseNumDebrisRequests = bseDroppedRequests = 0;
+	memset( bseNumRequests, 0, sizeof( bseNumRequests ) );
+	bseDroppedRequests = 0;
 	if ( BSE_Debug() && dropped > 0 ) {
-		common->Printf( "BSE: %d child effect / debris requests over the limit were dropped\n", dropped );
+		common->Printf( "BSE: %d child effect / debris / view effect requests over the limit were dropped\n", dropped );
 	}
 	if ( game == NULL || !GameQ4_MapActive() ) {
 		return;
@@ -287,10 +311,16 @@ void BSE_DeliverRequests( void ) {
 	const idVec4 white( 1.0f, 1.0f, 1.0f, 1.0f );
 	for ( int i = 0; i < requests.Num(); i++ ) {
 		const bseRequest_t &r = requests[i];
-		if ( r.effect != NULL ) {
-			game->PlayEffect( r.effect, r.origin, r.axis, false, vec3_origin, false, false, EC_IGNORE, white );
-		} else {
-			game->SpawnClientMoveable( r.entityDef.c_str(), 0, r.origin, r.axis, r.velocity, r.angularVelocity );
+		switch ( r.kind ) {
+			case BSE_REQUEST_EFFECT:
+				game->PlayEffect( r.effect, r.origin, r.axis, false, vec3_origin, false, false, EC_IGNORE, white );
+				break;
+			case BSE_REQUEST_DEBRIS:
+				game->SpawnClientMoveable( r.entityDef.c_str(), 0, r.origin, r.axis, r.velocity, r.angularVelocity );
+				break;
+			default:
+				game->StartViewEffect( r.viewEffect, r.endTime, r.scale );
+				break;
 		}
 	}
 }
@@ -980,7 +1010,7 @@ void BSE_WorldFreed( idRenderWorld *world ) {
 	}
 	for ( int i = 0; i < bseRequests.Num(); i++ ) {
 		if ( bseRequests[i].world == world ) {
-			( bseRequests[i].effect != NULL ? bseNumEffectRequests : bseNumDebrisRequests )--;
+			bseNumRequests[bseRequests[i].kind]--;
 			bseRequests.RemoveIndex( i-- );
 		}
 	}
@@ -995,7 +1025,8 @@ void BSE_Shutdown( void ) {
 	bseTestEffects.Clear();
 	bseViewEntities.Clear();
 	bseRequests.Clear();
-	bseNumEffectRequests = bseNumDebrisRequests = bseDroppedRequests = 0;
+	memset( bseNumRequests, 0, sizeof( bseNumRequests ) );
+	bseDroppedRequests = 0;
 	effectPrecacheEntityDef = NULL;
 	cmdSystem->RemoveCommand( "testEffect" );
 	bseWorldViews.Clear();

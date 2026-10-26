@@ -608,7 +608,7 @@ void idEffectSegment::Clear( void ) {
 	volume.min = volume.max = 0.0f;
 	freqShift.min = freqShift.max = 1.0f;		// no shift, as retail
 	detail = 0.0f;
-	scale = 0.0f;
+	scale = 1.0f;		// a view effect at full strength unless the file says otherwise, as retail
 	particleCap = 0;
 	soundShader = NULL;
 	effect = NULL;

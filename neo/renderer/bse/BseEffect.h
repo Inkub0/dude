@@ -226,6 +226,8 @@ public:
 
 							// the attenuation of a segment for the player's distance (0 = gone)
 	float					SegmentAttenuation( const idEffectSegment &segment ) const;
+								// a view effect's strength: its scale, by the player's distance to the origin
+	float					OriginAttenuation( const idEffectSegment &segment ) const;
 							// a particle's position at time, in the effect's current frame
 	idVec3					EvaluatePosition( const bseParticle_t &p, const idEffectParticle &tmpl, float time ) const;
 							// a point of the effect's current frame in the world
@@ -338,6 +340,9 @@ bool			BSE_CanPlayImpactEffect( void );		// the game's rate limit for particle i
 void			BSE_RequestEffect( idBseEffect *effect, const idDeclEffect *child, const idVec3 &origin, const idMat3 &axis );
 void			BSE_RequestDebris( idBseEffect *effect, const char *entityDef, const idVec3 &origin, const idMat3 &axis,
 					const idVec3 &velocity, const idVec3 &angularVelocity );
+				// a view effect for the player (segment type shake, doubleVision or tunnel): until endTime (seconds
+				// of game time), at that strength
+void			BSE_RequestViewEffect( idBseEffect *effect, effectSegmentType_t type, float endTime, float scale );
 
 /*
 ===============================================================================

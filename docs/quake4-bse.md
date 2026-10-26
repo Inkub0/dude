@@ -2,9 +2,10 @@
 
 Status (2026-10-26): **plan approved; S1 (the effect decl), S2 (the runtime and sprites), S3
 (every drawn particle kind and the trails), S4 (lights, sounds, decals) and S5 (particle physics,
-impacts, debris, nested effects) done and on master.** Effects draw every particle kind, light their surroundings, play their sounds, leave
-their decals, collide with the world, throw debris and start their child effects; view effects
-(S6) come next. Visual checks
+impacts, debris, nested effects) done and on master; S6 (view effects) built on
+`feat/quake4-bse-view-effects`, its gate pending.** Effects draw every particle kind, light their
+surroundings, play their sounds, leave their decals, collide with the world, throw debris, start
+their child effects and shake or blur the player's view. Visual checks
 go through the user's Quake 4 Effect Browser (a claude.ai page listing all 1172 effects, what
 DUDE draws of each, the command that plays it, and a saved "Checked" tick per effect).
 
@@ -58,6 +59,8 @@ own code and the consultation is recorded in the commit message and in the table
 | That effects trace (the game's `Translation`, "small portion of physics required for the effects system"), spawn debris (`SpawnClientMoveable`; a lifetime of 0 takes the entity def's `duration`), rate-limit impact particles (`EC_IMPACT_PARTICLES`), read the owner's connected-area flag (the game sets `renderEffect_t::inConnectedArea` every frame), and the `bse_physics` / `bse_debris` cvars | the SDK (`bse/BSEInterface.h`, `game/Game_local.cpp`, `game/client/ClientEffect.cpp`, `renderer/RenderWorld.h`; Xanz/Quake4SDK = `~/quake4-refs/q4sdk`) |
 | Debris hands off to a client moveable at birth; model particles trace as points; bounces come to rest below a speed limit; a missing child effect plays nothing; child, impact and timeout effects play only while the owner is in a connected area, nested ones without the end origin; debris entity defs precache their media | OpenQ4 prose (parity audit) |
 | Physics (S5, §3.4): the trace over the last 0.1 s of motion from 0.1 s after the birth or bounce, against solids and render-model clip; one random impact effect at the hit point along the normal, behind the rate limit; the bounce (mirror, scale, motion restarts from the hit point, envelopes keep their clock; rest below 50 units/s off a floor facing against gravity by more than 45°); `remove`; the timeout effect at the death point along the direction of travel; debris placement (the effect's original frame, the velocity in the current one), spin (the end rotation, start not added) and lifetime 0; the nested segment's one child per window at the current origin and axis; `entityDef` on the other kinds only precached; the cvar defaults (1) | **decompile-derived, consulted 2026-10-26 (S5)**: OpenQ4 `src/bse` (`BSE_Particle.cpp` `RunPhysics` / `Bounce` / `CheckTimeoutEffect` / `rvDebrisParticle::FinishSpawn` / `EvaluatePosition` / `EvaluateVelocity`, `BSE_Particle.h`, `BSE_SegmentRuntime.cpp` `PlayEffect` / `UpdateGenericParticles`, `BSE_Segment.cpp`, `BSE_ParseParticle2.cpp` `ParseImpact` / `entityDef`, `BSE_Manager.cpp`) **cross-checked against idTech4A++ `raven/bse`** (`BSE_Particle.cpp`, `BSE_Segment.cpp`, `BSE_ParseParticle2.cpp`) - read for these behaviours only, re-expressed in DUDE's own code (`BseEffect.cpp`, `BseRender.cpp`), nothing copied. Both trees descend from the same recreation (Justin Marshall's Quake 4 BSE), so they are not independent: where they agree DUDE follows them; where they differ the user decides (below) |
+| View effects (S6): that the game shows them (`StartViewEffect( type, time, scale )`; the player view's `SetShakeParms` / `SetDoubleVisionParms` take `time` as the finish time in seconds of game time, `SetTunnelParms` as a length; the game ignores shakes in multiplayer) | the SDK (`game/Game_local.cpp` `StartViewEffect`, `game/PlayerView.h`) |
+| View effects (S6): one request per window; the finish time = the segment's start + its duration × the distance attenuation of §3.1 (player to the effect's bounds); the strength = the segment's `scale` × the owner's attenuation, by the same ramp over the player's distance to the effect's origin; `scale` defaults to 1 | **decompile-derived, consulted 2026-10-26 (S6)**: OpenQ4 `src/bse` (`BSE_Segment.cpp` `rvSegment::Check`, `AttenuateDuration`; `BSE_Effect.cpp` `GetAttenuation`, `GetOriginAttenuation`; `BSE_SegmentTemplate.cpp` `Init`) and idTech4A++ `raven/bse` (`BSE_Segment.cpp`, `BSE_Effect.cpp`, `BSE_Manager.cpp`, `BSE_SegmentTemplate.*`) - the two agree on all of it; re-expressed in DUDE's own code, nothing copied |
 | Where the two references differ (S5), and the user's choice (2026-10-26): the trace contents - OpenQ4 `SOLID \| RENDERMODEL` ("the game's shot mask", listed among its corrections against the retail 1.4.2 executable), idTech4A++ `SOLID \| OPAQUE`; when a bounce comes to rest - OpenQ4 below speed² 2500 off a floor, idTech4A++ whenever the unnormalised velocity·normal is under -0.707 (every hit into a surface: no hop would survive, and its `BSE_BOUNCE_LIMIT` goes unused). **The user chose OpenQ4's for both**, to be confirmed against retail at the S5 gate (sparks hopping before they settle; blood landing on a corpse). Also differing, with no user call needed: the bounce frame (idTech4A++ and OpenQ4's own changelog: the particle's birth frame; OpenQ4's current code: the effect's current frame - DUDE keeps the birth frame, identical for effects that do not turn) | user decision, recorded per the rule that reference discrepancies go to the user |
 
 ## 2. The grammar (measured)
@@ -346,6 +349,20 @@ The rules `neo/renderer/bse/BseEffect.cpp` implements; sources in the table of �
 - **Persist.** Particles that persist live out their lives after the effect stops (S2), bouncing,
   colliding and timing out as before.
 
+### 3.5 View effects (S6, in DUDE's words)
+
+- A `shake`, `doubleVision` or `tunnel` segment asks the game for that view effect once per window,
+  at its start: lasting the segment's duration shortened by the player's distance to the effect
+  (the §3.1 ramp over the distance to its bounds), as strong as its `scale` (1 when not given)
+  shortened by the same ramp over the distance to its origin, both times the owner's attenuation.
+  The game's player view keeps the last one asked for; the game shows no shake in multiplayer.
+- Retail's view effects: 81 shakes, 3 double visions, no tunnel. Most shakes ramp from 200 to 600
+  units; the buzzsaw effects' (`attenuation 1,1`) act only within two units of their origin,
+  where the game plays them on the player; `cinematics/intro/blur` and `levels/core/doors` have no
+  distances and act anywhere.
+- Requests reach the game at its effect frame bracket like child effects (§3.4), at most 64 a
+  bracket.
+
 ## 4. Stages and gates
 
 One branch per stage, merged to master at its gate after the user's verification. The user runs
@@ -358,7 +375,7 @@ every in-game check; nothing here launches the game.
 | S3 Particle kinds — **DONE 2026-10-26** (gate passed: all 20 comparisons ticked, play checks, ASAN clean) | line, oriented, electricity, linked, model; `motion` / `burn` / named trails | Offline geometry test; the user compares `weapons/nailgun/impact_default`, `ambient/acid_react_waste`, `weapons/lightninggun/tube` + `impact`, `weapons/railgun/trail`, `monsters/strogg_flyer/bomb_fly`, `moveables/barrel/explode`, `weapons/nailgun/impact_glass`, `monsters/makron/blaster_fly`, `monsters/gunner/grenade_burst`; lightning gun and railgun in play |
 | S4 Lights, sounds, decals — **DONE 2026-10-26** (gate passed: 12 effects ticked, play checks, no device loss, ASAN clean) | light segments as render lights; sound segments on the effect's emitter (`EffectDefHasSound`, random sample choice); decal segments projected | Rocket light, impact decals, impact sounds varying per shot; a busy fight on `dude_rtx 2` with no device loss; GL3 and Vulkan |
 | S5 Physics and children — **DONE 2026-10-26** (gate passed: all 16 effects, play checks, ASAN clean) | traces through `Translation`, bounce / remove, impact and timeout effects, nested effect segments, debris through `SpawnClientMoveable`, `entityDef` on other kinds, `persist` | Offline physics test; wall impacts, `wounds/blood`, harvester claw debris, turret deaths, `bse_physics` / `bse_debris`; ASAN |
-| S6 View effects | `shake` scaled by distance, `doubleVision`, `tunnel` | Explosions shake by distance, `mapobjects/buzzsaw_chop`, the intro blur |
+| S6 View effects — **BUILT 2026-10-26** (gate pending) | `shake` scaled by distance, `doubleVision`, `tunnel` | Explosions shake by distance, `mapobjects/buzzsaw_chop`, the intro blur |
 | S7 Cvars and tools | the retail `bse_*` cvars, rate limits, `bseSweep` + log summary, debug overlay, opt-in extras, performance | quake4-port.md §6's Q4 gate: `bseSweep` clean over all 1172, ~20 effects signed off against retail, OpenQ4's prose checklist, Doom 3 / RoE / LM smoke, ABI 0 breaks |
 
 `testEffect` moves from S7 into S2: every later gate needs it.
@@ -474,6 +491,32 @@ effects (16):
 4. A busy fight on GL3 and Vulkan and on `dude_rtx 2`: no device loss, no hitch from debris.
 5. `tools/run-asan.sh --q4` for a few minutes of play; Doom 3 / RoE smoke (the scene hook and the
    game adapter are shared; Doom 3 never runs BSE).
+
+**S6 as built.** `idBseSegment::Check` handles the three view segments (§3.5) through one more
+engine hook, `BSE_RequestViewEffect`; `idBseEffect::OriginAttenuation` is the strength ramp (the
+duration uses the existing `SegmentAttenuation`). The request queue (`BseRender.cpp`) gained a
+kind per request (effect, debris, view; 256 / 128 / 64 a bracket) and delivers view effects as
+`game->StartViewEffect` with Quake 4's `VIEWEFFECT_*` numbers. The decl's default `scale` is 1, as
+retail's (it was 0, which would have left the 29 shakes without a `scale` - the rocket and grenade
+impacts among them - still).
+
+Offline (`test_bse_sim.sh`): 1076 shake and 12 double vision requests over the run, none bad (end
+time finite and not before the effect's start, scale finite and not negative), strongest 8
+(`scale 8`), longest 4.98 s; the rocket impact's shake (no `scale`, attenuation 200-600) gives 1, 0.5
+and 0 at 100, 400 and 700 units, for both the strength and the duration. The S2-S5 results are
+unchanged. `test_effect_parse.sh` 1172 / 0 failed; ABI 0 breaks; Linux and Windows builds;
+`q4base.so` rebuilt.
+
+**S6 gate (user):** on the Effect Browser, stage 6:
+1. With `testEffect` (80 units in front): `weapons/rocketlauncher/impact`,
+   `weapons/grenadelauncher/impact` (a short shake, weaker from further away: `setviewpos` back
+   400 units halves it, 600 ends it), `monsters/camerashakelarge` (a strong shake, from 500 units
+   on weaker), `monsters/gladiator/footstomp`, `levels/core/doors` (a shake at any distance),
+   `cinematics/intro/blur` (double vision for 5 s; `g_doubleVision 1`).
+2. In play: rocket and grenade explosions near and far, the airdefense1 intro (the blur), a
+   buzzsaw hit on the player (shake and double vision - `testEffect` cannot show those, they act
+   only at the effect's origin).
+3. Retail side by side for one of them (the strength of a near rocket impact's shake).
 
 **S5 gate result (2026-10-26, user, ASAN build): passed, merged to master.** 15 of the 16 stage-5
 effects ticked on the Effect Browser, and the 16th passed as well (below); impacts, bounces, drips, gibs, acid pools, debris (`harvester/claw_dirt` and the others) and
