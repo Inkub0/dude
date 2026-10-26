@@ -1,9 +1,8 @@
 # Quake 4 effects (BSE) on DUDE — phase Q4
 
 Status (2026-10-26): **plan approved; S1 (the effect decl), S2 (the runtime and sprites), S3
-(every drawn particle kind and the trails) and S4 (lights, sounds, decals) done and on master; S5
-(particle physics, impacts, debris, nested effects) built on `feat/quake4-bse-physics`, its gate
-pending.** Effects draw every particle kind, light their surroundings, play their sounds, leave
+(every drawn particle kind and the trails), S4 (lights, sounds, decals) and S5 (particle physics,
+impacts, debris, nested effects) done and on master.** Effects draw every particle kind, light their surroundings, play their sounds, leave
 their decals, collide with the world, throw debris and start their child effects; view effects
 (S6) come next. Visual checks
 go through the user's Quake 4 Effect Browser (a claude.ai page listing all 1172 effects, what
@@ -148,9 +147,10 @@ Domains (count, values): `point` 11835 (n), `box` 11531 (2n), `line` 4862 (2n), 
 - `explosions/surface/turret_exp` throws four debris entities (`debris_mturret_base`, `_sensor`,
   `_barrel1`, `_barrel2`) whose models, `models/mapobjects/strogg/machines/turrets/debris/*.lwo`,
   are not in the paks (the other 55 debris entity defs the effects name all have theirs). They fly
-  as the engine's default model, a dark box. **Retail never plays this effect either** (checked
-  2026-10-26: no map, entity def, script, effect or game source names it), so again only
-  `testEffect` shows it; kept as the data has it.
+  as the engine's default model, a dark box - **as in retail**: the user spawned it there
+  (`spawn func_fx`, 2026-10-26) and retail throws the same dark boxes. Retail never plays this
+  effect on its own (no map, entity def, script, effect or game source names it), so only
+  `testEffect` shows it.
 
 ## 3. Runtime design (approved 2026-10-25)
 
@@ -357,7 +357,7 @@ every in-game check; nothing here launches the game.
 | S2 Runtime + sprites — **DONE 2026-10-25** (gate passed: user firefights in Quake 4 and Doom 3, ASAN clean on both) | Manager, effect instances behind the render world calls, timing (start, duration, count, spawner bursts, loops, delay segments, looping ambient effects already in full flow), domains and modifiers, envelopes, motion, `locked` / `attenuation` / `detail` / `density` / `particleCap`, sprites, segment draw order, `testEffect` | Offline simulation over every retail emitter (no NaN, population follows the emission rate, particles stay within the decl's `size`); the user compares 10 sprite-only effects covering every domain, modifier and envelope option with retail on GL3 and Vulkan (`moveables/barrel/debris_fly`, `monsters/scientist/obscuring_cloud`, `weapons/nailgun/guide`, `ambient/dustedge_mp`, `monsters/teleport_dropper/blast_exhaust`, `monsters/fatty/ambient_acid`, `steam/mcc_vent_slow`, `smoke/air_defense_hillsa`, `mapobjects/casket_door2_inv`, `levels/dispersal/supportbreak`); an airdefense1 fight; no FSR2 ghosting; ASAN `--q4`; Doom 3 / RoE smoke |
 | S3 Particle kinds — **DONE 2026-10-26** (gate passed: all 20 comparisons ticked, play checks, ASAN clean) | line, oriented, electricity, linked, model; `motion` / `burn` / named trails | Offline geometry test; the user compares `weapons/nailgun/impact_default`, `ambient/acid_react_waste`, `weapons/lightninggun/tube` + `impact`, `weapons/railgun/trail`, `monsters/strogg_flyer/bomb_fly`, `moveables/barrel/explode`, `weapons/nailgun/impact_glass`, `monsters/makron/blaster_fly`, `monsters/gunner/grenade_burst`; lightning gun and railgun in play |
 | S4 Lights, sounds, decals — **DONE 2026-10-26** (gate passed: 12 effects ticked, play checks, no device loss, ASAN clean) | light segments as render lights; sound segments on the effect's emitter (`EffectDefHasSound`, random sample choice); decal segments projected | Rocket light, impact decals, impact sounds varying per shot; a busy fight on `dude_rtx 2` with no device loss; GL3 and Vulkan |
-| S5 Physics and children — **BUILT 2026-10-26** (gate pending) | traces through `Translation`, bounce / remove, impact and timeout effects, nested effect segments, debris through `SpawnClientMoveable`, `entityDef` on other kinds, `persist` | Offline physics test; wall impacts, `wounds/blood`, harvester claw debris, turret deaths, `bse_physics` / `bse_debris`; ASAN |
+| S5 Physics and children — **DONE 2026-10-26** (gate passed: all 16 effects, play checks, ASAN clean) | traces through `Translation`, bounce / remove, impact and timeout effects, nested effect segments, debris through `SpawnClientMoveable`, `entityDef` on other kinds, `persist` | Offline physics test; wall impacts, `wounds/blood`, harvester claw debris, turret deaths, `bse_physics` / `bse_debris`; ASAN |
 | S6 View effects | `shake` scaled by distance, `doubleVision`, `tunnel` | Explosions shake by distance, `mapobjects/buzzsaw_chop`, the intro blur |
 | S7 Cvars and tools | the retail `bse_*` cvars, rate limits, `bseSweep` + log summary, debug overlay, opt-in extras, performance | quake4-port.md §6's Q4 gate: `bseSweep` clean over all 1172, ~20 effects signed off against retail, OpenQ4's prose checklist, Doom 3 / RoE / LM smoke, ABI 0 breaks |
 
@@ -475,11 +475,11 @@ effects (16):
 5. `tools/run-asan.sh --q4` for a few minutes of play; Doom 3 / RoE smoke (the scene hook and the
    game adapter are shared; Doom 3 never runs BSE).
 
-**S5 gate result (2026-10-26, user, ASAN build):** 15 of the 16 stage-5 effects ticked on the Effect
-Browser; impacts, bounces, drips, gibs, acid pools, debris (`harvester/claw_dirt` and the others) and
+**S5 gate result (2026-10-26, user, ASAN build): passed, merged to master.** 15 of the 16 stage-5
+effects ticked on the Effect Browser, and the 16th passed as well (below); impacts, bounces, drips, gibs, acid pools, debris (`harvester/claw_dirt` and the others) and
 both nested effects look right; no ASAN report. The one left unticked, `explosions/surface/turret_exp`,
-throws dark boxes: its debris models are missing from the retail data and retail never plays the
-effect (§2). The timeout direction (the particle's own world direction, not OpenQ4's
+throws dark boxes: its debris models are missing from the retail data, and retail spawned from the
+console throws the same dark boxes (§2) - a pass. The timeout direction (the particle's own world direction, not OpenQ4's
 current-frame reading) is the user's choice. `vehicles/explosion_tank` under `testEffect` costs
 frame time: per play 10 debris rigid bodies live 5 s, each trailing `fire/spot_32_trail_bigsmoke`
 (six emitters, about 30 smoke sprites of radius 50-120), and `testEffect` loops the effect for 4 s
