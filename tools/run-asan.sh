@@ -11,7 +11,8 @@
 #         --q4   Quake 4 (run-q4.sh, also rebuilds q4base.so against build-asan/)
 #         e.g.   tools/run-asan.sh +map game/mars_city1
 #                tools/run-asan.sh --q4 +map game/airdefense1
-# Reports: ~/.local/share/dude/asan.<pid> (ASAN_OPTIONS overrides). Slower than build/ by ~2-3x.
+# Reports: ~/.local/share/dude/asan.<pid> (ASAN_OPTIONS overrides), failed asserts included (with
+# their stack). Slower than build/ by ~2-3x.
 set -euo pipefail
 DUDE="$(cd "$(dirname "$0")/.." && pwd)"
 ASAN_BUILD="$DUDE/build-asan"
@@ -50,8 +51,10 @@ if [ "$QUAKE4" = 1 ]; then
 	DUDE_BUILD=build-asan "$DUDE/tools/quake4/build-q4game.sh"
 fi
 
-# leak reports at exit are noise for a game (id's allocators keep memory until shutdown)
-export ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=0:log_path=${XDG_DATA_HOME:-$HOME/.local/share}/dude/asan}"
+# leak reports at exit are noise for a game (id's allocators keep memory until shutdown); a failed
+# assert() raises SIGTRAP: handle_sigtrap=2 makes ASAN report it with a symbolized stack (and keeps
+# the engine's own crash handler from taking it over)
+export ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=0:handle_sigtrap=2:log_path=${XDG_DATA_HOME:-$HOME/.local/share}/dude/asan}"
 export DUDE_BIN="$ASAN_BUILD/dude"
 if [ "$QUAKE4" = 1 ]; then
 	exec "$DUDE/run-q4.sh" "$@"

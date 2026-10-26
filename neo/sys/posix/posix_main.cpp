@@ -594,8 +594,10 @@ void Sys_SleepUntilPrecise( double targetTimeMS ) {
 
 // ----------- lots of signal handling stuff ------------
 
-static const int   crashSigs[]     = {  SIGILL,   SIGABRT,   SIGFPE,   SIGSEGV };
-static const char* crashSigNames[] = { "SIGILL", "SIGABRT", "SIGFPE", "SIGSEGV" };
+// DUDE: SIGTRAP too - a failed assert() raises it (idlib's AssertFailed); without a debugger the
+// game died with no backtrace and dudelog.txt cut short. Under gdb, gdb still stops on it first.
+static const int   crashSigs[]     = {  SIGILL,   SIGABRT,   SIGFPE,   SIGSEGV,   SIGTRAP };
+static const char* crashSigNames[] = { "SIGILL", "SIGABRT", "SIGFPE", "SIGSEGV", "SIGTRAP" };
 
 #if ( defined(__linux__) && defined(__GLIBC__) ) || defined(__FreeBSD__) || (defined(__APPLE__) && !defined(OSX_TIGER))
   #define D3_HAVE_BACKTRACE
@@ -1312,6 +1314,14 @@ void Sys_VPrintf( const char *msg, va_list arg ) {
 	}
 }
 
+// DUDE: debug prints are rare and often the last words (a failed assert): flushed, so the log keeps them
+static void Sys_FlushDebugPrint( void ) {
+	fflush( stdout );
+	if ( consoleLog != NULL ) {
+		fflush( consoleLog );
+	}
+}
+
 void Sys_DebugPrintf( const char *fmt, ... ) {
 	va_list argptr;
 
@@ -1320,12 +1330,14 @@ void Sys_DebugPrintf( const char *fmt, ... ) {
 	Sys_VPrintf( fmt, argptr );
 	va_end( argptr );
 	tty_Show();
+	Sys_FlushDebugPrint();
 }
 
 void Sys_DebugVPrintf( const char *fmt, va_list arg ) {
 	tty_Hide();
 	Sys_VPrintf( fmt, arg );
 	tty_Show();
+	Sys_FlushDebugPrint();
 }
 
 void Sys_Printf(const char *msg, ...) {
