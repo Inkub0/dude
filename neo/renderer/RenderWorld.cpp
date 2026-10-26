@@ -33,6 +33,7 @@ If you have questions concerning this license or the applicable additional terms
 #include "renderer/RenderWorld_local.h"
 
 #include "renderer/tr_local.h"
+#include "renderer/bse/BseEffect.h"
 
 /*
 ===================
@@ -818,6 +819,9 @@ void idRenderWorldLocal::RenderScene( const renderView_t *renderView ) {
 
 	int startTime = Sys_Milliseconds();
 	const double startTimeF = Sys_MillisecondsPrecise();
+
+	// DUDE: Quake 4's effects serviced since the last scene move their entities now
+	BSE_SyncWorld( this );
 
 	// setup view parms for the initial view
 	//

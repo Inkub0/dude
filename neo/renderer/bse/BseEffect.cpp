@@ -979,6 +979,7 @@ void idBseEffect::Init( const bseEffectParms_t &parms, float time ) {
 	originalEndOrigin = currentEndOrigin = parms.hasEndOrigin ? parms.endOrigin : vec3_origin;
 	worldBounds.Clear();
 	particleBounds.Clear();
+	boundsDirty = false;
 	UpdateFromOwner( parms, time );
 	lastTime = currentTime = time;
 	endOriginChanged = hasEndOrigin && decl->UsesEndOrigin();
@@ -1172,6 +1173,13 @@ void idBseEffect::UpdateParticleBounds( float time ) {
 	}
 }
 
+void idBseEffect::UpdateBounds( void ) {
+	if ( boundsDirty ) {
+		UpdateParticleBounds( currentTime );
+		boundsDirty = false;
+	}
+}
+
 // the effect lasts at least this long (a negative time: the decl's shortest)
 void idBseEffect::SetDuration( float time ) {
 	if ( time < 0.0f ) {
@@ -1216,7 +1224,7 @@ bool idBseEffect::Service( float time ) {
 			alive = true;
 		}
 	}
-	UpdateParticleBounds( time );
+	boundsDirty = true;		// taken when a scene needs them (UpdateBounds)
 
 	if ( stopped ) {
 		return !alive;

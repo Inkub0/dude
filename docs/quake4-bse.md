@@ -300,8 +300,12 @@ hands such entities over and, once the view's other entities are done, `R_AddBse
 each one's sprites for the view into frame-temporary vertices (`vertexCache.AllocFrameTemp`, the
 deform-particle pattern: drawn by every backend, nothing kept past the frame) and adds them as
 draw surfaces - effects farthest first, segments in file order. The game's `UpdateEffectDef`
-services an effect at its game time (owner state, spawns, loops, deaths, the entity's bounds);
-the first view of a frame services one nobody has updated (a new effect, `testEffect`'s).
+services an effect at its game time (owner state, spawns, loops, deaths); its entities - with the
+live particles' bounds - follow once before the next scene of its world renders (`BSE_SyncWorld`
+from `RenderScene`, 2026-10-26: taking the bounds every game tic cost 86% of the effects' time,
+and a skipped cinematic runs a minute of game tics without rendering one - airdefense1's effects
+went from 6.6 to 0.75 ms per tic under ASAN, 3.2 to 0.4 ms at -O0). The first view of a frame
+services an effect nobody has updated (a new effect, `testEffect`'s).
 Particles are evaluated at the view's time. The Quake 4 render world facade
 (`quake4/RenderWorldQ4.cpp`) plays the game's effects through `BSE_PlayEffect` /
 `BSE_UpdateEffect` / `BSE_StopEffect` / `BSE_FreeEffect`; `EffectDuration` answers from the

@@ -131,6 +131,7 @@ static void BSE_ServiceForView( idBseEffect *effect, const viewDef_t *view ) {
 		effect->UpdateFromOwner( effect->owner, MS2SEC( view->renderView.time ) );
 		effect->finished = effect->Service( MS2SEC( view->renderView.time ) ) || effect->finished;
 		effect->serviceTime = view->renderView.time;
+		effect->entityDirty = true;
 	}
 }
 
@@ -283,6 +284,7 @@ idBseEffect *BSE_PlayEffect( idRenderWorld *world, const bseEffectParms_t &parms
 	effect->world = world;
 	effect->entityHandle = -1;
 	effect->litHandle = -1;
+	effect->entityDirty = false;
 	effect->serviceTime = timeMs - 1;		// the frame's first view services it
 	effect->Init( parms, MS2SEC( timeMs ) );
 	if ( BSE_Debug() ) {
@@ -314,11 +316,31 @@ bool BSE_UpdateEffect( idBseEffect *effect, const bseEffectParms_t &parms, int t
 		effect->finished = effect->Service( MS2SEC( timeMs ) );
 		effect->serviceTime = timeMs;
 	}
-	BSE_SyncEntity( effect );
+	effect->entityDirty = true;		// its entities follow before the next scene (BSE_SyncWorld)
 	if ( effect->finished && BSE_Debug() ) {
 		common->Printf( "BSE: '%s' is over\n", effect->decl->GetName() );
 	}
 	return effect->finished;
+}
+
+/*
+================
+BSE_SyncWorld
+
+The entities of world's effects that were serviced since their last update, with their particles'
+bounds: done once before a scene renders rather than every game tic, so game tics that render
+nothing (a skipped cinematic runs a minute of them in one frame) pay only for the simulation.
+================
+*/
+void BSE_SyncWorld( idRenderWorld *world ) {
+	for ( int i = 0; i < bseEffects.Num(); i++ ) {
+		idBseEffect *effect = bseEffects[i];
+		if ( effect->world == world && effect->entityDirty ) {
+			effect->UpdateBounds();
+			BSE_SyncEntity( effect );
+			effect->entityDirty = false;
+		}
+	}
 }
 
 void BSE_StopEffect( idBseEffect *effect ) {

@@ -205,6 +205,9 @@ public:
 							// the ribbons of a segment's "trailType motion" particles
 	int						BuildMotionTrails( const idBseSegment &segment, float time, const bseView_t &view, idBseGeometry &geo ) const;
 	int						CountParticles( void ) const;
+							// the live particles' bounds, if a service changed them since (BSE_SyncWorld: once
+							// before a scene renders, not every game tic)
+	void					UpdateBounds( void );
 
 	bseEffectParms_t		owner;				// the owner's last state
 	const idDeclEffect *	decl;
@@ -229,6 +232,7 @@ public:
 	idBounds				worldBounds;		// grows as the effect moves
 	idBounds				localBounds;		// worldBounds in the current frame
 	idBounds				particleBounds;		// the live particles at the last service, current frame
+	bool					boundsDirty;		// serviced since particleBounds was taken
 	float					ownerAttenuation;
 	float					shortestDistance;	// player to localBounds
 	float					originDistance;		// player to the origin
@@ -242,6 +246,7 @@ public:
 	idRenderWorld *			world;
 	int						entityHandle;
 	int						litHandle;			// the lit entity drawing lit model particles, or -1
+	bool					entityDirty;		// serviced since its entities were last updated
 	int						serviceTime;		// ms, the last game time serviced
 	bool					finished;
 
@@ -292,6 +297,9 @@ idBseEffect *	BSE_PlayEffect( idRenderWorld *world, const bseEffectParms_t &parm
 				// the owner's new state; true when the effect is over and can be freed
 bool			BSE_UpdateEffect( idBseEffect *effect, const bseEffectParms_t &parms, int timeMs );
 void			BSE_StopEffect( idBseEffect *effect );				// no more spawns; live particles die out
+				// before a scene of world renders: the entities of its effects serviced since, with their
+				// particles' bounds (a cinematic skip runs many game tics and renders none)
+void			BSE_SyncWorld( idRenderWorld *world );
 void			BSE_FreeEffect( idBseEffect *effect );
 float			BSE_EffectDuration( const idBseEffect *effect );	// seconds
 				// an effect decl's own length, when no effect plays it
