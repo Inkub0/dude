@@ -871,18 +871,15 @@ static void R_AddBseGeometry( viewEntity_t *vEntity, const idMaterial *material,
 	if ( tri->ambientCache == NULL ) {
 		return;
 	}
-	// DUDE bse_softParticles (opt-in): sprites and oriented quads fade against the scene's depth, as
-	// Doom 3's particles do with r_useSoftParticles, over the segment's average particle size
-	// keeping the depth test (DSF_SOFT_DEPTH_TESTED): fire behind a car's bonnet stays hidden by it
+	// DUDE bse_softParticles (opt-in): sprites and oriented quads soften where they cut into the scene,
+	// as Doom 3's particles do with r_useSoftParticles (RB_RHI_RenderSoftParticleStage: drawn as without
+	// softening, fading only over the last few units in front of what they meet); the radius is the
+	// segment's average particle size. GL3/Vulkan, as Doom 3's
 	float softRadius = -1.0f;
-	if ( soft && geo.sizeCount > 0 && bse_softParticles != NULL && bse_softParticles->GetBool() ) {
+	if ( soft && geo.sizeCount > 0 && bse_softParticles != NULL && bse_softParticles->GetBool() && R_BackendSupportsEnhancements() ) {
 		softRadius = Max( 1.0f, geo.sizeSum / geo.sizeCount );
 	}
-	const int before = tr.viewDef->numDrawSurfs;
 	R_AddDrawSurf( tri, vEntity, &def->parms, material, vEntity->scissorRect, softRadius );
-	if ( softRadius > 0.0f && tr.viewDef->numDrawSurfs == before + 1 ) {
-		tr.viewDef->drawSurfs[before]->dsFlags |= DSF_SOFT_DEPTH_TESTED;
-	}
 }
 
 /*
@@ -1154,7 +1151,7 @@ void BSE_Init( void ) {
 								"rate limit for spawned effects [what impact effects may spend at once; 0.1 or less: no limit]" );
 		bse_rateCost		= new idCVar( "bse_rateCost", "1", CVAR_RENDERER | CVAR_FLOAT, "rate cost multiplier for spawned effects" );
 		bse_softParticles	= new idCVar( "bse_softParticles", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL,
-								"DUDE: effect sprites fade where they meet the scene, like Doom 3's soft particles (non-vanilla; GL3/Vulkan with r_useSoftParticles' depth capture)" );
+								"DUDE: effect sprites lose the hard line where they cut into walls and floors, as Doom 3's soft particles (non-vanilla; GL3/Vulkan, needs r_useSoftParticles' depth capture)" );
 	}
 	BSE_ResetRateTimes();
 	BSE_InitTools();

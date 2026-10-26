@@ -387,8 +387,14 @@ The rules `neo/renderer/bse/BseEffect.cpp` implements; sources in the table of ย
   particles'), `bse_physics`, `bse_debris`, `bse_scale` (archived), `bse_singleEffect` (only effects
   whose name contains it play - checked when any effect plays and in the game's filter),
   `bse_maxParticles` 2048, `bse_rateLimit` 3, `bse_rateCost` 1. DUDE's own: `bse_softParticles`
-  (0; effect sprites and oriented quads fade where they meet the scene, over the segment's average
-  particle size, through the soft particle path Doom 3's particles use).
+  (0; the ImGui menu's "Soften Quake 4 Effects"): effect sprites and oriented quads lose the hard
+  line where they cut into walls and floors - drawn exactly as without, depth-tested, fading out
+  only over the last 12 units (or half the particle) before the surface - through the soft particle
+  path Doom 3's particles use. Built in three rounds at the S7 gate (user screenshots): the Dark
+  Mod's soft path (no depth test, a sphere of the particle's radius) let fire show through a car's
+  bonnet; a depth-tested fade over half the particle made smoke look behind what it drifted over;
+  the narrow fade is what the user asked for, and Doom 3 / RoE / Lost Mission particles use it too
+  (2026-10-26, user: "this can be ported to Doom 3 as well").
 - **Rate limits**: hitscan impacts (the game asks) and particle impact effects (BSE physics) each
   spend from their own budget; the arithmetic is in ยง1's S7 row. In single player the budget pays
   back every game tic, so one impact a tic is free; a burst plays its first ~15 impacts for

@@ -797,9 +797,7 @@ void RB_STD_T_RenderShaderPasses( const drawSurf_t *surf ) {
 	}
 
 	// check whether we're drawing a soft particle surface #3878
-	// DUDE: the legacy ARB soft program fades with no depth test; a depth-tested soft surface (Quake 4
-	// effects, DSF_SOFT_DEPTH_TESTED) draws as a plain particle here
-	const bool soft_particle = ( surf->dsFlags & DSF_SOFT_PARTICLE ) != 0 && !( surf->dsFlags & DSF_SOFT_DEPTH_TESTED );
+	const bool soft_particle = ( surf->dsFlags & DSF_SOFT_PARTICLE ) != 0;
 	
 	// get the expressions for conditionals / color / texcoords
 	regs = surf->shaderRegisters;

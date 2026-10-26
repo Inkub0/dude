@@ -30,16 +30,14 @@ void main() {
 	 float sceneDepth = 1.0 / (rawSceneDepth * depth_consts.x + depth_consts.y);
 	 float particleDepth = 1.0 / (gl_FragCoord.z * depth_consts.x + depth_consts.y);
 
-	 // u_particleRadius.w (DUDE): a depth-tested soft surface (Quake 4 effects) fades only over the last
-	 // few units in front of what it cuts into - 0 where it meets it - and is otherwise drawn as without
-	 // softening, near the viewer too (the Dark Mod's fades a sphere about the sprite with no depth test,
-	 // which shows through anything nearer than its radius)
-	 float fade = u_particleRadius.w > 0.5
-		 ? clamp((particleDepth - sceneDepth) * u_particleRadius.y, 0.0, 1.0)
-		 : clamp((particleDepth - sceneDepth + u_particleRadius.x) * u_particleRadius.y, 0.0, 1.0);
-	 float nearFade = u_particleRadius.w > 0.5 ? 1.0 : clamp(particleDepth * -u_particleRadius.z, 0.0, 1.0);
+	 // DUDE: the particle is drawn depth-tested, as without softening, and fades out only over the last
+	 // few units in front of what it cuts into (1/u_particleRadius.y; 0 where it meets it), so only the
+	 // hard intersection line goes. The Dark Mod's drew with no depth test and faded a sphere of the
+	 // particle's radius about the sprite (plus a fade near the viewer), which let it show through
+	 // anything nearer than that radius.
+	 float fade = clamp((particleDepth - sceneDepth) * u_particleRadius.y, 0.0, 1.0);
 
-	 vec4 fadeCol = clamp(vec4(nearFade * fade) + u_channelMask, 0.0, 1.0);
+	 vec4 fadeCol = clamp(vec4(fade) + u_channelMask, 0.0, 1.0);
 	 fragColor = texture(u_diffuseMap, var_TexCoord) * fadeCol * var_Color;
 
 	 // DUDE smoke-darkness blend: dim smoke/steam/dust where the scene behind it is

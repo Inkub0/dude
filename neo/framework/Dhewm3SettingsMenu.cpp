@@ -2333,7 +2333,30 @@ static CVarOption particleOptions[] = {
 				D3::ImGuiHooks::ShowWarningOverlay( "Capturing the Depth Buffer was disabled.\nEnabled it because soft particles need it!" );
 			}
 		}
-		const char* descr = "! Can slow down rendering !\nSoften particle transitions when player walks through them or they cross solid geometry. Needs r_enableDepthCapture.";
+		const char* descr = "! Can slow down rendering !\nRemoves the hard line where smoke, fire and dust cut into walls and floors: particles\n"
+			"look exactly as without this, except that they fade out over the last few units before the\n"
+			"surface they meet. Needs r_enableDepthCapture. opengl3/Vulkan only.";
+		AddCVarOptionTooltips( cvar, descr );
+	} ),
+	// Quake 4 only (the cvar exists only for that title, else this draws nothing): the same softening
+	// for its effects (BSE), off by default; it needs soft particles' depth capture, so enabling it
+	// turns them on too
+	CVarOption( "bse_softParticles", []( idCVar& cvar ) {
+		bool enable = cvar.GetBool();
+		if ( ImGui::Checkbox( "Soften Quake 4 Effects", &enable ) ) {
+			cvar.SetBool( enable );
+			if ( enable && !r_useSoftParticles.GetBool() ) {
+				r_useSoftParticles.SetBool( true );
+				if ( r_enableDepthCapture.GetInteger() == 0 ) {
+					r_enableDepthCapture.SetInteger( -1 );
+				}
+				D3::ImGuiHooks::ShowWarningOverlay( "Enabled Soft Particles (and depth capture).\nSoftened effects build on them." );
+			}
+		}
+		const char* descr = "Quake 4's effects (smoke, fire, sparks' glow) soften where they cut into walls and floors,\n"
+			"like the soft particles above: drawn as without, except for the last few units before the\n"
+			"surface they meet. Not in the original game. Builds on Soft Particles (turned on\n"
+			"automatically). opengl3/Vulkan only.";
 		AddCVarOptionTooltips( cvar, descr );
 	} ),
 	CVarOption( "r_enableDepthCapture", []( idCVar& cvar ) {

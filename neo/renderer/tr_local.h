@@ -110,11 +110,6 @@ SURFACES
 // drawSurf_t are always allocated and freed every frame, they are never cached
 static const int	DSF_VIEW_INSIDE_SHADOW	= 1;
 static const int	DSF_SOFT_PARTICLE		= 2; // #3878 - soft particles
-// DUDE: a soft particle that keeps the scene's depth test (Quake 4 effects, bse_softParticles): what
-// is in front of it hides it, and it fades out only over the space in front of what lies behind it
-// (the Dark Mod path the flag above takes fades a sphere about the sprite with no depth test, which
-// lets a sprite show through anything less than its radius in front of it). GL3/Vulkan only.
-static const int	DSF_SOFT_DEPTH_TESTED	= 4;
 
 typedef struct drawSurf_s {
 	const srfTriangles_t	*geo;

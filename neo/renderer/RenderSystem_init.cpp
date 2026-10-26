@@ -267,7 +267,7 @@ idCVar r_vidRestartAlwaysFull( "r_vidRestartAlwaysFull", 0, CVAR_RENDERER | CVAR
 // DG: for soft particles (ported from TDM)
 idCVar r_enableDepthCapture( "r_enableDepthCapture", "-1", CVAR_RENDERER | CVAR_INTEGER,
 		"enable capturing depth buffer to texture. -1: enable automatically (if soft particles are enabled), 0: disable, 1: enable", -1, 1 ); // #3877
-idCVar r_useSoftParticles( "r_useSoftParticles", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "Soften particle transitions when player walks through them or they cross solid geometry. Needs r_enableDepthCapture. Can slow down rendering!" ); // #3878
+idCVar r_useSoftParticles( "r_useSoftParticles", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "Remove the hard line where particles cut into walls and floors: drawn as without, except that they fade out over the last few units before the surface they meet. Needs r_enableDepthCapture. GL3/Vulkan only. Can slow down rendering!" ); // #3878
 
 // DUDE: dim smoke/steam/dust particles where the scene behind them is dark, so
 // smoke fades into shadow instead of glowing as grey blobs. Alpha-blended smoke is

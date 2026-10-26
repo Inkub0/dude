@@ -37,7 +37,7 @@ UBO_BINDING(0) uniform RenderParams {
 	vec4 u_localParam1;           // program.local[1] (material stage parm: magnitude / target color)
 
 	vec4 u_depthTexRecip;         // fp env[22] (soft particles: 1/currentDepth size, .zw the view's first pixel in a cropped Vulkan view)
-	vec4 u_particleRadius;        // fp env[23] (soft particles: radius, 1/fadeRange, 1/radius, .w 1: depth-tested fade in front of the scene)
+	vec4 u_particleRadius;        // fp env[23] (soft particles: radius, 1/fade depth in front of the scene)
 	vec4 u_channelMask;           // fp env[24] (soft particles: additive vs alpha channel mask)
 
 	vec4 u_color;                 // fixed-function glColor replacement (new shaders)

@@ -2723,12 +2723,13 @@ static bool RB_RHI_ParticleLooksLikeSmoke( const idMaterial *mat ) {
 =============
 RB_RHI_RenderSoftParticleStage
 
-SteveL #3878 particle softening, ported to the GL3 backend. Fades a particle
-quad where it approaches solid scene geometry (sampled from _currentDepth) and
-where it gets too close to the eye, so smoke/fog no longer show a hard
-intersection seam against walls and floors. Mirrors the soft-particle branch of
-RB_STD_T_RenderShaderPasses (draw_common.cpp): the depth test is forced off so
-the quad overdraws and the shader does the clipping instead.
+SteveL #3878 particle softening on the GL3/Vulkan backends, DUDE's variant (2026-10-26): the
+particle quad is drawn as it would be without softening - depth-tested, so whatever is in front of
+it hides it - and fades out only over the last few units in front of the geometry it cuts into
+(sampled from _currentDepth), so smoke, fire and dust lose the hard seam where they meet walls and
+floors and nothing else changes. The Dark Mod's original (still the legacy backend's, in
+draw_common.cpp) forced the depth test off and faded a sphere of the particle's radius, plus a fade
+near the eye, which let large particles show through anything nearer than that radius.
 
 Only reached for DSF_SOFT_PARTICLE surfaces with a positive radius and an
 additive or src-alpha blend; the front-end (R_AddDrawSurf) already gates the
@@ -2784,25 +2785,14 @@ static bool RB_RHI_RenderSoftParticleStage( rhi::RHI *r, const viewDef_t *viewDe
 		parms.color[0] = parms.color[1] = parms.color[2] = parms.color[3] = 1.0f;
 	}
 
-	// env[23]: { radius, 1/fadeRange, 1/radius }. fadeRange is the particle
-	// diameter for alpha blends (smoke is half as opaque with a wall mid-volume)
-	// but the radius for additive blends (glares lose nothing to overdraw).
-	float fadeRange = surf->particle_radius;
-	if ( src_blend == GLS_SRCBLEND_SRC_ALPHA ) {
-		fadeRange = surf->particle_radius * 2.0f;
-	}
+	// env[23]: { radius, 1/fadeRange }. DUDE: a soft particle is drawn as it would be without softening -
+	// depth-tested, so what is in front of it hides it, near the viewer too - and fades out only over
+	// the last few units in front of what it cuts into (12, or half the particle when smaller): just the
+	// hard line where a sprite meets a wall or the floor goes. The Dark Mod's original drew with no depth
+	// test and faded a sphere about the sprite, which let a sprite show through anything nearer than its
+	// radius (fire through a car's bonnet; 2026-10-26, user).
 	parms.particleRadius[0] = surf->particle_radius;
-	parms.particleRadius[1] = 1.0f / fadeRange;
-	parms.particleRadius[2] = 1.0f / surf->particle_radius;
-	// DUDE env[23].w: a depth-tested soft surface (DSF_SOFT_DEPTH_TESTED, Quake 4 effects) draws as it
-	// would without softening, but fades out over the last few units in front of what it cuts into -
-	// only the hard line where the sprite meets a wall or the floor goes (12 units, or half the
-	// particle when smaller); no fade near the viewer either
-	const bool depthTested = ( surf->dsFlags & DSF_SOFT_DEPTH_TESTED ) != 0;
-	if ( depthTested ) {
-		parms.particleRadius[1] = 1.0f / Min( 12.0f, surf->particle_radius * 0.5f );
-		parms.particleRadius[3] = 1.0f;
-	}
+	parms.particleRadius[1] = 1.0f / Min( 12.0f, surf->particle_radius * 0.5f );
 
 	// env[24]: colour-channel mask added to the fade multiplier. Additive blends
 	// fade their RGB; alpha blends fade their alpha (leave the rest at 1).
@@ -2915,10 +2905,10 @@ static bool RB_RHI_RenderSoftParticleStage( rhi::RHI *r, const viewDef_t *viewDe
 		backEnd.glState.currenttmu = 0;
 	}
 
-	// depth test off (the shader fades against captured depth); strip alpha-test
-	// bits, which the soft-particle shader doesn't implement
+	// the stage's own depth test (see env[23] above); strip alpha-test bits, which the soft-particle
+	// shader doesn't implement
 	rhi::PipelineDesc pd;
-	pd.stateBits = ( pStage->drawStateBits & ~GLS_ATEST_BITS ) | ( depthTested ? 0 : GLS_DEPTHFUNC_ALWAYS );
+	pd.stateBits = pStage->drawStateBits & ~GLS_ATEST_BITS;
 	pd.shader = prog;
 	pd.vertexLayout = rhi::VL_DRAWVERT;
 	pd.cullType = RB_RHI_CullFor( viewDef, surf->material->GetCullType() );
@@ -3317,7 +3307,8 @@ static void RB_RHI_RenderShaderPasses( rhi::RHI *r, const viewDef_t *viewDef, co
 	if ( surf->space->weaponDepthHack ) {
 		RB_EnterWeaponDepthHack();
 	}
-	if ( surf->space->modelDepthHack != 0.0f && !( surf->dsFlags & DSF_SOFT_PARTICLE ) ) {
+	// (soft particles too: they keep the depth test, so they take the hack as unsoftened ones do)
+	if ( surf->space->modelDepthHack != 0.0f ) {
 		RB_EnterModelDepthHack( surf->space->modelDepthHack );
 	}
 
@@ -3543,7 +3534,7 @@ static void RB_RHI_RenderShaderPasses( rhi::RHI *r, const viewDef_t *viewDef, co
 		}
 		r->SetPolygonOffset( false, 0.0f, 0.0f );
 	}
-	if ( surf->space->weaponDepthHack || ( surf->space->modelDepthHack != 0.0f && !( surf->dsFlags & DSF_SOFT_PARTICLE ) ) ) {
+	if ( surf->space->weaponDepthHack || surf->space->modelDepthHack != 0.0f ) {
 		RB_LeaveDepthHack();
 	}
 }
