@@ -150,6 +150,19 @@ Domains (count, values): `point` 11835 (n), `box` 11531 (2n), `line` 4862 (2n), 
   effects** (checked 2026-10-26: no map, entity def, script, material, effect or game source
   names them; the weapons' concrete and rock impacts are their own `impact_concrete` /
   `impact_rock` effects), so no player sees what draws there; only `testEffect` shows it.
+- Effect names the game or a map asks for that no file defines (`bseSweep`, 2026-10-26): `fx/teleporter`,
+  `fx/teleporter1` - `3`, `effects/ambient/drip_ring`, `effects/ambient/slime_splash_green`,
+  `effects/weapons/shotgun/eject`, `effects/weapons/machinegun/impact_armor`,
+  `effects/explosions/barrel`, `effects/vehicles/walker/machinegun/impact_electronics`,
+  `effects/vehicles/walker/maingun/fly`. The decl manager makes them the default effect, which plays
+  nothing, as in retail.
+- Media the effects' materials and sounds name that the paks lack (`bseSweep`'s parse warnings: about
+  50 images such as `gfx/effects/energy_sparks/exp1` - `exp13`, `gfx/effects/fluids_drips/bubble_*`,
+  and about 15 sounds such as `sound/impact/bullet/blt_dirt1` - `4`): they draw the default image and
+  play the default sound, as retail's loaders fall back too. One is a typo, not a gap:
+  `materials/monsters.mtr` names `models/gibs/pork_local.tga.tga` (the file is `pork_local.tga`), so the
+  loader's `.jpg` fallback hands the TGA to the JPG decoder ("stb_image was unable to load JPG") and that
+  gib material has no local normal map.
 - `explosions/surface/turret_exp` throws four debris entities (`debris_mturret_base`, `_sensor`,
   `_barrel1`, `_barrel2`) whose models, `models/mapobjects/strogg/machines/turrets/debris/*.lwo`,
   are not in the paks (the other 55 debris entity defs the effects name all have theirs). They fly

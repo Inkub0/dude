@@ -166,6 +166,7 @@ typedef struct {
 	int									startMs;
 	int									notPlayed;
 	int									notParsed;
+	int									notInData;		// names the game or a map asked for that no file defines
 	int									warningBatches;
 	int									mostParticles;
 	idStr								mostParticlesName;
@@ -210,12 +211,14 @@ static void BSE_Sweep_f( const idCmdArgs &args ) {
 	bseSweep.batch.Clear();
 	bseSweep.next = bseSweep.batches = 0;
 	bseSweep.batchEndMs = -1;
-	bseSweep.notPlayed = bseSweep.notParsed = bseSweep.warningBatches = bseSweep.mostParticles = 0;
+	bseSweep.notPlayed = bseSweep.notParsed = bseSweep.notInData = bseSweep.warningBatches = bseSweep.mostParticles = 0;
 	bseSweep.mostParticlesName.Clear();
 	bseSweep.notPlayedNames.Clear();
 	bseSweep.startMs = Sys_Milliseconds();
 
-	// every effect, parsed now (a decl that fails becomes the default effect: counted, not played)
+	// every effect, parsed now. A name the game or a map asked for that no file defines is an implicit
+	// decl (the default effect, which plays nothing, as in retail); a file that fails to parse becomes
+	// the default effect too. Both are counted, neither is played.
 	const int warningsBefore = Com_NumWarnings();
 	const int numDecls = declManager->GetNumDecls( DECL_EFFECT );
 	for ( int i = 0; i < numDecls; i++ ) {
@@ -223,9 +226,14 @@ static void BSE_Sweep_f( const idCmdArgs &args ) {
 		if ( decl == NULL || ( filter.Length() && idStr::FindText( decl->GetName(), filter, false ) < 0 ) ) {
 			continue;
 		}
+		if ( decl->IsImplicit() ) {
+			bseSweep.notInData++;
+			common->Printf( "bseSweep: '%s' is asked for but not in the data (plays nothing, as in retail)\n", decl->GetName() );
+			continue;
+		}
 		if ( decl->GetState() == DS_DEFAULTED ) {
 			bseSweep.notParsed++;
-			common->Printf( "bseSweep: '%s' did not parse\n", decl->GetName() );
+			common->Printf( "bseSweep: '%s' did not parse (%s, line %d)\n", decl->GetName(), decl->GetFileName(), decl->GetLineNum() );
 			continue;
 		}
 		bseSweep.effects.Append( decl );
@@ -287,8 +295,8 @@ void BSE_SweepFrame( idRenderWorld *world, int timeMs ) {
 
 	if ( bseSweep.next >= bseSweep.effects.Num() ) {
 		const float seconds = MS2SEC( Sys_Milliseconds() - bseSweep.startMs );
-		common->Printf( "bseSweep: %d effects in %d batches, %.0f s: %d did not play, %d did not parse, %d batches gave warnings; most particles alive in one effect: %d (%s)\n",
-			bseSweep.effects.Num(), bseSweep.batches, seconds, bseSweep.notPlayed, bseSweep.notParsed, bseSweep.warningBatches,
+		common->Printf( "bseSweep: %d effects in %d batches, %.0f s: %d did not play, %d did not parse, %d batches gave warnings (%d names asked for are not in the data); most particles alive in one effect: %d (%s)\n",
+			bseSweep.effects.Num(), bseSweep.batches, seconds, bseSweep.notPlayed, bseSweep.notParsed, bseSweep.warningBatches, bseSweep.notInData,
 			bseSweep.mostParticles, bseSweep.mostParticlesName.Length() ? bseSweep.mostParticlesName.c_str() : "-" );
 		for ( int i = 0; i < bseSweep.notPlayedNames.Num(); i++ ) {
 			common->Printf( "bseSweep: did not play: %s\n", bseSweep.notPlayedNames[i].c_str() );
