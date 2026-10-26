@@ -129,6 +129,9 @@ public:
 	// amplitude data): one letter per 1/30 s, 'a' = still. NULL when the shader has none.
 	const char *			GetShakeData( int index ) const;
 	bool					IsVO_ForPlayer( void ) const		{ return ( parms.soundShaderFlags & SSF_VO_FOR_PLAYER ) != 0; }
+	// the longest of its samples, in seconds (0 while none is loaded); a Quake 4 effect's sound
+	// segment lasts this long
+	float					GetTimeLength( void ) const;
 	// the Quake 4 game library's form of GetParms (quake4/SoundQ4.h defines it)
 	void					GetParms( struct soundShaderParmsQ4_s *out ) const;
 

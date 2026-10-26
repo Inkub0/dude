@@ -20,6 +20,7 @@ Doom 3 GPL Source Code (see ArbProgram.h for license header)
 #include "idlib/math/Random.h"
 #include "idlib/bv/Bounds.h"
 #include "idlib/geometry/DrawVert.h"
+#include "idlib/geometry/Winding.h"
 #include "framework/CVarSystem.h"
 #include "renderer/Model.h"
 #include "renderer/RenderWorld.h"
@@ -163,6 +164,12 @@ public:
 	int						budgetLooping;
 	float					trailDuration;		// how long a particle leaves a named trail, for its budget
 	idList<bseParticle_t>	particles;			// draw order: soonest to die first (complex: newest first)
+	// a sound segment's play: the volume and pitch it picked, and whether its looping sound is on
+	float					soundVolume;
+	float					soundFreqShift;
+	bool					soundPlaying;
+	// a light segment's render light (the engine side; -1: none)
+	int						lightHandle;
 
 							// a named trail's budget grows by what the segments leaving it hold
 	void					AddTrailBudget( int once, int looping, float duration );
@@ -178,7 +185,21 @@ private:
 	void					RefreshLengths( idBseEffect *effect );
 	void					EmitTrail( idBseEffect *effect, bseParticle_t &p, float time );
 	void					Insert( const bseParticle_t &p );
+	void					StartSound( idBseEffect *effect );
+	void					HandleSound( idBseEffect *effect, float time );
+	void					ProjectDecal( idBseEffect *effect );
 };
+
+// a light segment's render light at a time: from its live particle
+typedef struct {
+	idVec3					origin;				// world space
+	idMat3					axis;
+	idVec3					radius;
+	idVec3					color;				// the particle's colour as it is: fade and the owner's colour do not apply
+	const idMaterial *		material;			// NULL: the engine's default light
+	bool					shadows;
+	bool					specular;
+} bseLight_t;
 
 // a played effect
 class idBseEffect {
@@ -205,6 +226,8 @@ public:
 							// the ribbons of a segment's "trailType motion" particles
 	int						BuildMotionTrails( const idBseSegment &segment, float time, const bseView_t &view, idBseGeometry &geo ) const;
 	int						CountParticles( void ) const;
+							// a light segment's light at time; false when it has none then
+	bool					EvaluateLight( const idBseSegment &segment, float time, bseLight_t &light ) const;
 							// the live particles' bounds, if a service changed them since (BSE_SyncWorld: once
 							// before a scene renders, not every game tic)
 	void					UpdateBounds( void );
@@ -280,6 +303,15 @@ bool			BSE_ViewOrigin( const idRenderWorld *world, idVec3 &origin );	// the play
 idRandom &		BSE_Random( void );
 				// a model particle's mesh: its model's first surface, as Quake 4 draws it (NULL: none)
 const srfTriangles_t *	BSE_ModelGeometry( const idRenderModel *model );
+				// sounds, on the effect's emitter (the owner's referenceSoundHandle; none: silent)
+float			BSE_SoundLength( const idSoundShader *shader );		// seconds, 0 when not known
+bool			BSE_SoundLooping( const idSoundShader *shader );
+void			BSE_StartSound( idBseEffect *effect, int channel, const idSoundShader *shader, float diversity, bool looping );
+void			BSE_UpdateSound( idBseEffect *effect, float volume, float freqShift );	// the emitter follows the effect
+void			BSE_StopSound( idBseEffect *effect, int channel );
+				// a decal onto the world, as idRenderWorld::ProjectDecalOntoWorld takes it
+void			BSE_ProjectDecal( idBseEffect *effect, const idFixedWinding &winding, const idVec3 &projectionOrigin,
+					float depth, const idMaterial *material, int startTimeMs );
 
 /*
 ===============================================================================

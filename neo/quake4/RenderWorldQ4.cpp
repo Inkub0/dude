@@ -474,9 +474,10 @@ void idRenderWorldQ4Local::FreeEffectDef( qhandle_t effectHandle ) {
 	effects[effectHandle] = NULL;
 }
 
-// whether the game should give the effect a sound emitter (sound segments: phase Q4 S4)
+// whether the game should give the effect a sound emitter: it has sound segments
 bool idRenderWorldQ4Local::EffectDefHasSound( const renderEffect_t *reffect ) {
-	return false;
+	const idDeclEffect *decl = EffectDeclQ4( reffect );
+	return decl != NULL && decl->HasSound();
 }
 
 /*

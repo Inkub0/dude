@@ -601,7 +601,7 @@ void idEffectSegment::Clear( void ) {
 	density.min = density.max = 0.0f;
 	attenuation.min = attenuation.max = 0.0f;
 	volume.min = volume.max = 0.0f;
-	freqShift.min = freqShift.max = 0.0f;
+	freqShift.min = freqShift.max = 1.0f;		// no shift, as retail
 	detail = 0.0f;
 	scale = 0.0f;
 	particleCap = 0;
@@ -613,6 +613,7 @@ void idEffectSegment::Clear( void ) {
 	complex = false;
 	ignoreDuration = false;
 	temporary = false;
+	durationIsSound = false;
 }
 
 /*
@@ -1074,6 +1075,10 @@ static void FinishEffectSegment( idEffectSegment &segment ) {
 	segment.complex = false;
 	segment.ignoreDuration = false;
 	segment.temporary = false;
+	// a sound shader sets a sound segment's duration to the sound's length, unless it has its own
+	// (retail reads the length when the decl is parsed; DUDE when the segment plays, once the
+	// level's samples are in)
+	segment.durationIsSound = segment.type == EFFECT_SEG_SOUND && segment.soundShader != NULL && !( segment.keys & EFFECT_SKEY_DURATION );
 	switch ( segment.type ) {
 		case EFFECT_SEG_EMITTER:
 			segment.enabled = hasParticle && !( segment.flags & EFFECT_SEGMENT_CONSTANT );

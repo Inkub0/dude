@@ -306,6 +306,7 @@ public:
 	bool					complex;		// its particles need work every frame; the newest draws first
 	bool					ignoreDuration;	// its time does not make the effect last longer (sound)
 	bool					temporary;		// one particle slot (decals, debris)
+	bool					durationIsSound;	// a sound segment without "duration": its sound's length (taken at play time)
 };
 
 // effect keywords

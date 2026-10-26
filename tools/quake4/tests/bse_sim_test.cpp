@@ -23,6 +23,10 @@
 	inside its geometry, whole triangles. Reported per particle kind: the segments drawn and the
 	most vertices one segment took; and how many named trail segments received particles.
 
+	Lights, sounds, decals (S4): every light segment's light is evaluated ten times a second (gate:
+	finite, radius at least 1); every decal's projection is checked (gate: four finite corners);
+	sounds are counted as they start (a stand-in shader 1.5 s long, never looping).
+
 	Built and run by tools/quake4/test_bse_sim.sh. No game, no window, no GPU.
 */
 
@@ -93,6 +97,32 @@ static idRandom simRandom;
 float BSE_GameGravity( void ) { return GRAVITY; }
 bool BSE_ViewOrigin( const idRenderWorld *world, idVec3 &origin ) { return false; }	// no player: full detail
 idRandom &BSE_Random( void ) { return simRandom; }
+
+// sounds and decals: counted and checked, not played
+static long soundsStarted = 0, soundUpdates = 0, soundsStopped = 0, decalsProjected = 0, badDecals = 0;
+static long lightsEvaluated = 0, badLights = 0;
+float BSE_SoundLength( const idSoundShader *shader ) { return 1.5f; }
+bool BSE_SoundLooping( const idSoundShader *shader ) { return false; }
+void BSE_StartSound( idBseEffect *effect, int channel, const idSoundShader *shader, float diversity, bool looping ) { soundsStarted++; }
+void BSE_UpdateSound( idBseEffect *effect, float volume, float freqShift ) {
+	soundUpdates++;
+	if ( !std::isfinite( volume ) || !std::isfinite( freqShift ) ) {
+		badDecals++;		// counted with the bad decals: any bad S4 output fails the gate
+	}
+}
+void BSE_StopSound( idBseEffect *effect, int channel ) { soundsStopped++; }
+void BSE_ProjectDecal( idBseEffect *effect, const idFixedWinding &winding, const idVec3 &projectionOrigin,
+		float depth, const idMaterial *material, int startTimeMs ) {
+	decalsProjected++;
+	bool ok = winding.GetNumPoints() == 4 && std::isfinite( projectionOrigin.x ) && std::isfinite( projectionOrigin.y ) && std::isfinite( projectionOrigin.z );
+	for ( int i = 0; i < winding.GetNumPoints(); i++ ) {
+		const idVec5 &v = winding[i];
+		ok = ok && std::isfinite( v.x ) && std::isfinite( v.y ) && std::isfinite( v.z );
+	}
+	if ( !ok ) {
+		badDecals++;
+	}
+}
 
 // every model particle's model: a cube 8 units across, its faces' own vertices
 static idDrawVert cubeVerts[24];
@@ -258,6 +288,16 @@ static simResult_t Simulate( const idDeclEffect *decl, bool loop, float seconds 
 			if ( segment.particles.Num() > 0 ) {
 				fed[s] = true;
 			}
+			if ( segment.tmpl->type == EFFECT_SEG_LIGHT && frame % 6 == 0 ) {
+				bseLight_t light;
+				if ( effect.EvaluateLight( segment, t, light ) ) {
+					lightsEvaluated++;
+					if ( !Finite( light.origin ) || !Finite( light.color ) || !Finite( light.radius ) ||
+							light.radius.x < 1.0f || light.radius.y < 1.0f || light.radius.z < 1.0f ) {
+						badLights++;
+					}
+				}
+			}
 			if ( segment.tmpl->hasParticles && segment.particles.Num() && frame % 6 == 0 ) {
 				geo.Clear();
 				effect.BuildSegment( segment, t, view, geo );
@@ -376,5 +416,8 @@ int main( int argc, char **argv ) {
 	}
 	printf( "== named trail segments that received particles (once): %d of %d\n", namedTrailsFed, namedTrails );
 	printf( "== bad geometry (vertex not finite, index outside, broken triangle): %ld\n", badGeometry );
-	return ( failed > 0 || notFinite > 0 || notEnded > 0 || overBudget > 0 || badGeometry > 0 ) ? 1 : 0;
+	printf( "== lights evaluated ten times a second: %ld, bad (not finite, radius under 1): %ld\n", lightsEvaluated, badLights );
+	printf( "== sounds started: %ld (emitter updates %ld, stops %ld); decals projected: %ld, bad (or bad sound parms): %ld\n",
+		soundsStarted, soundUpdates, soundsStopped, decalsProjected, badDecals );
+	return ( failed > 0 || notFinite > 0 || notEnded > 0 || overBudget > 0 || badGeometry > 0 || badLights > 0 || badDecals > 0 ) ? 1 : 0;
 }

@@ -278,6 +278,28 @@ The rules `neo/renderer/bse/BseEffect.cpp` implements; sources in the table of �
 - **Surfaces.** A segment draws at most 10000 vertices and 30000 indexes (motion trails too):
   particles past that are not drawn, as in retail.
 
+### 3.3 Lights, sounds and decals (S4, in DUDE's words)
+
+- **Lights.** A light segment makes one light per window: a particle born at the segment's start
+  (a live one is not replaced). While it lives it is a point light of the effect's world: where
+  the particle is, its size the radius (at least 1), oriented with the effect, its material the
+  particle's (none given: the engine's default light). Its colour is the particle's colour as it
+  is: retail applies neither the particle's fade nor the owner's colour or brightness, and leaves
+  parm 3 at 0. Shadows and specular only with `shadows` / `specular`. A `constant` segment's light
+  lives as long as the effect. DUDE updates effect lights before each scene, evaluated at the
+  scene's time, so they move smoothly between game tics.
+- **Sounds.** A sound segment plays its shader on the effect's emitter (the game allocates one when
+  `EffectDefHasSound` says the decl has sound segments): on channel `SCHANNEL_ONE` + the segment's
+  index, a random sample choice, the volume and pitch picked from `volume` / `freqShift` (no
+  `volume`: the shader's own; no `freqShift`: 1), the emitter moved to the effect on every service.
+  A one-shot plays again each loop; a looping shader starts once and stops with the effect. Without
+  `duration`, the segment lasts as long as its sound (1 s when not known), which keeps a one-shot
+  effect - and the emitter the game frees with it - alive until its sound ends; a looping sound
+  does not.
+- **Decals.** A decal segment projects one decal at its start: a square of the particle's size
+  (half width), turned by its rotation, onto what lies within 8 units behind the effect along its
+  x axis (impacts play along the surface normal), with the particle's material.
+
 ## 4. Stages and gates
 
 One branch per stage, merged to master at its gate after the user's verification. The user runs
@@ -288,7 +310,7 @@ every in-game check; nothing here launches the game.
 | **S1 Decl** — **BUILT 2026-10-25** | The grammar of §2: `neo/renderer/bse/DeclEffect.{h,cpp}`, strict value counts, references through the decl / model managers, named trails resolved | `tools/quake4/test_effect_parse.sh` (below) |
 | S2 Runtime + sprites — **DONE 2026-10-25** (gate passed: user firefights in Quake 4 and Doom 3, ASAN clean on both) | Manager, effect instances behind the render world calls, timing (start, duration, count, spawner bursts, loops, delay segments, looping ambient effects already in full flow), domains and modifiers, envelopes, motion, `locked` / `attenuation` / `detail` / `density` / `particleCap`, sprites, segment draw order, `testEffect` | Offline simulation over every retail emitter (no NaN, population follows the emission rate, particles stay within the decl's `size`); the user compares 10 sprite-only effects covering every domain, modifier and envelope option with retail on GL3 and Vulkan (`moveables/barrel/debris_fly`, `monsters/scientist/obscuring_cloud`, `weapons/nailgun/guide`, `ambient/dustedge_mp`, `monsters/teleport_dropper/blast_exhaust`, `monsters/fatty/ambient_acid`, `steam/mcc_vent_slow`, `smoke/air_defense_hillsa`, `mapobjects/casket_door2_inv`, `levels/dispersal/supportbreak`); an airdefense1 fight; no FSR2 ghosting; ASAN `--q4`; Doom 3 / RoE smoke |
 | S3 Particle kinds — **DONE 2026-10-26** (gate passed: all 20 comparisons ticked, play checks, ASAN clean) | line, oriented, electricity, linked, model; `motion` / `burn` / named trails | Offline geometry test; the user compares `weapons/nailgun/impact_default`, `ambient/acid_react_waste`, `weapons/lightninggun/tube` + `impact`, `weapons/railgun/trail`, `monsters/strogg_flyer/bomb_fly`, `moveables/barrel/explode`, `weapons/nailgun/impact_glass`, `monsters/makron/blaster_fly`, `monsters/gunner/grenade_burst`; lightning gun and railgun in play |
-| S4 Lights, sounds, decals | light segments as render lights; sound segments on the effect's emitter (`EffectDefHasSound`, random sample choice); decal segments projected | Rocket light, impact decals, impact sounds varying per shot; a busy fight on `dude_rtx 2` with no device loss; GL3 and Vulkan |
+| S4 Lights, sounds, decals — **BUILT 2026-10-26**, at its gate | light segments as render lights; sound segments on the effect's emitter (`EffectDefHasSound`, random sample choice); decal segments projected | Rocket light, impact decals, impact sounds varying per shot; a busy fight on `dude_rtx 2` with no device loss; GL3 and Vulkan |
 | S5 Physics and children | traces through `Translation`, bounce / remove, impact and timeout effects, nested effect segments, debris through `SpawnClientMoveable`, `entityDef` on other kinds, `persist` | Offline physics test; wall impacts, `wounds/blood`, harvester claw debris, turret deaths, `bse_physics` / `bse_debris`; ASAN |
 | S6 View effects | `shake` scaled by distance, `doubleVision`, `tunnel` | Explosions shake by distance, `mapobjects/buzzsaw_chop`, the intro blur |
 | S7 Cvars and tools | the retail `bse_*` cvars, rate limits, `bseSweep` + log summary, debug overlay, opt-in extras, performance | quake4-port.md §6's Q4 gate: `bseSweep` clean over all 1172, ~20 effects signed off against retail, OpenQ4's prose checklist, Doom 3 / RoE / LM smoke, ABI 0 breaks |
@@ -347,6 +369,40 @@ life).
 runs of both titles with S2 left no report; the Quake 4 log's warnings are the known retail data
 quirks only. Merged to master (`ce6be7d9`). The side-by-side retail comparisons carry over to the
 S3 gate, where the effects that mix sprites with lines, oriented quads and bolts become complete.
+
+**S4 as built.** The runtime (`BseEffect.cpp`) handles the three segment kinds of §3.3 through
+engine hooks, so the offline test keeps running it: `BSE_StartSound` / `BSE_UpdateSound` /
+`BSE_StopSound` reach the game's emitter through the Quake 4 sound facade
+(`SoundSystemQ4()->EmitterForIndex`, the calls retail's effects make), `BSE_ProjectDecal` calls
+`ProjectDecalOntoWorld`, and `EvaluateLight` gives a light segment's light, which `BSE_SyncWorld`
+adds, updates and frees as a render light before each scene. `idSoundShader::GetTimeLength` (new,
+non-virtual: the dhewm3 ABI is untouched) gives a sound's length. `EffectDefHasSound` now answers
+from the decl. `testEffect` allocates an emitter of its own (freed with the effect, letting its
+sounds finish) and puts an effect that leaves a decal on the surface in view. The decl's default
+`freqShift` is 1 (was 0). Effect lights go through the engine's light path like the game's own
+muzzle flashes; the ray-traced tiers' light table caps itself (256) and drops the rest.
+
+Offline (`test_bse_sim.sh`, now also evaluating every light ten times a second and checking every
+decal's projection and every sound's parameters): 0 bad lights, 0 bad decals; about 4900 light
+samples, 9800 sounds started and 4200 decals over the run. Parse test, ABI check (0 breaks), Linux
+and Windows builds, `q4base.so`.
+
+**S4 gate (user):** on the Effect Browser, the stage selector set to stage 4, the "Stage 4 gate"
+effects - their particles are stage 3's; this stage adds the light, the sound and the decal:
+1. With `testEffect` (an impact goes on the wall in view; sounds play): the rocket's flight
+   (`weapons/rocketlauncher/fly`: an orange light that follows it, the looping rocket sound), the
+   rocket and grenade impacts (`weapons/rocketlauncher/impact`, `weapons/grenadelauncher/impact`:
+   explosion sounds, scorch), the bullet impacts (`weapons/machinegun/impact_concrete`,
+   `weapons/shotgun/impact_concrete`, `weapons/nailgun/impact_default`,
+   `weapons/hyperblaster/impact_concrete`: a mark on the wall, a sound that varies between shots),
+   `weapons/grenadelauncher/trail` and `monsters/gunner/grenade_fly` (a light that stays with the
+   effect), `monsters/strogg_flyer/bomb_burst` and `monsters/scientist/concussion_burst` (sound,
+   light and scorch together), `monsters/bossbuddy/charge2` (lights casting shadows).
+2. In play: the rocket launcher (light following the rocket, its sound stopping at the impact),
+   machine gun and shotgun on walls (marks, sounds varying per shot), a grenade fight.
+3. A busy fight on `dude_rtx 2` (Path Tracing): no device loss; GL3 and Vulkan.
+4. `tools/run-asan.sh --q4` for a few minutes of play; Doom 3 / RoE smoke (`sound.h` and the
+   scene hook are shared).
 
 **S3 as built.** `BseEffect.cpp` builds every drawn kind (§3.2) into a growable geometry
 (`idBseGeometry`) for a viewer in the effect's frame - `BuildSegment` (the particles, with burn

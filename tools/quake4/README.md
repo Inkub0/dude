@@ -74,7 +74,8 @@ Q4BASE="/path/to/Quake 4/q4base" python3 tools/quake4/q4_inventory.py > /tmp/q4_
   every segment's geometry (every particle kind, motion and burn trails; a stand-in cube for models)
   and checks it: vertices finite, indexes inside, whole triangles. Also: the retail bounds formula
   against each file's `size`, particles past twice that radius, the largest segment per particle kind,
-  and the named trails that received particles. Needs a configured `build/`.
+  and the named trails that received particles. Since S4 it also evaluates every light segment's light
+  and checks every decal projection and sound parameter (gate: none bad). Needs a configured `build/`.
 - `q4_effect_census.py census|compare|refs` — the independent effect census above; `refs <q4base>
   <parser output>` resolves tables, materials, sound shaders, effects, entity defs and models.
 - `check_engine_strings.py [q4base]` — every `#str_` id the engine source uses, resolved as the

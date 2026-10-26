@@ -29,6 +29,10 @@ idCVar *bse_scale = NULL;
 idCVar *bse_maxParticles = NULL;
 idCVar *bse_debug = NULL;
 
+// a sound segment's channel on the effect's emitter: the first after the sound system's "any"
+// channel (SCHANNEL_ONE), plus the segment's index, as retail
+const int BSE_SOUND_CHANNEL = 1;
+
 static int BSE_ParticleCap( void ) {
 	return idMath::ClampInt( 0, BSE_MAX_PARTICLES, BSE_MaxParticles() );
 }
@@ -295,6 +299,10 @@ void idBseSegment::Init( idBseEffect *effect, int index, float time ) {
 	fastInterval = slowInterval = 0.0f;
 	budget = budgetOnce = budgetLooping = 0;
 	trailDuration = 0.0f;
+	soundVolume = 0.0f;
+	soundFreqShift = 1.0f;
+	soundPlaying = false;
+	lightHandle = -1;
 	particles.Clear();
 	particles.SetGranularity( 32 );
 
@@ -346,9 +354,20 @@ void idBseSegment::InitTime( idBseEffect *effect, float time ) {
 		segStartTime = segEndTime = time;	// a trail follows the particles that leave it
 	} else {
 		segStartTime = BSE_RandomRange( tmpl->start.min, tmpl->start.max ) + time;
-		segEndTime = BSE_RandomRange( tmpl->duration.min, tmpl->duration.max ) + segStartTime;
+		if ( tmpl->durationIsSound ) {
+			// as long as its sound (1 s when the length is not known, as retail)
+			float length = BSE_SoundLength( tmpl->soundShader );
+			if ( length <= BSE_TIME_EPSILON ) {
+				length = 1.0f;
+			}
+			segEndTime = segStartTime + length;
+		} else {
+			segEndTime = BSE_RandomRange( tmpl->duration.min, tmpl->duration.max ) + segStartTime;
+		}
 	}
-	if ( !tmpl->ignoreDuration || !effect->looping ) {
+	// a sound keeps a one-shot effect (and its emitter) alive to its end, unless it loops
+	const bool loopingSound = tmpl->type == EFFECT_SEG_SOUND && tmpl->soundShader != NULL && BSE_SoundLooping( tmpl->soundShader );
+	if ( !tmpl->ignoreDuration || ( !effect->looping && !loopingSound ) ) {
 		effect->SetDuration( segEndTime - time );
 	}
 }
@@ -552,12 +571,113 @@ bool idBseSegment::Check( idBseEffect *effect, float time ) {
 			expired = true;
 			return true;
 		}
+		case EFFECT_SEG_SOUND:
+			StartSound( effect );
+			expired = true;
+			return true;
+		case EFFECT_SEG_DECAL:
+			if ( BSE_Render() ) {
+				ProjectDecal( effect );
+			}
+			expired = true;
+			return true;
+		case EFFECT_SEG_LIGHT:
+			// one light per window: a live one is not replaced (the engine turns it into a render light)
+			if ( tmpl->particle.type == EFFECT_PARTICLE_LIGHT && particles.Num() == 0 ) {
+				Spawn( effect, segStartTime, 0.0f );
+			}
+			expired = true;
+			return true;
 		default:
-			// trails follow their particles (S3); delays only time the loop; sounds, decals, lights,
-			// nested effects and view effects come with S4-S6
+			// trails follow their particles; delays only time the loop; nested effects and view
+			// effects come with S5-S6
 			expired = true;
 			return true;
 	}
+}
+
+/*
+================
+idBseSegment::StartSound
+
+A sound segment's start: a volume and pitch from its ranges, the emitter moved to the effect, and
+the sound on the segment's own channel with a random sample choice. A one-shot plays again each
+loop; a looping sound starts once and plays until the effect stops.
+================
+*/
+void idBseSegment::StartSound( idBseEffect *effect ) {
+	const idSoundShader *shader = tmpl->soundShader;
+	if ( shader == NULL ) {
+		return;
+	}
+	soundVolume = BSE_RandomRange( tmpl->volume.min, tmpl->volume.max );
+	soundFreqShift = BSE_RandomRange( tmpl->freqShift.min, tmpl->freqShift.max );
+	BSE_UpdateSound( effect, soundVolume, soundFreqShift );
+	const int channel = BSE_SOUND_CHANNEL + index;
+	if ( !BSE_SoundLooping( shader ) ) {
+		BSE_StartSound( effect, channel, shader, BSE_Random().RandomFloat(), false );
+	} else if ( !soundPlaying ) {
+		soundPlaying = true;
+		BSE_StartSound( effect, channel, shader, BSE_Random().RandomFloat(), true );
+	}
+}
+
+// every service from the segment's start: the emitter follows the effect; a stopped effect's
+// looping sound stops
+void idBseSegment::HandleSound( idBseEffect *effect, float time ) {
+	if ( tmpl->type != EFFECT_SEG_SOUND || tmpl->soundShader == NULL || time < segStartTime ) {
+		return;
+	}
+	if ( effect->stopped ) {
+		if ( soundPlaying ) {
+			BSE_StopSound( effect, BSE_SOUND_CHANNEL + index );
+			soundPlaying = false;
+		}
+		return;
+	}
+	BSE_UpdateSound( effect, soundVolume, soundFreqShift );
+}
+
+/*
+================
+idBseSegment::ProjectDecal
+
+A decal segment's mark, made once at its start: a square of the particle's size, turned by its
+rotation, projected 8 units into the surface the effect's x axis points away from (an impact
+effect plays along the surface normal). Retail's projection, depth and texture corners.
+================
+*/
+void idBseSegment::ProjectDecal( idBseEffect *effect ) {
+	const idEffectParticle &tmplP = tmpl->particle;
+	if ( tmplP.type != EFFECT_PARTICLE_DECAL || tmplP.material == NULL ) {
+		return;
+	}
+	bseParticle_t p;
+	SpawnParticle( effect, p, segStartTime, 0.0f, NULL, NULL );
+	const float size = p.sizeStart.x;
+	idVec3 normal = -effect->currentAxis[0];
+	if ( normal.LengthSqr() <= 1e-8f ) {
+		return;
+	}
+	normal.Normalize();
+	idVec3 tangent0, tangent1;
+	normal.NormalVectors( tangent0, tangent1 );
+	float s, c;
+	idMath::SinCos( p.rotateStart.x, s, c );
+	const idVec3 axis0 = tangent0 * c - tangent1 * s;
+	const idVec3 axis1 = -tangent0 * s - tangent1 * c;
+
+	const float depth = 8.0f;
+	const idVec3 centre = effect->currentOrigin + normal * depth;
+	static const float corners[4][4] = {		// x, y, s, t
+		{ 1.0f, 1.0f, 1.0f, 1.0f }, { -1.0f, 1.0f, 0.0f, 1.0f }, { -1.0f, -1.0f, 0.0f, 0.0f }, { 1.0f, -1.0f, 1.0f, 0.0f }
+	};
+	idFixedWinding winding;
+	for ( int i = 0; i < 4; i++ ) {
+		const idVec3 point = centre + axis0 * ( corners[i][0] * size ) + axis1 * ( corners[i][1] * size );
+		winding += idVec5( point, idVec2( corners[i][2], corners[i][3] ) );
+	}
+	BSE_ProjectDecal( effect, winding, effect->currentOrigin - normal * depth, depth, tmplP.material, (int)( segStartTime * 1000.0f ) );
 }
 
 /*
@@ -924,6 +1044,7 @@ bool idBseSegment::UpdateParticles( idBseEffect *effect, float time ) {
 	const bool persist = ( tmpl->particle.flags & EFFECT_PARTICLE_PERSIST ) != 0;
 	const int trail = tmpl->particle.trailType == EFFECT_TRAIL_SEGMENT ? tmpl->particle.trailSegment : -1;
 	const bool smoker = trail >= 0 && trail != index && trail < effect->segments.Num();
+	HandleSound( effect, time );
 	int kept = 0;
 	for ( int i = 0; i < particles.Num(); i++ ) {
 		if ( smoker ) {
@@ -1135,6 +1256,9 @@ void idBseEffect::UpdateParticleBounds( float time ) {
 	particleBounds.Clear();
 	for ( int i = 0; i < segments.Num(); i++ ) {
 		const idBseSegment &segment = segments[i];
+		if ( !segment.tmpl->hasParticles ) {
+			continue;		// lights and decals draw nothing of their own
+		}
 		const idEffectParticle &tmplP = segment.tmpl->particle;
 		const idDeclTable *sizeTable = tmplP.parms[EFFECT_PARM_SIZE].envelope.table;
 		const idDeclTable *lengthTable = tmplP.parms[EFFECT_PARM_LENGTH].envelope.table;
@@ -1841,6 +1965,40 @@ int idBseEffect::BuildMotionTrails( const idBseSegment &segment, float time, con
 		drawn++;
 	}
 	return drawn;
+}
+
+/*
+================
+idBseEffect::EvaluateLight
+
+A light segment's light at time, from its particle: where it is (in the world), its radius (the
+size, at least 1), its colour - the particle's colour as it is: retail applies neither its fade nor
+the owner's colour and brightness - and its material (none keyed: the engine's default light).
+A constant segment's light lives as long as the effect.
+================
+*/
+bool idBseEffect::EvaluateLight( const idBseSegment &segment, float time, bseLight_t &light ) const {
+	if ( segment.tmpl->type != EFFECT_SEG_LIGHT || segment.particles.Num() == 0 ) {
+		return false;
+	}
+	const idEffectParticle &tmplP = segment.tmpl->particle;
+	bseParticle_t p = segment.particles[0];
+	if ( ( segment.tmpl->flags & EFFECT_SEGMENT_CONSTANT ) && time >= p.endTime - BSE_TIME_EPSILON ) {
+		p.endTime = time + 1.0f;
+	}
+	idVec3 position, size, rotate;
+	idVec4 color;
+	if ( !EvaluateParticle( p, tmplP, time, position, color, size, rotate ) ) {
+		return false;
+	}
+	light.origin = currentOrigin + currentAxis * position;
+	light.axis = currentAxis;
+	light.radius.Set( Max( 1.0f, size.x ), Max( 1.0f, size.y ), Max( 1.0f, size.z ) );
+	light.color.Set( color.x, color.y, color.z );
+	light.material = ( tmplP.keys & EFFECT_PKEY_MATERIAL ) ? tmplP.material : NULL;
+	light.shadows = ( tmplP.flags & EFFECT_PARTICLE_SHADOWS ) != 0;
+	light.specular = ( tmplP.flags & EFFECT_PARTICLE_SPECULAR ) != 0;
+	return true;
 }
 
 int idBseEffect::CountParticles( void ) const {

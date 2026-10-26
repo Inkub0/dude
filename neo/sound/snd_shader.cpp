@@ -576,6 +576,25 @@ bool idSoundShader::HasDefaultSound() const {
 
 /*
 ===============
+idSoundShader::GetTimeLength
+
+DUDE: the longest sample's play time; a sample's size counts every channel.
+===============
+*/
+float idSoundShader::GetTimeLength( void ) const {
+	float longest = 0.0f;
+	for ( int i = 0; i < numEntries; i++ ) {
+		const idSoundSample *sample = entries[i];
+		if ( sample != NULL ) {
+			const int channels = Max( 1, (int)sample->objectInfo.nChannels );
+			longest = Max( longest, (float)sample->LengthIn44kHzSamples() / (float)( channels * PRIMARYFREQ ) );
+		}
+	}
+	return longest;
+}
+
+/*
+===============
 idSoundShader::GetParms
 ===============
 */
