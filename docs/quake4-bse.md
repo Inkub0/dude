@@ -2,8 +2,8 @@
 
 Status (2026-10-26): **plan approved; S1 (the effect decl), S2 (the runtime and sprites), S3
 (every drawn particle kind and the trails), S4 (lights, sounds, decals) and S5 (particle physics,
-impacts, debris, nested effects) and S6 (view effects) done and on master; S7 (cvars and
-tools, the Quake 4 phase gate) built on `feat/quake4-bse-cvars-tools`, its gate pending.** Effects draw every particle kind, light their
+impacts, debris, nested effects), S6 (view effects) and S7 (cvars and tools) done and on master;
+the Quake 4 phase gate (row Q4 of quake4-port.md §6) passed 2026-10-26.** Follow-ups in §6. Effects draw every particle kind, light their
 surroundings, play their sounds, leave their decals, collide with the world, throw debris, start
 their child effects and shake or blur the player's view. Visual checks
 go through the user's Quake 4 Effect Browser (a claude.ai page listing all 1172 effects, what
@@ -424,7 +424,7 @@ every in-game check; nothing here launches the game.
 | S4 Lights, sounds, decals — **DONE 2026-10-26** (gate passed: 12 effects ticked, play checks, no device loss, ASAN clean) | light segments as render lights; sound segments on the effect's emitter (`EffectDefHasSound`, random sample choice); decal segments projected | Rocket light, impact decals, impact sounds varying per shot; a busy fight on `dude_rtx 2` with no device loss; GL3 and Vulkan |
 | S5 Physics and children — **DONE 2026-10-26** (gate passed: all 16 effects, play checks, ASAN clean) | traces through `Translation`, bounce / remove, impact and timeout effects, nested effect segments, debris through `SpawnClientMoveable`, `entityDef` on other kinds, `persist` | Offline physics test; wall impacts, `wounds/blood`, harvester claw debris, turret deaths, `bse_physics` / `bse_debris`; ASAN |
 | S6 View effects — **DONE 2026-10-26** (gate passed: the view effects, the intro blur after two renderer fixes) | `shake` scaled by distance, `doubleVision`, `tunnel` | Explosions shake by distance, `mapobjects/buzzsaw_chop`, the intro blur |
-| S7 Cvars and tools — **BUILT 2026-10-26** (gate pending) | the retail `bse_*` cvars, rate limits, `bseSweep` + log summary, debug overlay, opt-in extras, performance | quake4-port.md §6's Q4 gate: `bseSweep` clean over all 1172, ~20 effects signed off against retail, OpenQ4's prose checklist, Doom 3 / RoE / LM smoke, ABI 0 breaks |
+| S7 Cvars and tools — **DONE 2026-10-26** (the phase gate passed) | the retail `bse_*` cvars, rate limits, `bseSweep` + log summary, debug overlay, opt-in extras, performance | quake4-port.md §6's Q4 gate: `bseSweep` clean over all 1172, ~20 effects signed off against retail, OpenQ4's prose checklist, Doom 3 / RoE / LM smoke, ABI 0 breaks |
 
 `testEffect` moves from S7 into S2: every later gate needs it.
 
@@ -622,6 +622,19 @@ identical); parse test 1172 / 0; ABI 0 breaks; Linux and Windows builds; `q4base
    shows, as retail 1.4's limit promises).
 4. `tools/run-asan.sh --q4` during a sweep; Doom 3 / RoE / Lost Mission smoke (the session's
    warning counter and the scene hook are shared); ABI 0 breaks (done).
+
+**S7 gate result = the Quake 4 phase gate (2026-10-26, user): passed, merged to master.**
+1. `bseSweep` (ASAN build, Vulkan): 1157 effects in 97 batches, 341 s - 0 did not play, 0 did not
+   parse, 0 batches gave warnings; the 11 names the data lacks reported apart (§2); most particles
+   alive in one effect 2414 (`levels/core/bury`); no ASAN report; Vulkan validation clean over 26836
+   frames. The first sweep had called those 11 names parse failures (fixed, 2e1c9dbd).
+2. The 20 stage-7 effects ticked next to retail on the Effect Browser.
+3. Every cvar as described (§3.6). Two finds on the way, fixed: `bse_softParticles` - three rounds
+   to the narrow, depth-tested fade the user asked for, then given to every title's soft particles
+   (82494104, ImGui updated); `bse_showBounds` under sub-native FSR2 drew in the render-size corner -
+   all debug overlays did (9dac6b31: they take the display-size composite's rect).
+4. Doom 3 smoke after the shared changes (soft particles, debug overlays, the warning counter).
+Queued after the gate (user): the interaction table overflow, HDR for crop-view frames (§6).
 
 **S6 gate result (2026-10-26, user): passed, merged to master.** Shakes ticked on the Effect
 Browser (rocket and grenade impacts by distance, `camerashakelarge`, the gladiator's footstomp,
