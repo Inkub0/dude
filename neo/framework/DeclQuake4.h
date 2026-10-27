@@ -23,6 +23,7 @@ Doom 3 GPL Source Code (see ArbProgram.h for license header)
 #include "framework/DeclManager.h"
 #include "framework/DeclEntityDef.h"
 #include "framework/CVarSystem.h"
+#include "sound/sound.h"
 #include "renderer/bse/DeclEffect.h"
 
 /*
@@ -80,9 +81,33 @@ public:
 	const char *			GetText( void ) const { return lipText; }		// usually a #str_ id
 	const char *			GetVisemes( const char *language ) const { return visemes.GetString( language, "" ); }
 	const idDict &			GetAllVisemes( void ) const { return visemes; }
-							// the game's language's visemes (sys_lang), else English's
+							// the game's language's visemes (sys_lang) when this line is voiced in
+							// that language, else English's. Retail took sys_lang's track only when
+							// that language's VO was installed (common->LanguageHasVO); the sound
+							// shader falls back to English per line (snd_shader.cpp), so the check
+							// is per line too: the line's sample must have resolved into
+							// sound/vo_<sys_lang>/. Otherwise the mouths followed e.g. the Italian
+							// track (more visemes per line) while the English recording played.
+							// Inline, virtual calls only: the Quake 4 game library calls this.
 	const char *			GetLipSyncData( void ) const {
-								return visemes.GetString( cvarSystem->GetCVarString( "sys_lang" ), visemes.GetString( "english", "" ) );
+								const char *english = visemes.GetString( "english", "" );
+								const char *lang = cvarSystem->GetCVarString( "sys_lang" );
+								if ( idStr::Icmp( lang, "english" ) == 0 ) {
+									return english;
+								}
+								const char *track = visemes.GetString( lang, "" );
+								if ( track[0] == '\0' ) {
+									return english;
+								}
+								const idSoundShader *voice = declManager->FindSound( GetName(), false );
+								if ( voice == NULL || voice->GetNumSounds() <= 0 ) {
+									return english;
+								}
+								const idStr voFolder = va( "sound/vo_%s/", lang );
+								if ( idStr::Icmpn( voice->GetSound( 0 ), voFolder.c_str(), voFolder.Length() ) != 0 ) {
+									return english;
+								}
+								return track;
 							}
 
 private:
