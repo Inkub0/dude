@@ -3925,8 +3925,27 @@ static rhi::RenderTargetHandle RB_RHI_AcquireCubeTarget( rhi::RHI *r, int lightI
 			firstFree = victim;
 		}
 	}
+	// slot table full while under budget: every point light met since the map loaded
+	// still holds its slot, so evict the least-recently-used one not touched this frame
+	// (as the 2D cache does). Without this, past 128 lights every new light re-rendered
+	// its scratch cube each frame until the next map load.
 	if ( firstFree < 0 ) {
-		return 0;				// slot table full (rare) -> scratch
+		int victim = -1;
+		for ( int i = 0; i < MAX_SHADOW_CUBE_CACHE; i++ ) {
+			if ( rhiCubeCache[i].rt && rhiCubeCache[i].lastFrame != rhiCubeCacheFrameNo
+			     && ( victim < 0 || rhiCubeCache[i].lastFrame < rhiCubeCache[victim].lastFrame ) ) {
+				victim = i;
+			}
+		}
+		if ( victim < 0 ) {
+			return 0;			// every slot in use this frame -> scratch
+		}
+		r->DestroyRenderTarget( rhiCubeCache[victim].rt );
+		rhiCubeCacheBytes -= rhiCubeCache[victim].bytes;
+		rhiCubeCache[victim].lightIndex = -1;
+		rhiCubeCache[victim].rt = 0;
+		rhiCubeCache[victim].bytes = 0;
+		firstFree = victim;
 	}
 
 	rhi::RenderTargetHandle rt = r->CreateRenderTargetCube( rhi::IF_DEPTH24, size );
