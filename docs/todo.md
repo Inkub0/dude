@@ -491,8 +491,11 @@ emissive on): gather 24.7 / 13.6 / 8.4 ms at 10 / 4 / 1 samples before those cha
   O(all triangles), plus a linear emitters.cfg / override scan per row) and any flux change re-uploads the whole CDF.
   Incremental rows (only the moved group's), a hashed emitters.cfg lookup, a CDF slice upload. No fps while GPU-bound;
   helps hitches on mover-heavy maps. Read `r_rtEmissiveTableDebug 1`'s "mover upkeep" line first. Effort S-M.
-- **Denoiser knobs** (tuning, not code): `AntiFirefly` off (NRD: ~7-10% of the denoise), Atrous 2 instead of 3. Fidelity
-  choices for the user.
+- **Denoiser knobs** — **no engineering left** (checked 2026-10-27): every ReLAX knob is a saved cvar passed to NRD each frame
+  and already in the ImGui ReSTIR DI section (`r_rtReStirDIRelaxFirefly` "Anti-Firefly", `r_rtReStirDIRelaxAtrous` "A-trous
+  Iterations" 2-8, Prepass, Fast, HistoryMs, Phi, VarianceHist, ConfRelax). Open only as a USER DECISION on the shipped
+  defaults: Anti-Firefly off (~7-10% of `restir.di.denoise`, ~0.2-0.3 ms; watch for lone bright pixels near emitters) and
+  A-trous 2 instead of 3 (guess ~0.3-0.4 ms; watch for blotchier shadows / dim-area noise) - A/B on mars_city1 first.
 - **Not to re-propose** (tried and rejected): GI half-rate, DI reservoir reworks (two-reservoir emitter split, K-pick
   emitter reservoir), fewer grid slots, residual stochastic slots, MCPG guiding, Q2RTX per-cell emitter lists, and the
   **cache resolve over a touched-slot list** (2026-10-27, branch `perf/rtgi-cache-touched-resolve`, NOT merged): the
