@@ -3982,6 +3982,13 @@ static void DrawEnhGroup_Shadows()
 			"fill (6 faces). Pair with Cube Edge Softness (Developer tab) to smooth edges without "
 			"raising resolution." );
 
+		CvarCheckbox( "Adaptive Shadow Resolution", r_shadowMapBudgetDownscale, "When the point lights in view "
+			"don't fit the shadow-cache VRAM budget, halve the cube resolution of the farthest ones "
+			"(down to a quarter) until they fit, instead of re-rendering the overflow at full "
+			"resolution every frame. Faster in light-heavy views at high cube resolutions; distant "
+			"shadows get softer while it is active. Off = full resolution always (default). Also on "
+			"the main menu's System > Advanced page." );
+
 		CvarCheckbox( "Perforated Casters (grates/fences)", r_shadowMapPerforated, "Let alpha-tested grates, fences and foliage cast real punched-out "
 			"shadows. In vanilla these are flagged noShadows because stencil volumes can't "
 			"perforate, so they cast nothing (or a hand-faked shadow). Shadow maps can cut "
@@ -5831,8 +5838,9 @@ static void DrawDbgGroup_ShadowMaps()
 		r_shadowMapCacheMB.SetInteger( autoBudget ? -1 : ( cacheCvar < 0 ? manualSeed : cacheCvar ) );
 	}
 	AddTooltip( "Auto sizes the cache to the VRAM actually free right now (measured) minus a safety "
-		"reserve for other growth - as large as safely possible, so static cubes rarely evict and "
-		"re-render (the frame-time cost). Scales to the card. Uncheck to cap it manually." );
+		"reserve of 20% of the card's VRAM (at least 768 MB), so static cubes rarely evict and "
+		"re-render (the frame-time cost) yet VRAM never fills to the brim. Scales to the card. "
+		"Uncheck to cap it manually." );
 
 	ImGui::BeginDisabled( autoBudget );
 	int budget = ( cacheCvar < 0 ) ? manualSeed : cacheCvar;
