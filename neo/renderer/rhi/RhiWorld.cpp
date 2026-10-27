@@ -3609,6 +3609,7 @@ struct shadowCubeCache_t {
 	unsigned long long		lightTok;		// light-pose-only sub-hash (r_shadowMapCacheDebug: classify a warm miss as light-moved vs caster-moved)
 	unsigned long long		faceTok[6];		// per-face token (r_shadowMapCachePerFace): re-render only the cube faces a mover dirtied
 	int						lastFrame;		// for LRU eviction
+	int						lastUseFrame;	// tr.frameCount of the last use (thrash guard, RB_RHI_CubeSlotEvictable)
 	size_t					bytes;			// VRAM cost estimate
 };
 static shadowCubeCache_t rhiCubeCache[MAX_SHADOW_CUBE_CACHE];
@@ -3647,8 +3648,9 @@ static size_t RB_RHI_CubeBytes( int size ) {
 // resolved shadow-cache VRAM budget in bytes.
 //   r_shadowMapCacheMB > 0 : that many MB (explicit).
 //   r_shadowMapCacheMB == 0 : unlimited.
-//   r_shadowMapCacheMB  < 0 : AUTO -- give the cache all the VRAM actually free, minus a safety
-//                             reserve, so static cubes almost never evict (eviction + re-render is
+//   r_shadowMapCacheMB  < 0 : AUTO -- give the cache the VRAM actually free, minus a safety
+//                             reserve of 20% of the card's VRAM (at least 768 MB), so static cubes
+//                             rarely evict yet VRAM never fills to the brim (eviction + re-render is
 //                             the frame-time cost we want to avoid). "Free" is measured live via VMA
 //                             (VK_EXT_memory_budget): budget - (usage - ourCacheBytes) is the space
 //                             left after everything NON-shadow the app has allocated, and we keep a
@@ -3678,8 +3680,11 @@ static size_t RB_RHI_CacheBudgetBytes() {
 		if ( r != NULL && r->GetDeviceLocalMemory( usage, budget ) && budget > 0 ) {
 			// what everything NON-shadow currently holds (our cache's own bytes don't count against it)
 			const uint64_t nonShadow = ( usage > rhiCubeCacheBytes ) ? ( usage - rhiCubeCacheBytes ) : 0;
-			// safety reserve for transient growth: ~8% of VRAM, at least 768 MB
-			uint64_t reserve = budget / 12;
+			// safety reserve: 20% of the card's VRAM, at least 768 MB. ~8% let a 3600^2 cube cache
+			// (~311 MB a light) fill a 12 GB card to the brim; the reserve leaves the driver, other
+			// apps and transient growth (streaming, RT scene) their room.
+			const uint64_t totalVram = glConfig.vidMemMB > 0 ? (uint64_t)glConfig.vidMemMB * 1024 * 1024 : budget;
+			uint64_t reserve = totalVram / 5;
 			const uint64_t minReserve = (uint64_t)768 * 1024 * 1024;
 			if ( reserve < minReserve ) { reserve = minReserve; }
 			int64_t target = (int64_t)budget - (int64_t)nonShadow - (int64_t)reserve;
@@ -3842,6 +3847,15 @@ static void RB_RHI_CubeFaceTokens( const viewLight_t *vLight, float range, int s
 // For that case the new token is NOT committed here; the caller writes it via *pendingSlot
 // once it commits to re-rendering, so a deferred light stays a miss and is retried next
 // frame. A cold miss (fresh slot, no prior contents) leaves stale=false and must render.
+// Thrash guard: a cube used this frame or the frame before belongs to the working set. When the
+// point lights in view didn't fit the budget, evicting such a cube only to re-create and re-render
+// it a frame later churned whole render targets every frame (a 3600^2 cube is ~311 MB; one comm1
+// view evicted and re-created ~70 a frame, at 1 fps). Lights that don't fit take the scratch cube
+// instead: rendered each frame, but nothing is freed or allocated.
+static bool RB_RHI_CubeSlotEvictable( const shadowCubeCache_t &s ) {
+	return s.rt != 0 && s.lastFrame != rhiCubeCacheFrameNo && tr.frameCount - s.lastUseFrame >= 2;
+}
+
 static rhi::RenderTargetHandle RB_RHI_AcquireCubeTarget( rhi::RHI *r, int lightIndex, int size,
                                                          unsigned long long token, unsigned long long lightTok,
                                                          bool &hit, bool &stale, shadowCubeCache_t **pendingSlot ) {
@@ -3879,6 +3893,7 @@ static rhi::RenderTargetHandle RB_RHI_AcquireCubeTarget( rhi::RHI *r, int lightI
 			e = NULL;
 		} else if ( e->size == size ) {
 			e->lastFrame = rhiCubeCacheFrameNo;	// touched this view -> not LRU-evictable
+			e->lastUseFrame = tr.frameCount;
 			if ( e->token == token ) {
 				hit = true;						// reuse -> skip the whole render
 				return e->rt;
@@ -3905,10 +3920,23 @@ static rhi::RenderTargetHandle RB_RHI_AcquireCubeTarget( rhi::RHI *r, int lightI
 	// touched this frame) until the newcomer fits.
 	const size_t need = RB_RHI_CubeBytes( size );
 	const size_t budget = RB_RHI_CacheBudgetBytes();
+	if ( rhiCubeCacheBytes + need > budget ) {
+		// evict only if that makes room: when the working set alone overflows the budget, freeing
+		// a few cubes first and then falling back to scratch anyway was pure churn
+		size_t evictable = 0;
+		for ( int i = 0; i < MAX_SHADOW_CUBE_CACHE; i++ ) {
+			if ( RB_RHI_CubeSlotEvictable( rhiCubeCache[i] ) ) {
+				evictable += rhiCubeCache[i].bytes;
+			}
+		}
+		if ( rhiCubeCacheBytes - evictable + need > budget ) {
+			return 0;			// the lights in view don't fit -> scratch, nothing evicted
+		}
+	}
 	while ( rhiCubeCacheBytes + need > budget ) {
 		int victim = -1;
 		for ( int i = 0; i < MAX_SHADOW_CUBE_CACHE; i++ ) {
-			if ( rhiCubeCache[i].rt && rhiCubeCache[i].lastFrame != rhiCubeCacheFrameNo
+			if ( RB_RHI_CubeSlotEvictable( rhiCubeCache[i] )
 			     && ( victim < 0 || rhiCubeCache[i].lastFrame < rhiCubeCache[victim].lastFrame ) ) {
 				victim = i;
 			}
@@ -3933,13 +3961,13 @@ static rhi::RenderTargetHandle RB_RHI_AcquireCubeTarget( rhi::RHI *r, int lightI
 	if ( firstFree < 0 ) {
 		int victim = -1;
 		for ( int i = 0; i < MAX_SHADOW_CUBE_CACHE; i++ ) {
-			if ( rhiCubeCache[i].rt && rhiCubeCache[i].lastFrame != rhiCubeCacheFrameNo
+			if ( RB_RHI_CubeSlotEvictable( rhiCubeCache[i] )
 			     && ( victim < 0 || rhiCubeCache[i].lastFrame < rhiCubeCache[victim].lastFrame ) ) {
 				victim = i;
 			}
 		}
 		if ( victim < 0 ) {
-			return 0;			// every slot in use this frame -> scratch
+			return 0;			// every slot in the working set -> scratch
 		}
 		r->DestroyRenderTarget( rhiCubeCache[victim].rt );
 		rhiCubeCacheBytes -= rhiCubeCache[victim].bytes;
@@ -3963,6 +3991,7 @@ static rhi::RenderTargetHandle RB_RHI_AcquireCubeTarget( rhi::RHI *r, int lightI
 	slot.lightTok = lightTok;	// r_shadowMapCacheDebug classification baseline
 	for ( int f = 0; f < 6; f++ ) { slot.faceTok[f] = 0; }	// per-face baseline; caller fills it after the cold render
 	slot.lastFrame = rhiCubeCacheFrameNo;
+	slot.lastUseFrame = tr.frameCount;
 	slot.bytes = need;
 	rhiCubeCacheBytes += need;
 	*pendingSlot = &slot;		// cold miss: hand the slot back so the caller stores per-face tokens
@@ -3997,6 +4026,7 @@ struct shadow2DCache_t {
 	int						size;			// map resolution of rt
 	unsigned long long		token;			// invalidation hash of light + casters
 	int						lastFrame;		// LRU key; shares rhiCubeCacheFrameNo
+	int						lastUseFrame;	// tr.frameCount of the last use: the cube cache's thrash guard
 };
 static shadow2DCache_t rhiMapCache[MAX_SHADOW_2D_CACHE];
 
@@ -4031,6 +4061,7 @@ static rhi::RenderTargetHandle RB_RHI_Acquire2DTarget( rhi::RHI *r, int lightInd
 			e = NULL;
 		} else if ( e->size == size ) {
 			e->lastFrame = rhiCubeCacheFrameNo;
+			e->lastUseFrame = tr.frameCount;
 			if ( e->token == token ) {
 				hit = true;						// unchanged -- skip the render
 				return e->rt;
@@ -4051,12 +4082,13 @@ static rhi::RenderTargetHandle RB_RHI_Acquire2DTarget( rhi::RHI *r, int lightInd
 		int victim = -1;
 		for ( int i = 0; i < MAX_SHADOW_2D_CACHE; i++ ) {
 			if ( rhiMapCache[i].rt && rhiMapCache[i].lastFrame != rhiCubeCacheFrameNo
+			     && tr.frameCount - rhiMapCache[i].lastUseFrame >= 2
 			     && ( victim < 0 || rhiMapCache[i].lastFrame < rhiMapCache[victim].lastFrame ) ) {
 				victim = i;
 			}
 		}
 		if ( victim < 0 ) {
-			return 0;						// every slot in use this frame -> scratch
+			return 0;						// every slot used this or last frame -> scratch
 		}
 		r->DestroyRenderTarget( rhiMapCache[victim].rt );
 		rhiMapCache[victim].lightIndex = -1;
@@ -4074,6 +4106,7 @@ static rhi::RenderTargetHandle RB_RHI_Acquire2DTarget( rhi::RHI *r, int lightInd
 	slot.size = size;
 	slot.token = token;
 	slot.lastFrame = rhiCubeCacheFrameNo;
+	slot.lastUseFrame = tr.frameCount;
 	return rt;							// hit stays false -> caller renders
 }
 
