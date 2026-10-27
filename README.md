@@ -49,6 +49,8 @@ System menu, "Potato" = unmodified classic rendering)
 
 **Engine quality-of-life**
 - `com_interpolate` — render above 60 fps while the game simulates at its native 60 Hz.
+- `com_classicTics` — Doom 3's original 62.5 Hz game tic (16 ms, as 1.3.1 ran) instead of
+  60 Hz, for speedrunners; pair it with `com_interpolate` (see [Configuration.md](Configuration.md)).
 - `com_maxFPS` frame limiter, SSE4.1 SIMD baseline, runtime ARB→SPIR-V compilation so
   classic mod shaders work on the new backends, cvar-translation shim for old mods.
 
