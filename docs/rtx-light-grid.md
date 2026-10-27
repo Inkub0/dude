@@ -186,4 +186,4 @@ in-range rows of the sweep in the same order - the same top-N, ties and sums. Ce
 4) join the block's loads and barriers but write nothing.
 
 Gate (user, mars_city1 emissive mode, A/B `r_rtLightGridBlockFill` - removed with the old sweep at merge): image identical;
-`lightgrid.fill` 0.95 -> 0.35 ms, GPU total 23.7 -> 23.3 ms; Vulkan validation clean (the known NRD messages only); ASAN.
+`lightgrid.fill` 0.95 -> 0.35 ms, GPU total 23.7 -> 23.3 ms; Vulkan validation clean (the known NRD messages only); ASAN clean. Merged.
