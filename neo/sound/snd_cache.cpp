@@ -26,6 +26,14 @@ If you have questions concerning this license or the applicable additional terms
 ===========================================================================
 */
 
+#if D3_IS_BIG_ENDIAN
+  #define STB_VORBIS_BIG_ENDIAN
+#endif
+#define STB_VORBIS_NO_STDIO
+#define STB_VORBIS_NO_PUSHDATA_API // we're using the pulldata API
+#define STB_VORBIS_HEADER_ONLY
+#include "stb_vorbis.h"
+
 #include "sys/platform.h"
 #include "framework/FileSystem.h"
 #include "framework/Common.h"
@@ -552,6 +560,82 @@ void idSoundSample::CheckForDownSample( void ) {
 
 /*
 ===================
+idSoundSample::ResampleTo44kHz
+
+DUDE: converts a sample at a rate the mixer can't play (see DecodeCpu) into 44100 Hz 16-bit PCM
+that replaces nonCacheData. An OGG is decoded whole first, so it is held uncompressed afterwards
+(~10 MB per stereo minute, like a 44 kHz WAV). Each channel is resampled with Catmull-Rom
+interpolation. Worker-thread safe: libc malloc and a local stb_vorbis decode only.
+===================
+*/
+bool idSoundSample::ResampleTo44kHz( void ) {
+	const int rate = objectInfo.nSamplesPerSec;
+	const int channels = objectInfo.nChannels;
+	const short *src = NULL;
+	short *decoded = NULL;		// the OGG's PCM, malloc'd by stb_vorbis
+	int frames = 0;
+
+	if ( objectInfo.wFormatTag == WAVE_FORMAT_TAG_OGG ) {
+		int oggChannels = 0, oggRate = 0;
+		frames = stb_vorbis_decode_memory( nonCacheData, objectMemSize, &oggChannels, &oggRate, &decoded );
+		if ( frames <= 0 || decoded == NULL || oggChannels != channels ) {
+			common->Warning( "idSoundCache: couldn't decode %s to resample it, using default", name.c_str() );
+			free( decoded );
+			return false;
+		}
+		src = decoded;
+	} else {
+		src = (const short *)nonCacheData;
+		frames = objectSize / channels;
+	}
+	if ( frames <= 0 ) {
+		free( decoded );
+		return false;
+	}
+
+	const int outFrames = Max( 1, (int)( (long long)frames * 44100 / rate ) );
+	short *out = (short *)malloc( (size_t)outFrames * channels * sizeof( short ) );
+	const double step = (double)rate / 44100.0;
+	const int last = frames - 1;
+
+	for ( int o = 0; o < outFrames; o++ ) {
+		const double pos = o * step;
+		const int i = (int)pos;
+		const float t = (float)( pos - i );
+		const int i0 = Max( i - 1, 0 );
+		const int i1 = Min( i, last );
+		const int i2 = Min( i + 1, last );
+		const int i3 = Min( i + 2, last );
+		for ( int c = 0; c < channels; c++ ) {
+			const float s0 = src[i0 * channels + c];
+			const float s1 = src[i1 * channels + c];
+			const float s2 = src[i2 * channels + c];
+			const float s3 = src[i3 * channels + c];
+			const float v = s1 + 0.5f * t * ( s2 - s0 + t * ( 2.0f * s0 - 5.0f * s1 + 4.0f * s2 - s3
+			                + t * ( 3.0f * ( s1 - s2 ) + s3 - s0 ) ) );
+			out[o * channels + c] = (short)idMath::ClampInt( -32768, 32767, idMath::FtoiFast( v ) );
+		}
+	}
+
+	free( decoded );
+	free( nonCacheData );		// DecodeCpu malloc'd it (nonCacheMalloced)
+	nonCacheData = (byte *)out;
+	nonCacheMalloced = true;
+
+	common->Printf( "idSoundCache: %s resampled from %d Hz to 44100 Hz\n", name.c_str(), rate );
+
+	objectInfo.wFormatTag = WAVE_FORMAT_TAG_PCM;
+	objectInfo.nSamplesPerSec = 44100;
+	objectInfo.wBitsPerSample = 16;
+	objectInfo.nBlockAlign = channels * sizeof( short );
+	objectInfo.nAvgBytesPerSec = 44100 * objectInfo.nBlockAlign;
+	objectSize = outFrames * channels;
+	objectMemSize = objectSize * sizeof( short );
+	return true;
+}
+
+/*
+===================
 idSoundSample::GetNewTimeStamp
 ===================
 */
@@ -627,12 +711,17 @@ void idSoundSample::DecodeCpu( void ) {
 		return;
 	}
 
-	if ( info.nSamplesPerSec != 44100 && info.nSamplesPerSec != 22050 && info.nSamplesPerSec != 11025 ) {
-		common->Warning( "idSoundCache: %s is %dHz, expected 11025, 22050 or 44100 Hz. Using default", name.c_str(), info.nSamplesPerSec );
+	// DUDE: the mixer only knows 11025, 22050 and 44100 Hz (LengthIn44kHzSamples, the 44 kHz
+	// upsamplers, the streaming decoder's rate shift), and vanilla played the default beep for
+	// anything else. Custom maps often ship 48 kHz (or 32/24/16/8 kHz) sounds, so those are
+	// converted to 44100 Hz PCM once, below. Retail data never takes this path.
+	if ( info.nSamplesPerSec == 0 ) {
+		common->Warning( "idSoundCache: %s has no sample rate, using default", name.c_str() );
 		fh.Close();
 		decodeFailed = true;
 		return;
 	}
+	const bool resample = info.nSamplesPerSec != 44100 && info.nSamplesPerSec != 22050 && info.nSamplesPerSec != 11025;
 
 	objectInfo = info;
 	objectSize = fh.GetOutputSize();
@@ -645,6 +734,14 @@ void idSoundSample::DecodeCpu( void ) {
 	nonCacheMalloced = true;
 
 	fh.Read( nonCacheData, objectMemSize, NULL );
+
+	if ( resample && !ResampleTo44kHz() ) {
+		free( nonCacheData );
+		nonCacheData = NULL;
+		fh.Close();
+		decodeFailed = true;
+		return;
+	}
 
 	// optionally convert it to 22kHz to save memory
 	CheckForDownSample();

@@ -937,6 +937,7 @@ public:
 	void					Reload( bool force );		// reloads if timestamp has changed, or always if force
 	void					PurgeSoundSample();			// frees all data
 	void					CheckForDownSample();		// down sample if required
+	bool					ResampleTo44kHz();			// DUDE: other rates -> 44100 Hz PCM on load (DecodeCpu)
 	bool					FetchFromCache( int offset, const byte **output, int *position, int *size, const bool allowIO );
 };
 
