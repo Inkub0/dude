@@ -471,6 +471,11 @@ static bool  rhiRtaoRanThisView = false;			// ray output produced this view (ove
 // architecture - a single FRESH 1-spp gather each frame (no persistent reservoir, no hand-rolled temporal);
 // NRD does the temporal accumulation downstream (+ the DI confidence pass for moving-light antilag).
 static rhi::RenderTargetHandle rhiReStirDIRT = 0;	// the fresh 1-spp gather: CreateRenderTargetRtgiMrt (NRD guide MRT), or the 4-att SH variant
+// DUDE (2026-10-27): two gather MRTs used in turn - each gather writes the one it did NOT write last, so the other
+// still holds last frame's side data (att1 viewZ + lum / att2 normal / att3 SH1 + row) for the gradient and the boost:
+// no copies (the three full-screen "restir.di.sidecopy" passes, ~0.3 ms). rhiReStirDIRT = this gather's target.
+static rhi::RenderTargetHandle rhiReStirDIPairRT[2] = { 0, 0 };
+static int rhiReStirDILastWritten = -1;				// which of the pair the last gather wrote (-1 = none since (re)create)
 static bool rhiReStirDIShRT = false;				// rhiReStirDIRT is the SH (4-attachment) variant
 static bool rhiReStirDIShThisView = false;			// the gather ran in SH mode this view (the apply resolves SH1)
 static bool rhiReStirDIRelaxThisView = false;		// R2: the gather wrote the ReLAX encoding this view (linear + raw hitDist)
@@ -511,8 +516,7 @@ static bool  rhiReStirDIGradConfValid = false;		// rhiReStirDIGradConfRT[idx ^ 1
 static rhi::ImageHandle rhiReStirDIGradConfThisView = 0;	// the confidence fed to NRD this view (debug view 5)
 static rhi::ImageHandle rhiReStirDIGradThisView = 0;		// the filtered gradient this view (debug view 6)
 static bool  rhiReStirDIGatherPrevValid = false;	// the gather MRT holds last frame's side data at the current rw x rh
-static rhi::RenderTargetHandle rhiReStirDIPrevSideRT[3] = { 0, 0, 0 };	// R1 rev.2: copies of last frame's gather att1 (RG32F) / att2 (RGBA16F) / att3 (RGBA32F), made before the gather
-static int   rhiReStirDIPrevSideW = 0, rhiReStirDIPrevSideH = 0;
+static rhi::RenderTargetHandle rhiReStirDIPrevRT = 0;	// R1 rev.2: the gather MRT holding last frame's side data (the other of the pair)
 static float rhiReStirDIPrevCb = 0.0f;				// last frame's checkerboard parity (0 off / 1 / 2): where a pixel's data sits
 #define DI_LIGHTMAP_MAX		4096					// lightDef -> row table capacity (uints per ring slot)
 static rhi::BufferHandle	s_diLightMapBuf = 0;
@@ -4113,13 +4117,13 @@ void RB_RHI_ResetWorldTargets( void ) {
 	rhiSsaoHistValid = false;	RB_RHI_TemporalResetCam();	RB_RHI_MotionResetCache();
 	rhiRtaoRayRT = 0;			rhiRtaoW = rhiRtaoH = 0;
 	rhiReStirDIRT = 0;			rhiReStirDIW = rhiReStirDIH = 0;	// ReSTIR DI target stale after a lost context
+	rhiReStirDIPairRT[0] = rhiReStirDIPairRT[1] = 0;	rhiReStirDILastWritten = -1;	rhiReStirDIPrevRT = 0;
 	rhiReStirDIGuideRT = 0;		rhiReStirDIGuideW = rhiReStirDIGuideH = 0;
 	rhiReStirDIVelRT = 0;		rhiReStirDIVelW = rhiReStirDIVelH = 0;
 	rhiReStirDIPrevValid = false;								// no valid reprojection history across a lost context
 	rhiReStirDIGradRT[0] = rhiReStirDIGradRT[1] = 0;	rhiReStirDIGradW = rhiReStirDIGradH = 0;	// R1
 	rhiReStirDIGradConfRT[0] = rhiReStirDIGradConfRT[1] = 0;	rhiReStirDIGradConfW = rhiReStirDIGradConfH = 0;
 	rhiReStirDIGradConfValid = false;	rhiReStirDIGatherPrevValid = false;
-	rhiReStirDIPrevSideRT[0] = rhiReStirDIPrevSideRT[1] = rhiReStirDIPrevSideRT[2] = 0;	rhiReStirDIPrevSideW = rhiReStirDIPrevSideH = 0;
 	rhiReStirDIYoungRT[0] = rhiReStirDIYoungRT[1] = 0;	rhiReStirDIYoungW = rhiReStirDIYoungH = 0;	rhiReStirDIYoungValid = false;
 	s_diLightMapBuf = 0;	s_diLightMapAddr = 0;
 	s_sceneLightSlotFrame[0] = s_sceneLightSlotFrame[1] = s_sceneLightSlotFrame[2] = -1;
@@ -8299,18 +8303,29 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	// R1: the gather target is always the 4-attachment DI MRT (att1 RG16F = viewZ + gradient luminance, att3.w = the
 	// chosen light's row) whether or not SH mode is on - the side data is what next frame's gradient pass re-shades.
 	const bool shMode = r_rtReStirDISH.GetBool();
-	if ( rhiReStirDIRT && ( r->GetRenderTargetImage( rhiReStirDIRT ) == 0 || rhiReStirDIW != rw || rhiReStirDIH != rh ) ) {
-		r->DestroyRenderTarget( rhiReStirDIRT );	rhiReStirDIRT = 0;	rhiReStirDIW = rhiReStirDIH = 0;
+	// the pair lives and dies together (a lost context, a resolution change)
+	const bool pairStale = ( rhiReStirDIPairRT[0] && r->GetRenderTargetImage( rhiReStirDIPairRT[0] ) == 0 )
+		|| ( rhiReStirDIPairRT[1] && r->GetRenderTargetImage( rhiReStirDIPairRT[1] ) == 0 ) || rhiReStirDIW != rw || rhiReStirDIH != rh;
+	if ( ( rhiReStirDIPairRT[0] || rhiReStirDIPairRT[1] ) && pairStale ) {
+		for ( int k = 0; k < 2; k++ ) { if ( rhiReStirDIPairRT[k] ) { r->DestroyRenderTarget( rhiReStirDIPairRT[k] ); rhiReStirDIPairRT[k] = 0; } }
+		rhiReStirDIRT = 0;	rhiReStirDIPrevRT = 0;	rhiReStirDIW = rhiReStirDIH = 0;	rhiReStirDILastWritten = -1;
 		rhiReStirDIGatherPrevValid = false;
 	}
-	if ( !rhiReStirDIRT ) {
-		rhiReStirDIRT = r->CreateRenderTargetReStirDIMrt( rw, rh );
-		if ( !rhiReStirDIRT ) {
+	if ( !rhiReStirDIPairRT[0] || !rhiReStirDIPairRT[1] ) {
+		for ( int k = 0; k < 2; k++ ) { if ( !rhiReStirDIPairRT[k] ) { rhiReStirDIPairRT[k] = r->CreateRenderTargetReStirDIMrt( rw, rh ); } }
+		if ( !rhiReStirDIPairRT[0] || !rhiReStirDIPairRT[1] ) {
+			for ( int k = 0; k < 2; k++ ) { if ( rhiReStirDIPairRT[k] ) { r->DestroyRenderTarget( rhiReStirDIPairRT[k] ); rhiReStirDIPairRT[k] = 0; } }
+			rhiReStirDIRT = 0;	rhiReStirDIPrevRT = 0;	rhiReStirDILastWritten = -1;	rhiReStirDIGatherPrevValid = false;
 			return;
 		}
 		rhiReStirDIW = rw;	rhiReStirDIH = rh;	rhiReStirDIShRT = shMode;
+		rhiReStirDILastWritten = -1;
 		rhiReStirDIGatherPrevValid = false;
 	}
+	// this gather writes the one it did not write last; the other is last frame's (a gather that never ran since leaves
+	// rhiReStirDILastWritten unchanged, so a skipped frame never makes the side data two frames old or unwritten)
+	rhiReStirDIRT     = rhiReStirDIPairRT[ ( rhiReStirDILastWritten == 0 ) ? 1 : 0 ];
+	rhiReStirDIPrevRT = ( rhiReStirDILastWritten >= 0 ) ? rhiReStirDIPairRT[ rhiReStirDILastWritten ] : 0;
 	rhiReStirDIShThisView = shMode;
 	const bool relaxMode = true;		// R6: DI is ReLAX-only (ReBLUR path removed for DI; ReBLUR still serves RTAO/RTGI). ReLAX = the gather's encoding + the denoise
 	rhiReStirDIRelaxThisView = relaxMode;
@@ -8511,40 +8526,16 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	const bool boostWant = boostK > 0 && boostProg != 0 && youngProg != 0 && rhiReStirDIYoungRT[0] != 0 && rhiReStirDIYoungRT[1] != 0 && nrdVel != 0 && nrdFree;
 	if ( !boostWant ) { rhiReStirDIYoungValid = false; }		// a gap breaks the age chain: next run starts with no holds
 
-	// ---- R1 rev.2: keep last frame's side data (att1 viewZ+lum / att2 normal / att3 SH1+row) across the gather, so the
-	// gradient pass can run AFTER it and see BOTH frames' picks (RTXDI: the brightest sample of either frame). Three
-	// plain copies at the gather res; only when the gradient will run. ----
+	// ---- R1 rev.2: last frame's side data (att1 viewZ+lum / att2 normal / att3 SH1+row) survives the gather, so the
+	// gradient pass can run AFTER it and see BOTH frames' picks (RTXDI: the brightest sample of either frame). It is the
+	// other gather MRT of the pair (rhiReStirDIPrevRT): no copies. ----
 	const float diPrevCb = rhiReStirDIPrevCb;
-	bool diPrevSideValid = false;
-	if ( ( r_rtReStirDIGradient.GetBool() || boostWant ) && rhiReStirDIGatherPrevValid && nrdVel != 0 && nrdFree && !diCut ) {
-		for ( int k = 0; k < 3; k++ ) {
-			if ( rhiReStirDIPrevSideRT[k] && r->GetRenderTargetImage( rhiReStirDIPrevSideRT[k] ) == 0 ) { rhiReStirDIPrevSideRT[k] = 0; }
-		}
-		if ( rhiReStirDIPrevSideW != rw || rhiReStirDIPrevSideH != rh ) {
-			for ( int k = 0; k < 3; k++ ) { if ( rhiReStirDIPrevSideRT[k] ) { r->DestroyRenderTarget( rhiReStirDIPrevSideRT[k] ); rhiReStirDIPrevSideRT[k] = 0; } }
-			rhiReStirDIPrevSideW = rhiReStirDIPrevSideH = 0;
-		}
-		if ( !rhiReStirDIPrevSideRT[0] ) { rhiReStirDIPrevSideRT[0] = r->CreateRenderTarget( rhi::IF_RG32F,   rw, rh ); }	// full-float view z (as att1)
-		if ( !rhiReStirDIPrevSideRT[1] ) { rhiReStirDIPrevSideRT[1] = r->CreateRenderTarget( rhi::IF_RGBA16F, rw, rh ); }
-		if ( !rhiReStirDIPrevSideRT[2] ) { rhiReStirDIPrevSideRT[2] = r->CreateRenderTarget( rhi::IF_RGBA32F, rw, rh ); }	// full-float row id (as att3)
-		rhi::ShaderHandle copyProg = ( rhiReStirDIPrevSideRT[0] && rhiReStirDIPrevSideRT[1] && rhiReStirDIPrevSideRT[2] ) ? r->LoadShader( "smaa_copy" ) : 0;
-		if ( copyProg != 0 ) {
-			rhiReStirDIPrevSideW = rw;	rhiReStirDIPrevSideH = rh;
-			rhi::RenderParams cp;
-			memset( &cp, 0, sizeof( cp ) );
-			cp.mvpMatrix[0] = cp.mvpMatrix[5] = cp.mvpMatrix[10] = cp.mvpMatrix[15] = 1.0f;
-			cp.screenCorrection[0] = 1.0f; cp.screenCorrection[1] = 1.0f;
-			const rhi::ImageHandle srcs[3] = { r->GetRenderTargetImage2( rhiReStirDIRT ), r->GetRenderTargetImage3( rhiReStirDIRT ), r->GetRenderTargetImage4( rhiReStirDIRT ) };
-			r->GpuScopeBegin( "restir.di.sidecopy" );	// r_vkGpuTime 2: last frame's side data kept for the gradient
-			for ( int k = 0; k < 3; k++ ) {
-				r->BeginTargetPass( rhiReStirDIPrevSideRT[k], NULL );
-				RB_RHI_DrawFullscreen( r, copyProg, cp, srcs[k] );
-				r->EndPass();
-			}
-			r->GpuScopeEnd();
-			diPrevSideValid = true;
-		}
-	}
+	const bool diPrevSideValid = ( r_rtReStirDIGradient.GetBool() || boostWant ) && rhiReStirDIGatherPrevValid
+		&& rhiReStirDIPrevRT != 0 && rhiReStirDIPrevRT != rhiReStirDIRT && nrdVel != 0 && nrdFree && !diCut;
+	const rhi::ImageHandle diPrevSide[3] = {
+		diPrevSideValid ? r->GetRenderTargetImage2( rhiReStirDIPrevRT ) : 0,	// last frame's ( viewZ, lum )
+		diPrevSideValid ? r->GetRenderTargetImage3( rhiReStirDIPrevRT ) : 0,	// last frame's packed normal
+		diPrevSideValid ? r->GetRenderTargetImage4( rhiReStirDIPrevRT ) : 0 };	// last frame's ( SH1, row + 1 [+ boost bit] )
 
 	// fresh 1-spp gather -> NRD guide MRT (weapon masked inside the shader). NRD does the temporal below.
 	// Checkerboard packs every traced sample into the LEFT HALF, so restrict the draw there - the right half is
@@ -8608,9 +8599,9 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		const rhi::ImageHandle prevDen = ( boostWant && !boostAll ) ? r->GetRtgiOutputImage() : 0;
 		if ( prevDen ) { RB_RHI_BindRTImage( r, 4, prevDen ); } else { RB_RHI_BindUnit( 4, globalImages->whiteImage ); }
 		if ( boostSide ) {
-			RB_RHI_BindRTImage( r, 5, r->GetRenderTargetImage( rhiReStirDIPrevSideRT[0] ) );	// last frame's ( viewZ, lum )
-			RB_RHI_BindRTImage( r, 6, r->GetRenderTargetImage( rhiReStirDIPrevSideRT[1] ) );	// last frame's packed normal
-			RB_RHI_BindRTImage( r, 9, r->GetRenderTargetImage( rhiReStirDIPrevSideRT[2] ) );	// last frame's ( SH1, row + 1 [+ boost bit] )
+			RB_RHI_BindRTImage( r, 5, diPrevSide[0] );	// last frame's ( viewZ, lum )
+			RB_RHI_BindRTImage( r, 6, diPrevSide[1] );	// last frame's packed normal
+			RB_RHI_BindRTImage( r, 9, diPrevSide[2] );	// last frame's ( SH1, row + 1 [+ boost bit] )
 		} else {
 			RB_RHI_BindUnit( 5, globalImages->whiteImage );	RB_RHI_BindUnit( 6, globalImages->whiteImage );	RB_RHI_BindUnit( 9, globalImages->whiteImage );
 		}
@@ -8653,6 +8644,7 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	rhiReStirDIRanThisView = true;
 	rhiReStirDIApplyThisView = diApply;				// Stage D: from here on this view is DI-lit (forward loop + apply)
 	rhiReStirDIGatherPrevValid = true;				// R1: the MRT now holds this frame's side data for next frame's gradient
+	rhiReStirDILastWritten = ( rhiReStirDIRT == rhiReStirDIPairRT[1] ) ? 1 : 0;	// next gather writes the other of the pair
 	rhiReStirDIPrevCb = cbParity;
 
 	// ---- R1 gradient confidence (docs/rtx-restir-di.md Plan R1) ----
@@ -8728,12 +8720,12 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 				else { RB_RHI_BindUnit( 2, globalImages->whiteImage ); RB_RHI_BindUnit( 3, globalImages->whiteImage ); }
 				backEnd.glState.tmu[2].current2DMap = -1;	backEnd.glState.tmu[3].current2DMap = -1;
 				RB_RHI_BindRTImage( r, 4, r->GetRenderTargetImage2( rhiReStirDIRT ) );		// THIS frame's ( viewZ, lum )
-				RB_RHI_BindRTImage( r, 5, r->GetRenderTargetImage( rhiReStirDIPrevSideRT[0] ) );	// last frame's ( viewZ, lum )
-				RB_RHI_BindRTImage( r, 6, r->GetRenderTargetImage( rhiReStirDIPrevSideRT[1] ) );	// last frame's packed normal
+				RB_RHI_BindRTImage( r, 5, diPrevSide[0] );	// last frame's ( viewZ, lum )
+				RB_RHI_BindRTImage( r, 6, diPrevSide[1] );	// last frame's packed normal
 				// units 10 / 11, not 7 / 8: 7 / 8 are the interaction draws' shadow map / cube (depth-compare samplers) and an
 				// unshadowed (DI-covered) light inherits them unchanged - a colour image there blanked the weapon's lit draws
 				RB_RHI_BindRTImage( r, 10, nrdVel );
-				RB_RHI_BindRTImage( r, 11, r->GetRenderTargetImage( rhiReStirDIPrevSideRT[2] ) );	// last frame's ( SH1, row + 1 )
+				RB_RHI_BindRTImage( r, 11, diPrevSide[2] );	// last frame's ( SH1, row + 1 )
 				RB_RHI_BindRTImage( r, 9, r->GetRenderTargetImage4( rhiReStirDIRT ) );		// THIS frame's ( SH1, row + 1 )
 				RB_RHI_DrawFullscreen( r, gradProg, gp, 0 );
 				r->EndPass();

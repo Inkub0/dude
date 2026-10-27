@@ -1197,3 +1197,13 @@ mode: no material); the tail's target-only shade is the loop's own except in ful
 still calls `diShadeLight`. Same values (up to the compiler's instruction fusion); four more live values
 across the loop (register pressure: measure the gather). The boost picks (restir_di_boost.glsl) are not
 touched.
+## Perf: last frame's side data without copies (2026-10-27, `perf/restir-di-pingpong-side`)
+
+The gradient and the boost read last frame's gather attachments (att1 viewZ + lum, att2 normal, att3 SH1 + row);
+R1 rev.2 copied them into three side targets before each gather ("restir.di.sidecopy": three full-screen copies at
+the gather res, 0.2-0.3 ms measured). Now there are two gather MRTs (`rhiReStirDIPairRT`): each gather writes the
+one it did not write last (`rhiReStirDILastWritten`), and the other is last frame's (`rhiReStirDIPrevRT`), read
+directly. A frame whose gather does not run leaves the choice unchanged, so the side data is never two frames old or
+unwritten; the pair is created, re-sized and lost together, and a fresh pair has no "last" until a gather wrote one
+(`rhiReStirDIGatherPrevValid` false), as the copies' first frame. Memory: the second MRT replaces the three copies
+(+ its radiance attachment). No image change.
