@@ -810,7 +810,10 @@ in both games, the screenshots compare directly. `func_fx` also takes `endOrigin
   for a lit one, more with debris), so a long busy fight - and `bseSweep` - outgrows it and
   `ResizeInteractionTable` drops it ("overflowed interactionTableWidth, dumping"): the rest of the
   map looks interactions up the slow way. Retail's effects were not render entities.
-  **Built 2026-10-27** (`perf/interaction-table-grow`, gate pending): `ResizeInteractionTable` grows
+  **Done 2026-10-27** (`perf/interaction-table-grow`, merged after the user's gate: an ASAN
+  `bseSweep` on airdefense1 grew the table once, 5.2 MB -> 1635 entities x 608 lights (7.6 MB), with
+  no "dumping" line and no ASAN report; GPU timings identical with `r_useInteractionTable` 1 / 0 (a
+  CPU-side lookup); Doom 3 smoke): `ResizeInteractionTable` grows
   the table instead - the overflowing side by half (at least 100), refilled from the lights'
   interaction lists (`FillInteractionTable`, the loop `GenerateAllInteractions` had), so a map
   regrows a few times at most and keeps the fast lookup; the console says "interactionTable grown to
