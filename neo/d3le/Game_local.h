@@ -91,7 +91,9 @@ extern idSoundWorld *				gameSoundWorld;
 extern const int NUM_RENDER_PORTAL_BITS;
 
 // DG: USERCMD_MSEC is 16, USERCMD_MSEC_PRECISE is a float and 16.6666..
-extern const float USERCMD_MSEC_PRECISE;
+// DUDE: USERCMD_MSEC_PRECISE is the length of a tic: 16.6666 (60 Hz), or USERCMD_MSEC (16) while
+//       the map runs Doom 3's original 62.5 Hz tic (com_classicTics, idGameLocal::LatchTicRate())
+extern float USERCMD_MSEC_PRECISE;
 /*
 ===============================================================================
 
@@ -246,6 +248,8 @@ struct timeState_t {
 		savefile->ReadInt( time ); savefile->ReadInt( previousTime );
 		savefile->ReadInt( msec ); savefile->ReadInt( framenum );
 		savefile->ReadInt( realClientTime );
+		// DUDE: 16 or 17 msec is a whole tic at either tic rate (a save from 60 Hz or 62.5 Hz,
+		//       com_classicTics): the tic length this map runs at (LatchTicRate() set it first)
 		if ( msec == 16 || msec == 17 ) {
 			msecPrecise = USERCMD_MSEC_PRECISE;
 		} else {
@@ -342,6 +346,11 @@ public:
 	//     so it can be used when the correct time for multiple frames must be calculated,
 	//     or when setting an int-timer for next frame (where it rounds down which is safe for that case)
 	float					msecPrecise;
+
+	// DUDE: com_classicTics - this map runs Doom 3 1.3.1's 62.5 Hz tic: msec is USERCMD_MSEC (16)
+	//       every tic instead of CalcMSec's 16/17/17. The engine decides it at each map load
+	//       (FT_GameTicMSec, LatchTicRate()); not saved, savegames load at either tic.
+	bool					classicTics;
 
 	int						vacuumAreaNum;			// -1 if level doesn't have any outside areas
 
@@ -617,6 +626,8 @@ private:
 	byte					lagometer[ LAGO_IMG_HEIGHT ][ LAGO_IMG_WIDTH ][ 4 ];
 
 	void					Clear( void );
+							// DUDE: com_classicTics - ask the engine which tic this map runs at
+	void					LatchTicRate( void );
 							// returns true if the entity shouldn't be spawned at all in this game type or difficulty level
 	bool					InhibitEntitySpawn( idDict &spawnArgs );
 							// spawn entities from the map file

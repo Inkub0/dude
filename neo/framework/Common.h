@@ -281,6 +281,15 @@ public:
 		// it returns true if the game debugger is active.
 		// relevant for mods.
 		FT_UpdateDebugger,
+		// DUDE (com_classicTics): the function's signature is int fn(void) - no arguments.
+		// it returns the length of a game tic in milliseconds when the engine runs Doom 3's
+		// original whole-millisecond tic (16 = 62.5 Hz, as Doom 3 1.3.1 did), or 0 for dhewm3's
+		// 60 Hz tic (the game then alternates 16/17/17 msec so 60 tics make a second).
+		// The answer only changes at a map load, before the game initializes the map.
+		// Asking for this function tells the engine the game library can run either tic; the
+		// engine never runs 62.5 Hz for a library that didn't ask (a dhewm3 game library always
+		// adds 16/17/17 msec per tic and would run 4% fast).
+		FT_GameTicMSec,
 	};
 
 	// returns true if that function is available in this version of DUDE

@@ -63,6 +63,12 @@ else
 // DG: functions used for improved frame timing - I put them here so they don't end up in the SDK
 extern void Com_UpdateFrameTime();
 extern void Com_WaitForNextTicStart();
+// DUDE: com_classicTics - pick the game tic rate for the map being loaded (Doom 3's original
+// 62.5 Hz when wantClassic and the game library supports it, else 60 Hz); returns whether
+// the map runs at 62.5 Hz. Com_ResetGameTicRate goes back to 60 Hz (no map loaded).
+extern bool Com_LatchGameTicRate( bool wantClassic, bool multiplayer );
+extern void Com_ResetGameTicRate();
+extern idCVar com_classicTics;
 
 
 typedef struct {
@@ -268,6 +274,12 @@ public:
 
 	idFile *			cmdDemoFile;		// if non-zero, we are reading commands from a file
 
+	// DUDE: com_classicTics - the game tic the current (or last) map ran at, which command demos
+	// record; and while StartPlayingCmdDemo loads a demo's map, the tic it was recorded at
+	// (0 = 60 Hz, 1 = 62.5 Hz; -1 = no demo, the cvar decides)
+	bool				mapClassicTics;
+	int					cmdDemoClassicTics;
+
 	int					latchedTicNumber;	// set to com_ticNumber each frame
 	int					lastGameTic;		// while latchedTicNumber > lastGameTic, run game frames
 	int					lastDemoTic;
@@ -334,7 +346,7 @@ public:
 	void				StartPlayingCmdDemo( const char *demoName);
 	void				TimeCmdDemo( const char *demoName);
 	void				SaveCmdDemoToFile(idFile *file);
-	void				LoadCmdDemoFromFile(idFile *file);
+	bool				LoadCmdDemoFromFile(idFile *file);	// DUDE: returns whether it was recorded at 62.5 Hz
 	void				TimeDemoFrame();
 	idStr				TimeDemoReport( const char *demoName, float demoSeconds );
 	void				StartRecordingRenderDemo( const char *name );

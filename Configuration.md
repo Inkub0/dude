@@ -179,6 +179,21 @@ This can be configured with the following CVars:
 - `r_screenshotPngCompression` Compression level when using PNG screenshots (`0` - `9`). Higher levels
   generate smaller files, but take noticeably longer; `3` (the default) seems to be a good compromise.
 
+## Doom 3's original tic rate
+
+- `com_classicTics` if set to `1`, the game runs at Doom 3's original 62.5 Hz tic (16 ms per tic,
+  as Doom 3 1.3.1 did) instead of dhewm3's 60 Hz (which alternates 16/17/17 ms so 60 tics make a
+  second), e.g. for speedrunning. Default `0`.
+    - It applies at the next map load (new game, level change, loading a savegame); savegames
+      load in either mode.
+    - Only DUDE's own Doom 3, RoE and Lost Mission game libraries support it. A mod's game library
+      built for dhewm3, Quake 4 and multiplayer stay at 60 Hz; the console says why at the map load.
+    - Without `com_interpolate 1`, a 60 Hz display shows a doubled tic about every 0.4 s, as
+      vanilla Doom 3 did; with it, rendering is smooth at any refresh rate.
+    - Command demos (`writeCmdDemo`) record the tic rate and play back at it. Render demos
+      (`recordDemo`) and timedemos always play on the 60 Hz clock, so a render demo recorded at
+      62.5 Hz plays back about 4% slower.
+
 ## Other CVars added in dhewm3
 
 - `com_disableAutoSaves` if set to `1`, no Autosaves are created when starting a level, and when

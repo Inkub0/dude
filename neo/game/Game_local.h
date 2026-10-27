@@ -291,7 +291,12 @@ public:
 	// DG: unlike msec, msecPrecise remains constant (in the base game, in d3xp it might be scaled for slowmo)
 	//     so it can be used when the correct time for multiple frames must be calculated,
 	//     or when setting an int-timer for next frame (where it rounds down which is safe for that case)
-	static const float		msecPrecise;			// 16.66666
+	// DUDE: the length of a tic, 16.66666 (60 Hz), or USERCMD_MSEC with classicTics; set per map
+	float					msecPrecise;
+	// DUDE: com_classicTics - this map runs Doom 3 1.3.1's 62.5 Hz tic: msec is USERCMD_MSEC (16)
+	//       every tic instead of CalcMSec's 16/17/17. The engine decides it at each map load
+	//       (FT_GameTicMSec, LatchTicRate()); not saved, savegames load at either tic.
+	bool					classicTics;
 
 	int						vacuumAreaNum;			// -1 if level doesn't have any outside areas
 
@@ -525,6 +530,8 @@ private:
 	byte					lagometer[ LAGO_IMG_HEIGHT ][ LAGO_IMG_WIDTH ][ 4 ];
 
 	void					Clear( void );
+							// DUDE: com_classicTics - ask the engine which tic this map runs at
+	void					LatchTicRate( void );
 							// returns true if the entity shouldn't be spawned at all in this game type or difficulty level
 	bool					InhibitEntitySpawn( idDict &spawnArgs );
 							// spawn entities from the map file
