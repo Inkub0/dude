@@ -1181,7 +1181,10 @@ Wyman & Panteleev, *Rearchitecting Spatiotemporal Resampling for Production*, HP
 - Runs at internal (FSR2) resolution like the other RT effects; FSR2 is the perf backstop.
 - New shaders: re-run CMake configure so the glob picks them up ([cmake-glob gotcha]).
 
-## Perf: the chosen light is shaded once (2026-10-27, `perf/restir-di-reuse-winner-shade`)
+## Perf: the chosen light is shaded once (2026-10-27, `perf/restir-di-reuse-winner-shade`, merged)
+
+Gate (user): mars_city1 emissive mode, image unchanged; `restir.di.gather` 8.3-8.5 -> 7.1 ms at 1 sample together with the
+side-data change below (not the same view: 57 vs 29 light passes); ASAN clean.
 
 The gather picked its light from the candidates' shades and then shaded the winner AGAIN after the loop
 (`diShadeLight( ..., false )`), and in tail-cache mode a third time for the cache's E_dir
