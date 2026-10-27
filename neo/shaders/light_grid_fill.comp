@@ -27,9 +27,11 @@ layout( push_constant ) uniform PC {
 	float parallelFlux;				// flux weight for parallel (sun) lights, which have no 1/d^2 term
 	uint  quotaB;					// slots reserved for BOUNCEONLY emitter rows (normal mode + r_rtEmissiveBounce), 0 in emissive mode
 	uint  rankLinear;				// r_rtLightGridRankLinear: importance = lum x (1 - d / radius), a Doom light's own falloff (else lum x radius^2 / d^2)
+	uint  binned;					// TEMPORARY A/B (r_rtLightGridBlockFill): 1 = lgFillBlock below, 0 = the original per-cell sweep
 } pc;
 
-void main() {
+// the original fill: one thread per cell (linear cellIndex), every scene light read from the buffer per cell
+void lgFillPerCell() {
 	uint cellIndex = gl_GlobalInvocationID.x;
 	uint total = pc.cascades * pc.res * pc.res * pc.res;
 	if ( cellIndex >= total ) { return; }
@@ -153,5 +155,203 @@ void main() {
 		}
 	} else if ( cellLive ) {
 		grid.g[ base ] = 0u;											// no in-range light: empty, the consumer falls back
+	}
+}
+
+// DUDE (2026-10-27): the BLOCK fill - one workgroup per 4 x 4 x 4 block of a cascade's cells (its 64 threads, one per
+// cell). The original read EVERY scene light for EVERY cell (87,808 cells x ~400 rows on mars_city1 in emissive mode,
+// almost all rejected by the in-range test). Here the group first FILTERS the rows against the block - a row whose cull
+// sphere (widened by the cell half-diagonal, as the per-cell test) misses the box of the block's cell centres can reach
+// none of its cells - 64 rows at a time, one per thread, and packs the survivors IN ROW ORDER into shared memory
+// (option 2: each row is loaded once per block, not once per cell); then every thread runs the unchanged per-cell test
+// and top-N over that short list. The block test is a superset (a cell centre lies in the box, so its distance is never
+// below the box's; a small slack covers rounding) and the order is the buffer's, so each cell sees exactly the in-range
+// rows the sweep saw, in the same order: the same top-N, the same ties, the same grid.
+shared uint  sRow[ 64 ];
+shared uint  sFlags[ 64 ];
+shared vec4  sCull[ 64 ];
+shared float sLum[ 64 ];
+shared float sRadius[ 64 ];
+shared vec3  sPos[ 64 ];
+shared uint  sPass[ 64 ];
+shared uint  sCount;
+
+void lgFillBlock() {
+	// the workgroup's block of 4 x 4 x 4 cells in cascade c; a cell past res (res not a multiple of 4) still joins the
+	// block's loads and barriers but writes nothing
+	uint  lid  = gl_LocalInvocationID.x;
+	int   res  = int( pc.res );
+	uint  bpa  = ( pc.res + 3u ) / 4u;									// blocks per axis
+	uint  wg   = gl_WorkGroupID.x;
+	int   cB   = int( wg / ( bpa * bpa * bpa ) );
+	uint  rb   = wg - uint( cB ) * bpa * bpa * bpa;
+	ivec3 blk  = ivec3( int( rb % bpa ), int( ( rb / bpa ) % bpa ), int( rb / ( bpa * bpa ) ) ) * 4;
+	ivec3 cellC = blk + ivec3( int( lid & 3u ), int( ( lid >> 2u ) & 3u ), int( lid >> 4u ) );
+	const bool cellLive = cB < int( pc.cascades ) && all( lessThan( cellC, ivec3( res ) ) );
+	uint cellIndex = cellLive ? lgCellIndex( cB, cellC, res ) : 0u;
+
+	LgGrid   grid   = LgGrid( uvec2( pc.gridLo, pc.gridHi ) );
+	RtLights lights = RtLights( uvec2( pc.lightLo, pc.lightHi ) );
+	uint     slots  = min( pc.slots, LG_MAX_SLOTS );
+	int      base   = int( cellIndex * lgStride( slots ) );
+
+	vec3  camPos = vec3( pc.camX, pc.camY, pc.camZ );
+	int   c;
+	vec3  center = lgCellCenter( cellIndex, camPos, pc.cellBase, int( pc.res ), c );
+	float cs     = pc.cellBase * float( 1 << c );
+	float cellHalfDiag = cs * 0.8660254;	// sqrt(3)/2 * cell size: a light reaching any corner is a candidate
+
+	uint  chosen[ LG_MAX_SLOTS ];
+	float chosenImp[ LG_MAX_SLOTS ];
+	uint  count   = 0u;				// kept so far (up to slotsL)
+	uint  minSlot = 0u;				// the weakest kept slot, for replacement once full
+	float minImp  = 1e30;
+	bool  overflowed = false;		// a candidate arrived after the cell was full: some light is DROPPED (debug view red)
+	// E2 v3: a BOUNCEONLY emitter row (normal mode + r_rtEmissiveBounce) is a candidate for the GI bounce only - the DI
+	// shade skips it - so it must never DISPLACE a placed light: it gets its own small quota of the slots (2 of 16), ranked
+	// among its kind. Ranking the 300 emitter rows of a map against the placed lights for the same slots emptied whole
+	// cells of their placed lights and the DI changed from cell to cell: the blocky shadows of 2026-10-20.
+	uint  quotaB  = min( pc.quotaB, ( slots >= 8u ) ? 2u : ( ( slots >= 4u ) ? 1u : 0u ) );
+	uint  slotsL  = slots - quotaB;	// the placed lights' (and, in emissive mode, the emitter lights') share
+	uint  chosenB[ 2 ];
+	float chosenImpB[ 2 ];
+	uint  countB  = 0u, minSlotB = 0u;
+	float minImpB = 1e30;
+
+	// the box of the block's cell CENTRES (cells past res included: still a superset)
+	float csB    = pc.cellBase * float( 1 << cB );
+	vec3  origB  = lgCascadeOrigin( vec3( pc.camX, pc.camY, pc.camZ ), pc.cellBase, res, cB );
+	vec3  boxLo  = origB + ( vec3( blk ) + 0.5 ) * csB;
+	vec3  boxHi  = origB + ( vec3( blk + ivec3( 3 ) ) + 0.5 ) * csB;
+	float halfDB = csB * 0.8660254;
+	for ( uint chunk = 0u; chunk < pc.nLights; chunk += 64u ) {			// uniform trip count: every barrier is reached by all
+		uint  rli   = chunk + lid;
+		bool  pass  = false;
+		uint  rflags = 0u;
+		vec4  rcull = vec4( 0.0 );
+		if ( rli < pc.nLights ) {
+			rflags = lights.l[ rli ].flags;
+			if ( ( rflags & ( DUDE_LIGHT_FOGVOLUME | DUDE_LIGHT_DIFORWARD ) ) == 0u ) {
+				rcull = lights.l[ rli ].cull;
+				vec3  q  = rcull.xyz - clamp( rcull.xyz, boxLo, boxHi );
+				float rB = rcull.w + halfDB + 0.01 * csB;
+				pass = dot( q, q ) <= rB * rB;
+			}
+		}
+		sPass[ lid ] = pass ? 1u : 0u;
+		memoryBarrierShared();
+		barrier();
+		uint at = 0u;
+		for ( uint j = 0u; j < lid; j++ ) { at += sPass[ j ]; }
+		if ( pass ) {
+			sRow[ at ]    = rli;
+			sFlags[ at ]  = rflags;
+			sCull[ at ]   = rcull;
+			sLum[ at ]    = dot( lights.l[ rli ].color, vec3( 0.2126, 0.7152, 0.0722 ) );
+			sRadius[ at ] = lights.l[ rli ].radius;
+			sPos[ at ]    = lights.l[ rli ].pos;
+		}
+		if ( lid == 63u ) { sCount = at + sPass[ 63 ]; }
+		memoryBarrierShared();
+		barrier();
+		uint n = min( sCount, 64u );
+		for ( uint t = 0u; t < n && cellLive; t++ ) {
+			uint li    = sRow[ t ];
+			uint flags = sFlags[ t ];											// (fog / DIFORWARD rows never reach the list: the block filter skips them)
+			// (E2 v3: an EMITTER row ranks like any light - its colour is the irradiance proxy at its reach, its radius the
+			// reach - including the BOUNCEONLY rows of normal mode, which the DI shade skips and the bounce uses)
+			// in-range: the cell centre within the light's cull sphere, widened by the cell half-diagonal
+			vec4 cull = sCull[ t ];
+			vec3 cd   = cull.xyz - center;
+			float rr  = cull.w + cellHalfDiag;
+			if ( dot( cd, cd ) > rr * rr ) { continue; }
+			// importance = flux * geometry. flux = emitted power proxy (luminance x reach); geom = inverse-square (clamped
+			// to the cell extent). Parallel suns have no distance term - a fixed flux weight keeps them a candidate everywhere.
+			float lum = sLum[ t ];												// the same dot( color, ... ), taken once per row at the load
+			if ( lum <= 0.0 ) { continue; }
+			float imp;
+			if ( ( flags & DUDE_LIGHT_PARALLEL ) != 0u ) {
+				imp = lum * pc.parallelFlux;
+			} else if ( pc.rankLinear != 0u ) {
+				// the light's OWN falloff as the rank (r_rtLightGridRankLinear): a Doom light delivers C x (1 - d / R) and nothing
+				// past R, so this is its expected contribution at the cell. The inverse-square proxy below overrates a light
+				// near its rim by an order of magnitude (at 0.9 R: 1.2 C against a true 0.1 C), so the big ambience lights
+				// hogged the slots of every cell near their edge and a room's own fixture rows were evicted (the alcoves that
+				// died as the reach grew, 2026-10-20). Floored at the cell's half-diagonal so a cell containing the light ranks
+				// it at full strength; a light whose volume only grazes the cell still ranks by the cell centre's distance.
+				// Measured against the light's CULL SPHERE (the volume the in-range test above admitted it by), NOT pos/radius:
+				// a projected spot's radius is the 320 fallback (spots do not use light_radius) and a light_center light's pos is
+				// off its box, so pos/radius ranked part of the real volume at exactly 0 and the `imp <= 0` skip below DROPPED an
+				// in-range light from a cell with free slots - whole floor patches lost their light under DI (the hell cage bars,
+				// 2026-10-22). The small floor keeps every in-range light a candidate: the rank only ORDERS, so a cell with free
+				// slots keeps its whole in-range set, and a full cell still evicts its rim-of-volume lights first.
+				float dd   = max( length( center - cull.xyz ) - cellHalfDiag, 0.0 );
+				imp = lum * max( 1.0 - dd / max( cull.w, 1.0 ), 0.02 );
+			} else {
+				float rad  = max( sRadius[ t ], 1.0 );
+				vec3  pd   = center - sPos[ t ];
+				float d2   = max( dot( pd, pd ), cs * cs );
+				imp = lum * ( rad * rad ) / d2;
+			}
+			if ( imp <= 0.0 ) { continue; }
+			if ( ( flags & DUDE_LIGHT_BOUNCEONLY ) != 0u ) {
+				if ( quotaB == 0u ) { continue; }
+				if ( countB < quotaB ) {
+					chosenB[ countB ] = li; chosenImpB[ countB ] = imp; countB++;
+					if ( countB == quotaB ) {
+						minImpB = chosenImpB[ 0 ]; minSlotB = 0u;
+						for ( uint k = 1u; k < quotaB; k++ ) { if ( chosenImpB[ k ] < minImpB ) { minImpB = chosenImpB[ k ]; minSlotB = k; } }
+					}
+				} else if ( imp > minImpB ) {
+					chosenB[ minSlotB ] = li; chosenImpB[ minSlotB ] = imp;
+					minImpB = chosenImpB[ 0 ]; minSlotB = 0u;
+					for ( uint k = 1u; k < quotaB; k++ ) { if ( chosenImpB[ k ] < minImpB ) { minImpB = chosenImpB[ k ]; minSlotB = k; } }
+				}
+				continue;
+			}
+			// streaming TOP-N by importance (deterministic - no rng, so the grid is stable frame-to-frame)
+			if ( count < slotsL ) {
+				chosen[ count ] = li;
+				chosenImp[ count ] = imp;
+				count++;
+				if ( count == slotsL ) {									// just filled: locate the weakest kept slot
+					minImp = chosenImp[ 0 ]; minSlot = 0u;
+					for ( uint k = 1u; k < slotsL; k++ ) { if ( chosenImp[ k ] < minImp ) { minImp = chosenImp[ k ]; minSlot = k; } }
+				}
+			} else {														// the cell is already full: this candidate costs a drop
+				overflowed = true;
+				if ( imp > minImp ) {										// stronger than the weakest kept: replace it, re-find the weakest
+					chosen[ minSlot ] = li;
+					chosenImp[ minSlot ] = imp;
+					minImp = chosenImp[ 0 ]; minSlot = 0u;
+					for ( uint k = 1u; k < slotsL; k++ ) { if ( chosenImp[ k ] < minImp ) { minImp = chosenImp[ k ]; minSlot = k; } }
+				}
+			}
+		}
+		memoryBarrierShared();
+		barrier();														// the next chunk overwrites the list
+	}
+	// the bounce-only rows ride behind the lights in the same record (their quota never exceeds the free slots)
+	for ( uint k = 0u; k < countB && count < slots; k++ ) { chosen[ count ] = chosenB[ k ]; chosenImp[ count ] = chosenImpB[ k ]; count++; }
+
+	if ( cellLive && count > 0u ) {
+		float sumStored = 0.0;											// sum over the KEPT lights = the consume's pdf denominator
+		for ( uint k = 0u; k < count; k++ ) { sumStored += chosenImp[ k ]; }
+		grid.g[ base ]     = count | ( overflowed ? 0x80000000u : 0u );	// bit 31 = OVERFLOW: more in-range lights than slots (debug view 2 red)
+		grid.g[ base + 1 ] = floatBitsToUint( sumStored );
+		for ( uint k = 0u; k < count; k++ ) {
+			grid.g[ base + int( LG_HEADER + 2u * k ) ]      = chosen[ k ];
+			grid.g[ base + int( LG_HEADER + 2u * k + 1u ) ] = floatBitsToUint( chosenImp[ k ] );
+		}
+	} else if ( cellLive ) {
+		grid.g[ base ] = 0u;											// no in-range light: empty, the consumer falls back
+	}
+}
+
+void main() {
+	if ( pc.binned != 0u ) {
+		lgFillBlock();
+	} else {
+		lgFillPerCell();
 	}
 }

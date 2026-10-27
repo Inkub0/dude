@@ -167,3 +167,21 @@ contribution at the cell - instead of lum x radius^2 / d^2. The inverse-square p
 an order of magnitude (0.9 R: 1.2 C vs a true 0.1 C), so big ambience lights hogged the slots of every cell near their
 edge and, with 9 slots, a room's own fixtures were evicted (the alcoves that died as the emitter reach grew). A sun
 ranks lum x 1 under the linear rank (x 4 under the old one). 0 = the old proxy.
+
+## Perf: the block fill (2026-10-27, `perf/light-grid-block-fill`)
+
+`lightgrid.fill` read EVERY scene light for EVERY cell: 4 cascades x 28^3 = 87,808 threads x ~400 rows on mars_city1 in
+emissive mode (~1.0 ms after the rows moved to VRAM, 1.45 before), almost all rejected by the in-range test. The fill
+(`light_grid_fill.comp` `lgFillBlock`) now runs one workgroup per 4 x 4 x 4 block of a cascade's cells (its 64 threads,
+one per cell): the group reads the rows 64 at a time (one per thread), keeps those whose cull sphere - widened by the
+cell half-diagonal as the per-cell test, plus a 1%-of-a-cell slack - reaches the box of the block's cell centres, and
+packs them IN ROW ORDER into shared memory with the fields the per-cell test reads (cull sphere, luminance, radius, pos,
+flags); every thread then runs the unchanged per-cell test and top-N over that list. Rows are read once per block instead
+of once per cell, and each cell only meets the rows near its block.
+
+Same grid: the block test is a superset (a cell centre lies in the box, so the box is never farther than the centre;
+checked offline in float32 over 198 M passing light/cell pairs at Doom-scale coordinates, every cascade, res 20-32,
+radii tuned to touch a centre exactly: 0 missed), and the list keeps the buffer's order, so each cell sees exactly the
+in-range rows of the sweep in the same order - the same top-N, ties and sums. Cells past `res` (res not a multiple of
+4) join the block's loads and barriers but write nothing. TEMPORARY A/B `r_rtLightGridBlockFill` (1 block / 0 sweep),
+removed at merge.
