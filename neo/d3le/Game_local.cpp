@@ -58,7 +58,7 @@ const idVec3 DEFAULT_GRAVITY_VEC3( 0, 0, -DEFAULT_GRAVITY );
 
 const int	CINEMATIC_SKIP_DELAY	= SEC2MS( 2.0f );
 
-const float USERCMD_MSEC_PRECISE = 1000.0f/60.0f;
+float USERCMD_MSEC_PRECISE = 1000.0f/60.0f;	// DUDE: per map, see LatchTicRate()
 
 #ifdef GAME_DLL
 
@@ -258,6 +258,8 @@ void idGameLocal::Clear( void ) {
 	framenum = 0;
 	previousTime = 0;
 	time = 0;
+	USERCMD_MSEC_PRECISE = 1000.0f / USERCMD_HZ;	// DUDE: LatchTicRate() sets it and classicTics per map
+	classicTics = false;
 	vacuumAreaNum = 0;
 	mapFileName.Clear();
 	mapFile = NULL;
@@ -316,6 +318,10 @@ bool updateGameDebugger( idInterpreter *interpreter, idProgram *program, int ins
 	}
 	return ret;
 }
+
+// DUDE: com_classicTics - the engine's FT_GameTicMSec (see LatchTicRate()). Asking for it in Init()
+// tells the engine this library can run Doom 3's original 62.5 Hz tic.
+static int ( *gameTicMSecFnPtr )( void ) = NULL;
 
 
 /*
@@ -429,6 +435,8 @@ void idGameLocal::Init( void ) {
 
 	//debugger support
 	common->GetAdditionalFunction( idCommon::FT_UpdateDebugger,( idCommon::FunctionPointer * ) &updateDebuggerFnPtr,NULL);
+	// DUDE: com_classicTics
+	common->GetAdditionalFunction( idCommon::FT_GameTicMSec, ( idCommon::FunctionPointer * ) &gameTicMSecFnPtr, NULL );
 
 }
 
@@ -1349,6 +1357,8 @@ void idGameLocal::InitFromNewMap(const char* mapName, idRenderWorld* renderWorld
 
 	Printf( "----- Game Map Init -----\n" );
 
+	LatchTicRate();		// DUDE: com_classicTics
+
 	gamestate = GAMESTATE_STARTUP;
 
 	gameRenderWorld = renderWorld;
@@ -1386,6 +1396,8 @@ bool idGameLocal::InitFromSaveGame( const char *mapName, idRenderWorld *renderWo
 	}
 
 	Printf( "----- Game Map Init SaveGame -----\n" );
+
+	LatchTicRate();		// DUDE: com_classicTics (savegames load at either tic: their times are msec)
 
 	gamestate = GAMESTATE_STARTUP;
 
@@ -2473,6 +2485,23 @@ static int CalcMSec( long long framenum ) {
 }
 
 /*
+===========
+idGameLocal::LatchTicRate
+
+DUDE: com_classicTics. Called first when a map is initialized (new or from a savegame), after the
+engine picked the tic it runs this map at: Doom 3 1.3.1's whole 16 msec (62.5 Hz), where msec is
+USERCMD_MSEC every tic as in vanilla, or dhewm3's 60 Hz, where RunFrame alternates 16/17/17 msec
+(CalcMSec). USERCMD_MSEC_PRECISE follows, so the slow-mo ramp (ComputeSlowMsec) and what
+msecPrecise times (view bob, script waits, camera anims) step by vanilla's 16 msec at 62.5 Hz.
+Before LoadMap(), whose ResetSlowTimeVars() and the savegame restore read it.
+===========
+*/
+void idGameLocal::LatchTicRate( void ) {
+	classicTics = ( gameTicMSecFnPtr != NULL && gameTicMSecFnPtr() == USERCMD_MSEC );
+	USERCMD_MSEC_PRECISE = classicTics ? (float)USERCMD_MSEC : 1000.0f / USERCMD_HZ;
+}
+
+/*
 ================
 idGameLocal::RunFrame
 ================
@@ -2518,7 +2547,8 @@ gameReturn_t idGameLocal::RunFrame(const usercmd_t* clientCmds) {
 		previousTime = time;
 
 		// dezo2/DG: recalculate each frame in single-player, see comment at CalcMSec()
-		int msec_fast = isMultiplayer ? USERCMD_MSEC : CalcMSec( framenum );
+		// DUDE: com_classicTics runs vanilla's whole 16 msec tics (62.5 Hz) instead
+		int msec_fast = ( isMultiplayer || classicTics ) ? USERCMD_MSEC : CalcMSec( framenum );
 		if ( slowmoState == SLOWMO_STATE_OFF ) {
 			msec = msec_fast;
 			msecPrecise = USERCMD_MSEC_PRECISE;
@@ -5055,7 +5085,8 @@ void idGameLocal::ComputeSlowMsec() {
 	}
 
 	// DG: for more precision in slowmo timing
-	static const float quarterFrameTime = USERCMD_MSEC_PRECISE * 0.25;
+	// DUDE: not static - USERCMD_MSEC_PRECISE is the tic length of this map (com_classicTics)
+	const float quarterFrameTime = USERCMD_MSEC_PRECISE * 0.25f;
 
 	// do any necessary ramping
 	if ( slowmoState == SLOWMO_STATE_RAMPUP ) {
