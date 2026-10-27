@@ -175,14 +175,64 @@ idRenderWorldLocal::~idRenderWorldLocal() {
 /*
 ===================
 ResizeInteractionTable
+
+DUDE: id dropped the table once a map outgrew the padding GenerateAllInteractions gave it, and the
+rest of the map crawled the interaction lists. Every live Quake 4 effect is a render entity (and
+its light segments render lights), and debris spawns client moveables, so a long fight outgrows
+it; Doom 3's own gibs and projectiles can too. Grow it by half instead - a few times per map at
+most - and refill it from the lights' interaction lists. Only a table too large to allocate is
+still dropped.
 ===================
 */
 void idRenderWorldLocal::ResizeInteractionTable() {
-	// we overflowed the interaction table, so dump it
-	// we may want to resize this in the future if it turns out to be common
-	common->Printf( "idRenderWorldLocal::ResizeInteractionTable: overflowed interactionTableWidth, dumping\n" );
+	if ( interactionTable == NULL
+		|| ( entityDefs.Num() <= interactionTableWidth && lightDefs.Num() <= interactionTableHeight ) ) {
+		return;
+	}
+	int newWidth = interactionTableWidth;
+	if ( entityDefs.Num() > newWidth ) {
+		newWidth = entityDefs.Num() + Max( 100, entityDefs.Num() / 2 );
+	}
+	int newHeight = interactionTableHeight;
+	if ( lightDefs.Num() > newHeight ) {
+		newHeight = lightDefs.Num() + Max( 100, lightDefs.Num() / 2 );
+	}
+	const long long size = (long long)newWidth * newHeight * sizeof( *interactionTable );
+
 	R_StaticFree( interactionTable );
 	interactionTable = NULL;
+	if ( size > 256 * 1024 * 1024 ) {
+		common->Printf( "idRenderWorldLocal::ResizeInteractionTable: %i x %i is too large, dumping\n", newWidth, newHeight );
+		return;
+	}
+	interactionTableWidth = newWidth;
+	interactionTableHeight = newHeight;
+	interactionTable = (idInteraction **)R_ClearedStaticAlloc( (int)size );
+	FillInteractionTable();
+	common->Printf( "interactionTable grown to %i entities x %i lights (%i KB)\n", newWidth, newHeight, (int)( size / 1024 ) );
+}
+
+/*
+===================
+FillInteractionTable
+
+DUDE: enters every interaction into a freshly cleared table (GenerateAllInteractions' loop);
+returns how many
+===================
+*/
+int idRenderWorldLocal::FillInteractionTable() {
+	int count = 0;
+	for ( int i = 0 ; i < lightDefs.Num() ; i++ ) {
+		idRenderLightLocal *ldef = lightDefs[i];
+		if ( !ldef ) {
+			continue;
+		}
+		for ( idInteraction *inter = ldef->firstInteraction; inter != NULL; inter = inter->lightNext ) {
+			interactionTable[ ldef->index * interactionTableWidth + inter->entityDef->index ] = inter;
+			count++;
+		}
+	}
+	return count;
 }
 
 /*
@@ -195,9 +245,7 @@ qhandle_t idRenderWorldLocal::AddEntityDef( const renderEntity_t *re ){
 	int entityHandle = entityDefs.FindNull();
 	if ( entityHandle == -1 ) {
 		entityHandle = entityDefs.Append( NULL );
-		if ( interactionTable && entityDefs.Num() > interactionTableWidth ) {
-			ResizeInteractionTable();
-		}
+		ResizeInteractionTable();
 	}
 
 	UpdateEntityDef( entityHandle, re );
@@ -230,8 +278,12 @@ void idRenderWorldLocal::UpdateEntityDef( qhandle_t entityHandle, const renderEn
 	if ( entityHandle < 0 || entityHandle > LUDICROUS_INDEX ) {
 		common->Error( "idRenderWorld::UpdateEntityDef: index = %i", entityHandle );
 	}
-	while ( entityHandle >= entityDefs.Num() ) {
-		entityDefs.Append( NULL );
+	if ( entityHandle >= entityDefs.Num() ) {
+		while ( entityHandle >= entityDefs.Num() ) {
+			entityDefs.Append( NULL );
+		}
+		// DUDE: a handle the caller chose (not from AddEntityDef) can grow the list past the table too
+		ResizeInteractionTable();
 	}
 
 	idRenderEntityLocal	*def = entityDefs[entityHandle];
@@ -374,9 +426,7 @@ qhandle_t idRenderWorldLocal::AddLightDef( const renderLight_t *rlight ) {
 
 	if ( lightHandle == -1 ) {
 		lightHandle = lightDefs.Append( NULL );
-		if ( interactionTable && lightDefs.Num() > interactionTableHeight ) {
-			ResizeInteractionTable();
-		}
+		ResizeInteractionTable();
 	}
 	UpdateLightDef( lightHandle, rlight );
 
@@ -404,8 +454,12 @@ void idRenderWorldLocal::UpdateLightDef( qhandle_t lightHandle, const renderLigh
 	if ( lightHandle < 0 || lightHandle > LUDICROUS_INDEX ) {
 		common->Error( "idRenderWorld::UpdateLightDef: index = %i", lightHandle );
 	}
-	while ( lightHandle >= lightDefs.Num() ) {
-		lightDefs.Append( NULL );
+	if ( lightHandle >= lightDefs.Num() ) {
+		while ( lightHandle >= lightDefs.Num() ) {
+			lightDefs.Append( NULL );
+		}
+		// DUDE: a handle the caller chose (not from AddLightDef) can grow the list past the table too
+		ResizeInteractionTable();
 	}
 
 	bool justUpdate = false;
@@ -1677,27 +1731,17 @@ void idRenderWorldLocal::GenerateAllInteractions() {
 
 
 	// build the interaction table
+	if ( interactionTable ) {
+		R_StaticFree( interactionTable );		// DUDE: a second call must not leak the first table
+		interactionTable = NULL;
+	}
 	if ( r_useInteractionTable.GetBool() ) {
 		interactionTableWidth = entityDefs.Num() + 100;
 		interactionTableHeight = lightDefs.Num() + 100;
 		int	size =  interactionTableWidth * interactionTableHeight * sizeof( *interactionTable );
 		interactionTable = (idInteraction **)R_ClearedStaticAlloc( size );
 
-		int	count = 0;
-		for ( int i = 0 ; i < this->lightDefs.Num() ; i++ ) {
-			idRenderLightLocal	*ldef = this->lightDefs[i];
-			if ( !ldef ) {
-				continue;
-			}
-			idInteraction	*inter;
-			for ( inter = ldef->firstInteraction; inter != NULL; inter = inter->lightNext ) {
-				idRenderEntityLocal	*edef = inter->entityDef;
-				int index = ldef->index * interactionTableWidth + edef->index;
-
-				interactionTable[ index ] = inter;
-				count++;
-			}
-		}
+		int	count = FillInteractionTable();
 
 		common->Printf( "interactionTable size: %i bytes\n", size );
 		common->Printf( "%d interaction take %zd bytes\n", count, count * sizeof( idInteraction ) );

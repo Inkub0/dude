@@ -199,6 +199,8 @@ public:
 	// cache access, because the table is accessed by light in idRenderWorldLocal::CreateLightDefInteractions()
 	// Growing this table is time consuming, so we add a pad value to the number
 	// of entityDefs and lightDefs
+	// DUDE: and grow it by half when a map outgrows it (ResizeInteractionTable), instead of
+	// dropping it for the rest of the map
 	idInteraction **		interactionTable;
 	int						interactionTableWidth;		// entityDefs
 	int						interactionTableHeight;		// lightDefs
@@ -287,6 +289,7 @@ public:
 	// RenderWorld.cpp
 
 	void					ResizeInteractionTable();
+	int						FillInteractionTable();
 
 	void					AddEntityRefToArea( idRenderEntityLocal *def, portalArea_t *area );
 	void					AddLightRefToArea( idRenderLightLocal *light, portalArea_t *area );

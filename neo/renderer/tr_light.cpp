@@ -705,7 +705,11 @@ void idRenderWorldLocal::CreateLightDefInteractions( idRenderLightLocal *ldef ) 
 
 			// some big outdoor meshes are flagged to not create any dynamic interactions
 			// when the level designer knows that nearby moving lights shouldn't actually hit them
-			if ( edef->parms.noDynamicInteractions && edef->world->generateAllInteractionsCalled ) {
+			// DUDE: a Quake 4 effect's marker entity draws nothing itself (its particles are built per
+			// view): no light interacts with it, also when the effect plays before the level's
+			// GenerateAllInteractions (the flag alone only counts after it)
+			if ( edef->parms.noDynamicInteractions
+				&& ( edef->world->generateAllInteractionsCalled || R_IsBseEntity( &edef->parms ) ) ) {
 				continue;
 			}
 

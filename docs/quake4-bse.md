@@ -809,9 +809,18 @@ in both games, the screenshots compare directly. `func_fx` also takes `endOrigin
   (`idRenderWorldLocal::GenerateAllInteractions`); every live effect is a render entity in DUDE (two
   for a lit one, more with debris), so a long busy fight - and `bseSweep` - outgrows it and
   `ResizeInteractionTable` drops it ("overflowed interactionTableWidth, dumping"): the rest of the
-  map looks interactions up the slow way. Retail's effects were not render entities. Options: grow
-  the table instead of dropping it, or keep effect entities out of it. Shared engine code: Doom 3 /
-  RoE / Lost Mission benefit too.
+  map looks interactions up the slow way. Retail's effects were not render entities.
+  **Built 2026-10-27** (`perf/interaction-table-grow`, gate pending): `ResizeInteractionTable` grows
+  the table instead - the overflowing side by half (at least 100), refilled from the lights'
+  interaction lists (`FillInteractionTable`, the loop `GenerateAllInteractions` had), so a map
+  regrows a few times at most and keeps the fast lookup; the console says "interactionTable grown to
+  W entities x H lights (N KB)". Only a table over 256 MB would still be dropped. Two more: a handle
+  the caller picks (`UpdateEntityDef` / `UpdateLightDef` past the list's end) grew the lists without
+  the size check - id's latent out-of-bounds write into the table, now checked too; and an effect's
+  marker entity (`_BSE_EFFECT`, no surfaces) never gets a light interaction, also when the effect
+  plays before the level's `GenerateAllInteractions` (its `noDynamicInteractions` counted only
+  after). Shared engine code: Doom 3 / RoE / Lost Mission get the same growth (their gibs, debris
+  and projectiles could overflow it too). No fidelity impact (a lookup structure).
 
 - **HDR for views rendered into a crop** (queued 2026-10-26, user): Quake 4's double vision frames
   (and RoE / Lost Mission's with `g_lowresFullscreenFX 1`) have no full-window world view, so
