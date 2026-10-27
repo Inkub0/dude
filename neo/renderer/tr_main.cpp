@@ -6203,9 +6203,12 @@ void R_SetupProjection( viewDef_t * viewDef ) {
 	// supersampling comes from the jittered sample positions, and it is the only
 	// consumer that resolves them (the standalone r_temporalJitter toggle from
 	// increment B was retired once C2 was verified — alone it just shimmers).
+	// DUDE: and only a full-window view (isWindowView, set by RenderScene before this): FSR2 never
+	// resolves the others - a world view the game renders into a crop (Quake 4's double vision),
+	// a GUI's 3D model view (the PDA, the menu planet) - so jittered they shimmered
 	const bool wantTemporalJitter = r_fsr.GetBool()
 		&& rhi::GetActiveBackendType() == rhi::BT_VULKAN
-		&& !viewDef->isSubview && !tr.takingEnvProbe && !tr.takingScreenshot;
+		&& !viewDef->isSubview && viewDef->isWindowView && !tr.takingEnvProbe && !tr.takingScreenshot;
 	if ( wantTemporalJitter ) {
 		// the phase count grows with the upscale ratio, as ffxFsr2GetJitterPhaseCount does:
 		// 8 * (display / render)^2 -- 8 at Native-AA, 18 at 0.67, 32 at 0.5

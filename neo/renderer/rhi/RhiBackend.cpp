@@ -758,6 +758,8 @@ static int						rhiHdrW = 0, rhiHdrH = 0;	// the scene buffer's size = the WORLD
 static rhi::RenderTargetHandle	rhiHdrCompositeRT = 0;
 static int						rhiHdrCompW = 0, rhiHdrCompH = 0;
 static bool						rbHdrCompositeActive = false;	// FSR2 ran: the frame target is the composite from here on
+static bool						rbHdrCropFrame = false;			// the frame's world view went into a crop (RB_RHI_FrameHasWorldScene)
+static bool						rbHdrCropMetered = false;		// that crop view's eye adaptation / bloom are measured
 static bool						rbHdrRtFloat = false;			// rhiHdrRT is RGBA16F (HDR) vs RGBA8 (off-HDR post) — recreate on change
 static bool						rbHdrAaFloat = false;			// rhiHdrAaRT is RGBA16F vs RGBA8 — must track rhiHdrRT's format
 static rhi::ImageHandle			rbEyeExposureImg = 0;			// B1 eye-adapt: 1x1 adapted exposure, measured at end of the primary 3D view, sampled by the resolve
@@ -812,10 +814,23 @@ subview and not fullscreen. Routing such a frame through the float buffer + dith
 resolve lifts near-black detail (the menu planet's dark limb) into visibility
 through the translucent menu buttons, so we keep those frames on the vanilla 8-bit
 path. Same fullscreen-and-not-subview test RB_RHI_DrawView uses for the post chain.
+
+DUDE: WORLD_SCENE_CROP - no full-window view, but the game rendered its world view into a crop
+(viewDef_t::isCropView: Quake 4's double vision, RoE / Lost Mission's g_lowresFullscreenFX) and
+stretches it over the screen in 2D. Such a frame is gameplay too: without HDR the blur's seconds
+lost the tone map and r_hdrExposure (bright fire looked hotter). Only a list that is presented
+counts: CaptureRenderToFile issues swap-less lists (savegame previews, PDA objective shots) that
+read the backbuffer straight back, so they stay on it.
 =============
 */
-static bool RB_RHI_FrameHasWorldScene( const emptyCommand_t *cmds ) {
+enum { WORLD_SCENE_NONE, WORLD_SCENE_WINDOW, WORLD_SCENE_CROP };
+static int RB_RHI_FrameHasWorldScene( const emptyCommand_t *cmds ) {
+	bool crop = false;
+	bool presented = false;
 	for ( ; cmds; cmds = (const emptyCommand_t *)cmds->next ) {
+		if ( cmds->commandId == RC_SWAP_BUFFERS ) {
+			presented = true;
+		}
 		if ( cmds->commandId != RC_DRAW_VIEW ) {
 			continue;
 		}
@@ -824,10 +839,13 @@ static bool RB_RHI_FrameHasWorldScene( const emptyCommand_t *cmds ) {
 			continue;
 		}
 		if ( vd->isWindowView ) {	// the primary scene view (set by RenderScene)
-			return true;
+			return WORLD_SCENE_WINDOW;
+		}
+		if ( vd->isCropView ) {
+			crop = true;
 		}
 	}
-	return false;
+	return ( crop && presented ) ? WORLD_SCENE_CROP : WORLD_SCENE_NONE;
 }
 
 static void RB_RHI_HdrBeginFrame( rhi::RHI *r, const emptyCommand_t *cmds ) {
@@ -835,6 +853,8 @@ static void RB_RHI_HdrBeginFrame( rhi::RHI *r, const emptyCommand_t *cmds ) {
 	rbFsrRanThisFrame = false;
 	rbHdrFrameActive = false;
 	rbHdrCompositeActive = false;
+	rbHdrCropFrame = false;
+	rbHdrCropMetered = false;
 
 	// Tonemap follows the HDR toggle (the curve is meaningless — and unreachable in the greyed-out
 	// combo — with r_hdr off). On the off edge clear it to faithful; on the on edge default it to
@@ -899,7 +919,8 @@ static void RB_RHI_HdrBeginFrame( rhi::RHI *r, const emptyCommand_t *cmds ) {
 	// worldless frames (main menu, GUIs, cinematics) stay on the 8-bit path so the
 	// float+dither resolve can't reveal near-black scene detail through translucent
 	// 2D — e.g. the menu planet's dark limb showing through the LOAD GAME button
-	if ( !RB_RHI_FrameHasWorldScene( cmds ) ) {
+	const int worldScene = RB_RHI_FrameHasWorldScene( cmds );
+	if ( worldScene == WORLD_SCENE_NONE ) {
 		return;
 	}
 
@@ -961,7 +982,21 @@ static void RB_RHI_HdrBeginFrame( rhi::RHI *r, const emptyCommand_t *cmds ) {
 		rbHdrAaFloat = wantHdr;
 	}
 
-	r->SetFrameTarget( rhiHdrRT );
+	// DUDE: a crop-view frame (Quake 4's double vision; WORLD_SCENE_CROP) never runs FSR2 - that
+	// is built for one full-window view - but its 2D composite and HUD are drawn at the display
+	// size. Under sub-native FSR2 the scene buffer is the smaller render size, so such a frame
+	// draws into the display-size composite from the start (the crop fits: CropRenderSize limits it
+	// to the render size); without the composite it stays on the 8-bit path, as before.
+	if ( worldScene == WORLD_SCENE_CROP && wantFsr && ( w != dw || h != dh ) ) {
+		if ( !rhiHdrCompositeRT ) {
+			return;
+		}
+		r->SetFrameTarget( rhiHdrCompositeRT );
+		rbHdrCompositeActive = true;
+	} else {
+		r->SetFrameTarget( rhiHdrRT );
+	}
+	rbHdrCropFrame = ( worldScene == WORLD_SCENE_CROP );
 	rbHdrActiveThisFrame = true;
 	rbEyeExposureImg = 0;		// B1: recomputed at the end of the primary 3D view (0 = use static exposure)
 	rbBloomImg = 0;				// Phase C: recomputed at the end of the primary 3D view (0 = no bloom)
@@ -1169,12 +1204,18 @@ static void RB_RHI_HdrResolve( rhi::RHI *r ) {
 	// view (scene-only, before the HUD/console). The resolve just samples that 1x1 here; 0 when
 	// adaptation is off, so the static r_hdrExposure is used.
 	rhi::ImageHandle eyeExposureImg = rbEyeExposureImg;
+	// DUDE: a crop-view frame whose crop could not be metered holds the adapted exposure
+	if ( eyeExposureImg == 0 && rbHdrCropFrame ) {
+		eyeExposureImg = RB_RHI_EyeAdaptHeld( r );
+	}
 
 	// Fused SMAA resolve (chroma off): the neighborhood blend + grain/gamma tail in one pass,
 	// dropping the rhiHdrAaRT round-trip. Falls through to the classic path when ineligible.
 	// When FSR2 resolved this frame (R1/C2) its RCAS replaces FXAA/SMAA entirely — stacking
 	// a second AA over the temporally-resolved image only softens it.
-	if ( !rbFsrRanThisFrame && RB_RHI_HdrResolveSmaaFused( r, w, h ) ) {
+	// (the AA passes read the scene buffer: not on a frame that ended in the composite - FSR2 ran,
+	// or a crop-view frame under sub-native FSR2 drew there from the start)
+	if ( !rbFsrRanThisFrame && !rbHdrCompositeActive && RB_RHI_HdrResolveSmaaFused( r, w, h ) ) {
 		return;
 	}
 
@@ -1192,7 +1233,7 @@ static void RB_RHI_HdrResolve( rhi::RHI *r ) {
 	// sub-native FSR2: the frame ended in the display-size composite, resolve THAT (film grain,
 	// gamma, tonemap all run here at display pixels, after and outside the upscale)
 	rhi::RenderTargetHandle sourceRT = rbHdrCompositeActive ? rhiHdrCompositeRT : rhiHdrRT;
-	if ( !rbFsrRanThisFrame && r_rhiAA.GetInteger() > 0 && rhiHdrAaRT ) {
+	if ( !rbFsrRanThisFrame && !rbHdrCompositeActive && r_rhiAA.GetInteger() > 0 && rhiHdrAaRT ) {
 		if ( r_rhiAA.GetInteger() != 2 || !RB_RHI_HdrSmaa( r ) ) {
 			RB_RHI_HdrFxaa( r );
 		}
@@ -3692,6 +3733,42 @@ static void RB_RHI_PortalSkyComposite( rhi::RHI *r, const viewDef_t *viewDef ) {
 	backEnd.pc.c_drawElements++;
 }
 
+/*
+=============
+RB_RHI_HdrMeterCropView
+
+DUDE: eye adaptation and bloom for a frame whose world view the game rendered into a crop -
+Quake 4's double vision (512x256, copied to _scratch and drawn twice over the screen in 2D),
+RoE / Lost Mission's g_lowresFullscreenFX (512x512). They measure the crop's own rows of the
+frame target, at the point a full view measures (its end, before the 2D composite and the HUD),
+so the bloom - stretched over the screen as the game stretches the crop - and the exposure follow
+what the player sees. The resolve then tone-maps the composite and the HUD as on any frame. Rows
+are passed in memory order: GL keeps bottom-up rows, Vulkan's colour targets store the view
+upright and flip a GL bottom-left rect at y onto rows [H - y - h, H - y) (ApplyDynState). A
+rect outside the target measures nothing: no bloom, and the resolve holds the exposure.
+=============
+*/
+static void RB_RHI_HdrMeterCropView( rhi::RHI *r, const viewDef_t *viewDef ) {
+	if ( !rbHdrActiveThisFrame || !rbHdrFrameActive ) {
+		return;		// the RGBA8 off-HDR post target has no tone map to feed
+	}
+	const rhi::RenderTargetHandle rt = rbHdrCompositeActive ? rhiHdrCompositeRT : rhiHdrRT;
+	const int tw = rbHdrCompositeActive ? rhiHdrCompW : rhiHdrW;
+	const int th = rbHdrCompositeActive ? rhiHdrCompH : rhiHdrH;
+	const int x = tr.viewportOffset[0] + viewDef->viewport.x1;
+	const int y = tr.viewportOffset[1] + viewDef->viewport.y1;
+	const int w = viewDef->viewport.x2 - viewDef->viewport.x1 + 1;
+	const int h = viewDef->viewport.y2 - viewDef->viewport.y1 + 1;
+	if ( rt == 0 || tw <= 0 || th <= 0 || w <= 0 || h <= 0 || x < 0 || y < 0 || x + w > tw || y + h > th ) {
+		return;
+	}
+	const int row = ( rhi::GetActiveBackendType() == rhi::BT_VULKAN ) ? th - y - h : y;
+	const float uvRect[4] = { (float)x / tw, (float)row / th, (float)w / tw, (float)h / th };
+	const rhi::ImageHandle sceneImg = r->GetRenderTargetImage( rt );
+	rbEyeExposureImg = RB_RHI_EyeAdaptExposure( r, sceneImg, uvRect );
+	rbBloomImg = RB_RHI_Bloom( r, sceneImg, uvRect );
+}
+
 static void RB_RHI_DrawView( rhi::RHI *r, viewDef_t *viewDef ) {
 	backEnd.viewDef = viewDef;	// engine helpers (cinematics, counters) read this
 
@@ -3937,6 +4014,14 @@ static void RB_RHI_DrawView( rhi::RHI *r, viewDef_t *viewDef ) {
 				fa.fovYRadians = DEG2RAD( viewDef->renderView.fov_y );
 				fa.zNear = r_znear.GetFloat();
 				fa.reset = RB_RHI_TemporalFsrReset( viewDef );
+				// DUDE: FSR2's history is only last frame's if it ran last frame: after frames that
+				// skipped it (Quake 4's double vision renders into a crop for seconds, a worldless
+				// menu) the history is that old, and only a camera jump reset it
+				static int fsrPrevFrame = -100;
+				if ( fsrPrevFrame != tr.frameCount - 1 ) {
+					fa.reset = true;
+				}
+				fsrPrevFrame = tr.frameCount;
 				fa.sharpness = r_fsrSharpness.GetFloat() > 0.0f ? r_fsrSharpness.GetFloat() : -1.0f;
 				// auto-reactive (R1/D): only meaningful when this frame's opaque snapshot was
 				// captured (the backend also guards on that); < 0 disables
@@ -3986,6 +4071,14 @@ static void RB_RHI_DrawView( rhi::RHI *r, viewDef_t *viewDef ) {
 		// r_mvDebug: overlay the per-object velocity buffer (R1/A2; VK-only, no-op otherwise)
 		RB_RHI_MotionVectorDebugOverlay( r, viewDef );
 		r->GpuScopeEnd();	// end "post"
+	} else if ( rbHdrCropFrame && !rbHdrCropMetered && viewDef->viewEntitys && !viewDef->isSubview
+	            && viewDef->isCropView ) {
+		// DUDE: a frame whose world view the game rendered into a crop (RB_RHI_FrameHasWorldScene)
+		// meters the first such view, before the game copies it out and stretches it in 2D
+		rbHdrCropMetered = true;
+		r->GpuScopeBegin( "post" );
+		RB_RHI_HdrMeterCropView( r, viewDef );
+		r->GpuScopeEnd();
 	}
 
 	// debug visualization (r_showTris, r_showNormals, debug lines/polygons, …)
@@ -3995,11 +4088,12 @@ static void RB_RHI_DrawView( rhi::RHI *r, viewDef_t *viewDef ) {
 	// path; the idImmediateMode-based views work now — on Vulkan too, M6, where
 	// RB_RenderDebugTools runs the qgl-safe subset.)
 	if ( viewDef->viewEntitys ) {
-		if ( rbHdrCompositeActive && viewDef == tr.primaryView && rhiHdrCompW > 0 && rhiHdrCompH > 0 ) {
+		if ( rbHdrCompositeActive && rbFsrRanThisFrame && viewDef == tr.primaryView && rhiHdrCompW > 0 && rhiHdrCompH > 0 ) {
 			// sub-native FSR2: the frame now draws into the display-size composite, while the view's
 			// viewport is the smaller render size - the debug lines (bse_showBounds, r_showLights, ...)
 			// landed in that corner. They take the composite's whole rect: the same projection, mapped
 			// onto the upscaled image (a screenshot renders unscaled, where the two were the same).
+			// Not a crop-view frame's composite (no upscale: the crop keeps its own viewport).
 			viewDef_t display = *viewDef;
 			display.viewport.x1 = display.viewport.y1 = 0;
 			display.viewport.x2 = rhiHdrCompW - 1;

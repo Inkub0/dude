@@ -624,3 +624,20 @@ reverted: it traded that ghosting for noise everywhere else and did not touch th
 - Cost: one extra storage write per skinned vertex in a kernel that already touches it, 16 B per skinned
   vertex of memory, one address in the per-draw uniforms. **Not covered:** CPU-skinned meshes (GL3,
   `r_gpuSkinning 0`), deform-once tessellation (`r_tessDeform`), vertex-deform materials, particles.
+
+## Crop-view frames (2026-10-27, `fix/hdr-crop-view-frames`)
+
+Frames whose world view the game renders into a crop (Quake 4's double vision; RoE / Lost Mission
+with `g_lowresFullscreenFX 1`) now go through the HDR scene path (hdr-pipeline.md, same date).
+FSR2 is built around one full-window view and still never runs on them. Three changes go with it:
+- **Sub-native `r_fsrScale`:** the scene buffer is the render size, but a crop frame's 2D composite
+  and HUD draw at the display size, so such a frame draws into the display-size composite
+  (`rhiHdrCompositeRT`) from its start (the crop fits: `CropRenderSize` limits it to the render
+  size). FXAA/SMAA read the scene buffer and so skip that frame's resolve. At 1.0 the frame uses the
+  scene buffer, as a normal frame does.
+- **Jitter:** the Halton jitter was applied to every view that was not a subview, so crop views and
+  GUI 3D model views (the PDA, the menu planet) shimmered: nothing resolves them. Now only a
+  full-window view (`isWindowView`) is jittered.
+- **History:** FSR2 dropped its history only on a camera jump. After frames that skipped FSR2 (the
+  blur's seconds, a worldless menu) the history is that old, so the dispatch now also resets when
+  FSR2 did not run on the previous rendered frame.

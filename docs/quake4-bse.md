@@ -820,6 +820,14 @@ in both games, the screenshots compare directly. `func_fx` also takes `endOrigin
   frame through the HDR buffer; to work out first: the order of the 2D double vision composite and
   the HUD against the tone map resolve, eye adaptation (measure the crop or hold), FSR2 (built for
   one full-window view). Own branch and test round.
+  **Built 2026-10-27** (`fix/hdr-crop-view-frames`, gate pending; plan approved by the user:
+  engine side, keep the crop, measure it): a presented frame whose world view went into a crop
+  routes through the HDR buffer; its first crop view meters eye adaptation and bloom from the crop's
+  rows (held exposure when it cannot); under sub-native FSR2 the frame draws into the display-size
+  composite; FSR2's jitter is limited to the full-window view (crop and GUI 3D views shimmered) and
+  its history resets after frames that skipped it. Details: hdr-pipeline.md and
+  fsr-temporal-pipeline.md, "crop-view frames". RoE / Lost Mission (`g_lowresFullscreenFX 1`) get
+  the same; Doom 3's double vision and berserk already render uncropped on GL3/Vulkan.
 
 - After the BSE particle path is done: reuse it to fix Doom 3's particle buffer churn on Vulkan
   (`idRenderModelPrt` snapshots → frame-temporary memory), as the user asked on 2026-10-25.

@@ -10582,6 +10582,21 @@ static bool RB_RHI_EnsureEyeAdaptTargets( rhi::RHI *r ) {
 	return true;
 }
 
+// DUDE: u_localParam1 of hdrluma / bloomthreshold - the part of the measured image the scene
+// fills, offset.xy + scale.zw in texture space; the whole image unless the caller passes the rect
+// of a world view rendered into a crop (RB_RHI_HdrMeterCropView)
+static void RB_RHI_SetSceneUvRect( rhi::RenderParams &p, const float *uvRect ) {
+	if ( uvRect != NULL ) {
+		p.localParam1[0] = uvRect[0];
+		p.localParam1[1] = uvRect[1];
+		p.localParam1[2] = uvRect[2];
+		p.localParam1[3] = uvRect[3];
+	} else {
+		p.localParam1[0] = p.localParam1[1] = 0.0f;
+		p.localParam1[2] = p.localParam1[3] = 1.0f;
+	}
+}
+
 /*
 ===================
 RB_RHI_EyeAdaptExposure
@@ -10595,7 +10610,7 @@ Mirrors the FXAA pattern (BeginTargetPass reading rhiHdrRT), so it is safe at re
 time; measured before the resolve's own SetFrameTarget(0).
 ===================
 */
-rhi::ImageHandle RB_RHI_EyeAdaptExposure( rhi::RHI *r, rhi::ImageHandle sceneImg ) {
+rhi::ImageHandle RB_RHI_EyeAdaptExposure( rhi::RHI *r, rhi::ImageHandle sceneImg, const float *uvRect ) {
 	if ( !R_HdrEyeAdaptationWanted() || r_hdrTonemap.GetInteger() < 1 || sceneImg == 0 ) {
 		return 0;
 	}
@@ -10624,6 +10639,7 @@ rhi::ImageHandle RB_RHI_EyeAdaptExposure( rhi::RHI *r, rhi::ImageHandle sceneImg
 	memset( &p, 0, sizeof( p ) );
 	p.mvpMatrix[0] = p.mvpMatrix[5] = p.mvpMatrix[10] = p.mvpMatrix[15] = 1.0f;
 	p.localParam0[0] = idMath::ClampFloat( 0.05f, 1.0f, r_hdrAdaptCenter.GetFloat() );	// central metering crop (hdrluma)
+	RB_RHI_SetSceneUvRect( p, uvRect );									// the image part the scene fills (hdrluma)
 
 	r->BeginTargetPass( rhiLumaA, NULL );					// scene -> 64x64 log-luma
 	RB_RHI_DrawFullscreen( r, lumaProg, p, sceneImg );
@@ -10677,6 +10693,25 @@ rhi::ImageHandle RB_RHI_EyeAdaptExposure( rhi::RHI *r, rhi::ImageHandle sceneImg
 	RB_RHI_ForgetTexBinds();
 
 	return r->GetRenderTargetImage( rhiExposureRT[writeIdx] );			// fresh exposure for the resolve
+}
+
+/*
+===================
+RB_RHI_EyeAdaptHeld
+
+DUDE: a frame whose world view went into a crop that could not be metered keeps the exposure the
+eye had reached (no re-metering, no snap to the static r_hdrExposure); the clock moves on, so the
+next measurement eases from it instead of snapping as after a pause. 0 when adaptation would not
+run for this frame either, or nothing was measured yet.
+===================
+*/
+rhi::ImageHandle RB_RHI_EyeAdaptHeld( rhi::RHI *r ) {
+	if ( !R_HdrEyeAdaptationWanted() || r_hdrTonemap.GetInteger() < 1 || RB_RHI_CinematicView()
+		|| !R_BackendSupportsEnhancements() || !RB_RHI_EnsureEyeAdaptTargets( r ) || !rhiExposureValid ) {
+		return 0;		// (EnsureEyeAdaptTargets clears rhiExposureValid when it re-creates them)
+	}
+	rhiExposureLastTick = Sys_Milliseconds();
+	return r->GetRenderTargetImage( rhiExposureRT[1 - rhiExposureIdx] );	// the slot written last
 }
 
 // ---- HDR bloom (Phase C, docs/hdr-pipeline.md) ----
@@ -10736,7 +10771,7 @@ separate set of targets rather than accumulating in place). Returns the half-res
 off. Runs at the end of the primary 3D view (scene-only), like eye adaptation.
 ===================
 */
-rhi::ImageHandle RB_RHI_Bloom( rhi::RHI *r, rhi::ImageHandle sceneImg ) {
+rhi::ImageHandle RB_RHI_Bloom( rhi::RHI *r, rhi::ImageHandle sceneImg, const float *uvRect ) {
 	if ( r_hdrBloom.GetFloat() <= 0.0f || sceneImg == 0 ) {
 		return 0;
 	}
@@ -10756,6 +10791,7 @@ rhi::ImageHandle RB_RHI_Bloom( rhi::RHI *r, rhi::ImageHandle sceneImg ) {
 	memset( &p, 0, sizeof( p ) );
 	p.mvpMatrix[0] = p.mvpMatrix[5] = p.mvpMatrix[10] = p.mvpMatrix[15] = 1.0f;
 	p.localParam0[0] = r_hdrBloomThreshold.GetFloat();
+	RB_RHI_SetSceneUvRect( p, uvRect );						// the image part the scene fills
 	r->BeginTargetPass( rhiBloomD[0], NULL );
 	RB_RHI_DrawFullscreen( r, threshProg, p, sceneImg );
 	r->EndPass();

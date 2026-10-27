@@ -331,3 +331,36 @@ Phase A now runs on the Vulkan backend too (`neo/renderer/rhi/vk/VulkanBackend.c
   round-trip); the capture is still RGBA8 (minor: 8-bit refraction sample vs GL3's RGBA16F).
 - Default path unchanged: with `r_hdr 0` the frame target stays 0 and every scene/shadow
   pass behaves exactly as before M7.
+
+## Frames whose world view is rendered into a crop (2026-10-27, `fix/hdr-crop-view-frames`)
+
+A frame went through the HDR buffer only when it had a full-window world view
+(`RB_RHI_FrameHasWorldScene`, `viewDef_t::isWindowView`). Quake 4's double vision (the intro
+`cinematics/intro/blur`, buzzsaw hits) renders the player's view into `CropRenderSize( 512, 256 )`,
+copies it to `_scratch` and draws it twice over the screen in 2D; RoE / Lost Mission with
+`g_lowresFullscreenFX 1` render every gameplay frame's world into a 512x512 crop. Those frames stayed
+on the 8-bit path: no tone map, no `r_hdrExposure`, no bloom - bright fire looked hotter for the
+blur's seconds. (DUDE's own Doom 3 code renders double vision and berserk uncropped on GL3/Vulkan, so
+it never had the gap.)
+
+- **Routing.** A world view rendered while a crop is active (`isCropView`, not a subview) now counts
+  too, in a command list that is presented. `CaptureRenderToFile` issues swap-less lists (savegame
+  previews, PDA objective shots) and reads the backbuffer straight back, so those stay on it. Menus
+  and GUI 3D views never crop. The order within the frame is the normal one: the crop view, the
+  game's capture, its 2D composite and the HUD all land in the HDR buffer, and the swap-time resolve
+  tone-maps them together, as it tone-maps a normal frame's world and HUD.
+- **Eye adaptation and bloom measure the crop.** At the end of the frame's first crop view (where a
+  full view measures: before the 2D composite and the HUD), `RB_RHI_HdrMeterCropView` passes the
+  crop's rows of the frame target to `hdrluma` / `bloomthreshold` (`u_localParam1` = offset.xy,
+  scale.zw, clamped half a texel inside; GL rows bottom-up, Vulkan's upright rows `[H-y-h, H-y)`).
+  The bloom therefore comes out stretched over the screen as the game stretches the crop. A crop
+  that could not be metered holds the adapted exposure (`RB_RHI_EyeAdaptHeld`, clock moved on so
+  the next measurement eases instead of snapping) and has no bloom.
+- **FSR2** never runs on a crop view (it is gated on the full-window view). See
+  fsr-temporal-pipeline.md for the composite, jitter and history changes that go with this.
+- Not covered (as before): chromatic aberration, DoF, SSAO and the ray-traced passes skip crop
+  views. The level-change wipe (`StartWipe`'s 640x480 crop) now resolves through HDR for its one
+  frame, but the image the wipe then shows stays untone-mapped, as it was.
+
+Fidelity: with `r_hdr 0` (and no FSR / Vulkan post) the crop frames are unchanged. With HDR on they
+get the exposure the rest of play has, which is the point.

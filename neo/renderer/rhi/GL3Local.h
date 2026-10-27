@@ -250,14 +250,18 @@ void RB_RHI_VolumetricLighting( rhi::RHI *r, const viewDef_s *viewDef );
 void RB_RHI_ChromaticAberration( rhi::RHI *r, const viewDef_s *viewDef, const idScreenRect *rectOverride = NULL );	// DUDE sub-native FSR2: rect of the display-size composite once the frame target switched to it
 // HDR eye adaptation (Phase B1): measure scene luminance, update the adapted exposure,
 // return the 1x1 exposure image for the resolve to sample (0 = use the static r_hdrExposure).
-rhi::ImageHandle RB_RHI_EyeAdaptExposure( rhi::RHI *r, rhi::ImageHandle sceneImg );
+// uvRect: the part of sceneImg the scene fills (offset.xy, scale.zw); NULL = all of it.
+rhi::ImageHandle RB_RHI_EyeAdaptExposure( rhi::RHI *r, rhi::ImageHandle sceneImg, const float *uvRect = NULL );
+// DUDE: the last adapted exposure, held (a crop-view frame that could not be metered); 0 = none.
+rhi::ImageHandle RB_RHI_EyeAdaptHeld( rhi::RHI *r );
 // True while the frame's main world view is a CINEMATIC camera (RB_RHI_DrawView latches it).
 // Effects that model the PLAYER's eye - eye adaptation - stand down for it and resume by
 // themselves afterwards; no cvar is touched, so there is nothing to restore.
 bool RB_RHI_CinematicView( void );
 // HDR bloom (Phase C): threshold + blur the bright HDR scene, return the half-res glow for the
 // resolve to add before the tonemap (0 = bloom off).
-rhi::ImageHandle RB_RHI_Bloom( rhi::RHI *r, rhi::ImageHandle sceneImg );
+// uvRect as RB_RHI_EyeAdaptExposure's.
+rhi::ImageHandle RB_RHI_Bloom( rhi::RHI *r, rhi::ImageHandle sceneImg, const float *uvRect = NULL );
 
 // motion-vector debug overlay (r_mvDebug; docs/fsr-temporal-pipeline.md R1/A2): blit the
 // velocity MRT over the finished 3D view. No-op unless r_motionVectors + r_mvDebug are on (VK).
