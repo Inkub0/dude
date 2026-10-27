@@ -5943,8 +5943,23 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 	if ( viewDef == NULL || viewDef->renderWorld == NULL ) {
 		return 0;
 	}
+	// TEMPORARY A/B (r_vkUploadBuffersVram, in the gfx-config signature: the device idled at this frame's start): a flip
+	// re-creates the rows and the DI light map in the other heap, and forgets every slot's saved address - the gradient
+	// reads LAST frame's rows through them, and the old buffers' memory goes with them (as after a lost context)
+	{
+		static int builtVram = -1;
+		const int wantVram = r_vkUploadBuffersVram.GetBool() ? 1 : 0;
+		if ( builtVram != wantVram ) {
+			if ( s_rtReflLightBuf != 0 ) { r->DestroyBuffer( s_rtReflLightBuf ); s_rtReflLightBuf = 0; s_rtReflLightAddr = 0; }
+			if ( s_diLightMapBuf  != 0 ) { r->DestroyBuffer( s_diLightMapBuf );  s_diLightMapBuf  = 0; s_diLightMapAddr  = 0; }
+			for ( int k = 0; k < RT_REFL_LIGHT_SLOTS; k++ ) {
+				s_sceneLightSlotFrame[k] = -1;	s_sceneLightSlotAddr[k] = 0;	s_diLightMapSlotAddr[k] = 0;
+			}
+			builtVram = wantVram;
+		}
+	}
 	if ( s_rtReflLightBuf == 0 ) {
-		s_rtReflLightBuf  = r->CreateBuffer( rhi::BU_STORAGE,
+		s_rtReflLightBuf  = r->CreateBuffer( r_vkUploadBuffersVram.GetBool() ? rhi::BU_STORAGE_UPLOAD : rhi::BU_STORAGE,
 			RT_REFL_LIGHT_SLOTS * RT_SCENE_MAX_ROWS * (int)sizeof( RtReflLightGPU ), NULL );
 		s_rtReflLightAddr = ( s_rtReflLightBuf != 0 ) ? r->GetBufferDeviceAddress( s_rtReflLightBuf ) : 0;
 	}
@@ -6339,7 +6354,8 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 	s_diLightMapSlotAddr[ slot ]  = 0;
 	if ( numDefs <= DI_LIGHTMAP_MAX ) {
 		if ( s_diLightMapBuf == 0 ) {
-			s_diLightMapBuf  = r->CreateBuffer( rhi::BU_STORAGE, RT_REFL_LIGHT_SLOTS * DI_LIGHTMAP_MAX * (int)sizeof( unsigned int ), NULL );
+			s_diLightMapBuf  = r->CreateBuffer( r_vkUploadBuffersVram.GetBool() ? rhi::BU_STORAGE_UPLOAD : rhi::BU_STORAGE,
+				RT_REFL_LIGHT_SLOTS * DI_LIGHTMAP_MAX * (int)sizeof( unsigned int ), NULL );
 			s_diLightMapAddr = ( s_diLightMapBuf != 0 ) ? r->GetBufferDeviceAddress( s_diLightMapBuf ) : 0;
 		}
 		if ( s_diLightMapAddr != 0 ) {

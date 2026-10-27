@@ -42,13 +42,18 @@ enum BufferUsage {
 					// composition needs (the tesc/tese read it as ordinary vertex input).
 					// Host-visible+mapped for now (lets CreateBuffer pre-fill the static
 					// st/color fields the kernel leaves alone); device-local is a follow-up.
-	BU_STORAGE_DEVICE	// GPU-ONLY storage buffer (docs/rtx-irradiance-cache.md C0): device-local, never
+	BU_STORAGE_DEVICE,	// GPU-ONLY storage buffer (docs/rtx-irradiance-cache.md C0): device-local, never
 					// host-mapped, addressable (GetBufferDeviceAddress) and bindable as a compute
 					// storage binding. For buffers the GPU both writes and reads every frame (the RT
 					// irradiance cache: fragment-shader atomics into 32 MB) - BU_STORAGE's host-visible
 					// memory would put that traffic across the bus. Contents are UNDEFINED at creation
 					// (`data` is ignored; the owner clears it with a compute dispatch); UpdateBuffer /
 					// ReadBuffer are no-ops on it. VK only; the GL3 backend treats it as a plain buffer.
+	BU_STORAGE_UPLOAD	// DUDE (2026-10-27): a storage buffer the CPU only WRITES (initial data / UpdateBuffer) and never reads
+					// back - the scene-light rows, the emissive table, the DI light map, read by the ray passes every
+					// frame. Prefers DEVICE-LOCAL host-visible memory (resizable BAR) so the GPU reads it from VRAM, and
+					// falls back to host memory where there is none. Mapped and addressable like BU_STORAGE; ReadBuffer
+					// on it would be slow (write-combined), so it is not for read-back buffers.
 };
 
 enum ImageFormat {

@@ -3007,7 +3007,8 @@ uint64_t VulkanBackend::ComputeGfxCfgSignature() const {
 	mixI( r_rtgiCacheSlotsLog2 );
 	// RT light grid (docs/rtx-light-grid.md): slots / res / cascades change the grid buffer size -> re-allocate
 	mixI( r_rtLightGridSlots ); mixI( r_rtLightGridRes ); mixI( r_rtLightGridCascades );
-	mixB( r_rtEmissiveLighting ); mixB( r_rtEmissiveBounce ); mixB( r_rtEmissiveTable ); mixI( r_rtEmissiveGridSlots );		// E2: the emitter rows enter / leave the scene-light buffer and the grid with these (idle the device on the flip)
+	mixB( r_rtEmissiveLighting ); mixB( r_rtEmissiveBounce ); mixB( r_rtEmissiveTable ); mixI( r_rtEmissiveGridSlots );
+	mixB( r_vkUploadBuffersVram );		// TEMPORARY A/B: re-creates the scene-light rows / emissive table / DI light map in another heap		// E2: the emitter rows enter / leave the scene-light buffer and the grid with these (idle the device on the flip)
 	return h;
 }
 
@@ -4418,6 +4419,10 @@ BufferHandle VulkanBackend::CreateBuffer( BufferUsage usage, int size, const voi
 		case BU_STORAGE_DEVICE: usageBits = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
 		                           | VK_BUFFER_USAGE_TRANSFER_SRC_BIT
 		                           | VK_BUFFER_USAGE_TRANSFER_DST_BIT; break;
+		// CPU-write-only storage (the scene-light rows, the emissive table): device-local + host-visible below when there is such memory
+		case BU_STORAGE_UPLOAD: usageBits = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+		                           | VK_BUFFER_USAGE_TRANSFER_SRC_BIT
+		                           | VK_BUFFER_USAGE_TRANSFER_DST_BIT; break;
 		default:         usageBits = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT; break;
 	}
 	// BDA (Phase 3.2b): storage buffers (compute) and persistent vertex/index buffers (the world-static
@@ -4426,7 +4431,7 @@ BufferHandle VulkanBackend::CreateBuffer( BufferUsage usage, int size, const voi
 	// legal when the allocator carries the BDA flag (else vmaCreateBuffer fails validation), so gate on
 	// the same capability. Ring buffers aren't created here, so they stay address-less and the BDA zfill
 	// path falls back for streamed/skinned surfaces.
-	if ( ( usage == BU_STORAGE || usage == BU_STORAGE_DEVICE || usage == BU_VERTEX || usage == BU_INDEX ) && haveBufferDeviceAddress ) {
+	if ( ( usage == BU_STORAGE || usage == BU_STORAGE_DEVICE || usage == BU_STORAGE_UPLOAD || usage == BU_VERTEX || usage == BU_INDEX ) && haveBufferDeviceAddress ) {
 		usageBits |= VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
 	}
 	// R3.5 animated BLAS: the GPU-skinned vertex output (BU_SKIN) and each surface's persistent
@@ -4456,6 +4461,13 @@ BufferHandle VulkanBackend::CreateBuffer( BufferUsage usage, int size, const voi
 		// device heap; the contents are undefined until the owner's clear dispatch; bufferMapped stays NULL, so
 		// UpdateBuffer / ReadBuffer are no-ops on it (`data` is ignored - there is no mapping to seed through).
 		aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+	} else if ( usage == BU_STORAGE_UPLOAD ) {
+		// CPU-write-only storage read by the GPU every frame: PREFER DEVICE (VRAM) among the host-visible, coherent types -
+		// with resizable BAR that is DEVICE_LOCAL | HOST_VISIBLE, so the CPU's sequential writes go over the bus once and the
+		// ray passes read from VRAM; without it VMA falls back to host memory, as BU_STORAGE
+		aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+		aci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+		aci.requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
 	} else {
 		// storage buffers are read back on the host (ReadBuffer), so hint RANDOM access to keep
 		// them in cached memory; everything else is write-only-from-CPU (SEQUENTIAL_WRITE lets the
@@ -4474,6 +4486,20 @@ BufferHandle VulkanBackend::CreateBuffer( BufferUsage usage, int size, const voi
 	}
 	if ( data && info.pMappedData ) {
 		memcpy( info.pMappedData, data, (size_t)size );
+	}
+	// TEMPORARY (the r_vkUploadBuffersVram A/B): say where each storage kind landed, once per kind + memory type
+	if ( usage == BU_STORAGE || usage == BU_STORAGE_UPLOAD ) {
+		static uint32_t reported[2] = { 0, 0 };		// bit per memory property combination seen
+		VkMemoryPropertyFlags mf = 0;
+		vmaGetAllocationMemoryProperties( vma, alloc, &mf );
+		const int k = ( usage == BU_STORAGE_UPLOAD ) ? 1 : 0;
+		const uint32_t bit = 1u << ( ( ( mf & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT ) ? 1 : 0 ) | ( ( mf & VK_MEMORY_PROPERTY_HOST_CACHED_BIT ) ? 2 : 0 ) );
+		if ( ( reported[k] & bit ) == 0 ) {
+			reported[k] |= bit;
+			common->Printf( "VK: %s buffers in %s%s memory (first: %d KB)\n", k ? "BU_STORAGE_UPLOAD" : "BU_STORAGE",
+				( mf & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT ) ? "DEVICE_LOCAL (VRAM)" : "host (system RAM)",
+				( mf & VK_MEMORY_PROPERTY_HOST_CACHED_BIT ) ? ", cached" : "", size >> 10 );
+		}
 	}
 
 	// cache the device address now (BDA, Phase 3.2b): a buffer's address is fixed for its
