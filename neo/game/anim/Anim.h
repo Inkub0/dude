@@ -523,6 +523,13 @@ public:
 	void						ClearForceUpdate( void );
 	bool						CreateFrame( int animtime, bool force );
 	bool						FrameHasChanged( int animtime ) const;
+
+								// render callback (idEntity::UpdateRenderEntity): the pose renderEnt shows. CreateTicFrame
+								// is the stock tic pose; CreateInterpolatedFrame (com_interpolate + com_interpolateAnim)
+								// blends the final poses of the previous and current tic, frac in [0,1]
+	bool						CreateTicFrame( struct renderEntity_s *renderEnt, int currentTime );
+	bool						CreateInterpolatedFrame( struct renderEntity_s *renderEnt, int currentTime, int previousTime, float frac, bool restartHistory );
+
 	void						GetDelta( int fromtime, int totime, idVec3 &delta ) const;
 	bool						GetDeltaRotation( int fromtime, int totime, idMat3 &delta ) const;
 	void						GetOrigin( int currentTime, idVec3 &pos ) const;
@@ -569,6 +576,10 @@ public:
 private:
 	void						FreeData( void );
 	void						PushAnims( int channel, int currentTime, int blendTime );
+	bool						BuildFrame( int currentTime, idJointMat *frameJoints ) const;
+	void						FreeInterpolation( void );
+	void						CaptureInterpolationPose( int currentTime, int previousTime, bool restartHistory );
+	int							NewestAnimStartTime( void ) const;
 
 private:
 	const idDeclModelDef *		modelDef;
@@ -592,6 +603,21 @@ private:
 	idList<idJointQuat>			AFPoseJointFrame;
 	idBounds					AFPoseBounds;
 	int							AFPoseTime;
+
+	// com_interpolate pose interpolation, see CreateInterpolatedFrame. Render-only, never saved: the
+	// final pose (anims + every joint modifier) of the last two tics in joint-local form, and the
+	// render-only joint buffer the render entity shows between tics. joints[] stays the exact tic pose.
+	int							interpNumJoints;		// joints the buffers below hold, 0 = not allocated
+	idJointQuat *				interpPoseCur;			// final pose at interpPoseCurTime
+	idJointQuat *				interpPosePrev;			// final pose one tic earlier, if interpPrevValid
+	idJointMat *				interpJoints;			// blended (or sub-tic sampled) pose handed to the renderer
+	int							interpPoseCurTime;
+	bool						interpCurValid;
+	bool						interpPrevValid;
+	bool						interpPoseStatic;		// the two poses are identical: show joints[] as is
+	int							interpShownMode;		// what interpJoints hold (INTERP_SHOWN_*), so repeated callbacks
+	int							interpShownTime;		// in one rendered frame (several views, every light interaction)
+	float						interpShownFrac;		// don't rebuild and re-skin it
 };
 
 /*

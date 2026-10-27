@@ -3087,6 +3087,13 @@ const idVec3 &idDeclModelDef::GetVisualOffset( void ) const {
 
 ***********************************************************************/
 
+// what idAnimator::interpJoints hold (com_interpolate, see idAnimator::CreateInterpolatedFrame)
+enum {
+	INTERP_SHOWN_NONE,
+	INTERP_SHOWN_BLEND,		// the previous and current tic's poses blended by interpShownFrac
+	INTERP_SHOWN_SAMPLE		// the anims sampled at the sub-tic instant (no previous pose to blend from)
+};
+
 /*
 =====================
 idAnimator::idAnimator
@@ -3103,6 +3110,12 @@ idAnimator::idAnimator() {
 	stoppedAnimatingUpdate	= false;
 	removeOriginOffset		= false;
 	forceUpdate				= false;
+
+	interpNumJoints			= 0;
+	interpPoseCur			= NULL;
+	interpPosePrev			= NULL;
+	interpJoints			= NULL;
+	FreeInterpolation();
 
 	frameBounds.Clear();
 
@@ -3137,6 +3150,7 @@ size_t idAnimator::Allocated( void ) const {
 	size_t	size;
 
 	size = jointMods.Allocated() + numJoints * sizeof( joints[0] ) + jointMods.Num() * sizeof( jointMods[ 0 ] ) + AFPoseJointMods.Allocated() + AFPoseJointFrame.Allocated() + AFPoseJoints.Allocated();
+	size += interpNumJoints * ( 2 * sizeof( idJointQuat ) + sizeof( idJointMat ) );
 
 	return size;
 }
@@ -3317,9 +3331,34 @@ void idAnimator::FreeData( void ) {
 	joints = NULL;
 	numJoints = 0;
 
+	// the pose history belongs to the old model
+	FreeInterpolation();
+
 	modelDef = NULL;
 
 	ForceUpdate();
+}
+
+/*
+=====================
+idAnimator::FreeInterpolation
+=====================
+*/
+void idAnimator::FreeInterpolation( void ) {
+	Mem_Free16( interpPoseCur );
+	Mem_Free16( interpPosePrev );
+	Mem_Free16( interpJoints );
+	interpPoseCur		= NULL;
+	interpPosePrev		= NULL;
+	interpJoints		= NULL;
+	interpNumJoints		= 0;
+	interpPoseCurTime	= 0;
+	interpCurValid		= false;
+	interpPrevValid		= false;
+	interpPoseStatic	= false;
+	interpShownMode		= INTERP_SHOWN_NONE;
+	interpShownTime		= 0;
+	interpShownFrac		= 0.0f;
 }
 
 /*
@@ -4261,18 +4300,6 @@ idAnimator::CreateFrame
 =====================
 */
 bool idAnimator::CreateFrame( int currentTime, bool force ) {
-	int					i, j;
-	int					numJoints;
-	int					parentNum;
-	bool				hasAnim;
-	bool				debugInfo;
-	float				baseBlend;
-	float				blendWeight;
-	const idAnimBlend *	blend;
-	const int *			jointParent;
-	const jointMod_t *	jointMod;
-	const idJointQuat *	defaultPose;
-
 	static idCVar		r_showSkel( "r_showSkel", "0", CVAR_RENDERER | CVAR_INTEGER, "", 0, 2, idCmdSystem::ArgCompletion_Integer<0,2> );
 
 	if ( gameLocal.inCinematic && gameLocal.skipCinematic ) {
@@ -4294,6 +4321,31 @@ bool idAnimator::CreateFrame( int currentTime, bool force ) {
 
 	lastTransformTime = currentTime;
 	stoppedAnimatingUpdate = false;
+
+	return BuildFrame( currentTime, joints );
+}
+
+/*
+=====================
+idAnimator::BuildFrame
+
+Builds the model-space pose at currentTime (anims, AF pose and joint modifiers) into frameJoints.
+CreateFrame builds the authoritative joints[] with it; the com_interpolate render path also samples
+a sub-tic pose into its own buffer with it, without touching any animator state.
+=====================
+*/
+bool idAnimator::BuildFrame( int currentTime, idJointMat *frameJoints ) const {
+	int					i, j;
+	int					numJoints;
+	int					parentNum;
+	bool				hasAnim;
+	bool				debugInfo;
+	float				baseBlend;
+	float				blendWeight;
+	const idAnimBlend *	blend;
+	const int *			jointParent;
+	const jointMod_t *	jointMod;
+	const idJointQuat *	defaultPose;
 
 	if ( entity && ( ( g_debugAnim.GetInteger() == entity->entityNumber ) || ( g_debugAnim.GetInteger() == -2 ) ) ) {
 		debugInfo = true;
@@ -4388,7 +4440,7 @@ bool idAnimator::CreateFrame( int currentTime, bool force ) {
 	}
 
 	// convert the joint quaternions to rotation matrices
-	SIMDProcessor->ConvertJointQuatsToJointMats( joints, jointFrame, numJoints );
+	SIMDProcessor->ConvertJointQuatsToJointMats( frameJoints, jointFrame, numJoints );
 
 	// check if we need to modify the origin
 	if ( jointMods.Num() && ( jointMods[0]->jointnum == 0 ) ) {
@@ -4399,16 +4451,16 @@ bool idAnimator::CreateFrame( int currentTime, bool force ) {
 				break;
 
 			case JOINTMOD_LOCAL:
-				joints[0].SetRotation( jointMod->mat * joints[0].ToMat3() );
+				frameJoints[0].SetRotation( jointMod->mat * frameJoints[0].ToMat3() );
 				break;
 
 			case JOINTMOD_WORLD:
-				joints[0].SetRotation( joints[0].ToMat3() * jointMod->mat );
+				frameJoints[0].SetRotation( frameJoints[0].ToMat3() * jointMod->mat );
 				break;
 
 			case JOINTMOD_LOCAL_OVERRIDE:
 			case JOINTMOD_WORLD_OVERRIDE:
-				joints[0].SetRotation( jointMod->mat );
+				frameJoints[0].SetRotation( jointMod->mat );
 				break;
 		}
 
@@ -4417,13 +4469,13 @@ bool idAnimator::CreateFrame( int currentTime, bool force ) {
 				break;
 
 			case JOINTMOD_LOCAL:
-				joints[0].SetTranslation( joints[0].ToVec3() + jointMod->pos );
+				frameJoints[0].SetTranslation( frameJoints[0].ToVec3() + jointMod->pos );
 				break;
 
 			case JOINTMOD_LOCAL_OVERRIDE:
 			case JOINTMOD_WORLD:
 			case JOINTMOD_WORLD_OVERRIDE:
-				joints[0].SetTranslation( jointMod->pos );
+				frameJoints[0].SetTranslation( jointMod->pos );
 				break;
 		}
 		j = 1;
@@ -4432,7 +4484,7 @@ bool idAnimator::CreateFrame( int currentTime, bool force ) {
 	}
 
 	// add in the model offset
-	joints[0].SetTranslation( joints[0].ToVec3() + modelDef->GetVisualOffset() );
+	frameJoints[0].SetTranslation( frameJoints[0].ToVec3() + modelDef->GetVisualOffset() );
 
 	// pointer to joint info
 	jointParent = modelDef->JointParents();
@@ -4442,7 +4494,7 @@ bool idAnimator::CreateFrame( int currentTime, bool force ) {
 		jointMod = jointMods[j];
 
 		// transform any joints preceding the joint modifier
-		SIMDProcessor->TransformJoints( joints, jointParent, i, jointMod->jointnum - 1 );
+		SIMDProcessor->TransformJoints( frameJoints, jointParent, i, jointMod->jointnum - 1 );
 		i = jointMod->jointnum;
 
 		parentNum = jointParent[i];
@@ -4450,54 +4502,224 @@ bool idAnimator::CreateFrame( int currentTime, bool force ) {
 		// modify the axis
 		switch( jointMod->transform_axis ) {
 			case JOINTMOD_NONE:
-				joints[i].SetRotation( joints[i].ToMat3() * joints[ parentNum ].ToMat3() );
+				frameJoints[i].SetRotation( frameJoints[i].ToMat3() * frameJoints[ parentNum ].ToMat3() );
 				break;
 
 			case JOINTMOD_LOCAL:
-				joints[i].SetRotation( jointMod->mat * ( joints[i].ToMat3() * joints[parentNum].ToMat3() ) );
+				frameJoints[i].SetRotation( jointMod->mat * ( frameJoints[i].ToMat3() * frameJoints[parentNum].ToMat3() ) );
 				break;
 
 			case JOINTMOD_LOCAL_OVERRIDE:
-				joints[i].SetRotation( jointMod->mat * joints[parentNum].ToMat3() );
+				frameJoints[i].SetRotation( jointMod->mat * frameJoints[parentNum].ToMat3() );
 				break;
 
 			case JOINTMOD_WORLD:
-				joints[i].SetRotation( ( joints[i].ToMat3() * joints[parentNum].ToMat3() ) * jointMod->mat );
+				frameJoints[i].SetRotation( ( frameJoints[i].ToMat3() * frameJoints[parentNum].ToMat3() ) * jointMod->mat );
 				break;
 
 			case JOINTMOD_WORLD_OVERRIDE:
-				joints[i].SetRotation( jointMod->mat );
+				frameJoints[i].SetRotation( jointMod->mat );
 				break;
 		}
 
 		// modify the position
 		switch( jointMod->transform_pos ) {
 			case JOINTMOD_NONE:
-				joints[i].SetTranslation( joints[parentNum].ToVec3() + joints[i].ToVec3() * joints[parentNum].ToMat3() );
+				frameJoints[i].SetTranslation( frameJoints[parentNum].ToVec3() + frameJoints[i].ToVec3() * frameJoints[parentNum].ToMat3() );
 				break;
 
 			case JOINTMOD_LOCAL:
-				joints[i].SetTranslation( joints[parentNum].ToVec3() + ( joints[i].ToVec3() + jointMod->pos ) * joints[parentNum].ToMat3() );
+				frameJoints[i].SetTranslation( frameJoints[parentNum].ToVec3() + ( frameJoints[i].ToVec3() + jointMod->pos ) * frameJoints[parentNum].ToMat3() );
 				break;
 
 			case JOINTMOD_LOCAL_OVERRIDE:
-				joints[i].SetTranslation( joints[parentNum].ToVec3() + jointMod->pos * joints[parentNum].ToMat3() );
+				frameJoints[i].SetTranslation( frameJoints[parentNum].ToVec3() + jointMod->pos * frameJoints[parentNum].ToMat3() );
 				break;
 
 			case JOINTMOD_WORLD:
-				joints[i].SetTranslation( joints[parentNum].ToVec3() + joints[i].ToVec3() * joints[parentNum].ToMat3() + jointMod->pos );
+				frameJoints[i].SetTranslation( frameJoints[parentNum].ToVec3() + frameJoints[i].ToVec3() * frameJoints[parentNum].ToMat3() + jointMod->pos );
 				break;
 
 			case JOINTMOD_WORLD_OVERRIDE:
-				joints[i].SetTranslation( jointMod->pos );
+				frameJoints[i].SetTranslation( jointMod->pos );
 				break;
 		}
 	}
 
 	// transform the rest of the hierarchy
-	SIMDProcessor->TransformJoints( joints, jointParent, i, numJoints - 1 );
+	SIMDProcessor->TransformJoints( frameJoints, jointParent, i, numJoints - 1 );
 
 	return true;
+}
+
+/*
+=====================
+idAnimator::CreateTicFrame
+
+Render callback without com_interpolate pose interpolation: the stock tic pose. Points the render
+entity back at the authoritative joints if an interpolated frame had pointed it at interpJoints.
+=====================
+*/
+bool idAnimator::CreateTicFrame( renderEntity_t *renderEnt, int currentTime ) {
+	bool changed = CreateFrame( currentTime, false );
+	if ( interpJoints != NULL && renderEnt->joints == interpJoints ) {
+		renderEnt->joints = joints;
+		changed = true;
+	}
+	return changed;
+}
+
+/*
+=====================
+idAnimator::CreateInterpolatedFrame
+
+com_interpolate + com_interpolateAnim render callback: the pose of a frame rendered frac of the way
+from the previous tic (previousTime) to the current one (currentTime) - the instant the entity's
+render transform is interpolated to (idEntity::PresentInterpolated).
+
+Sampling the anims at that sub-tic instant only moves what the anims drive. Joints that game code
+overrides once per tic - walk IK (pelvis and legs, against the tic's physics origin), AI look joints,
+head joints copied from the body, AF ragdoll poses - stayed at the current tic's value while the root
+transform glided between tics, so planted feet slid by a tic of travel and snapped back each tic, and
+a monster stepping up stairs dipped its pelvis right after every step. So instead the final pose of
+each tic, everything CreateFrame applies included, is captured once per tic in joint-local form, and
+frames between two tics blend those two poses, just as the root transform is interpolated: the
+overrides stay consistent with the interpolated origin, and no pose is ever sampled before an anim
+started. Only without a pose from the previous tic (first rendered tic after spawning, a teleport, a
+new model, the entity having been off screen, or rendering below the tic rate) are the anims sampled
+at the sub-tic instant, never before the newest anim started.
+
+The interpolated pose goes to the render-only interpJoints, which the render entity is pointed at;
+the authoritative joints[] that game code reads (GetJointTransform) always hold the exact tic pose.
+=====================
+*/
+bool idAnimator::CreateInterpolatedFrame( renderEntity_t *renderEnt, int currentTime, int previousTime, float frac, bool restartHistory ) {
+	// leave render entities alone that the game pointed at some other joint buffer
+	if ( renderEnt->joints != joints && ( interpJoints == NULL || renderEnt->joints != interpJoints ) ) {
+		return CreateFrame( currentTime, false );
+	}
+
+	const int ticLen = currentTime - previousTime;
+	if ( ( gameLocal.inCinematic && gameLocal.skipCinematic ) || !modelDef || !modelDef->ModelHandle() || numJoints <= 0
+		|| renderEnt->numJoints != numJoints || modelDef->NumJointsOnChannel( ANIMCHANNEL_ALL ) != numJoints
+		|| ticLen <= 0 || ticLen > 100 ) {
+		return CreateTicFrame( renderEnt, currentTime );
+	}
+
+	// the authoritative tic pose, as the stock render callback builds it
+	bool changed = CreateFrame( currentTime, false );
+
+	// first rendered frame of a new tic: snapshot it
+	if ( !interpCurValid || interpPoseCurTime != currentTime ) {
+		CaptureInterpolationPose( currentTime, previousTime, restartHistory );
+	}
+
+	int shownMode = INTERP_SHOWN_NONE;
+	int sampleTime = currentTime;
+	if ( frac < 1.0f ) {
+		if ( interpPrevValid ) {
+			if ( !interpPoseStatic ) {
+				shownMode = INTERP_SHOWN_BLEND;
+			}
+		} else {
+			sampleTime = currentTime - (int)( ( 1.0f - frac ) * (float)ticLen );
+			sampleTime = Max( sampleTime, NewestAnimStartTime() );
+			if ( sampleTime < currentTime ) {
+				shownMode = INTERP_SHOWN_SAMPLE;
+			}
+		}
+	}
+
+	if ( shownMode != INTERP_SHOWN_NONE ) {
+		// build it once per rendered frame: several views and every light interaction issue the
+		// callback, and each true return re-skins the model
+		if ( interpShownMode != shownMode || interpShownTime != currentTime || interpShownFrac != frac ) {
+			bool built = true;
+			if ( shownMode == INTERP_SHOWN_BLEND ) {
+				idJointQuat *blendFrame = ( idJointQuat * )_alloca16( numJoints * sizeof( blendFrame[0] ) );
+				SIMDProcessor->Memcpy( blendFrame, interpPosePrev, numJoints * sizeof( blendFrame[0] ) );
+				SIMDProcessor->BlendJoints( blendFrame, interpPoseCur, frac, modelDef->GetChannelJoints( ANIMCHANNEL_ALL ), numJoints );
+				SIMDProcessor->ConvertJointQuatsToJointMats( interpJoints, blendFrame, numJoints );
+				SIMDProcessor->TransformJoints( interpJoints, modelDef->JointParents(), 1, numJoints - 1 );
+			} else {
+				built = BuildFrame( sampleTime, interpJoints );
+			}
+			if ( built ) {
+				interpShownMode = shownMode;
+				interpShownTime = currentTime;
+				interpShownFrac = frac;
+				changed = true;
+			} else {
+				// nothing to sample (no anims, no joint modifiers): the tic pose it is
+				interpShownMode = INTERP_SHOWN_NONE;
+				shownMode = INTERP_SHOWN_NONE;
+			}
+		}
+	}
+
+	idJointMat *shownJoints = ( shownMode != INTERP_SHOWN_NONE ) ? interpJoints : joints;
+	if ( renderEnt->joints != shownJoints ) {
+		renderEnt->joints = shownJoints;
+		changed = true;
+	}
+	return changed;
+}
+
+/*
+=====================
+idAnimator::CaptureInterpolationPose
+
+com_interpolate: snapshots the authoritative pose of a new tic (joints[], just built for currentTime)
+in joint-local form, so a blend turns every bone rigidly about its parent, the way the animation
+system blends anims. The previous snapshot stays the blend's start only if it belongs to the tic right
+before this one and the entity didn't snap (restartHistory: teleport, first presentation, see
+idEntity::SnapshotRenderTransform).
+=====================
+*/
+void idAnimator::CaptureInterpolationPose( int currentTime, int previousTime, bool restartHistory ) {
+	if ( interpNumJoints != numJoints ) {
+		FreeInterpolation();
+		interpPoseCur = ( idJointQuat * )Mem_Alloc16( numJoints * sizeof( interpPoseCur[0] ) );
+		interpPosePrev = ( idJointQuat * )Mem_Alloc16( numJoints * sizeof( interpPosePrev[0] ) );
+		interpJoints = ( idJointMat * )Mem_Alloc16( numJoints * sizeof( interpJoints[0] ) );
+		interpNumJoints = numJoints;
+	}
+
+	// age the history one tic
+	idSwap( interpPoseCur, interpPosePrev );
+	interpPrevValid = interpCurValid && interpPoseCurTime == previousTime && !restartHistory;
+	interpPoseCurTime = currentTime;
+	interpCurValid = true;
+
+	idJointMat *localJoints = ( idJointMat * )_alloca16( numJoints * sizeof( localJoints[0] ) );
+	SIMDProcessor->Memcpy( localJoints, joints, numJoints * sizeof( localJoints[0] ) );
+	SIMDProcessor->UntransformJoints( localJoints, modelDef->JointParents(), 1, numJoints - 1 );
+	SIMDProcessor->ConvertJointMatsToJointQuats( interpPoseCur, localJoints, numJoints );
+
+	// an entity that holds still shows its exact tic pose, no blend
+	interpPoseStatic = interpPrevValid && memcmp( interpPoseCur, interpPosePrev, numJoints * sizeof( interpPoseCur[0] ) ) == 0;
+}
+
+/*
+=====================
+idAnimator::NewestAnimStartTime
+
+The latest time any channel's newest anim was started or re-weighted (PlayAnim, CycleAnim, SetFrame
+and SetWeight all set blendStartTime one msec before the time they're called at). The com_interpolate
+sub-tic sample never goes before it: a cycle restarted with no blend time and sampled even a msec
+before its start wraps to the end of the cycle, while the anim it replaced is already cleared, so the
+model twitched for a frame (a weapon going into its reload, for example).
+=====================
+*/
+int idAnimator::NewestAnimStartTime( void ) const {
+	int newest = -0x7fffffff;
+	for ( int i = 0; i < ANIM_NumAnimChannels; i++ ) {
+		const idAnimBlend &blend = channels[ i ][ 0 ];
+		if ( blend.animNum && blend.blendStartTime + 1 > newest ) {
+			newest = blend.blendStartTime + 1;
+		}
+	}
+	return newest;
 }
 
 /*

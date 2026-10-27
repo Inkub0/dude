@@ -449,7 +449,6 @@ idEntity::idEntity() {
 
 	memset( &renderEntity, 0, sizeof( renderEntity ) );
 	modelDefHandle	= -1;
-	renderAnimTimeOffset = 0;
 	renderInterpOriginPrev.Zero();
 	renderInterpOriginCur.Zero();
 	renderInterpAxisPrev.Identity();
@@ -1575,6 +1574,35 @@ void idEntity::SnapshotRenderTransform( void ) {
 
 /*
 ================
+RenderInterpMonotoneTangents
+
+com_interpolateCubic: limits the Hermite tangents m0 (at p0) and m1 (at p1) per axis so the cubic
+segment from p0 to p1 is monotone (Fritsch-Carlson) and so can't overshoot either sample: zero on an
+axis that doesn't move or whose tangent points against the segment, and scaled back into the
+monotone region (alpha^2 + beta^2 <= 9, alpha and beta being the tangents over the segment's slope)
+where the tic before moved much faster. Leaves smooth motion (constant velocity: alpha = beta = 1)
+unchanged.
+================
+*/
+static void RenderInterpMonotoneTangents( const idVec3 &p0, const idVec3 &p1, idVec3 &m0, idVec3 &m1 ) {
+	for ( int i = 0; i < 3; i++ ) {
+		const float delta = p1[i] - p0[i];
+		if ( delta == 0.0f ) {
+			m0[i] = 0.0f;
+			m1[i] = 0.0f;
+			continue;
+		}
+		const float alpha = ( m0[i] * delta > 0.0f ) ? m0[i] / delta : 0.0f;
+		const float beta = ( m1[i] * delta > 0.0f ) ? m1[i] / delta : 0.0f;
+		const float lenSqr = alpha * alpha + beta * beta;
+		const float tau = ( lenSqr > 9.0f ) ? 3.0f / idMath::Sqrt( lenSqr ) : 1.0f;
+		m0[i] = tau * alpha * delta;
+		m1[i] = tau * beta * delta;
+	}
+}
+
+/*
+================
 idEntity::PresentInterpolated
 
 Called once per *rendered* frame between game tics (com_interpolate stage 3). Re-presents the
@@ -1599,13 +1627,17 @@ void idEntity::PresentInterpolated( float frac ) {
 	renderEntity_t lerped = renderEntity;
 
 	// position: cubic Hermite (Catmull-Rom) when we have two tics of history, so motion stays
-	// smooth (C1-continuous) through accelerations instead of kinking at each tic like a plain
-	// lerp; falls back to linear on the first tic of history or when com_interpolateCubic is off.
-	// Still strictly interpolation (frac in [0,1], between the last two committed tics) - no
-	// extrapolation, so no overshoot past the current state.
+	// smoother through accelerations than a plain lerp that kinks at each tic; falls back to linear
+	// on the first tic of history or when com_interpolateCubic is off. frac stays in [0,1] between
+	// the last two committed tics (no extrapolation), but an unlimited Catmull-Rom tangent still
+	// overshoots on step-shaped motion: a monster that climbs a stair step in one tic and then
+	// holds its height rose ~7% of the step above the stair on the next tic and sank back. The
+	// tangents are therefore limited per axis to keep each segment monotone
+	// (RenderInterpMonotoneTangents), so the curve never leaves the range of its two tic samples.
 	if ( gameLocal.renderInterpCubic && renderInterpHistCount >= 2 ) {
-		const idVec3 m0 = ( renderInterpOriginCur - renderInterpOriginPrev2 ) * 0.5f;	// centered tangent at Prev
-		const idVec3 m1 = renderInterpOriginCur - renderInterpOriginPrev;				// tangent at Cur
+		idVec3 m0 = ( renderInterpOriginCur - renderInterpOriginPrev2 ) * 0.5f;	// centered tangent at Prev
+		idVec3 m1 = renderInterpOriginCur - renderInterpOriginPrev;				// tangent at Cur
+		RenderInterpMonotoneTangents( renderInterpOriginPrev, renderInterpOriginCur, m0, m1 );
 		const float t2 = frac * frac;
 		const float t3 = t2 * frac;
 		lerped.origin = renderInterpOriginPrev * ( 2.0f * t3 - 3.0f * t2 + 1.0f )
@@ -1671,23 +1703,21 @@ bool idEntity::UpdateRenderEntity( renderEntity_s *renderEntity, const renderVie
 		SetTimeState ts( timeGroup );
 #endif
 
-		// renderAnimTimeOffset is normally 0; the view weapon sets it each rendered frame so its
-		// animation is sampled at the interpolated sub-tic instant (com_interpolate)
-		int animTime = gameLocal.time + renderAnimTimeOffset;
-
-		// com_interpolateAnim: sample skeletal animation at the same sub-tic instant the render
-		// transform is interpolated to, so limbs move smoothly above 60fps rather than stepping at
-		// the tic rate. Only for entities the weapon path hasn't already offset (renderAnimTimeOffset
-		// == 0); like the transform interp this samples up to one tic in the past, adding no gameplay
-		// latency (SetTimeState above keeps this in the entity's own d3xp time group).
-		if ( renderAnimTimeOffset == 0 && gameLocal.renderInterpAnim && gameLocal.renderInterpolateFrac < 1.0f ) {
-			int ticLen = gameLocal.time - gameLocal.previousTime;
-			if ( ticLen > 0 && ticLen <= 100 ) {
-				animTime -= (int)( ( 1.0f - gameLocal.renderInterpolateFrac ) * (float)ticLen );
-			}
+		// com_interpolateAnim (only set while idGameLocal::Draw renders with com_interpolate): show
+		// the skeleton at the same sub-tic instant the render transform is interpolated to, blended
+		// between the final poses of the previous and current tic, so limbs - joints that walk IK,
+		// look control and ragdolls override once per tic included - move smoothly above 60fps and
+		// stay consistent with the interpolated origin. Like the transform interp this shows up to
+		// one tic in the past, adding no gameplay latency (SetTimeState above keeps this in the
+		// entity's own d3xp time group). Covers the view weapon too.
+		if ( gameLocal.renderInterpAnim ) {
+			// a render transform that snapped this tic (teleport, first presentation, see
+			// SnapshotRenderTransform) restarts the pose history too
+			const bool restartHistory = ( renderInterpSnapshotTime == gameLocal.time && renderInterpHistCount < 2 );
+			return animator->CreateInterpolatedFrame( renderEntity, gameLocal.time, gameLocal.previousTime, gameLocal.renderInterpolateFrac, restartHistory );
 		}
 
-		return animator->CreateFrame( animTime, false );
+		return animator->CreateTicFrame( renderEntity, gameLocal.time );
 	}
 
 	return false;

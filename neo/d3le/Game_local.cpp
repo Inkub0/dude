@@ -2856,6 +2856,12 @@ bool idGameLocal::Draw( int clientNum ) {
 	// render the scene
 	player->playerView.RenderPlayerView( player->hud );
 
+	// done rendering: anything that issues a render callback before the next rendered frame (the
+	// game tics, e.g. a trace against an animated model) gets the exact tic pose, not this frame's
+	// sub-tic one
+	renderInterpolateFrac = 1.0f;
+	renderInterpAnim = false;
+
 	return true;
 }
 
