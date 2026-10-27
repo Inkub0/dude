@@ -60,6 +60,7 @@ idCVar	idSessionLocal::com_minTics( "com_minTics", "1", CVAR_SYSTEM, "" );
 idCVar	idSessionLocal::com_showTics( "com_showTics", "0", CVAR_SYSTEM | CVAR_BOOL, "" );
 idCVar	idSessionLocal::com_fixedTic( "com_fixedTic", "0", CVAR_SYSTEM | CVAR_INTEGER | CVAR_ARCHIVE, "", -1, 10 );
 extern idCVar com_interpolate; // declared in Common.cpp; when set, don't block waiting for the next game tic
+extern idCVar r_scaleMenusTo43;
 
 // DUDE benchmark (docs/benchmark.md). Doom 3's timedemo consumed one 30 Hz demo frame per
 // rendered frame, which fast-forwards the demo on anything quicker than 30 fps and, with
@@ -1907,6 +1908,14 @@ void idSessionLocal::LoadLoadingGui( const char *mapName ) {
 		guiLoading->SetStateString( "loading_bkgnd", mapDef->dict.GetString( "loadimage" ) );
 		guiLoading->SetStateString( "loading_levelname",
 			common->GetLanguageDict()->GetString( mapDef->dict.GetString( "name", mapName ) ) );
+	}
+	// DUDE: Quake 4's loading GUIs (guis/loading/*.gui) are 640x480 layouts with 4:3 art but,
+	// unlike its menus and Doom 3's per-map loading GUIs, carry no "menugui 1", so they
+	// stretched to the screen's width. Fit them to 4:3 like menus (r_scaleMenusTo43) through
+	// the "scaleto43" state switch; this runs after uiManager->Reload, which resets the flags.
+	if ( GameTitle::Get().title == GAME_TITLE_QUAKE4 ) {
+		guiLoading->SetStateBool( "scaleto43", r_scaleMenusTo43.GetBool() );
+		guiLoading->StateChanged( com_frameTime );
 	}
 }
 
