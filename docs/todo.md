@@ -459,3 +459,35 @@ Also still open from the original plan: ship a DUDE-authored widescreen GUI set 
 anchor system is already in-engine; only the `.gui` text is third-party/id-derivative).
 
 Full plan: **[codebase-independence.md](codebase-independence.md)**.
+
+## Emissive mode performance  **[backlog 2026-10-27 — nothing scheduled]**
+
+Context: emissive mode (`r_rtEmissiveLighting 1`) was made playable on 2026-10-27: `r_rtEmissiveSamples` default 2, the
+analytic emitter RIS target on (`r_rtEmissiveCheapTarget 1`), the ReSTIR DI winner shaded once, the gather's side data
+ping-ponged instead of copied, the boost picks' SH-mode target fixed, the cache resolve over touched slots only
+(docs/rtx-restir-di.md and docs/rtx-irradiance-cache.md, "Perf" sections). Reference capture (user, mars_city1 1440p,
+emissive on): gather 24.7 / 13.6 / 8.4 ms at 10 / 4 / 1 samples before those changes. Estimates below are estimates.
+
+- **Light buffer + emissive table in VRAM** — the scene-light rows (`RB_RHI_GatherSceneLights`, a 3-slot ring) and the
+  emissive table / CDF are `BU_STORAGE`: HOST_VISIBLE | HOST_COHERENT, so on a discrete GPU they may live in system memory
+  and every gather / grid-fill / bounce / gradient read that misses L2 crosses PCIe. First a one-flag A/B (prefer
+  device-local + host-visible, ReBAR); if it pays, stage the uploads (the mover pass's in-place slice writes then need the
+  same path). Est. 0-0.5 ms, unmeasured. Effort S to test, M to stage.
+- **`lightgrid.fill`** — ~2 ms on emitter-dense maps (mars_city1; 0.09 ms in hell1): one thread per cell (4 cascades x 28^3
+  = 87,808) loops over EVERY row of the light buffer, placed + emitter rows, so cost = cells x rows. Ideas: cull rows per
+  cascade on the CPU (a row only enters cells within its cull sphere - bin rows by cascade/region first), or a two-level
+  fill (coarse bins of rows per 4^3 cell block). Must keep the deterministic top-N (the stable grid). Effort M.
+- **Bounce hit: RIS-pick 1-2 of the cell's candidates** instead of shading all up-to-32 (rtgi_bounce.glsl, the combined-GI
+  bounce at the hit). Est. 0.3-0.8 ms. Noisier GI, so opt-in, and a flicker A/B is required (GI half-rate flickered
+  through NRD's anti-lag in 2026-10-14 and was reverted). Effort M.
+- **Gradient pass** (`restir.di.grad`, 0.6-1.25 ms; was 0.44 on 2026-10-13, growth not explained) — first an A/B of
+  `r_rtReStirDIGradientStratum` 3 vs 4; then a compute rewrite (one thread per gather pixel + a subgroup max, one re-shade
+  per stratum) for the serial 9-pixel scans. A stratum change alters the confidence granularity: opt-in. Effort S / M-L.
+- **CPU: emissive table mover upkeep** — any emissive mover move regenerates EVERY emitter row (`R_RtEmissiveBuildRows`,
+  O(all triangles), plus a linear emitters.cfg / override scan per row) and any flux change re-uploads the whole CDF.
+  Incremental rows (only the moved group's), a hashed emitters.cfg lookup, a CDF slice upload. No fps while GPU-bound;
+  helps hitches on mover-heavy maps. Read `r_rtEmissiveTableDebug 1`'s "mover upkeep" line first. Effort S-M.
+- **Denoiser knobs** (tuning, not code): `AntiFirefly` off (NRD: ~7-10% of the denoise), Atrous 2 instead of 3. Fidelity
+  choices for the user.
+- **Not to re-propose** (tried and rejected): GI half-rate, DI reservoir reworks (two-reservoir emitter split, K-pick
+  emitter reservoir), fewer grid slots, residual stochastic slots, MCPG guiding, Q2RTX per-cell emitter lists.
