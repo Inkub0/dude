@@ -1197,7 +1197,11 @@ mode: no material); the tail's target-only shade is the loop's own except in ful
 still calls `diShadeLight`. Same values (up to the compiler's instruction fusion); four more live values
 across the loop (register pressure: measure the gather). The boost picks (restir_di_boost.glsl) are not
 touched.
-## Perf: last frame's side data without copies (2026-10-27, `perf/restir-di-pingpong-side`)
+## Perf: last frame's side data without copies (2026-10-27, `perf/restir-di-pingpong-side`, merged)
+
+Gate (user): mars_city1 emissive mode, image unchanged, `restir.di.sidecopy` gone from the profile; ASAN clean; Vulkan
+validation ON: only the known NRD SH `gOut_DiffSh` VUID-08795 (see the 2026-10-12 validation note) and startup vertex-attribute
+performance warnings - nothing from the gather pair.
 
 The gradient and the boost read last frame's gather attachments (att1 viewZ + lum, att2 normal, att3 SH1 + row);
 R1 rev.2 copied them into three side targets before each gather ("restir.di.sidecopy": three full-screen copies at
