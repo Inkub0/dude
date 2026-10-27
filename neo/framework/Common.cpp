@@ -155,7 +155,7 @@ idCVar com_interpolate( "com_interpolate", "0", CVAR_BOOL | CVAR_SYSTEM | CVAR_A
 // com_interpolate refinements (ported from the best parts of dhewm3 PR #771; all no-ops unless com_interpolate is set)
 idCVar com_interpolateAim( "com_interpolateAim", "1", CVAR_BOOL | CVAR_SYSTEM | CVAR_ARCHIVE, "with com_interpolate: overlay pending (un-simulated) mouse look onto the rendered view so aiming has no added latency above 60fps; shooting still resolves at the game tic" );
 idCVar com_interpolateCubic( "com_interpolateCubic", "1", CVAR_BOOL | CVAR_SYSTEM | CVAR_ARCHIVE, "with com_interpolate: cubic (Catmull-Rom) instead of linear position interpolation for moving world entities; smoother through accelerations" );
-idCVar com_interpolateAnim( "com_interpolateAnim", "1", CVAR_BOOL | CVAR_SYSTEM | CVAR_ARCHIVE, "with com_interpolate: sample animated entities' skeletal animation at the sub-tic instant so limbs move smoothly above 60fps, not just their root transform" );
+idCVar com_interpolateAnim( "com_interpolateAnim", "1", CVAR_BOOL | CVAR_SYSTEM | CVAR_ARCHIVE, "with com_interpolate: interpolate animated entities' (and the view weapon's) skeletal pose between tics, walk IK, head look and ragdolls included, so limbs move smoothly above 60fps, not just their root transform" );
 // DG/DUDE: render-side frame-rate cap. Paces each frame to an even wall-clock interval so
 // motion stays smooth even without a clean vsync — the intended companion to running vsync
 // off (r_swapInterval 0) on a multi-monitor X11 setup where vsync clamps to the wrong

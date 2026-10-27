@@ -1940,9 +1940,6 @@ void idWeapon::PresentWeapon( bool showViewModel ) {
 		renderWeaponOriginPrev = renderWeaponOrigin;
 		renderWeaponAxisPrev = renderWeaponAxis;
 	}
-	// reset the render-time animation offset each tic; InterpolateViewWeapon sets it per rendered
-	// frame when com_interpolate is active, so with interpolation off it stays at the tic time
-	renderAnimTimeOffset = 0;
 
 	// update the weapon script
 	UpdateScript();
@@ -2139,11 +2136,9 @@ void idWeapon::InterpolateViewWeapon( float frac ) {
 	renderEntity.axis   = localAxis * eyeAxis;
 	renderEntity.origin = eyeOrg + localOrg * eyeAxis;
 
-	// sample the weapon animation at the same interpolated instant as the transform: frac of the
-	// way from the previous tic to the current one, i.e. up to one tic in the past. This is purely
+	// the weapon's skeletal pose is interpolated to the same instant by the render callback like
+	// every other animated entity's (idEntity::UpdateRenderEntity, com_interpolateAnim). Purely
 	// visual - firing/damage still happen at the game tic, so it adds no shooting latency.
-	renderAnimTimeOffset = -(int)( ( 1.0f - frac ) * (float)( gameLocal.time - gameLocal.previousTime ) );
-
 	gameRenderWorld->UpdateEntityDef( modelDefHandle, &renderEntity );
 
 	// move the gui display glow light with the interpolated display. The light is a tiny radius-3

@@ -389,12 +389,6 @@ protected:
 	int						modelDefHandle;						// handle to static renderer model
 	refSound_t				refSound;							// used to present sound to the audio engine
 
-	// render interpolation (com_interpolate): offset added to gameLocal.time when sampling this
-	// entity's animation at render time, so the animated pose can be interpolated between game
-	// tics. 0 (the default) means "sample at the tic time" - i.e. no change for normal entities.
-	// Currently only set by the view weapon; see idWeapon::InterpolateViewWeapon().
-	int						renderAnimTimeOffset;
-
 	// render interpolation stage 3 (com_interpolate): the renderEntity transform as committed to
 	// the render world at the previous and current game tic. Between tics,
 	// idGameLocal::InterpolateRenderEntities re-presents entities that moved at a blend of the

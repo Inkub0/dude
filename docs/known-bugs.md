@@ -4,6 +4,33 @@ Deferred until the rendering pipeline is complete — tracked here for later tri
 Hub: [vulkan-port.md](vulkan-port.md). Deliberate deviations (not bugs) are in
 [readme-changes.md](readme-changes.md).
 
+- **[FIXED, PENDING IN-GAME CHECK 2026-10-27] Monsters jittered above 60 fps, worst on stairs; a weapon twitched entering its reload (com_interpolate).**
+  Reported on moddb: with `com_interpolate 1` at high fps, the Imp and the Fat Zombie jittered,
+  especially walking stairs, and a modded shotgun twitched for one frame going into its reload.
+  **Root causes:** (1) `com_interpolateAnim` sampled the *anims* at the sub-tic instant, but the
+  joints game code overrides once per tic stayed at the tic value while the root transform was
+  interpolated: walk IK (`idIK_Walk::Evaluate` sets the pelvis position/axis and the hip, knee and
+  ankle axes as `JOINTMOD_WORLD_OVERRIDE` against the tic's physics origin, smoothing the pelvis
+  down after each stair step), AI look joints, head joints copied from the body, AF ragdoll poses.
+  Planted feet slid by a tic of travel and snapped back each tic; on stairs the pelvis dipped by
+  ~0.75 of the step right after it. (2) The Catmull-Rom tangents of `com_interpolateCubic`
+  overshot step-shaped motion by ~7% of the step (1.3 units on an 18-unit stair) on the tic after
+  it. (3) `GetTicInterpolation` read the clock when the game drew, after the frame's tics ran, so
+  frames that ran a tic got an alpha late by the tic's CPU time. (4) A cycle restarted with no
+  blend time and sampled even a msec before its start wraps to the end of the cycle (the anim it
+  replaced is already cleared): the reload twitch. **Fix:** the render callback now interpolates
+  final *poses*: `idAnimator::CreateInterpolatedFrame` snapshots each tic's final pose (anims + AF
+  + every joint modifier, in joint-local quaternions) once per tic and blends the previous and
+  current tic's poses (`BlendJoints`) into a render-only joint buffer the render entity is pointed
+  at - the authoritative `joints[]` game code reads stay the exact tic pose. Only without a pose
+  from the previous tic (just spawned / teleported / new model / was off screen / rendering below
+  60 fps) does it fall back to sampling the anims at the sub-tic instant, never before the newest
+  anim started. The view weapon goes through the same path (its own sub-tic anim offset is gone,
+  so it now follows `com_interpolateAnim`). The cubic tangents are limited per axis to stay
+  monotone (Fritsch-Carlson); the alpha is measured at the timestamp `Com_UpdateFrameTime` latched
+  the frame's tic schedule at. Applied to `neo/game/`, `neo/d3xp/` and `neo/d3le/` alike. See
+  [[render-interpolation-feature]].
+
 - **[RESOLVED 2026-08-04] Crash (SIGABRT) after killing the Mars City Underground scientist — vertex-block double-free.**
   Reported 2026-08-04 on Vulkan: the game aborted shortly after the demonic-invasion
   scene, with `Heap.h:839 Assertion 'block->node == NULL' failed` in

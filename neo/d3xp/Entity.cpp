@@ -449,7 +449,6 @@ idEntity::idEntity() {
 
 	memset( &renderEntity, 0, sizeof( renderEntity ) );
 	modelDefHandle	= -1;
-	renderAnimTimeOffset = 0;
 	renderInterpOriginPrev.Zero();
 	renderInterpOriginCur.Zero();
 	renderInterpAxisPrev.Identity();
@@ -1704,23 +1703,21 @@ bool idEntity::UpdateRenderEntity( renderEntity_s *renderEntity, const renderVie
 		SetTimeState ts( timeGroup );
 #endif
 
-		// renderAnimTimeOffset is normally 0; the view weapon sets it each rendered frame so its
-		// animation is sampled at the interpolated sub-tic instant (com_interpolate)
-		int animTime = gameLocal.time + renderAnimTimeOffset;
-
-		// com_interpolateAnim: sample skeletal animation at the same sub-tic instant the render
-		// transform is interpolated to, so limbs move smoothly above 60fps rather than stepping at
-		// the tic rate. Only for entities the weapon path hasn't already offset (renderAnimTimeOffset
-		// == 0); like the transform interp this samples up to one tic in the past, adding no gameplay
-		// latency (SetTimeState above keeps this in the entity's own d3xp time group).
-		if ( renderAnimTimeOffset == 0 && gameLocal.renderInterpAnim && gameLocal.renderInterpolateFrac < 1.0f ) {
-			int ticLen = gameLocal.time - gameLocal.previousTime;
-			if ( ticLen > 0 && ticLen <= 100 ) {
-				animTime -= (int)( ( 1.0f - gameLocal.renderInterpolateFrac ) * (float)ticLen );
-			}
+		// com_interpolateAnim (only set while idGameLocal::Draw renders with com_interpolate): show
+		// the skeleton at the same sub-tic instant the render transform is interpolated to, blended
+		// between the final poses of the previous and current tic, so limbs - joints that walk IK,
+		// look control and ragdolls override once per tic included - move smoothly above 60fps and
+		// stay consistent with the interpolated origin. Like the transform interp this shows up to
+		// one tic in the past, adding no gameplay latency (SetTimeState above keeps this in the
+		// entity's own d3xp time group). Covers the view weapon too.
+		if ( gameLocal.renderInterpAnim ) {
+			// a render transform that snapped this tic (teleport, first presentation, see
+			// SnapshotRenderTransform) restarts the pose history too
+			const bool restartHistory = ( renderInterpSnapshotTime == gameLocal.time && renderInterpHistCount < 2 );
+			return animator->CreateInterpolatedFrame( renderEntity, gameLocal.time, gameLocal.previousTime, gameLocal.renderInterpolateFrac, restartHistory );
 		}
 
-		return animator->CreateFrame( animTime, false );
+		return animator->CreateTicFrame( renderEntity, gameLocal.time );
 	}
 
 	return false;
