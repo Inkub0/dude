@@ -578,3 +578,6 @@ Workflow: Emissive Mode on -> Bake defaults -> Physical on -> walk the map with 
   P; ndl / ldir / SH stay the centroid's (bump re-resolve still cancels), only the radiance is smoothed. Carried in the
   DI pass's free u_texGen0S.x; the bounce uses 1. A placed light still costs 1 sample (the emitter's own cost). LESSON:
   the far-field area-light problem is sampling variance + the denoiser clamp, not falloff or culling.
+  2026-10-27 (user, mars_city1, emissive mode on): `restir.di.gather` 24.7 / 13.6 / 8.4 ms at 10 / 4 / 1 samples (~1.75 ms
+  per sample: every emitter CANDIDATE of a pixel's list ran them all, not only the winner), and 10 / 4 / 1 looked the same
+  -> the default is 1 (`tune/emissive-samples-default`); a saved value is kept, so set it by hand where one is archived.
