@@ -477,7 +477,7 @@ emissive on): gather 24.7 / 13.6 / 8.4 ms at 10 / 4 / 1 samples before those cha
   and every gather / grid-fill / bounce / gradient read that misses L2 crosses PCIe. First a one-flag A/B (prefer
   device-local + host-visible, ReBAR); if it pays, stage the uploads (the mover pass's in-place slice writes then need the
   same path). Est. 0-0.5 ms, unmeasured. Effort S to test, M to stage.
-- **`lightgrid.fill`** — ~2 ms on emitter-dense maps (mars_city1; 0.09 ms in hell1): one thread per cell (4 cascades x 28^3
+- **`lightgrid.fill`** — **DONE 2026-10-27** (options 1 + 2 as the block fill, docs/rtx-light-grid.md: 0.95 -> 0.35 ms on mars_city1, same grid). Original note: ~2 ms on emitter-dense maps (mars_city1; 0.09 ms in hell1): one thread per cell (4 cascades x 28^3
   = 87,808) loops over EVERY row of the light buffer, placed + emitter rows, so cost = cells x rows. Ideas: cull rows per
   cascade on the CPU (a row only enters cells within its cull sphere - bin rows by cascade/region first), or a two-level
   fill (coarse bins of rows per 4^3 cell block). Must keep the deterministic top-N (the stable grid). Effort M.
