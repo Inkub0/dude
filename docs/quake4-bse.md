@@ -820,7 +820,10 @@ in both games, the screenshots compare directly. `func_fx` also takes `endOrigin
   frame through the HDR buffer; to work out first: the order of the 2D double vision composite and
   the HUD against the tone map resolve, eye adaptation (measure the crop or hold), FSR2 (built for
   one full-window view). Own branch and test round.
-  **Built 2026-10-27** (`fix/hdr-crop-view-frames`, gate pending; plan approved by the user:
+  **Done 2026-10-27** (`fix/hdr-crop-view-frames`, merged after the user's gate: blur vs no blur at
+  the same exposure on GL3 and Vulkan with `r_hdr` on/off, eye adaptation and bloom through the blur,
+  FSR2 at 1.0 and 0.67, the savegame thumbnail, RoE `g_lowresFullscreenFX 1`, Vulkan validation and
+  ASAN; plan approved by the user:
   engine side, keep the crop, measure it): a presented frame whose world view went into a crop
   routes through the HDR buffer; its first crop view meters eye adaptation and bloom from the crop's
   rows (held exposure when it cannot); under sub-native FSR2 the frame draws into the display-size

@@ -625,7 +625,7 @@ reverted: it traded that ghosting for noise everywhere else and did not touch th
   vertex of memory, one address in the per-draw uniforms. **Not covered:** CPU-skinned meshes (GL3,
   `r_gpuSkinning 0`), deform-once tessellation (`r_tessDeform`), vertex-deform materials, particles.
 
-## Crop-view frames (2026-10-27, `fix/hdr-crop-view-frames`)
+## Crop-view frames (2026-10-27, `fix/hdr-crop-view-frames`, user-verified + merged)
 
 Frames whose world view the game renders into a crop (Quake 4's double vision; RoE / Lost Mission
 with `g_lowresFullscreenFX 1`) now go through the HDR scene path (hdr-pipeline.md, same date).

@@ -332,7 +332,7 @@ Phase A now runs on the Vulkan backend too (`neo/renderer/rhi/vk/VulkanBackend.c
 - Default path unchanged: with `r_hdr 0` the frame target stays 0 and every scene/shadow
   pass behaves exactly as before M7.
 
-## Frames whose world view is rendered into a crop (2026-10-27, `fix/hdr-crop-view-frames`)
+## Frames whose world view is rendered into a crop (2026-10-27, `fix/hdr-crop-view-frames`, user-verified + merged)
 
 A frame went through the HDR buffer only when it had a full-window world view
 (`RB_RHI_FrameHasWorldScene`, `viewDef_t::isWindowView`). Quake 4's double vision (the intro
