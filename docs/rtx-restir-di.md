@@ -1230,6 +1230,9 @@ change is the noise: an emitter facing away still gets weight (the row carries n
 is floored at the bound radius. Built opt-in; the user turned it ON by default (2026-10-27): with `r_rtEmissiveSamples 2`
 it "makes the emissive mode playable rather than a quirk / tech demo". `r_rtEmissiveCheapTarget 0` is the original weighing.
 
-Noticed, NOT changed (the user does not want the DI reservoir reworked without a decision): in SH mode the boost's
-extra picks divide their target by N.L ("same as the main loop"), but the main loop no longer does - the boost's
-weights then use a different target from the wSum they share. Worth a look on its own.
+Noticed in passing, FIXED separately (`fix/restir-di-boost-sh-target`, user-requested): in SH mode the boost's extra
+picks still divided their target by N.L ("same as the main loop"), a leftover of the cosine-free SH target that
+58aac0a4 (2026-10-17) removed from the direct term, the boost and the GI bounce - its own message says so, but this
+line survived. The main loop's wSum is built with the cosine IN, so each extra pick's Wk = wSum / pH came out N.L too
+small: boosted (young, disoccluded) pixels read darker than the plain gather in SH mode, the default. The boost now
+uses the main loop's target.

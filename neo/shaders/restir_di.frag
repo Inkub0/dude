@@ -404,8 +404,11 @@ void main() {
 			vec3 c, ld; float dl, ndl;
 			// the TARGET pHat (cheap or full, consistent with wSum) for Wk, then the full shade for the radiance
 			if ( !diTargetLight( lights, lk, S, c, ld, dl, ndl, cheapTarget ) ) { continue; }
+			// the main loop's target exactly (its wSum is shared): luminance with the cosine IN. DUDE (2026-10-27): this pick
+			// still divided by N.L in SH mode - a leftover of the cosine-free SH target that 58aac0a4 removed everywhere else
+			// ("direct + R3a boost + GI bounce") - so each extra pick's Wk came out N.L too small and boosted (young) pixels
+			// read darker than the plain gather in SH mode, the default
 			float pH = dot( c, vec3( 0.2126, 0.7152, 0.0722 ) );
-			if ( shMode ) { pH /= max( ndl, 0.05 ); }	// radiance target, same as the main loop (cosine out of the target)
 			if ( !( pH > 0.0 ) ) { continue; }
 			vec3  cF = c;	float ndlF = ndl;
 			if ( cheapTarget || diTargetIsAnalytic( lights, lk ) ) {	// the full shade (an analytic emitter target is not one)
