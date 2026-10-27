@@ -329,10 +329,16 @@ idCommon *		common = &commonLocal;
 
 static double nextTicTime = 0.0;
 
+// com_interpolate: the wall-clock time (Sys_MillisecondsPrecise) Com_UpdateFrameTime last latched the
+// tic schedule at, i.e. the instant the current frame decided which game tics are due. The frame's
+// sub-tic interpolation alpha is measured at this same instant (GetTicInterpolation), not when the
+// game draws: a frame that runs a tic draws later by that tic's CPU time, so reading the clock there
+// biased its alpha late by it and the alpha jittered between frames that run a tic and frames that
+// don't. 0.0 = not latched yet.
+static double ticScheduleTime = 0.0;
+
 // DG: updates the tic number based on the (real) time expired since it has last been updated
-void Com_UpdateTicNumber() {
-	D3P_CPUSampleFn();
-	double now = Sys_MillisecondsPrecise();
+static void Com_UpdateTicNumberAt( double now ) {
 	double timeDiff = now - nextTicTime + 0.1; // 0.1 ms tolerance in case we're just a little early
 	if ( timeDiff >= 0.0) {
 		if ( nextTicTime == 0.0 ) {
@@ -358,12 +364,21 @@ void Com_UpdateTicNumber() {
 	}
 }
 
+void Com_UpdateTicNumber() {
+	D3P_CPUSampleFn();
+	Com_UpdateTicNumberAt( Sys_MillisecondsPrecise() );
+}
+
 // DG: updates com_frameTime based on the current tic number (which is also updated if necessary)
 //     and com_preciseFrameLengthMS
 void Com_UpdateFrameTime() {
 	static int lastTicNum = 0;
 
-	Com_UpdateTicNumber();
+	D3P_CPUSampleFn();
+	// one timestamp for both the tic schedule and this frame's interpolation alpha (ticScheduleTime)
+	const double now = Sys_MillisecondsPrecise();
+	Com_UpdateTicNumberAt( now );
+	ticScheduleTime = now;
 
 	int ticNum = com_ticNumber;
 	int ticDiff = ticNum - lastTicNum;
@@ -404,7 +419,9 @@ float idCommonLocal::GetTicInterpolation( void ) {
 		return 0.0f;
 	}
 
-	double now = Sys_MillisecondsPrecise();
+	// measured when this frame latched its tic schedule (ticScheduleTime), so the alpha isn't
+	// skewed by however long the tics this frame ran took
+	const double now = ( ticScheduleTime != 0.0 ) ? ticScheduleTime : Sys_MillisecondsPrecise();
 	double frac = 1.0 - ( nextTicTime - now ) / ticLen;
 
 	// clamp to [0,1]: below 0 can happen right after a tic boundary due to timing jitter,
