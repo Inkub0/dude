@@ -695,6 +695,7 @@ private:
 	std::unordered_map<TexSetKey, VkDescriptorSet, TexSetKeyHash> textureSetCache;
 	std::vector<VkDescriptorSet> retiredTexSets[FRAMES_IN_FLIGHT];
 	void						InvalidateTextureSets();
+	void						InvalidateTextureSetsFor( const ImageHandle *handles, int count );
 	bool						framePoolWarned = false;
 	ImageHandle					dummyImage = 0;			// 1x1 white for unused sampler slots
 	ImageHandle					dummyCube = 0;			// 1x1 white cube (samplerCube slots)
@@ -9712,9 +9713,9 @@ void VulkanBackend::DestroyImage( ImageHandle h ) {
 	}
 	rec = ImageRec();
 	SyncBindlessSlot( h );		// RR4: the freed slot shows the dummy until reused
-	// drop the cross-frame texture-set cache: any cached set keyed on handle h is
-	// now stale, and reusing the slot would otherwise sample the wrong texture.
-	InvalidateTextureSets();
+	// drop the cached texture sets keyed on handle h: they are now stale, and reusing the
+	// slot would otherwise sample the wrong texture
+	InvalidateTextureSetsFor( &h, 1 );
 }
 
 /*
@@ -9769,6 +9770,46 @@ void VulkanBackend::InvalidateTextureSets() {
 	// a retired set may be the one the last-bound fast path is holding; drop it
 	boundTexKey = TexSetKey{};
 	boundTexSet = VK_NULL_HANDLE;
+}
+
+/*
+====================
+VulkanBackend::InvalidateTextureSetsFor
+
+The selective form, for a freed image or render target: retires only the cached sets that bind
+one of the freed handles and keeps the rest. The shadow caches evict mid-frame, and dropping the
+whole cache on every eviction rebuilt every later draw's set; several evictions in one frame
+(walking or noclipping into a lit area) stacked the retired generations in the slot's retire
+list until texturePool ran dry ("descriptor pool exhausted", lit draws dropped) and hitched.
+A set that binds none of the freed handles stays valid: its views are all still live.
+====================
+*/
+void VulkanBackend::InvalidateTextureSetsFor( const ImageHandle *handles, int count ) {
+	auto usesFreed = [handles, count]( const TexSetKey &key ) {
+		for ( int b = 0; b < VK_TEX_BINDINGS; b++ ) {
+			if ( key.h[b] == 0 ) {
+				continue;
+			}
+			for ( int i = 0; i < count; i++ ) {
+				if ( key.h[b] == handles[i] ) {
+					return true;
+				}
+			}
+		}
+		return false;
+	};
+	for ( auto it = textureSetCache.begin(); it != textureSetCache.end(); ) {
+		if ( usesFreed( it->first ) ) {
+			retiredTexSets[frameIndex].push_back( it->second );
+			it = textureSetCache.erase( it );
+		} else {
+			++it;
+		}
+	}
+	if ( boundTexSet != VK_NULL_HANDLE && usesFreed( boundTexKey ) ) {
+		boundTexKey = TexSetKey{};
+		boundTexSet = VK_NULL_HANDLE;
+	}
 }
 
 /*
@@ -11171,6 +11212,17 @@ void VulkanBackend::DestroyRenderTarget( RenderTargetHandle rt ) {
 	// frames frameIndex has already advanced, so the retire list would drain on
 	// the wrong fence — waitIdle + free immediately instead (same reasoning as
 	// DestroyImage).
+	// the sample handles this target lends to texture sets (shadow unit 7/8, HDR unit 0, SSAO
+	// levels), collected before ReleaseTargetSampleSlots clears them
+	ImageHandle freed[5 + RenderTarget::MAX_MIP];
+	int numFreed = 0;
+	freed[numFreed++] = t->sampleImage;
+	for ( int c = 0; c < 4; c++ ) {
+		freed[numFreed++] = t->colorSampleImage[c];
+	}
+	for ( int L = 0; L < RenderTarget::MAX_MIP; L++ ) {
+		freed[numFreed++] = t->colorLevelInput[L];
+	}
 	ReleaseTargetSampleSlots( *t );
 	if ( frameOpen && !skipFrame ) {
 		retiredTargets[frameIndex].push_back( *t );
@@ -11179,7 +11231,7 @@ void VulkanBackend::DestroyRenderTarget( RenderTargetHandle rt ) {
 		FreeTargetObjects( *t );
 	}
 	*t = RenderTarget();		// free the target-table slot
-	InvalidateTextureSets();	// a freed sample handle may be cached in a texture set (shadow unit 7/8, HDR unit 0)
+	InvalidateTextureSetsFor( freed, numFreed );	// only the cached sets that bind a freed sample handle
 }
 
 void VulkanBackend::DrainRetiredTargets( int slot ) {
