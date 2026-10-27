@@ -90,6 +90,9 @@ const int PREVIEW_Y = 31;
 const int PREVIEW_WIDTH = 398;
 const int PREVIEW_HEIGHT = 298;
 
+// DUDE: com_classicTics - serverinfo key a command demo recorded at Doom 3's original 62.5 Hz carries
+static const char * const CMDDEMO_CLASSIC_TICS_KEY = "dude_classicTics";
+
 void RandomizeStack( void ) {
 	// attempt to force uninitialized stack memory bugs
 	int		bytes = 4000000;
@@ -397,6 +400,8 @@ void idSessionLocal::Clear() {
 	writeDemo = NULL;
 	renderdemoVersion = 0;
 	cmdDemoFile = NULL;
+	mapClassicTics = false;
+	cmdDemoClassicTics = -1;
 
 	syncNextGameFrame = false;
 	mapSpawned = false;
@@ -1680,7 +1685,15 @@ SaveCmdDemoFromFile
 */
 void idSessionLocal::SaveCmdDemoToFile( idFile *file ) {
 
-	mapSpawnData.serverInfo.WriteToFileHandle( file );
+	// DUDE: com_classicTics - note the tic the level ran at in the demo's copy of the serverinfo, so
+	// playback runs the same one (the usercmds only replay in step on it)
+	if ( mapClassicTics ) {
+		idDict serverInfo = mapSpawnData.serverInfo;
+		serverInfo.SetBool( CMDDEMO_CLASSIC_TICS_KEY, true );
+		serverInfo.WriteToFileHandle( file );
+	} else {
+		mapSpawnData.serverInfo.WriteToFileHandle( file );
+	}
 
 	for ( int i = 0 ; i < MAX_ASYNC_CLIENTS ; i++ ) {
 		mapSpawnData.userInfo[i].WriteToFileHandle( file );
@@ -1700,15 +1713,21 @@ void idSessionLocal::SaveCmdDemoToFile( idFile *file ) {
 idSessionLocal::LoadCmdDemoFromFile
 ==============
 */
-void idSessionLocal::LoadCmdDemoFromFile( idFile *file ) {
+bool idSessionLocal::LoadCmdDemoFromFile( idFile *file ) {
 
 	mapSpawnData.serverInfo.ReadFromFileHandle( file );
+
+	// DUDE: com_classicTics - the tic the demo was recorded at (SaveCmdDemoToFile); a demo without
+	// the key ran at 60 Hz. Not passed on to the game.
+	const bool classicTics = mapSpawnData.serverInfo.GetBool( CMDDEMO_CLASSIC_TICS_KEY );
+	mapSpawnData.serverInfo.Delete( CMDDEMO_CLASSIC_TICS_KEY );
 
 	for ( int i = 0 ; i < MAX_ASYNC_CLIENTS ; i++ ) {
 		mapSpawnData.userInfo[i].ReadFromFileHandle( file );
 		mapSpawnData.persistentPlayerInfo[i].ReadFromFileHandle( file );
 	}
 	file->Read( &mapSpawnData.mapSpawnUsercmd, sizeof( mapSpawnData.mapSpawnUsercmd ) );
+	return classicTics;
 }
 
 /*
@@ -1789,10 +1808,18 @@ void idSessionLocal::StartPlayingCmdDemo(const char *demoName) {
 	guiLoading = uiManager->FindGui( GameTitle::Get().loadingGui, true, false, true );
 	//cmdDemoFile->Read(&loadGameTime, sizeof(loadGameTime));
 
-	LoadCmdDemoFromFile(cmdDemoFile);
+	const bool recordedClassicTics = LoadCmdDemoFromFile(cmdDemoFile);
 
-	// start the map
+	// start the map, at the game tic the demo was recorded at (DUDE: com_classicTics)
+	cmdDemoClassicTics = recordedClassicTics ? 1 : 0;
 	ExecuteMapChange();
+
+	if ( mapClassicTics != recordedClassicTics ) {
+		// its usercmds would replay out of step and the run would go differently
+		common->Warning( "%s was recorded at Doom 3's original 62.5 Hz tic (com_classicTics), which this game can't run - not playing it", fullDemoName.c_str() );
+		Stop();
+		return;
+	}
 
 	cmdDemoFile = fileSystem->OpenFileRead(fullDemoName);
 
@@ -2077,9 +2104,12 @@ void idSessionLocal::ExecuteMapChange( bool noFadeWipe ) {
 	common->Printf( "----- Map Initialization -----\n" );
 	common->Printf( "Map: %s\n", mapString.c_str() );
 
-	// DUDE: com_classicTics - the game tic this map runs at. Latched before the game initializes
-	// the map, which asks for it (FT_GameTicMSec), and kept until the next map load.
-	Com_LatchGameTicRate( com_classicTics.GetBool(), idAsyncNetwork::IsActive() );
+	// DUDE: com_classicTics - the game tic this map runs at: the cvar's, or the one a command demo
+	// being started was recorded at. Latched before the game initializes the map, which asks for
+	// it (FT_GameTicMSec), and kept until the next map load.
+	const bool wantClassicTics = ( cmdDemoClassicTics >= 0 ) ? ( cmdDemoClassicTics != 0 ) : com_classicTics.GetBool();
+	cmdDemoClassicTics = -1;
+	mapClassicTics = Com_LatchGameTicRate( wantClassicTics, idAsyncNetwork::IsActive() );
 
 	// let the renderSystem load all the geometry
 	if ( !rw->InitFromMap( fullMapName ) ) {

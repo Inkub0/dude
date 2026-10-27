@@ -274,6 +274,12 @@ public:
 
 	idFile *			cmdDemoFile;		// if non-zero, we are reading commands from a file
 
+	// DUDE: com_classicTics - the game tic the current (or last) map ran at, which command demos
+	// record; and while StartPlayingCmdDemo loads a demo's map, the tic it was recorded at
+	// (0 = 60 Hz, 1 = 62.5 Hz; -1 = no demo, the cvar decides)
+	bool				mapClassicTics;
+	int					cmdDemoClassicTics;
+
 	int					latchedTicNumber;	// set to com_ticNumber each frame
 	int					lastGameTic;		// while latchedTicNumber > lastGameTic, run game frames
 	int					lastDemoTic;
@@ -340,7 +346,7 @@ public:
 	void				StartPlayingCmdDemo( const char *demoName);
 	void				TimeCmdDemo( const char *demoName);
 	void				SaveCmdDemoToFile(idFile *file);
-	void				LoadCmdDemoFromFile(idFile *file);
+	bool				LoadCmdDemoFromFile(idFile *file);	// DUDE: returns whether it was recorded at 62.5 Hz
 	void				TimeDemoFrame();
 	idStr				TimeDemoReport( const char *demoName, float demoSeconds );
 	void				StartRecordingRenderDemo( const char *name );
