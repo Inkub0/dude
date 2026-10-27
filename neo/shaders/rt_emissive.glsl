@@ -297,4 +297,36 @@ bool rtEmissiveShadeRow( RtLights lights, uint li, vec3 P, vec3 N, uint seed, ui
 }
 
 
+// DUDE (2026-10-27, r_rtEmissiveCheapTarget): an ANALYTIC RIS TARGET for emitter row li - deterministic, no table read, no
+// area samples. The ReSTIR DI gather weighs every candidate of a pixel's list by a target; an emitter's target was its full
+// rtEmissiveShadeRow (r_rtEmissiveSamples area samples each), the gather's main cost in emissive mode (~1.75 ms per sample on
+// mars_city1). The row's colour is its irradiance proxy at its reach R, 16 L A / R^2 (RB_RHI_GatherSceneLights), so
+// L A = colour R^2 / 16 and the far-field irradiance is that / d^2 times the shade's own reach boost and fade, times the
+// receiver cosine toward the row's pos (the shade's ndl). Only the winner is then area-sampled. Any positive target keeps
+// RIS unbiased as long as it is non-zero wherever the shade can be: the cull, the flags and the ndl gate are the shade's, and
+// the fade is taken at the emitter's NEAREST possible point (its bound sphere: cull.w - radius around the centroid), never
+// below the fade of any sample the shade could draw. The near field is floored at the bound radius (a solid angle cannot
+// exceed the hemisphere). ldir / dl / ndl are the shade's (toward pos).
+bool rtEmissiveTargetRow( RtLights lights, uint li, vec3 P, vec3 N, out vec3 contrib, out vec3 ldir, out float dl, out float ndl ) {
+	contrib = vec3( 0.0 );	ldir = vec3( 0.0, 0.0, 1.0 );	dl = 0.0;	ndl = 0.0;
+	if ( floatBitsToUint( lights.l[ li ].projQ.y ) == 0u ) { return false; }	// no triangles: the shade reaches nothing
+	vec3 cd = lights.l[ li ].pos - P;
+	dl   = length( cd );
+	if ( !( dl > 1e-3 ) ) { return false; }
+	ldir = cd / dl;
+	ndl  = max( dot( N, ldir ), 0.0 );
+	if ( !( ndl > 0.0 ) ) { return false; }
+	float R      = max( lights.l[ li ].radius, 1.0 );
+	float br     = max( lights.l[ li ].cull.w - lights.l[ li ].radius, 0.0 );	// the run's bound radius around its centroid
+	float dc     = length( lights.l[ li ].cull.xyz - P );					// to the centroid
+	float knee   = lights.l[ li ].projQ.z;
+	bool  noFade = lights.l[ li ].projQ.w > 0.5;
+	float boost  = ( knee > 0.0 ) ? max( dc / knee, 1.0 ) : 1.0;
+	float fade   = noFade ? 1.0 : 1.0 - smoothstep( 0.75 * R, R, max( dc - br, 0.0 ) );
+	if ( !( fade > 0.0 ) ) { return false; }
+	float d2     = max( dc * dc, max( br * br, 1.0 ) );
+	contrib = lights.l[ li ].color * ( ( R * R / 16.0 ) * boost * fade * ndl / d2 );
+	return !( any( isnan( contrib ) ) ) && dot( contrib, vec3( 1.0 ) ) > 0.0;
+}
+
 #endif // RT_EMISSIVE_GLSL

@@ -1211,3 +1211,25 @@ directly. A frame whose gather does not run leaves the choice unchanged, so the 
 unwritten; the pair is created, re-sized and lost together, and a fresh pair has no "last" until a gather wrote one
 (`rhiReStirDIGatherPrevValid` false), as the copies' first frame. Memory: the second MRT replaces the three copies
 (+ its radiance attachment). No image change.
+
+## Perf: an analytic target for emitter candidates (2026-10-27, `perf/restir-di-emitter-cheap-target`, ON by default)
+
+Measured first (user, mars_city1, emissive mode): `restir.di.gather` 24.7 / 13.6 / 8.4 ms at `r_rtEmissiveSamples`
+10 / 4 / 1 - ~1.75 ms per sample, because every EMITTER candidate of a pixel's list was weighed by its full area-sampled
+shade, not only the winner. `r_rtEmissiveCheapTarget 1` weighs an emitter candidate with `rtEmissiveTargetRow`
+(rt_emissive.glsl): the row's colour is its irradiance proxy at its reach R (16 L A / R^2), so the target is
+colour x (R^2 / 16) / max( d^2, bound^2 ) x the shade's reach boost and fade x the receiver cosine - no table read,
+no samples. Only the chosen emitter is then area-sampled (in the loop's mode; with the winner-shade reuse above its
+result feeds the full shade and the tail cache). The boost's extra picks use the same target for their weight and
+the full shade for their radiance.
+
+Unbiased: RIS holds for any target that is positive wherever the shade can be. The culls, flags and the N.L gate
+are the shade's own (diTargetLight), and the fade is evaluated at the emitter's NEAREST possible point (its bound
+sphere around the centroid), so the target is never zero where a sample could still be inside the reach. What can
+change is the noise: an emitter facing away still gets weight (the row carries no orientation), and the near field
+is floored at the bound radius. Built opt-in; the user turned it ON by default (2026-10-27): with `r_rtEmissiveSamples 2`
+it "makes the emissive mode playable rather than a quirk / tech demo". `r_rtEmissiveCheapTarget 0` is the original weighing.
+
+Noticed, NOT changed (the user does not want the DI reservoir reworked without a decision): in SH mode the boost's
+extra picks divide their target by N.L ("same as the main loop"), but the main loop no longer does - the boost's
+weights then use a different target from the wSum they share. Worth a look on its own.

@@ -325,7 +325,7 @@ void main() {
 		// RIS TARGET only: the cheap unshadowed irradiance (no GGX material) when cheapTarget, else the full shade. The
 		// winner is re-shaded at full material once AFTER the loop, so a pixel pays ~38 cheap targets + 1 full GGX instead
 		// of ~38 full GGX evals. false = cannot reach (culled / forward-path / N.L <= 0).
-		if ( diShadeLight( lights, li, S, contrib, ldir, dl, ndl, cheapTarget ) ) {
+		if ( diTargetLight( lights, li, S, contrib, ldir, dl, ndl, cheapTarget ) ) {
 			pHat = dot( contrib, vec3( 0.2126, 0.7152, 0.0722 ) );		// luminance of the target
 		}
 		float w    = pdfOne ? pHat : pHat * float( nLights );	// pHat / candidate pdf (grid + exhaustive: pdf 1; uniform-M: 1/nLights)
@@ -360,6 +360,13 @@ void main() {
 	vec3  ldirChosen    = vec3( 0.0 );
 	float dlChosen      = 0.0;
 	uint  flagsChosen   = 0u;
+	// an emitter weighed analytically (r_rtEmissiveCheapTarget) is area-sampled now, once: its shade in the loop's mode
+	// (target-only when cheapTarget, else full) replaces the analytic value; pHatChosen stays the analytic target the RIS
+	// weights used. ldir / dl / N.L are the same (toward the row's pos); a shade that draws no sample contributes 0.
+	if ( pHatChosen > 0.0 && diTargetIsAnalytic( lights, rowChosen - 1u ) ) {
+		vec3 ldS; float dlS, ndlS;
+		if ( !diShadeLight( lights, rowChosen - 1u, S, tgtChosen, ldS, dlS, ndlS, cheapTarget ) ) { tgtChosen = vec3( 0.0 ); }
+	}
 	if ( pHatChosen > 0.0 ) {
 		ldirChosen    = ldirLoop;
 		dlChosen      = dlLoop;
@@ -396,12 +403,15 @@ void main() {
 			uint lk = pickB[k] - 1u;
 			vec3 c, ld; float dl, ndl;
 			// the TARGET pHat (cheap or full, consistent with wSum) for Wk, then the full shade for the radiance
-			if ( !diShadeLight( lights, lk, S, c, ld, dl, ndl, cheapTarget ) ) { continue; }
+			if ( !diTargetLight( lights, lk, S, c, ld, dl, ndl, cheapTarget ) ) { continue; }
 			float pH = dot( c, vec3( 0.2126, 0.7152, 0.0722 ) );
 			if ( shMode ) { pH /= max( ndl, 0.05 ); }	// radiance target, same as the main loop (cosine out of the target)
 			if ( !( pH > 0.0 ) ) { continue; }
 			vec3  cF = c;	float ndlF = ndl;
-			if ( cheapTarget ) { vec3 ldF; float dlF; diShadeLight( lights, lk, S, cF, ldF, dlF, ndlF, false ); }
+			if ( cheapTarget || diTargetIsAnalytic( lights, lk ) ) {	// the full shade (an analytic emitter target is not one)
+				vec3 ldF; float dlF;
+				if ( !diShadeLight( lights, lk, S, cF, ldF, dlF, ndlF, false ) ) { cF = vec3( 0.0 ); }
+			}
 			vec3  rk = cF / B;	// irradiance (cosine in), as radChosen above
 			float Wk = ( wSum / ( pdfOne ? 1.0 : float( draws ) ) ) / pH;
 			float od;

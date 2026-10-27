@@ -143,6 +143,22 @@ bool diShadeLight( RtLights lights, uint li, in DiSurface s, out vec3 contrib, o
 	return true;
 }
 
+// DUDE (2026-10-27): the RIS TARGET of candidate li - diShadeLight's, except an EMITTER row under r_rtEmissiveCheapTarget
+// (u_texGen0S.y), which is weighed analytically (rtEmissiveTargetRow: no area samples) and area-sampled only if it wins
+// (diTargetIsAnalytic tells the caller to shade the winner). Same culls and flags as diShadeLight, so the support matches.
+bool diTargetIsAnalytic( RtLights lights, uint li ) {
+	return u_texGen0S.y > 0.5 && ( lights.l[ li ].flags & DUDE_LIGHT_EMISSIVE ) != 0u;
+}
+bool diTargetLight( RtLights lights, uint li, in DiSurface s, out vec3 contrib, out vec3 ldir, out float dl, out float ndl, bool targetOnly ) {
+	if ( !diTargetIsAnalytic( lights, li ) ) {
+		return diShadeLight( lights, li, s, contrib, ldir, dl, ndl, targetOnly );
+	}
+	contrib = vec3( 0.0 );	ldir = vec3( 0.0, 0.0, 1.0 );	dl = 0.0;	ndl = 0.0;
+	if ( !dudeLightInRange( lights, li, s.Pw ) ) { return false; }
+	if ( ( lights.l[ li ].flags & ( DUDE_LIGHT_DIFORWARD | DUDE_LIGHT_FOGVOLUME | DUDE_LIGHT_BOUNCEONLY ) ) != 0u ) { return false; }
+	return rtEmissiveTargetRow( lights, li, s.Pw, s.Nw, contrib, ldir, dl, ndl );
+}
+
 // one hard any-occluder shadow ray from the surface toward the chosen light (interaction.frag's inline ray).
 // 1 = lit, 0 = occluded, 1 - strength behind a solid grate texel. No TLAS (no RT scene) -> unshadowed: never
 // trace a null acceleration structure.
