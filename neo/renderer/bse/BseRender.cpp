@@ -25,7 +25,8 @@ Doom 3 GPL Source Code (see ArbProgram.h for license header)
 // A segment whose material is lit (Quake 4's model particles: grenades in flight) cannot be lit as
 // frame-temporary geometry - light interactions come from an entity's model. Such an effect gets
 // a second render entity, its model (idRenderModelBseLit) a snapshot of the lit segments rebuilt
-// every frame, as Doom 3's particle models are; it receives lights, casts no shadow.
+// every frame, as Doom 3's particle models are (its vertices in frame-temporary memory too,
+// idRenderModelFrameSnapshot); it receives lights, casts no shadow.
 
 #include "sys/platform.h"
 #include "framework/Common.h"
@@ -508,7 +509,9 @@ idRenderModel *idRenderModelBseLit::InstantiateDynamicModel( const struct render
 	}
 	BSE_ServiceForView( effect, view );
 
-	idRenderModelStatic *snapshot = new idRenderModelStatic;
+	// its vertices in this frame's temp space, as Doom 3's particle snapshots (idRenderModelFrameSnapshot): not a
+	// static vertex-cache block per segment per frame (on Vulkan an RHI buffer created and destroyed each time)
+	idRenderModelFrameSnapshot *snapshot = new idRenderModelFrameSnapshot;
 	snapshot->InitEmpty( "_BSE_LIT_SNAPSHOT" );
 	const bseView_t viewer = BSE_EffectView( view, ent->origin, ent->axis );
 	const float time = MS2SEC( view->renderView.time );
@@ -543,6 +546,7 @@ idRenderModel *idRenderModelBseLit::InstantiateDynamicModel( const struct render
 		surf.shader = material;
 		surf.geometry = tri;
 		snapshot->AddSurface( surf );
+		snapshot->SetFrameTempCache( tri );
 		bounds.AddBounds( tri->bounds );
 	}
 	snapshot->bounds = bounds;

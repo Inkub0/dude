@@ -871,3 +871,8 @@ in both games, the screenshots compare directly. `func_fx` also takes `endOrigin
   - The gate's temporary A/B cvar (`r_prtFrameTemp`) is removed.
   No fidelity change (the same vertices). Shared engine code: Doom 3, RoE and Lost Mission; Quake
   4's effects were already frame-temp and only get the larger temp space.
+  **Quake 4's lit effect segments** (`_BSE_LIT_SNAPSHOT`, 2026-10-27, `perf/bse-lit-frame-temp`,
+  user-requested; gate pending): the lit snapshot (grenades in flight, rock chunks - §3.2) had the
+  same static block per segment per frame. The snapshot class became shared,
+  `idRenderModelFrameSnapshot` (Model_local.h: `SetFrameTempCache`, `DropFrameTempCaches`), and
+  the lit snapshot uses it; its tangents come with the geometry, so nothing else changes.

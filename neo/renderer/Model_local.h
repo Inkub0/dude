@@ -388,6 +388,32 @@ private:
 ===============================================================================
 */
 
+/*
+===============================================================================
+
+	DUDE (2026-10-27): a static snapshot rebuilt every frame (Doom 3's particles, Model_prt.cpp; Quake 4's lit
+	effect segments, bse/BseRender.cpp) whose surfaces' vertices go into the frame's temp vertex space instead
+	of a static vertex-cache block per surface per frame (on Vulkan a persistent RHI buffer created and destroyed
+	each time). A temp block's header is recycled when the frame ends, so the snapshot remembers which surfaces
+	it gave one and clears exactly those pointers before it rebuilds (DropFrameTempCaches) and before it is
+	deleted - they are never Free()d. When the temp space is full a surface keeps the static path.
+
+===============================================================================
+*/
+class idRenderModelFrameSnapshot : public idRenderModelStatic {
+public:
+	virtual						~idRenderModelFrameSnapshot() { DropFrameTempCaches(); }
+
+	// clears last frame's temp pointers; call before the surfaces are rebuilt or freed
+	void						DropFrameTempCaches();
+	// puts tri's vertices (tangents already derived where lighting needs them) into this frame's temp space;
+	// false when it is full (tri keeps no cache: R_CreateAmbientCache uploads it the static way)
+	bool						SetFrameTempCache( srfTriangles_t *tri );
+
+private:
+	idList<srfTriangles_t *>	frameTempTris;		// surfaces whose ambientCache is this frame's temp block
+};
+
 class idRenderModelPrt : public idRenderModelStatic {
 public:
 								idRenderModelPrt();

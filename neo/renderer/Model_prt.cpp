@@ -35,35 +35,28 @@ If you have questions concerning this license or the applicable additional terms
 static const char *parametricParticle_SnapshotName = "_ParametricParticle_Snapshot_";
 
 /*
-===============================================================================
-
-	DUDE (2026-10-27): the snapshot's vertices live in the frame's temp space
-
-	id rebuilt each stage's vertices in the snapshot's own arrays every frame, freed the surface's vertex cache and
-	let R_CreateAmbientCache upload them again as a STATIC block - on Vulkan a persistent RHI buffer created and
-	destroyed per stage per frame. The vertices change every frame, so they now go into the frame's temp space
-	(vertexCache.AllocFrameTempIfFits), as deform particles, decals and Quake 4's effects do; Vulkan streams them
-	through its per-frame ring. The arrays stay in the snapshot (light interactions of lit stages, overlays and the
-	bounds read them as before).
-
-	A temp block's header is recycled when the frame ends, so the snapshot remembers which surfaces it gave one and
-	clears exactly those pointers before it rebuilds (and before it is deleted) - never Free()ing them. When the temp
-	space is full the surface keeps id's path (a static block, freed next frame as before).
-
-===============================================================================
+====================
+idRenderModelFrameSnapshot (Model_local.h)
+====================
 */
-class idRenderModelPrtSnapshot : public idRenderModelStatic {
-public:
-	virtual						~idRenderModelPrtSnapshot() { DropFrameTempCaches(); }
+void idRenderModelFrameSnapshot::DropFrameTempCaches() {
+	for ( int i = 0; i < frameTempTris.Num(); i++ ) {
+		frameTempTris[i]->ambientCache = NULL;
+	}
+	frameTempTris.SetNum( 0, false );
+}
 
-	void						DropFrameTempCaches() {
-									for ( int i = 0; i < frameTempTris.Num(); i++ ) {
-										frameTempTris[i]->ambientCache = NULL;
-									}
-									frameTempTris.SetNum( 0, false );
-								}
-	idList<srfTriangles_t *>	frameTempTris;		// surfaces whose ambientCache is this frame's temp block
-};
+bool idRenderModelFrameSnapshot::SetFrameTempCache( srfTriangles_t *tri ) {
+	if ( tri == NULL || tri->numVerts <= 0 ) {
+		return false;
+	}
+	tri->ambientCache = vertexCache.AllocFrameTempIfFits( tri->verts, tri->numVerts * sizeof( idDrawVert ) );
+	if ( tri->ambientCache == NULL ) {
+		return false;
+	}
+	frameTempTris.Append( tri );
+	return true;
+}
 
 /*
 ====================
@@ -127,7 +120,7 @@ idRenderModel *idRenderModelPrt::InstantiateDynamicModel( const struct renderEnt
 	}
 	*/
 
-	idRenderModelPrtSnapshot *snapshot = dynamic_cast<idRenderModelPrtSnapshot *>( cachedModel );
+	idRenderModelFrameSnapshot *snapshot = dynamic_cast<idRenderModelFrameSnapshot *>( cachedModel );
 	if ( cachedModel != NULL && snapshot == NULL ) {
 		delete cachedModel;		// not ours (cannot happen: only this function makes the snapshot)
 	}
@@ -140,7 +133,7 @@ idRenderModel *idRenderModelPrt::InstantiateDynamicModel( const struct renderEnt
 
 	} else {
 
-		snapshot = new idRenderModelPrtSnapshot;
+		snapshot = new idRenderModelFrameSnapshot;
 		snapshot->InitEmpty( parametricParticle_SnapshotName );
 	}
 	staticModel = snapshot;
@@ -273,16 +266,13 @@ idRenderModel *idRenderModelPrt::InstantiateDynamicModel( const struct renderEnt
 		surf->geometry->numIndexes = numIndexes;
 		surf->geometry->bounds = stage->bounds;		// just always draw the particles
 
-		// DUDE: the vertices into this frame's temp space (see idRenderModelPrtSnapshot); a lit stage gets its
+		// DUDE: the vertices into this frame's temp space (idRenderModelFrameSnapshot); a lit stage gets its
 		// tangents first, as R_CreateAmbientCache derives them before its upload
 		if ( numVerts > 0 ) {
 			if ( stage->material->ReceivesLighting() ) {
 				R_DeriveTangents( surf->geometry );
 			}
-			surf->geometry->ambientCache = vertexCache.AllocFrameTempIfFits( verts, numVerts * sizeof( idDrawVert ) );
-			if ( surf->geometry->ambientCache != NULL ) {
-				snapshot->frameTempTris.Append( surf->geometry );
-			}
+			snapshot->SetFrameTempCache( surf->geometry );
 		}
 	}
 
