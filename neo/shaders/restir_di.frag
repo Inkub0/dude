@@ -283,6 +283,14 @@ void main() {
 	float wSum        = 0.0;
 	float pHatChosen  = 0.0;					// the TARGET (cheap irradiance or full shade) of the chosen, for the RIS weight W
 	uint  rowChosen   = 0u;						// R1: chosen light's row + 1 (0 = none)
+	// DUDE (2026-10-27): the chosen candidate's loop shade, kept so it is never shaded again. diShadeLight is
+	// deterministic (an emitter's area samples are seeded by row, point and frame), so re-running it for the winner -
+	// after the loop, and once more for the tail cache's E_dir - repeated the same work: for an emitter all
+	// r_rtEmissiveSamples area samples, twice or three times per pixel.
+	vec3  tgtChosen   = vec3( 0.0 );			// the loop's contrib: the TARGET when cheapTarget, else the full shade
+	vec3  ldirLoop    = vec3( 0.0, 0.0, 1.0 );
+	float dlLoop      = 0.0;
+	float ndlLoop     = 0.0;
 	// RT light grid (docs/rtx-light-grid.md L2): when the grid is live and this point's cell holds candidates, enumerate
 	// the cell's short list (its top-N lights by importance) instead of EVERY scene light - the gather's biggest cost.
 	// Each stored light is a candidate with pdf 1, weight pHat: the exact exhaustive RIS, just a far shorter candidate set
@@ -325,6 +333,10 @@ void main() {
 		if ( wSum > 0.0 && rnd( rng ) < ( w / wSum ) ) {
 			pHatChosen  = pHat;
 			rowChosen   = li + 1u;
+			tgtChosen   = contrib;
+			ldirLoop    = ldir;
+			dlLoop      = dl;
+			ndlLoop     = ndl;
 		}
 #if DI_BOOST
 		// R3a: the extra independent picks share the candidate weights (same wSum), each with its own random draws
@@ -340,15 +352,18 @@ void main() {
 	}
 
 	// full-shade the WINNER once (targetOnly = false): its real GGX contribution drives the radiance + the gradient
-	// luminance, and its ldir/dl the visibility ray. In full-target mode this reproduces the loop's shade exactly.
+	// luminance, and its ldir/dl the visibility ray. DUDE: from the loop's own shade - diShadeLight's full shade is its
+	// target times diMaterialResponse in apply mode (cheapTarget implies apply mode), and the loop's shade itself when
+	// the loop already shaded fully (full-target mode) or there is no material (not apply mode).
 	vec3  radChosen     = vec3( 0.0 );
 	vec3  contribChosen = vec3( 0.0 );			// R1: the chosen light's shaded contribution (with cosine), for the gradient luminance
 	vec3  ldirChosen    = vec3( 0.0 );
 	float dlChosen      = 0.0;
 	uint  flagsChosen   = 0u;
 	if ( pHatChosen > 0.0 ) {
-		float ndlC;
-		diShadeLight( lights, rowChosen - 1u, S, contribChosen, ldirChosen, dlChosen, ndlC, false );
+		ldirChosen    = ldirLoop;
+		dlChosen      = dlLoop;
+		contribChosen = cheapTarget ? tgtChosen * diMaterialResponse( S, ldirLoop, ndlLoop ) : tgtChosen;
 		flagsChosen = lights.l[ rowChosen - 1u ].flags;
 		radChosen   = contribChosen / B;	// IRRADIANCE (cosine IN), identical to the non-SH buffer; SH re-resolve is a bump RATIO in the apply, not a cosine removal (B = 1 outside apply mode)
 	}
@@ -471,8 +486,13 @@ void main() {
 				if ( bp.cache.tail ) {
 					vec3 Edir = vec3( 0.0 );
 					if ( pHatChosen > 0.0 ) {
-						vec3 cTO, ldTO; float dlTO, ndlTO;
-						diShadeLight( lights, rowChosen - 1u, S, cTO, ldTO, dlTO, ndlTO, true );
+						// the TARGET-only shade: the loop's own when it shaded target-only (cheapTarget) or there is no
+						// material (not apply mode); only full-target apply mode still shades it here
+						vec3 cTO = tgtChosen;
+						if ( applyMode && !cheapTarget ) {
+							vec3 ldTO; float dlTO, ndlTO;
+							diShadeLight( lights, rowChosen - 1u, S, cTO, ldTO, dlTO, ndlTO, true );
+						}
 						Edir = cTO * ( W * vis * bp.lightScale );
 					}
 					vec3 Eind = ( hit == 1 ) ? LiCache : vec3( 0.0 );

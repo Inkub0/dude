@@ -1180,3 +1180,17 @@ Wyman & Panteleev, *Rearchitecting Spatiotemporal Resampling for Production*, HP
 - `SupportsRayQuery()` + cvar gate; default off; raster/GL3/non-RT paths bit-for-bit unchanged.
 - Runs at internal (FSR2) resolution like the other RT effects; FSR2 is the perf backstop.
 - New shaders: re-run CMake configure so the glob picks them up ([cmake-glob gotcha]).
+
+## Perf: the chosen light is shaded once (2026-10-27, `perf/restir-di-reuse-winner-shade`)
+
+The gather picked its light from the candidates' shades and then shaded the winner AGAIN after the loop
+(`diShadeLight( ..., false )`), and in tail-cache mode a third time for the cache's E_dir
+(`diShadeLight( ..., true )`). `diShadeLight` is deterministic - an emitter row's area samples are seeded by
+row, point and frame - so both repeated the loop's work; for an emitter that is all `r_rtEmissiveSamples`
+area samples (Arvo sampling, a CDF search and a triangle fetch each) two or three times per pixel. The loop
+now keeps the winner's contrib / ldir / dl / N.L; the full shade is that target times `diMaterialResponse`
+(cheap-target mode, which implies apply mode) or the loop's shade itself (full-target mode, or no apply
+mode: no material); the tail's target-only shade is the loop's own except in full-target apply mode, which
+still calls `diShadeLight`. Same values (up to the compiler's instruction fusion); four more live values
+across the loop (register pressure: measure the gather). The boost picks (restir_di_boost.glsl) are not
+touched.
