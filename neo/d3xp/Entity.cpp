@@ -1575,6 +1575,35 @@ void idEntity::SnapshotRenderTransform( void ) {
 
 /*
 ================
+RenderInterpMonotoneTangents
+
+com_interpolateCubic: limits the Hermite tangents m0 (at p0) and m1 (at p1) per axis so the cubic
+segment from p0 to p1 is monotone (Fritsch-Carlson) and so can't overshoot either sample: zero on an
+axis that doesn't move or whose tangent points against the segment, and scaled back into the
+monotone region (alpha^2 + beta^2 <= 9, alpha and beta being the tangents over the segment's slope)
+where the tic before moved much faster. Leaves smooth motion (constant velocity: alpha = beta = 1)
+unchanged.
+================
+*/
+static void RenderInterpMonotoneTangents( const idVec3 &p0, const idVec3 &p1, idVec3 &m0, idVec3 &m1 ) {
+	for ( int i = 0; i < 3; i++ ) {
+		const float delta = p1[i] - p0[i];
+		if ( delta == 0.0f ) {
+			m0[i] = 0.0f;
+			m1[i] = 0.0f;
+			continue;
+		}
+		const float alpha = ( m0[i] * delta > 0.0f ) ? m0[i] / delta : 0.0f;
+		const float beta = ( m1[i] * delta > 0.0f ) ? m1[i] / delta : 0.0f;
+		const float lenSqr = alpha * alpha + beta * beta;
+		const float tau = ( lenSqr > 9.0f ) ? 3.0f / idMath::Sqrt( lenSqr ) : 1.0f;
+		m0[i] = tau * alpha * delta;
+		m1[i] = tau * beta * delta;
+	}
+}
+
+/*
+================
 idEntity::PresentInterpolated
 
 Called once per *rendered* frame between game tics (com_interpolate stage 3). Re-presents the
@@ -1599,13 +1628,17 @@ void idEntity::PresentInterpolated( float frac ) {
 	renderEntity_t lerped = renderEntity;
 
 	// position: cubic Hermite (Catmull-Rom) when we have two tics of history, so motion stays
-	// smooth (C1-continuous) through accelerations instead of kinking at each tic like a plain
-	// lerp; falls back to linear on the first tic of history or when com_interpolateCubic is off.
-	// Still strictly interpolation (frac in [0,1], between the last two committed tics) - no
-	// extrapolation, so no overshoot past the current state.
+	// smoother through accelerations than a plain lerp that kinks at each tic; falls back to linear
+	// on the first tic of history or when com_interpolateCubic is off. frac stays in [0,1] between
+	// the last two committed tics (no extrapolation), but an unlimited Catmull-Rom tangent still
+	// overshoots on step-shaped motion: a monster that climbs a stair step in one tic and then
+	// holds its height rose ~7% of the step above the stair on the next tic and sank back. The
+	// tangents are therefore limited per axis to keep each segment monotone
+	// (RenderInterpMonotoneTangents), so the curve never leaves the range of its two tic samples.
 	if ( gameLocal.renderInterpCubic && renderInterpHistCount >= 2 ) {
-		const idVec3 m0 = ( renderInterpOriginCur - renderInterpOriginPrev2 ) * 0.5f;	// centered tangent at Prev
-		const idVec3 m1 = renderInterpOriginCur - renderInterpOriginPrev;				// tangent at Cur
+		idVec3 m0 = ( renderInterpOriginCur - renderInterpOriginPrev2 ) * 0.5f;	// centered tangent at Prev
+		idVec3 m1 = renderInterpOriginCur - renderInterpOriginPrev;				// tangent at Cur
+		RenderInterpMonotoneTangents( renderInterpOriginPrev, renderInterpOriginCur, m0, m1 );
 		const float t2 = frac * frac;
 		const float t3 = t2 * frac;
 		lerped.origin = renderInterpOriginPrev * ( 2.0f * t3 - 3.0f * t2 + 1.0f )
