@@ -3007,8 +3007,7 @@ uint64_t VulkanBackend::ComputeGfxCfgSignature() const {
 	mixI( r_rtgiCacheSlotsLog2 );
 	// RT light grid (docs/rtx-light-grid.md): slots / res / cascades change the grid buffer size -> re-allocate
 	mixI( r_rtLightGridSlots ); mixI( r_rtLightGridRes ); mixI( r_rtLightGridCascades );
-	mixB( r_rtEmissiveLighting ); mixB( r_rtEmissiveBounce ); mixB( r_rtEmissiveTable ); mixI( r_rtEmissiveGridSlots );
-	mixB( r_vkUploadBuffersVram );		// TEMPORARY A/B: re-creates the scene-light rows / emissive table / DI light map in another heap		// E2: the emitter rows enter / leave the scene-light buffer and the grid with these (idle the device on the flip)
+	mixB( r_rtEmissiveLighting ); mixB( r_rtEmissiveBounce ); mixB( r_rtEmissiveTable ); mixI( r_rtEmissiveGridSlots );		// E2: the emitter rows enter / leave the scene-light buffer and the grid with these (idle the device on the flip)
 	return h;
 }
 
@@ -4486,20 +4485,6 @@ BufferHandle VulkanBackend::CreateBuffer( BufferUsage usage, int size, const voi
 	}
 	if ( data && info.pMappedData ) {
 		memcpy( info.pMappedData, data, (size_t)size );
-	}
-	// TEMPORARY (the r_vkUploadBuffersVram A/B): say where each storage kind landed, once per kind + memory type
-	if ( usage == BU_STORAGE || usage == BU_STORAGE_UPLOAD ) {
-		static uint32_t reported[2] = { 0, 0 };		// bit per memory property combination seen
-		VkMemoryPropertyFlags mf = 0;
-		vmaGetAllocationMemoryProperties( vma, alloc, &mf );
-		const int k = ( usage == BU_STORAGE_UPLOAD ) ? 1 : 0;
-		const uint32_t bit = 1u << ( ( ( mf & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT ) ? 1 : 0 ) | ( ( mf & VK_MEMORY_PROPERTY_HOST_CACHED_BIT ) ? 2 : 0 ) );
-		if ( ( reported[k] & bit ) == 0 ) {
-			reported[k] |= bit;
-			common->Printf( "VK: %s buffers in %s%s memory (first: %d KB)\n", k ? "BU_STORAGE_UPLOAD" : "BU_STORAGE",
-				( mf & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT ) ? "DEVICE_LOCAL (VRAM)" : "host (system RAM)",
-				( mf & VK_MEMORY_PROPERTY_HOST_CACHED_BIT ) ? ", cached" : "", size >> 10 );
-		}
 	}
 
 	// cache the device address now (BDA, Phase 3.2b): a buffer's address is fixed for its

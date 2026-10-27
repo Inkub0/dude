@@ -468,7 +468,11 @@ ping-ponged instead of copied, the boost picks' SH-mode target fixed, the cache 
 (docs/rtx-restir-di.md and docs/rtx-irradiance-cache.md, "Perf" sections). Reference capture (user, mars_city1 1440p,
 emissive on): gather 24.7 / 13.6 / 8.4 ms at 10 / 4 / 1 samples before those changes. Estimates below are estimates.
 
-- **Light buffer + emissive table in VRAM** — the scene-light rows (`RB_RHI_GatherSceneLights`, a 3-slot ring) and the
+- **Light buffer + emissive table in VRAM** — **DONE 2026-10-27** (`perf/vk-upload-storage-vram`): the three CPU-write-only
+  storage buffers (scene-light rows, emissive table, DI light map) are `BU_STORAGE_UPLOAD` - device-local host-visible
+  (resizable BAR), host memory where there is none. User A/B on mars_city1, warm windows both ways (the first pass was
+  confounded by the GPU warming up): `lightgrid.fill` 1.45 -> 0.99 ms, gather 11.7 -> 11.4-11.6, boost 1.14 -> 1.07.
+  Original note: the scene-light rows (`RB_RHI_GatherSceneLights`, a 3-slot ring) and the
   emissive table / CDF are `BU_STORAGE`: HOST_VISIBLE | HOST_COHERENT, so on a discrete GPU they may live in system memory
   and every gather / grid-fill / bounce / gradient read that misses L2 crosses PCIe. First a one-flag A/B (prefer
   device-local + host-visible, ReBAR); if it pays, stage the uploads (the mover pass's in-place slice writes then need the

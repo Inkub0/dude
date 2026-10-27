@@ -2845,7 +2845,6 @@ static int						s_rtEmissiveLastRebuildMs = -100000;	// Sys_Milliseconds of the 
 // first build of a map, after a table cvar changed, or with r_rtEmissiveTableDebug; the rebuilds a map makes on its
 // own print one timed line instead - writing ~250 console + log lines was part of each rebuild's hitch
 static bool						s_rtEmissiveReport = true;
-static bool						s_rtEmissiveBufVram = false;	// TEMPORARY A/B: s_rtEmissiveBuf was created as BU_STORAGE_UPLOAD
 static int						s_rtEmissiveRowBuilds = 0;		// R_RtEmissiveBuildRows calls, for the mover-upkeep timing (R_RtEmissiveRefreshMovers)
 static idStr					s_rtEmissiveReportedMap;
 static void R_RtEmissiveReport( const char *fmt, ... ) id_attribute((format(printf,1,2)));
@@ -3950,8 +3949,7 @@ static void R_RtEmissiveBuild( const idRenderWorldLocal *world, rhi::RHI *r ) {
 	hdr[2] = (unsigned int)( RT_EMISSIVE_HEADER_BYTES + triBytes );
 	memcpy( &hdr[3], &meanFlux, sizeof( float ) );
 	memcpy( blob + RT_EMISSIVE_HEADER_BYTES, s_rtEmissiveTris.Ptr(), triBytes );
-	s_rtEmissiveBuf  = r->CreateBuffer( r_vkUploadBuffersVram.GetBool() ? rhi::BU_STORAGE_UPLOAD : rhi::BU_STORAGE, bytes, blob );
-	s_rtEmissiveBufVram = r_vkUploadBuffersVram.GetBool();		// TEMPORARY A/B: a flip rebuilds the table (R_RtEmissiveUpdate)
+	s_rtEmissiveBuf  = r->CreateBuffer( rhi::BU_STORAGE_UPLOAD, bytes, blob );	// CPU-write-only, read by the ray passes: VRAM
 	s_rtEmissiveAddr = ( s_rtEmissiveBuf != 0 ) ? r->GetBufferDeviceAddress( s_rtEmissiveBuf ) : 0;
 	Mem_Free16( blob );
 	if ( s_rtEmissiveBuf == 0 || s_rtEmissiveAddr == 0 ) {
@@ -4592,8 +4590,7 @@ static void R_RtEmissiveUpdate( const idRenderWorldLocal *world, rhi::RHI *r ) {
 		return;
 	}
 	const bool stale = s_rtEmissiveMap.Icmp( world->mapName ) != 0 || r_rtEmissiveTable.IsModified() || r_rtEmissiveLighting.IsModified() || r_rtEmissiveScale.IsModified()
-		|| r_rtEmissiveFixtureMinArea.IsModified()		// the census pairing changed: rebuild (cheap enough; the table is small)
-		|| ( s_rtEmissiveBuf != 0 && s_rtEmissiveBufVram != r_vkUploadBuffersVram.GetBool() );	// TEMPORARY A/B: the other heap
+		|| r_rtEmissiveFixtureMinArea.IsModified();		// the census pairing changed: rebuild (cheap enough; the table is small)
 	if ( !stale ) {
 		R_RtEmissiveRefreshMovers( world, r );	// E1e: moved doors / lifts / platforms re-bake their slice
 		if ( r_rtEmissiveTableDebug.GetInteger() > 0 && r_rtEmissiveTableDebug.GetInteger() != 5 ) {
