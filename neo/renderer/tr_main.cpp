@@ -2764,6 +2764,8 @@ struct rtEmissiveGroup_t {
 	const idMaterial	*customShader;
 	float				shaderParms[MAX_ENTITY_SHADER_PARMS];
 	bool				dark;			// the current state glows nowhere: the slice is kept at zero flux (never sampled)
+	bool				regather;		// DUDE: re-gather on the next refresh whatever the state compare says (the entity
+										// came back: in its own slot, or adopted from another - R_RtEmissiveScanNewEntities)
 };
 static idList<rtEmissiveGroup_t>	s_rtEmissiveGroups;
 static idList<idVec3>				s_rtEmissiveLocalVerts;		// 3 per entity-sourced triangle (model space)
@@ -2839,6 +2841,23 @@ static idList<const idRenderModel *>	s_rtEmissiveSeenModel;	// per entity index:
 														// examined and found dark must not read as "new" every 90 frames (a rebuild each time:
 														// the hitching of 2026-10-20)
 static int						s_rtEmissiveLastRebuildMs = -100000;	// Sys_Milliseconds of the last build: scan / state rebuilds are throttled
+// DUDE (2026-10-27): the build's long report (per-material census, flare inference, the light census) prints for the
+// first build of a map, after a table cvar changed, or with r_rtEmissiveTableDebug; the rebuilds a map makes on its
+// own print one timed line instead - writing ~250 console + log lines was part of each rebuild's hitch
+static bool						s_rtEmissiveReport = true;
+static idStr					s_rtEmissiveReportedMap;
+static void R_RtEmissiveReport( const char *fmt, ... ) id_attribute((format(printf,1,2)));
+static void R_RtEmissiveReport( const char *fmt, ... ) {
+	if ( !s_rtEmissiveReport ) {
+		return;
+	}
+	char text[1024];
+	va_list argptr;
+	va_start( argptr, fmt );
+	idStr::vsnPrintf( text, sizeof( text ), fmt, argptr );
+	va_end( argptr );
+	common->Printf( "%s", text );
+}
 // E5 (docs/rtx-experimental-lighting.md): the placed lights' classification from the census - per lightDef index the
 // def's creation serial when the light is FIXTURED (an emitter inside its volume: dropped while emissive mode is on),
 // 0 otherwise. A light created after the build (a new serial in a reused slot) is never dropped (D1). Plus the
@@ -3629,7 +3648,7 @@ static int R_RtEmissiveInferFromFlares( const idRenderWorldLocal *world, float s
 		}
 		if ( best.tri == NULL || tableDist <= best.dist ) {
 			// no glow-less surface under it, or a real emitter is nearer: this flare belongs to that emitter (or to nothing)
-			common->Printf( "    flare entity %d at %.0f %.0f %.0f: %s (nearest emitter %.0f units%s)\n", fi, o.x, o.y, o.z,
+			R_RtEmissiveReport( "    flare entity %d at %.0f %.0f %.0f: %s (nearest emitter %.0f units%s)\n", fi, o.x, o.y, o.z,
 				best.tri == NULL ? "no glow-less opaque surface within reach" : va( "'%s' at %.0f units is farther than the emitter", best.mat->GetName(), best.dist ),
 				tableDist < 1e29f ? tableDist : 9999.0f, tableDist < 64.0f ? ": its fixture" : "" );
 			continue;
@@ -3639,12 +3658,12 @@ static int R_RtEmissiveInferFromFlares( const idRenderWorldLocal *world, float s
 		// The bright patch must be a PATCH (< 30% of the texels): a light-coloured wall or a barrel's label is not a tube.
 		const idImage *img = best.diffuse->texture.image;
 		if ( !img->brightExtents.valid || img->brightExtents.coverage > 0.3f ) {
-			common->Printf( "    flare entity %d at %.0f %.0f %.0f: '%s' at %.0f units has %s - not inferred\n", fi, o.x, o.y, o.z, best.mat->GetName(), best.dist,
+			R_RtEmissiveReport( "    flare entity %d at %.0f %.0f %.0f: '%s' at %.0f units has %s - not inferred\n", fi, o.x, o.y, o.z, best.mat->GetName(), best.dist,
 				img->brightExtents.valid ? va( "%.0f%% of its texels above %.0f%% (a bright material, not a light patch)", img->brightExtents.coverage * 100.0f, RT_EMISSIVE_DIFFUSE_GLOW_THRESHOLD * 100.0f )
 				                         : va( "no texels above %.0f%%", RT_EMISSIVE_DIFFUSE_GLOW_THRESHOLD * 100.0f ) );
 			continue;
 		}
-		common->Printf( "    flare entity %d at %.0f %.0f %.0f: INFERRED '%s' at %.0f units\n", fi, o.x, o.y, o.z, best.mat->GetName(), best.dist );
+		R_RtEmissiveReport( "    flare entity %d at %.0f %.0f %.0f: INFERRED '%s' at %.0f units\n", fi, o.x, o.y, o.z, best.mat->GetName(), best.dist );
 		const imageEmissiveExtents_t *ext = &img->brightExtents;
 		const float lumPerArea = R_RtLuminance( ext->mean ) * scale;
 		const unsigned int emit = ( (unsigned int)img->rhiHandle & 0xFFFFu ) | RT_EMIT_FLAG_DIFFUSEGLOW | ( best.entity ? RT_EMIT_FLAG_ENTITY : 0u );
@@ -3804,7 +3823,7 @@ static int R_RtEmissiveSplitWorldRuns( int firstLabel ) {
 		runsSplit++;
 	}
 	if ( runsSplit > 0 ) {
-		common->Printf( "r_rtEmissiveTable: %d world material runs split into separate fixtures: %d emitters from %d runs\n", runsSplit, fixtures, nOrig - firstLabel );
+		R_RtEmissiveReport( "r_rtEmissiveTable: %d world material runs split into separate fixtures: %d emitters from %d runs\n", runsSplit, fixtures, nOrig - firstLabel );
 	}
 	return fixtures;
 }
@@ -3899,14 +3918,15 @@ static void R_RtEmissiveBuild( const idRenderWorldLocal *world, rhi::RHI *r ) {
 			g.customShader = def->parms.customShader;
 			memcpy( g.shaderParms, def->parms.shaderParms, sizeof( g.shaderParms ) );
 			g.dark = false;
+			g.regather = false;
 		}
 	}
 
-	if ( r_rtEmissiveFlareInfer.GetBool() ) { common->Printf( "r_rtEmissiveTable: flare inference:\n" ); }
+	if ( r_rtEmissiveFlareInfer.GetBool() ) { R_RtEmissiveReport( "r_rtEmissiveTable: flare inference:\n" ); }
 	const int inferredFixtures = r_rtEmissiveFlareInfer.GetBool() ? R_RtEmissiveInferFromFlares( world, scale, census ) : 0;
 	const int n = s_rtEmissiveTris.Num();
 	if ( n == 0 ) {
-		common->Printf( "r_rtEmissiveTable: no emissive triangles on this map (%d screen surfaces excluded)\n", screens );
+		R_RtEmissiveReport( "r_rtEmissiveTable: no emissive triangles on this map (%d screen surfaces excluded)\n", screens );
 		return;
 	}
 	// flux CDF (unnormalised running sum; E2 draws u * totalFlux and binary-searches) + the device buffer
@@ -3942,21 +3962,21 @@ static void R_RtEmissiveBuild( const idRenderWorldLocal *world, rhi::RHI *r ) {
 	int animatedMats = 0;
 	for ( int i = 0; i < census.Num(); i++ ) { if ( census[i].animated ) { animatedMats++; } }
 	qsort( census.Ptr(), census.Num(), sizeof( rtEmissiveCensus_t ), R_RtCmpEmissiveCensus );
-	common->Printf( "r_rtEmissiveTable: %d emissive triangles (%d world, %d from %d static entities = mover-tracked groups), %d materials (%d register-driven), %d screen surfaces excluded, total flux %.1f (mean %.2f), %d KB, %d ms%s\n",
+	R_RtEmissiveReport( "r_rtEmissiveTable: %d emissive triangles (%d world, %d from %d static entities = mover-tracked groups), %d materials (%d register-driven), %d screen surfaces excluded, total flux %.1f (mean %.2f), %d KB, %d ms%s\n",
 		n, worldTris, entityTris, entities, census.Num(), animatedMats, screens, s_rtEmissiveTotalFlux, meanFlux, bytes >> 10,
 		Sys_Milliseconds() - msStart, overflow ? va( " - TABLE FULL: %d triangles dropped (raise RT_EMISSIVE_MAX_TRIS)", overflow ) : "" );
 	const int show = census.Num() < 64 ? census.Num() : 64;													// every material (a level has a few dozen): each painted tint gets a name
 	for ( int i = 0; i < show; i++ ) {
 		int rgb[3]; const char *hue = "";
 		R_RtEmissiveDebugTint( census[i].slot, rgb, &hue );
-		common->Printf( "    %6.1f%%  %6d tris  %-46s view1 %-10s #%02X%02X%02X%s%s%s\n", 100.0f * census[i].flux / s_rtEmissiveTotalFlux, census[i].tris,
+		R_RtEmissiveReport( "    %6.1f%%  %6d tris  %-46s view1 %-10s #%02X%02X%02X%s%s%s\n", 100.0f * census[i].flux / s_rtEmissiveTotalFlux, census[i].tris,
 			census[i].mat->GetName(), hue, rgb[0], rgb[1], rgb[2], census[i].animated ? "  (animated colour)" : "", census[i].texMatrix ? "  (texture matrix baked)" : "",
 			census[i].inferred ? "  (FLARE-INFERRED: diffuse patch under a flare)" : census[i].clipped ? "  (clipped to the glow's extents)" : "" );
 	}
 	if ( excluded.Num() > 0 ) {
-		common->Printf( "r_rtEmissiveTable: %d self-illuminated materials EXCLUDED:\n", excluded.Num() );
+		R_RtEmissiveReport( "r_rtEmissiveTable: %d self-illuminated materials EXCLUDED:\n", excluded.Num() );
 		for ( int i = 0; i < excluded.Num(); i++ ) {
-			common->Printf( "    %-38s %s\n", excluded[i].why, excluded[i].mat->GetName() );
+			R_RtEmissiveReport( "    %-38s %s\n", excluded[i].why, excluded[i].mat->GetName() );
 		}
 	}
 	// emitter mode: the FLARE sprites of emitting fixtures (a light entity's flare model: a sprite-deformed additive
@@ -3977,7 +3997,7 @@ static void R_RtEmissiveBuild( const idRenderWorldLocal *world, rhi::RHI *r ) {
 			s_rtEmissiveFlareCount++;
 		}
 	}
-	common->Printf( "r_rtEmissiveTable: %d fixtures inferred from flares (glow-less materials: diffuse patch emits), %d flare sprites sit on emitters (hidden while r_rtEmissiveHideFlares is on)\n", inferredFixtures, s_rtEmissiveFlareCount );
+	R_RtEmissiveReport( "r_rtEmissiveTable: %d fixtures inferred from flares (glow-less materials: diffuse patch emits), %d flare sprites sit on emitters (hidden while r_rtEmissiveHideFlares is on)\n", inferredFixtures, s_rtEmissiveFlareCount );
 }
 
 // The debug overlay's vertices for table triangles [firstTri, firstTri + numTris): xyz world, st, normal = (flux,
@@ -4114,6 +4134,7 @@ static bool R_RtEmissiveRegatherGroup( rtEmissiveGroup_t &g, const idRenderEntit
 	static idList<rtEmissiveTriGPU_t> scratch;
 	static idList<idVec3> scratchLocal;
 	static idList<rtEmissiveCensus_t> scratchCensus;
+	g.regather = false;
 	scratch.SetNum( 0, false );
 	scratchLocal.SetNum( 0, false );
 	scratchCensus.SetNum( 0, false );
@@ -4208,7 +4229,8 @@ static void R_RtEmissiveRefreshMovers( const idRenderWorldLocal *world, rhi::RHI
 					e.emit |= RT_EMIT_FLAG_DARK;
 				}
 				g.dark = true;
-				g.skin = NULL; g.customShader = NULL; memset( g.shaderParms, 0, sizeof( g.shaderParms ) );	// any returning state differs
+				g.skin = NULL; g.customShader = NULL; memset( g.shaderParms, 0, sizeof( g.shaderParms ) );
+				g.regather = true;		// a return re-gathers it, whatever its state (all-zero parms would compare equal)
 				r->UpdateBuffer( s_rtEmissiveBuf, RT_EMISSIVE_HEADER_BYTES + g.firstTri * (int)sizeof( rtEmissiveTriGPU_t ),
 					g.numTris * (int)sizeof( rtEmissiveTriGPU_t ), &s_rtEmissiveTris[ g.firstTri ] );
 				if ( s_rtEmissiveDbgVB != 0 ) {
@@ -4222,7 +4244,7 @@ static void R_RtEmissiveRefreshMovers( const idRenderWorldLocal *world, rhi::RHI
 			continue;
 		}
 		// the glow STATE: skin / custom material / shader parms (parm7 door-light colour, a scripted _color) changed?
-		if ( def->parms.customSkin != g.skin || def->parms.customShader != g.customShader
+		if ( g.regather || def->parms.customSkin != g.skin || def->parms.customShader != g.customShader
 				|| memcmp( def->parms.shaderParms, g.shaderParms, sizeof( g.shaderParms ) ) != 0 ) {
 			if ( R_RtEmissiveRegatherGroup( g, def, r ) ) {
 				r->UpdateBuffer( s_rtEmissiveBuf, RT_EMISSIVE_HEADER_BYTES + g.firstTri * (int)sizeof( rtEmissiveTriGPU_t ),
@@ -4320,7 +4342,7 @@ static void R_RtEmissiveApplyLightOverrides( void ) {
 		}
 		applied++;
 	}
-	if ( applied > 0 ) { common->Printf( "r_rtEmissiveTable: %d per-fixture overrides applied\n", applied ); }
+	if ( applied > 0 ) { R_RtEmissiveReport( "r_rtEmissiveTable: %d per-fixture overrides applied\n", applied ); }
 }
 
 static void R_RtEmissiveLightCensus( const idRenderWorldLocal *world, rhi::RHI *r ) {
@@ -4429,14 +4451,61 @@ static void R_RtEmissiveLightCensus( const idRenderWorldLocal *world, rhi::RHI *
 	R_RtEmissiveApplyLightOverrides();	// per-fixture (light id) overrides, keyed by the paired light's origin (set just above)
 	// the flags changed after the upload: rewrite the triangle range (the debug geometry is built lazily, after this)
 	r->UpdateBuffer( s_rtEmissiveBuf, RT_EMISSIVE_HEADER_BYTES, n * (int)sizeof( rtEmissiveTriGPU_t ), s_rtEmissiveTris.Ptr() );
-	common->Printf( "r_rtEmissiveTable: placed lights %d: %d FIXTURED (an emitter of >= %.0f effective units^2 (lit area x brightness) near the origin - dropped when emitters light the scene; %d ambient-material), %d AMBIENCE (no emitter - kept; %d ambient-material), %d parallel + %d fog/blend (kept); %d of %d emissive triangles sit inside a placed light (%d indicator triangles below the fixture area: never a fixture), %d in none (overlay mode 4)\n",
+	R_RtEmissiveReport( "r_rtEmissiveTable: placed lights %d: %d FIXTURED (an emitter of >= %.0f effective units^2 (lit area x brightness) near the origin - dropped when emitters light the scene; %d ambient-material), %d AMBIENCE (no emitter - kept; %d ambient-material), %d parallel + %d fog/blend (kept); %d of %d emissive triangles sit inside a placed light (%d indicator triangles below the fixture area: never a fixture), %d in none (overlay mode 4)\n",
 		total, fixtured, fixtureMinArea, fixturedAmbientMat, ambience, ambienceAmbientMat, parallel, fogBlend, trisInLight, n, indicatorsInLight, n - trisInLight );
 }
 
+// A group whose entity is gone: its slot was freed, or now holds another model (R_RtEmissiveRefreshMovers darkened it).
+static bool R_RtEmissiveGroupGone( const idRenderWorldLocal *world, const rtEmissiveGroup_t &g ) {
+	if ( g.entityIndex < 0 || g.entityIndex >= world->entityDefs.Num() ) {
+		return true;
+	}
+	const idRenderEntityLocal *def = world->entityDefs[ g.entityIndex ];
+	return def == NULL || def->parms.hModel != g.model || def->parms.callback != NULL;
+}
+
+// DUDE (2026-10-27): an entity the game hides and shows again comes back in a NEW render entity slot (Show() adds a
+// fresh entityDef; FindNull hands out the lowest free one) - mc_underground's canister conveyor does it every 20-30 s.
+// Its old group went dark when the slot was freed; the same model's triangles are the same, so the newcomer ADOPTS
+// that group (the nearest one, if several) and the next refresh re-gathers it in place, instead of a full rebuild
+// (gathering every emissive triangle of the map again, re-creating the GPU buffers: a hitch per cycle).
+static rtEmissiveGroup_t *R_RtEmissiveAdoptGroup( const idRenderWorldLocal *world, int entityIndex, const idRenderEntityLocal *def ) {
+	rtEmissiveGroup_t *best = NULL;
+	float bestDist = idMath::INFINITY;
+	for ( int gi = 0; gi < s_rtEmissiveGroups.Num(); gi++ ) {
+		rtEmissiveGroup_t &g = s_rtEmissiveGroups[gi];
+		if ( !g.dark || g.model != def->parms.hModel || !R_RtEmissiveGroupGone( world, g ) ) {
+			continue;
+		}
+		const idVec3 last( g.lastMatrix[12], g.lastMatrix[13], g.lastMatrix[14] );
+		const float d = ( def->parms.origin - last ).LengthSqr();
+		if ( d < bestDist ) {
+			bestDist = d;
+			best = &g;
+		}
+	}
+	if ( best == NULL ) {
+		return NULL;
+	}
+	// the old slot is examined again if a model ever lands there (it no longer has a group)
+	if ( best->entityIndex >= 0 && best->entityIndex < s_rtEmissiveSeenModel.Num() && s_rtEmissiveSeenModel[ best->entityIndex ] == best->model ) {
+		s_rtEmissiveSeenModel[ best->entityIndex ] = NULL;
+	}
+	while ( s_rtEmissiveSeenModel.Num() <= entityIndex ) {
+		s_rtEmissiveSeenModel.Append( NULL );
+	}
+	s_rtEmissiveSeenModel[ entityIndex ] = def->parms.hModel;
+	best->entityIndex = entityIndex;
+	best->regather = true;
+	return best;
+}
+
 // True when an entity slot NO group tracks holds a static model with an emissive surface (it appeared after the
-// build). Tracked slots are skipped (their state compare handles them). A few hundred entities x their surfaces;
-// the stage test evaluates material registers, so this runs only every 90 frames.
-static bool R_RtEmissiveNewEntityAppeared( const idRenderWorldLocal *world ) {
+// build) that no dark group of the same model could adopt: only that needs a full rebuild. Tracked slots are skipped
+// (their state compare handles them). A few hundred entities x their surfaces; the stage test evaluates material
+// registers, so this runs only every 90 frames.
+static bool R_RtEmissiveScanNewEntities( const idRenderWorldLocal *world ) {
+	bool rebuild = false;
 	for ( int i = 0; i < world->entityDefs.Num(); i++ ) {
 		const idRenderEntityLocal *def = world->entityDefs[i];
 		if ( !R_RtEmissiveEntityGatherable( def ) ) {
@@ -4447,18 +4516,26 @@ static bool R_RtEmissiveNewEntityAppeared( const idRenderWorldLocal *world ) {
 			continue;
 		}
 		const idRenderModel *model = def->parms.hModel;
-		for ( int s = 0; s < model->NumSurfaces(); s++ ) {
+		bool emissive = false;
+		for ( int s = 0; s < model->NumSurfaces() && !emissive; s++ ) {
 			const modelSurface_t *surf = model->Surface( s );
 			if ( surf->geometry == NULL || surf->geometry->verts == NULL || surf->geometry->indexes == NULL ) {
 				continue;
 			}
 			const idMaterial *mat = R_RemapShaderBySkin( surf->shader, def->parms.customSkin, def->parms.customShader );
-			if ( R_RtEmissiveStage( mat, NULL, def->parms.shaderParms ) != NULL ) {
-				return true;
+			emissive = R_RtEmissiveStage( mat, NULL, def->parms.shaderParms ) != NULL;
+		}
+		if ( !emissive ) {
+			// examined and dark, as the build records it: not tested again every 90 frames
+			while ( s_rtEmissiveSeenModel.Num() <= i ) {
+				s_rtEmissiveSeenModel.Append( NULL );
 			}
+			s_rtEmissiveSeenModel[i] = model;
+		} else if ( R_RtEmissiveAdoptGroup( world, i, def ) == NULL ) {
+			rebuild = true;
 		}
 	}
-	return false;
+	return rebuild;
 }
 
 // Keep the table in step with the live RT scene: build once per map (or when its cvars change), free when off.
@@ -4485,7 +4562,8 @@ static void R_RtEmissiveUpdate( const idRenderWorldLocal *world, rhi::RHI *r ) {
 		}
 		// an emissive entity that APPEARED after the build (a dropped item, a respawned pickup, a spawned prop): every 90
 		// frames, scan the entity slots no group tracks for a static model with an emissive surface -> full rebuild
-		if ( ( tr.frameCount % 90 ) == 45 && Sys_Milliseconds() - s_rtEmissiveLastRebuildMs > 5000 && R_RtEmissiveNewEntityAppeared( world ) ) {
+		// (a returning entity adopts its dark group instead - R_RtEmissiveAdoptGroup - and needs no rebuild)
+		if ( ( tr.frameCount % 90 ) == 45 && R_RtEmissiveScanNewEntities( world ) && Sys_Milliseconds() - s_rtEmissiveLastRebuildMs > 5000 ) {
 			common->Printf( "r_rtEmissiveTable: a new emissive entity appeared - rebuilding the table\n" );
 			s_rtEmissiveMap.Clear();
 			return;
@@ -4503,10 +4581,16 @@ static void R_RtEmissiveUpdate( const idRenderWorldLocal *world, rhi::RHI *r ) {
 		}
 		return;
 	}
+	// the full report: a new map, a cvar the user changed, or the debug overlay; a rebuild the map asked for itself
+	// (a fixture changed which surfaces glow, a new emissive entity, a glow image now resident) prints one line
+	s_rtEmissiveReport = s_rtEmissiveReportedMap.Icmp( world->mapName ) != 0 || r_rtEmissiveTable.IsModified()
+		|| r_rtEmissiveLighting.IsModified() || r_rtEmissiveScale.IsModified() || r_rtEmissiveFixtureMinArea.IsModified()
+		|| r_rtEmissiveTableDebug.GetInteger() > 0;
 	r_rtEmissiveTable.ClearModified();
 	r_rtEmissiveLighting.ClearModified();
 	r_rtEmissiveScale.ClearModified();
 	r_rtEmissiveFixtureMinArea.ClearModified();
+	const double buildStart = Sys_MillisecondsPrecise();
 	R_RtEmissiveFree();
 	s_rtEmissiveLastRebuildMs = Sys_Milliseconds();
 	R_RtEmissiveBuild( world, r );
@@ -4514,6 +4598,11 @@ static void R_RtEmissiveUpdate( const idRenderWorldLocal *world, rhi::RHI *r ) {
 		R_RtEmissiveLightCensus( world, r );	// E5 prep: fixtured vs ambience placed lights
 		R_RtEmissiveBuildRows();				// E2 v3: the emitter rows the scene-light gather appends
 	}
+	if ( !s_rtEmissiveReport ) {
+		common->Printf( "r_rtEmissiveTable: rebuilt in %.1f ms (%d emissive triangles)\n", Sys_MillisecondsPrecise() - buildStart, s_rtEmissiveTris.Num() );
+	}
+	s_rtEmissiveReport = true;				// the console commands' own output is never muted
+	s_rtEmissiveReportedMap = world->mapName;
 	s_rtEmissiveMap = world->mapName;		// the latch: an empty map builds nothing but is not retried every frame
 }
 

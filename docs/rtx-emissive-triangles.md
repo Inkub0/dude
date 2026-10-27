@@ -455,3 +455,31 @@ Inferred entity entries are not mover-tracked (door frames, lamp housings). The 
 without a flare.
 
 **Flare inference validated (user, EnPro entrance, 2026-10-20):** both door frames (`techdr1frame_cop`, `techdr2frame_cop`) come up checkered under their flares. The promoted patch is the whole frame within the 48-unit reach (the threshold read keeps only the bright bar emitting; the generous flux share is the known caveat). E1 complete; E2 next.
+
+## Entities that come back in a new slot (2026-10-27, `fix/rt-emissive-respawn-rebuild`)
+
+User report: a hitch every 20-30 s when strafing at the glass at the start of `mc_underground` (the
+guard with the pistol). Behind the glass a conveyor hides and shows its canisters (`canismover`,
+`canismover2`, their `mfscompcell` models). `Show()` adds a fresh render entity, which `FindNull`
+puts in whatever slot is free (352 -> 262 -> 267 ...); the old group went dark ("is gone"), and the
+every-90-frames scan saw an untracked emissive entity and did a **full rebuild** - gathering every
+emissive triangle of the map, re-creating the GPU buffers, and printing the ~250-line report. One
+rebuild per conveyor cycle (7 in 2.5 minutes in the user's log).
+
+- **Adoption** (`R_RtEmissiveScanNewEntities` / `R_RtEmissiveAdoptGroup`): an untracked emissive
+  entity first looks for a dark group of the same model whose entity is gone, the nearest one if
+  several; it takes it over (new slot, `regather` flag) and the next refresh re-gathers it in place
+  ("switched ON again"), as a returning pickup in its own slot always did. The old slot is examined
+  again should a model ever land there. Only an entity no group can take (a new model, a second
+  copy beyond the dark groups) still rebuilds, throttled as before.
+- **`regather` flag**: a returning entity re-gathers whatever its state. Before, the group relied
+  on its zeroed skin / material / parms differing from the returning entity's - an entity with
+  all-zero shader parms would have stayed dark.
+- The scan records a changed slot it found not emissive (as the build does), so it is not
+  re-tested every 90 frames.
+- **Quiet rebuilds**: the full report prints for the first build of a map, after a table cvar
+  changed, or with `r_rtEmissiveTableDebug`; a rebuild the map triggers itself prints
+  `r_rtEmissiveTable: rebuilt in N ms (N emissive triangles)`.
+
+No fidelity change: the same triangles glow. Not covered: an entity whose re-show uses a different
+skin that changes which surfaces glow still rebuilds (as any such change does).
