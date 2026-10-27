@@ -163,11 +163,22 @@ idCVar com_interpolateAnim( "com_interpolateAnim", "1", CVAR_BOOL | CVAR_SYSTEM 
 
 idCVar com_maxFPS( "com_maxFPS", "0", CVAR_INTEGER | CVAR_SYSTEM | CVAR_ARCHIVE, "cap the render frame rate (0 = uncapped). Best paired with vsync off; set it to your monitor's refresh or a clean divisor of it for even, tear-minimized pacing", 0, 1000 );
 
+// DUDE: Doom 3 1.3.1 ticked its game every 16 msec (62.5 Hz); dhewm3 ticks at 60 Hz and its game
+// code alternates 16/17/17 msec per tic. This runs Doom 3's original tic again (for speedrunning),
+// latched at each map load by Com_LatchGameTicRate - only for a game library that asked for
+// FT_GameTicMSec (DUDE's own Doom 3 / RoE / Lost Mission libraries), never Quake 4 or multiplayer.
+idCVar com_classicTics( "com_classicTics", "0", CVAR_BOOL | CVAR_SYSTEM | CVAR_ARCHIVE, "Doom 3's original 62.5 Hz game tic (16 ms) instead of 60 Hz; DUDE's own Doom 3 game libraries only; applies at the next map load" );
+
 // in the high-fps branch, the next three values will be set based on com_gameHz
 // here (in the old 60fps-only code) they're const and just to reduce difference to the other branch
 //const int    com_gameHzVal = 60;
 //const int    com_gameFrameLengthMS = 16; // length of one frame in msec, 1000 / com_gameHz
-const double  com_preciseFrameLengthMS = 1000.0 / 60.0;
+// DUDE: wall-clock length of one game tic: 1000/60 msec, or USERCMD_MSEC (16) while a map runs
+// Doom 3's original tic (com_classicTics). Only Com_LatchGameTicRate / Com_ResetGameTicRate
+// change it, on the main thread at a map load; the async thread only reads it to pace itself.
+static volatile double	com_preciseFrameLengthMS = 1000.0 / 60.0;
+static bool				com_classicTicsActive = false;	// the current map runs 16 msec tics
+static bool				com_gameTicRateAware = false;	// the game library asked for FT_GameTicMSec
 
 double com_preciseFrameTimeMS = 0; // like com_frameTime but as double: time (since start) for the current frame in milliseconds
 
@@ -345,12 +356,10 @@ static void Com_UpdateTicNumberAt( double now ) {
 			nextTicTime = now + com_preciseFrameLengthMS;
 			com_ticNumber = 1;
 		} else {
-			// usually numTics should be 1, except if timeDiff > 16.6667 (skipped a frame?)
-			// should be `1 + timediff / com_preciseFrameLengthMS`
-			// <=> 1 + timediff / (1000.0 / USERCMD_HZ) // 1000ms in one second
-			// <=> 1 + timediff * (USERCMD_HZ / 1000.0) // USERCMD_HZ = 60;
-			// <=> 1 + timediff * 0.06;
-			int numTics = 1 + timeDiff * 0.06;
+			// usually numTics should be 1, except if timeDiff > one tic (skipped a frame?)
+			// DUDE: `1 + timediff / com_preciseFrameLengthMS` (dhewm3 hardcoded its 60 Hz form,
+			// 1 + timediff * 0.06; the tic length is com_classicTics' 16 msec or 1000/60)
+			int numTics = 1 + (int)( timeDiff / com_preciseFrameLengthMS );
 			com_ticNumber += numTics;
 
 			// the number of msec per tic can be varied with the timescale cvar
@@ -396,6 +405,57 @@ void Com_WaitForNextTicStart() {
 		Sys_SleepUntilPrecise( nextTicTime );
 	}
 	Com_UpdateFrameTime();
+}
+
+// DUDE: com_classicTics - sets the wall-clock tic length. Takes effect from the next tic: the one
+// already scheduled (nextTicTime) keeps its time, so the tic clock never jumps.
+static void Com_SetGameTicRate( bool classic ) {
+	com_classicTicsActive = classic;
+	com_preciseFrameLengthMS = classic ? (double)USERCMD_MSEC : 1000.0 / USERCMD_HZ;
+}
+
+/*
+==================
+Com_LatchGameTicRate
+
+DUDE: com_classicTics. Picks the game tic for the map being loaded: idSessionLocal::ExecuteMapChange
+calls this before the game initializes the map, and the game reads the same answer through
+FT_GameTicMSec. wantClassic is com_classicTics, or the tic a command demo was recorded at.
+Doom 3's original 62.5 Hz runs only for a game library that asked for FT_GameTicMSec (a dhewm3
+library adds 16/17/17 msec per tic whatever the engine does, so it would run 4% fast), never for
+Quake 4 (its game code is built around 60 Hz) and never in multiplayer (servers, clients and
+their demos all assume 60 Hz). Returns whether the map runs at 62.5 Hz.
+==================
+*/
+bool Com_LatchGameTicRate( bool wantClassic, bool multiplayer ) {
+	const char *why = NULL;
+	if ( wantClassic ) {
+		if ( GameTitle::Get().title == GAME_TITLE_QUAKE4 ) {
+			why = "Quake 4 runs at 60 Hz";
+		} else if ( multiplayer ) {
+			why = "multiplayer runs at 60 Hz";
+		} else if ( !com_gameTicRateAware ) {
+			why = "this game library doesn't support it (a dhewm3 mod library would run 4% fast)";
+		}
+	}
+	const bool classic = wantClassic && why == NULL;
+	Com_SetGameTicRate( classic );
+	if ( classic ) {
+		common->Printf( "com_classicTics: game tic at Doom 3's original 62.5 Hz (16 msec)\n" );
+	} else if ( wantClassic ) {
+		common->Printf( "com_classicTics: game tic stays at 60 Hz - %s\n", why );
+	}
+	return classic;
+}
+
+// DUDE: com_classicTics - back to 60 Hz when no map runs (menus, render demos, a game library change)
+void Com_ResetGameTicRate() {
+	Com_SetGameTicRate( false );
+}
+
+// DUDE: FT_GameTicMSec (see Common.h): 16 while the map runs Doom 3's original tic, else 0
+static int gameTicMSec( void ) {
+	return com_classicTicsActive ? USERCMD_MSEC : 0;
 }
 
 // DG: sub-tic interpolation fraction, see idCommon::GetTicInterpolation().
@@ -3087,9 +3147,10 @@ void idCommonLocal::Frame( void ) {
 				// (uncapped fps), which is the expected behavior for an fps-unlock setting.
 			}
 			else if ( com_timescale.GetFloat() == 1.0f && GLimp_GetSwapInterval() != 0
-				&& fabsf(60.0f - GLimp_GetDisplayRefresh()) < 1.0f ) {
-				// if we're using vsync and the display is running at about 60Hz, start next tic
-				// immediately so our internal tic time and vsync don't drift apart
+				&& fabs( 1000.0 / com_preciseFrameLengthMS - GLimp_GetDisplayRefresh() ) < 1.0 ) {
+				// if we're using vsync and the display is running at about the tic rate (60Hz, or
+				// 62.5Hz with com_classicTics - a 60Hz display would pull those back to 60), start
+				// next tic immediately so our internal tic time and vsync don't drift apart
 				double now = Sys_MillisecondsPrecise();
 				if ( nextTicTime > now ) {
 					nextTicTime = now;
@@ -3472,6 +3533,9 @@ void idCommonLocal::UnloadGameDLL( void ) {
 
 	com_debuggerSupported = false; // HvG: Reset debugger availability.
 	gameCallbacks.Reset(); // DG: these callbacks are invalid now because DLL has been unloaded
+	// DUDE: com_classicTics - the next game library has to ask for FT_GameTicMSec again
+	com_gameTicRateAware = false;
+	Com_ResetGameTicRate();
 }
 
 /*
@@ -3522,6 +3586,7 @@ int idCommonLocal::AsyncThread(void* arg)
 		// TODO: Should this be synchronized with the main thread somehow?
 		//       Might make sense to run this when game tics are done, while main thread is rendering?
 		//       For now I'll assume that just doing this 60 times per second works well enough...
+		// DUDE: once per game tic: 60 Hz, or 62.5 Hz with com_classicTics (Doom 3 1.3.1's async rate)
 		nextTicTargetMsec += com_preciseFrameLengthMS;
 		Sys_SleepUntilPrecise( nextTicTargetMsec );
 	}
@@ -4144,6 +4209,12 @@ bool idCommonLocal::GetAdditionalFunction(idCommon::FunctionType ft, idCommon::F
 		case idCommon::FT_UpdateDebugger:
 			*out_fnptr = (idCommon::FunctionPointer)updateDebugger;
 			com_debuggerSupported = true;
+			return true;
+
+		case idCommon::FT_GameTicMSec:
+			// DUDE: asking marks the game library as able to run com_classicTics' 62.5 Hz
+			*out_fnptr = (idCommon::FunctionPointer)gameTicMSec;
+			com_gameTicRateAware = true;
 			return true;
 
 		default:

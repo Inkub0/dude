@@ -63,6 +63,12 @@ else
 // DG: functions used for improved frame timing - I put them here so they don't end up in the SDK
 extern void Com_UpdateFrameTime();
 extern void Com_WaitForNextTicStart();
+// DUDE: com_classicTics - pick the game tic rate for the map being loaded (Doom 3's original
+// 62.5 Hz when wantClassic and the game library supports it, else 60 Hz); returns whether
+// the map runs at 62.5 Hz. Com_ResetGameTicRate goes back to 60 Hz (no map loaded).
+extern bool Com_LatchGameTicRate( bool wantClassic, bool multiplayer );
+extern void Com_ResetGameTicRate();
+extern idCVar com_classicTics;
 
 
 typedef struct {

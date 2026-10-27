@@ -1851,6 +1851,10 @@ Exits with mapSpawned = false
 void idSessionLocal::UnloadMap() {
 	StopPlayingRenderDemo();
 
+	// DUDE: com_classicTics - no map, so back to the 60 Hz tic (menus, render demos and timedemos
+	// run on it); ExecuteMapChange latches the next map's
+	Com_ResetGameTicRate();
+
 	// end the current map in the game
 	if ( game ) {
 		game->MapShutdown();
@@ -2072,6 +2076,10 @@ void idSessionLocal::ExecuteMapChange( bool noFadeWipe ) {
 
 	common->Printf( "----- Map Initialization -----\n" );
 	common->Printf( "Map: %s\n", mapString.c_str() );
+
+	// DUDE: com_classicTics - the game tic this map runs at. Latched before the game initializes
+	// the map, which asks for it (FT_GameTicMSec), and kept until the next map load.
+	Com_LatchGameTicRate( com_classicTics.GetBool(), idAsyncNetwork::IsActive() );
 
 	// let the renderSystem load all the geometry
 	if ( !rw->InitFromMap( fullMapName ) ) {
