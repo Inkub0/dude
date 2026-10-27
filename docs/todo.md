@@ -490,4 +490,10 @@ emissive on): gather 24.7 / 13.6 / 8.4 ms at 10 / 4 / 1 samples before those cha
 - **Denoiser knobs** (tuning, not code): `AntiFirefly` off (NRD: ~7-10% of the denoise), Atrous 2 instead of 3. Fidelity
   choices for the user.
 - **Not to re-propose** (tried and rejected): GI half-rate, DI reservoir reworks (two-reservoir emitter split, K-pick
-  emitter reservoir), fewer grid slots, residual stochastic slots, MCPG guiding, Q2RTX per-cell emitter lists.
+  emitter reservoir), fewer grid slots, residual stochastic slots, MCPG guiding, Q2RTX per-cell emitter lists, and the
+  **cache resolve over a touched-slot list** (2026-10-27, branch `perf/rtgi-cache-touched-resolve`, NOT merged): the
+  first writer of a frame appended each slot to a list and the resolve walked it instead of all 2^21 slots. `rtgi.cache`
+  measured 0.48 ms at 1 sample against 0.37-0.43 ms for the sweep (user, mars_city1): the sweep's early-outs are cheap
+  coalesced reads; the cost is the touched slots' own work, which a list makes scattered, plus one contended counter
+  atomic per first touch in the gather. (The `rtgi.cache` GPU scope also seems to absorb the tail of the gather before
+  it: the sweep read 0.4 / 0.65 / 0.87 ms at 1 / 4 / 10 samples - compare at equal settings.)
