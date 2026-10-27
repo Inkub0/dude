@@ -4301,6 +4301,51 @@ windowDef OptionsMenuParent {
 			}
 		}
 
+	//CLASSIC 62.5 HZ TICS
+		// DUDE: com_classicTics - Doom 3's original 16 msec (62.5 Hz) game tic instead of 60 Hz,
+		// for DUDE's own Doom 3 game libraries; applies at the next map load.
+		windowDef OG10 {
+			rect		20, 272, 300, 16
+			windowDef OG10L {
+				rect		0, 0, 8, 16
+				background	"gui/mainmenu/select_edge"
+				matcolor	0, 0, 0, 1
+				noevents	1
+			}
+			windowDef OG10M {
+				rect		8, 0, 284, 16
+				background	"gui/mainmenu/select_border"
+				matcolor	0, 0, 0, 1
+				noevents	1
+			}
+			windowDef OG10R {
+				rect		292, 0, 8, 16
+				background	"gui/mainmenu/select_angle"
+				matcolor	0, 0, 0, 1
+				noevents	1
+			}
+			windowDef OG10Title {
+				rect		1, 1, 180, 14
+				text		"Classic 62.5 Hz Tics"
+				font		"fonts/bank"
+				textscale	0.25
+				textalign	2
+				textaligny	-6
+				forecolor	1, 1, 1, 1
+			}
+			choiceDef OG10Primary {
+				rect		220, 1, 50, 14
+				choices		"#str_04221"
+				cvar		"com_classicTics"
+				choiceType	0
+				font		"fonts/bank"
+				textscale	0.25
+				textalign	1
+				textaligny	-6
+				forecolor	0.6, 0.8, 0.8, 1
+			}
+		}
+
 	}
 
 //SYSTEM OPTIONS
