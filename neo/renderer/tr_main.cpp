@@ -2845,6 +2845,7 @@ static int						s_rtEmissiveLastRebuildMs = -100000;	// Sys_Milliseconds of the 
 // first build of a map, after a table cvar changed, or with r_rtEmissiveTableDebug; the rebuilds a map makes on its
 // own print one timed line instead - writing ~250 console + log lines was part of each rebuild's hitch
 static bool						s_rtEmissiveReport = true;
+static int						s_rtEmissiveRowBuilds = 0;		// R_RtEmissiveBuildRows calls, for the mover-upkeep timing (R_RtEmissiveRefreshMovers)
 static idStr					s_rtEmissiveReportedMap;
 static void R_RtEmissiveReport( const char *fmt, ... ) id_attribute((format(printf,1,2)));
 static void R_RtEmissiveReport( const char *fmt, ... ) {
@@ -4029,6 +4030,7 @@ static void R_RtEmissiveFillDebugVerts( int firstTri, int numTris, idDrawVert *v
 // emitters (chunking a big tile into pieces let one tile fill every slot of the cells under it and starved every other
 // light there - the dark Marine HQ of 2026-10-20).
 static void R_RtEmissiveBuildRows( void ) {
+	s_rtEmissiveRowBuilds++;
 	s_rtEmissiveRows.SetNum( 0, false );
 	if ( s_rtEmissiveLabels.Num() == 0 || s_rtEmissiveBuf == 0 ) {
 		return;
@@ -4208,7 +4210,7 @@ static bool R_RtEmissiveRegatherGroup( rtEmissiveGroup_t &g, const idRenderEntit
 // flight may read a half-updated slice: one emitter a frame off its true position - harmless for lighting (the
 // visibility ray traces the real TLAS), never a crash. A still entity costs a 16-float compare. An entity whose
 // slot was freed or re-used by another model is left where it was (static emitters only enter the table at build).
-static void R_RtEmissiveRefreshMovers( const idRenderWorldLocal *world, rhi::RHI *r ) {
+static void R_RtEmissiveRefreshMoversBody( const idRenderWorldLocal *world, rhi::RHI *r ) {
 	static int lastFrame = -1;
 	if ( tr.frameCount == lastFrame || s_rtEmissiveBuf == 0 ) {
 		return;
@@ -4304,6 +4306,36 @@ static void R_RtEmissiveRefreshMovers( const idRenderWorldLocal *world, rhi::RHI
 	}
 	if ( cdfDirty || movedThisFrame ) {
 		R_RtEmissiveBuildRows();												// the emitter rows follow flux and position changes
+	}
+}
+
+// DUDE (2026-10-27): the per-frame mover upkeep is map-wide (any emissive mover anywhere re-bakes its slice, and any
+// change regenerates the emitter rows the light grid reads). Timed here; with r_rtEmissiveTableDebug on, a summary
+// line every 5 s: the average and worst cost per frame and on how many frames the rows were regenerated.
+static void R_RtEmissiveRefreshMovers( const idRenderWorldLocal *world, rhi::RHI *r ) {
+	static int lastFrame = -1, frames = 0, rowFrames = 0, windowStartMs = 0;
+	static double sumMs = 0.0, maxMs = 0.0;
+	if ( tr.frameCount == lastFrame ) {
+		return;
+	}
+	lastFrame = tr.frameCount;
+	const int rowsBefore = s_rtEmissiveRowBuilds;
+	const double t0 = Sys_MillisecondsPrecise();
+	R_RtEmissiveRefreshMoversBody( world, r );
+	const double ms = Sys_MillisecondsPrecise() - t0;
+	sumMs += ms;
+	maxMs = Max( maxMs, ms );
+	frames++;
+	rowFrames += ( s_rtEmissiveRowBuilds != rowsBefore ) ? 1 : 0;
+	const int now = Sys_Milliseconds();
+	if ( now - windowStartMs >= 5000 ) {
+		if ( r_rtEmissiveTableDebug.GetInteger() > 0 && frames > 0 && windowStartMs != 0 ) {
+			common->Printf( "r_rtEmissiveTable: mover upkeep over %.1f s: %.3f ms/frame average, %.3f ms worst; emitter rows regenerated on %d of %d frames\n",
+				( now - windowStartMs ) * 0.001f, sumMs / frames, maxMs, rowFrames, frames );
+		}
+		windowStartMs = now;
+		sumMs = maxMs = 0.0;
+		frames = rowFrames = 0;
 	}
 }
 

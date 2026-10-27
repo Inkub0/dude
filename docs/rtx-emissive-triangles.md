@@ -483,5 +483,15 @@ rebuild per conveyor cycle (7 in 2.5 minutes in the user's log).
 - The per-entity state lines ("is gone", "switched OFF", "switched ON again") print only with
   `r_rtEmissiveTableDebug` on: with adoption the conveyor printed four of them every cycle (user).
 
+- **Mover upkeep timing**: the per-frame mover pass is map-wide (the table is one list for the whole
+  map, so a ray can reach any emitter; each emitter's reach limits what it lights). With
+  `r_rtEmissiveTableDebug` on, a line every 5 s gives its average and worst cost per frame and on
+  how many frames the emitter rows were regenerated - to decide whether far movers ever need skipping.
+
 No fidelity change: the same triangles glow. Not covered: an entity whose re-show uses a different
 skin that changes which surfaces glow still rebuilds (as any such change does).
+
+**Gate (user, 2026-10-27): passed, merged.** `mc_underground` (normal build): the hitch is gone; the
+table built once, the canisters adopted their groups every cycle (22 "is gone" / 24 "switched ON
+again" in an ASAN run with the debug cvar, 0 rebuilds); ASAN clean. The canisters are ~3400 units from
+the start area's glass: the scan is map-wide, so the hitch hit wherever the player stood.
