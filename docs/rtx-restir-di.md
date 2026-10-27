@@ -1235,4 +1235,5 @@ picks still divided their target by N.L ("same as the main loop"), a leftover of
 58aac0a4 (2026-10-17) removed from the direct term, the boost and the GI bounce - its own message says so, but this
 line survived. The main loop's wSum is built with the cosine IN, so each extra pick's Wk = wSum / pH came out N.L too
 small: boosted (young, disoccluded) pixels read darker than the plain gather in SH mode, the default. The boost now
-uses the main loop's target.
+uses the main loop's target. Gate (user, 2026-10-27): no dark fringe at disocclusions, Vulkan validation (only the known NRD
+messages) and ASAN clean - merged.
