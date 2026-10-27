@@ -9825,7 +9825,7 @@ static void RB_RHI_LightGridFill( rhi::RHI *r, unsigned long long lightAddr, int
 	if ( lightAddr == 0 || numLights <= 0 ) {
 		return;		// no rows this view: the grid is not consumed (the DI pass returned before its gather)
 	}
-	struct { unsigned int gridLo, gridHi, lightLo, lightHi, nLights, cascades, res, slots; float cellBase; float camX, camY, camZ; float parallelFlux; unsigned int quotaB; unsigned int rankLinear; unsigned int binned; } pc;	// light_grid_fill.comp PC
+	struct { unsigned int gridLo, gridHi, lightLo, lightHi, nLights, cascades, res, slots; float cellBase; float camX, camY, camZ; float parallelFlux; unsigned int quotaB; unsigned int rankLinear; } pc;	// light_grid_fill.comp PC
 	pc.gridLo      = (unsigned int)( g.gridAddr & 0xFFFFFFFFull );
 	pc.gridHi      = (unsigned int)( g.gridAddr >> 32 );
 	pc.lightLo     = (unsigned int)( lightAddr & 0xFFFFFFFFull );
@@ -9851,15 +9851,9 @@ static void RB_RHI_LightGridFill( rhi::RHI *r, unsigned long long lightAddr, int
 	ca.pushConstants = &pc;
 	ca.pushConstantSize = (int)sizeof( pc );
 	// DUDE (2026-10-27): the BLOCK fill (light_grid_fill.comp lgFillBlock) - one workgroup per 4 x 4 x 4 block of cells, the
-	// rows filtered per block into shared memory first; the same grid as the per-cell sweep. TEMPORARY A/B r_rtLightGridBlockFill.
-	pc.binned = r_rtLightGridBlockFill.GetBool() ? 1u : 0u;
-	if ( pc.binned ) {
-		const unsigned int bpa = ( (unsigned int)g.parms.res + 3u ) / 4u;
-		ca.groupsX = (unsigned int)g.parms.cascades * bpa * bpa * bpa;
-	} else {
-		const unsigned int cells = (unsigned int)g.parms.cascades * (unsigned int)g.parms.res * (unsigned int)g.parms.res * (unsigned int)g.parms.res;
-		ca.groupsX = ( cells + 63u ) / 64u;
-	}
+	// rows filtered per block into shared memory first; the same grid as the old per-cell sweep (user A/B: 0.95 -> 0.35 ms)
+	const unsigned int bpa = ( (unsigned int)g.parms.res + 3u ) / 4u;
+	ca.groupsX = (unsigned int)g.parms.cascades * bpa * bpa * bpa;
 	ca.groupsY = 1;
 	ca.groupsZ = 1;
 	ca.midScene = true;				// inside the open scene, before the DI gather that reads the grid (L2)

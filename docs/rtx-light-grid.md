@@ -183,5 +183,7 @@ Same grid: the block test is a superset (a cell centre lies in the box, so the b
 checked offline in float32 over 198 M passing light/cell pairs at Doom-scale coordinates, every cascade, res 20-32,
 radii tuned to touch a centre exactly: 0 missed), and the list keeps the buffer's order, so each cell sees exactly the
 in-range rows of the sweep in the same order - the same top-N, ties and sums. Cells past `res` (res not a multiple of
-4) join the block's loads and barriers but write nothing. TEMPORARY A/B `r_rtLightGridBlockFill` (1 block / 0 sweep),
-removed at merge.
+4) join the block's loads and barriers but write nothing.
+
+Gate (user, mars_city1 emissive mode, A/B `r_rtLightGridBlockFill` - removed with the old sweep at merge): image identical;
+`lightgrid.fill` 0.95 -> 0.35 ms, GPU total 23.7 -> 23.3 ms; Vulkan validation clean (the known NRD messages only); ASAN.
