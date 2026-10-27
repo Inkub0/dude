@@ -3633,6 +3633,7 @@ static int rhiCubeMissCold = 0;
 static int rhiCubeMissWarmCaster = 0;
 static int rhiCubeMissWarmLight = 0;
 static int rhiCubeEvictions = 0;
+static int rhiCubeSlotEvictions = 0;		// slot table full under budget: LRU slot recycled
 // r_shadowMapCacheDebug: point lights that used the static/dynamic split this view — a
 // moving-caster light kept CACHED for its world layer instead of bypassing the cache.
 static int rhiCubeCacheSplit = 0;
@@ -3925,8 +3926,28 @@ static rhi::RenderTargetHandle RB_RHI_AcquireCubeTarget( rhi::RHI *r, int lightI
 			firstFree = victim;
 		}
 	}
+	// slot table full while under budget: every point light met since the map loaded
+	// still holds its slot, so evict the least-recently-used one not touched this frame
+	// (as the 2D cache does). Without this, past 128 lights every new light re-rendered
+	// its scratch cube each frame until the next map load.
 	if ( firstFree < 0 ) {
-		return 0;				// slot table full (rare) -> scratch
+		int victim = -1;
+		for ( int i = 0; i < MAX_SHADOW_CUBE_CACHE; i++ ) {
+			if ( rhiCubeCache[i].rt && rhiCubeCache[i].lastFrame != rhiCubeCacheFrameNo
+			     && ( victim < 0 || rhiCubeCache[i].lastFrame < rhiCubeCache[victim].lastFrame ) ) {
+				victim = i;
+			}
+		}
+		if ( victim < 0 ) {
+			return 0;			// every slot in use this frame -> scratch
+		}
+		r->DestroyRenderTarget( rhiCubeCache[victim].rt );
+		rhiCubeCacheBytes -= rhiCubeCache[victim].bytes;
+		rhiCubeCache[victim].lightIndex = -1;
+		rhiCubeCache[victim].rt = 0;
+		rhiCubeCache[victim].bytes = 0;
+		rhiCubeSlotEvictions++;		// r_shadowMapCacheDebug: "evict N+M slot"
+		firstFree = victim;
 	}
 
 	rhi::RenderTargetHandle rt = r->CreateRenderTargetCube( rhi::IF_DEPTH24, size );
@@ -11342,6 +11363,7 @@ static void RB_RHI_ResetShadowTallies( rhi::RHI *r ) {
 	rhiCubeMissWarmCaster = 0;
 	rhiCubeMissWarmLight = 0;
 	rhiCubeEvictions = 0;
+	rhiCubeSlotEvictions = 0;
 	rhiCubeCacheSplit = 0;
 	rhiCubeCacheRtMoving = 0;
 	rhiMapCacheHits = 0;
@@ -11402,7 +11424,7 @@ static void RB_RHI_LogShadowCacheSummary() {
 	// per-frame spam. Hit% is over cached lookups (excludes scratch/dynamic lights, which
 	// never enter the cache). This is what says which caching lever is worth building.
 	if ( r_shadowMapCacheDebug.GetBool() ) {
-		static int accHits, accCold, accWarmCaster, accWarmLight, accScratch, accDynamic, accDeferred, accEvict, accFaces, accSplit, accRtMoving, accFrames, accStartMs;
+		static int accHits, accCold, accWarmCaster, accWarmLight, accScratch, accDynamic, accDeferred, accEvict, accSlotEvict, accFaces, accSplit, accRtMoving, accFrames, accStartMs;
 		const int nowMs = Sys_Milliseconds();
 		if ( accStartMs == 0 ) { accStartMs = nowMs; }
 		accHits       += rhiCubeCacheHits;
@@ -11413,6 +11435,7 @@ static void RB_RHI_LogShadowCacheSummary() {
 		accDynamic    += rhiCubeCacheDynamic;
 		accDeferred   += rhiCubeCacheDeferred;
 		accEvict      += rhiCubeEvictions;
+		accSlotEvict  += rhiCubeSlotEvictions;
 		accFaces      += rhiShadowCubeFaces;		// actual cube FACES rasterized -> the GPU cost per-face invalidation cuts
 		accSplit      += rhiCubeCacheSplit;			// moving-caster lights kept cached via the static/dynamic split
 		accRtMoving   += rhiCubeCacheRtMoving;		// moving lights served by a ray, no cube at all (r_rtMovingLights)
@@ -11421,10 +11444,10 @@ static void RB_RHI_LogShadowCacheSummary() {
 			const int rendered = accCold + accWarmCaster + accWarmLight;
 			const int lookups  = accHits + rendered;
 			const int hitPct   = lookups > 0 ? ( 100 * accHits ) / lookups : 0;
-			common->Printf( "cubeCache/s: %d hit (%d%%) | rendered %d = cold %d + warm[caster %d, light %d] | faces %d | split %d, rtMoving %d, scratch %d, dynamic %d, deferred %d, evict %d | %d frames\n",
+			common->Printf( "cubeCache/s: %d hit (%d%%) | rendered %d = cold %d + warm[caster %d, light %d] | faces %d | split %d, rtMoving %d, scratch %d, dynamic %d, deferred %d, evict %d+%d slot | %d frames\n",
 			                accHits, hitPct, rendered, accCold, accWarmCaster, accWarmLight, accFaces,
-			                accSplit, accRtMoving, accScratch, accDynamic, accDeferred, accEvict, accFrames );
-			accHits = accCold = accWarmCaster = accWarmLight = accScratch = accDynamic = accDeferred = accEvict = accFaces = accSplit = accRtMoving = accFrames = 0;
+			                accSplit, accRtMoving, accScratch, accDynamic, accDeferred, accEvict, accSlotEvict, accFrames );
+			accHits = accCold = accWarmCaster = accWarmLight = accScratch = accDynamic = accDeferred = accEvict = accSlotEvict = accFaces = accSplit = accRtMoving = accFrames = 0;
 			accStartMs = nowMs;
 		}
 	}
