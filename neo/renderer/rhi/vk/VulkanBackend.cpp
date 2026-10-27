@@ -12928,12 +12928,27 @@ bool VulkanBackend::BindForDraw( const DrawArgs &args, VkCommandBuffer &cbOut ) 
 				ai.descriptorPool = texturePool ? texturePool : framePool[frameIndex];
 				ai.descriptorSetCount = 1;
 				ai.pSetLayouts = &setLayoutTex;
+				bool frameOnly = false;		// one-frame set from framePool: not cached
 				if ( vkAllocateDescriptorSets( device, &ai, &texSet ) != VK_SUCCESS ) {
-					if ( !framePoolWarned ) {
-						framePoolWarned = true;
-						common->Warning( "VK: descriptor pool exhausted while allocating texture set" );
+					// texturePool full: a view needing more distinct sets than the cache cap
+					// (comm1 noclip: ~1500 entities x ~1100 lights) flushes the cache several
+					// times in one frame, and those retired generations fill the pool until
+					// their fence passes. Take a one-frame set from this slot's per-frame pool
+					// (reset in BeginFrame; the bound fast path is cleared there too) instead
+					// of dropping the draw.
+					bool ok = false;
+					if ( texturePool && framePool[frameIndex] ) {
+						ai.descriptorPool = framePool[frameIndex];
+						ok = vkAllocateDescriptorSets( device, &ai, &texSet ) == VK_SUCCESS;
+						frameOnly = ok;
 					}
-					return false;
+					if ( !ok ) {
+						if ( !framePoolWarned ) {
+							framePoolWarned = true;
+							common->Warning( "VK: descriptor pool exhausted while allocating texture set" );
+						}
+						return false;
+					}
 				}
 				// bindings 0-7 = units, 8 = shadow cube, 9 = SSAO, 10 = occlusion map,
 				// 11 = parallax height map. Empty slots take a dummy typed for what the
@@ -13034,7 +13049,9 @@ bool VulkanBackend::BindForDraw( const DrawArgs &args, VkCommandBuffer &cbOut ) 
 					writes[i].pImageInfo = &infos[i];
 				}
 				vkUpdateDescriptorSets( device, VK_TEX_BINDINGS, writes, 0, NULL );
-				textureSetCache[key] = texSet;
+				if ( !frameOnly ) {
+					textureSetCache[key] = texSet;
+				}
 			}
 			boundTexSet = texSet;
 			boundTexKey = key;
