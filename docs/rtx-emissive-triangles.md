@@ -480,6 +480,8 @@ rebuild per conveyor cycle (7 in 2.5 minutes in the user's log).
 - **Quiet rebuilds**: the full report prints for the first build of a map, after a table cvar
   changed, or with `r_rtEmissiveTableDebug`; a rebuild the map triggers itself prints
   `r_rtEmissiveTable: rebuilt in N ms (N emissive triangles)`.
+- The per-entity state lines ("is gone", "switched OFF", "switched ON again") print only with
+  `r_rtEmissiveTableDebug` on: with adoption the conveyor printed four of them every cycle (user).
 
 No fidelity change: the same triangles glow. Not covered: an entity whose re-show uses a different
 skin that changes which surfaces glow still rebuilds (as any such change does).

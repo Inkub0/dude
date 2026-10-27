@@ -4167,7 +4167,9 @@ static bool R_RtEmissiveRegatherGroup( rtEmissiveGroup_t &g, const idRenderEntit
 				e.emit |= RT_EMIT_FLAG_DARK;
 			}
 			g.dark = true;
-			common->Printf( "r_rtEmissiveTable: entity %d '%s' switched OFF (%d emissive tris kept dark)\n", g.entityIndex, model->Name(), g.numTris );
+			if ( r_rtEmissiveTableDebug.GetInteger() > 0 ) {	// DUDE: the overlay's companion; a conveyor would print every cycle
+				common->Printf( "r_rtEmissiveTable: entity %d '%s' switched OFF (%d emissive tris kept dark)\n", g.entityIndex, model->Name(), g.numTris );
+			}
 			return true;
 		}
 		return false;
@@ -4192,7 +4194,9 @@ static bool R_RtEmissiveRegatherGroup( rtEmissiveGroup_t &g, const idRenderEntit
 		s_rtEmissiveLocalVerts[ g.firstLocalVert + v ] = scratchLocal[v];
 	}
 	if ( g.dark ) {
-		common->Printf( "r_rtEmissiveTable: entity %d '%s' switched ON again\n", g.entityIndex, model->Name() );
+		if ( r_rtEmissiveTableDebug.GetInteger() > 0 ) {	// DUDE: the overlay's companion; a conveyor would print every cycle
+			common->Printf( "r_rtEmissiveTable: entity %d '%s' switched ON again\n", g.entityIndex, model->Name() );
+		}
 	}
 	g.dark = false;
 	return true;
@@ -4239,7 +4243,9 @@ static void R_RtEmissiveRefreshMovers( const idRenderWorldLocal *world, rhi::RHI
 					r->UpdateBuffer( s_rtEmissiveDbgVB, g.firstTri * 3 * (int)sizeof( idDrawVert ), g.numTris * 3 * (int)sizeof( idDrawVert ), dbgScratch.Ptr() );
 				}
 				cdfDirty = true;
-				common->Printf( "r_rtEmissiveTable: entity %d '%s' is gone (%d emissive tris kept dark)\n", g.entityIndex, g.model->Name(), g.numTris );
+				if ( r_rtEmissiveTableDebug.GetInteger() > 0 ) {	// DUDE: the overlay's companion; a conveyor would print every cycle
+					common->Printf( "r_rtEmissiveTable: entity %d '%s' is gone (%d emissive tris kept dark)\n", g.entityIndex, g.model->Name(), g.numTris );
+				}
 			}
 			continue;
 		}
