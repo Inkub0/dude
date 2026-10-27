@@ -33,7 +33,11 @@ If you have questions concerning this license or the applicable additional terms
 #include "renderer/VertexCache.h"
 #include "renderer/rhi/RHI.h"
 
-static const int	FRAME_MEMORY_BYTES = 0x200000;
+// DUDE: 16 MB (id: 2 MB). The frame's temp space holds every per-frame vertex upload - GUIs, decals, deform
+// particles, Quake 4's effects and, since 2026-10-27, Doom 3's particle snapshots (Model_prt.cpp) - and overflowing
+// it falls back to a static block created and destroyed per use (on Vulkan an RHI buffer each). CPU memory only
+// (x NUM_VERTEX_FRAMES); Vulkan streams the used part through its per-frame ring, which grows as needed.
+static const int	FRAME_MEMORY_BYTES = 16 * 1024 * 1024;
 static const int	EXPAND_HEADERS = 1024;
 
 idCVar idVertexCache::r_showVertexCache( "r_showVertexCache", "0", CVAR_INTEGER|CVAR_RENDERER, "" );
@@ -396,6 +400,21 @@ void idVertexCache::Free( vertCache_t *block ) {
 	block->prev = &deferredFreeList;
 	deferredFreeList.next->prev = block;
 	deferredFreeList.next = block;
+}
+
+/*
+===========
+idVertexCache::AllocFrameTempIfFits
+===========
+*/
+vertCache_t	*idVertexCache::AllocFrameTempIfFits( void *data, int size ) {
+	if ( size <= 0 || dynamicAllocThisFrame + size > frameBytes ) {
+		if ( size > 0 ) {
+			tempOverflow = true;	// r_showVertexCache reports it, as AllocFrameTemp's fallback does
+		}
+		return NULL;
+	}
+	return AllocFrameTemp( data, size );
 }
 
 /*

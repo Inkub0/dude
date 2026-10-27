@@ -28,10 +28,45 @@ If you have questions concerning this license or the applicable additional terms
 
 #include "sys/platform.h"
 #include "renderer/tr_local.h"
+#include "renderer/VertexCache.h"
 
 #include "renderer/Model_local.h"
 
 static const char *parametricParticle_SnapshotName = "_ParametricParticle_Snapshot_";
+
+/*
+===============================================================================
+
+	DUDE (2026-10-27): the snapshot's vertices live in the frame's temp space
+
+	id rebuilt each stage's vertices in the snapshot's own arrays every frame, freed the surface's vertex cache and
+	let R_CreateAmbientCache upload them again as a STATIC block - on Vulkan a persistent RHI buffer created and
+	destroyed per stage per frame. The vertices change every frame, so they now go into the frame's temp space
+	(vertexCache.AllocFrameTempIfFits), as deform particles, decals and Quake 4's effects do; Vulkan streams them
+	through its per-frame ring. The arrays stay in the snapshot (light interactions of lit stages, overlays and the
+	bounds read them as before).
+
+	A temp block's header is recycled when the frame ends, so the snapshot remembers which surfaces it gave one and
+	clears exactly those pointers before it rebuilds (and before it is deleted) - never Free()ing them. When the temp
+	space is full the surface keeps id's path (a static block, freed next frame as before).
+
+===============================================================================
+*/
+// TEMPORARY A/B for the gate (before/after in one binary); removed at merge
+static idCVar r_prtFrameTemp( "r_prtFrameTemp", "1", CVAR_RENDERER | CVAR_BOOL, "TEMPORARY A/B: 1 = Doom 3 particle snapshots in frame-temp vertex memory, 0 = id's static block per stage per frame" );
+
+class idRenderModelPrtSnapshot : public idRenderModelStatic {
+public:
+	virtual						~idRenderModelPrtSnapshot() { DropFrameTempCaches(); }
+
+	void						DropFrameTempCaches() {
+									for ( int i = 0; i < frameTempTris.Num(); i++ ) {
+										frameTempTris[i]->ambientCache = NULL;
+									}
+									frameTempTris.SetNum( 0, false );
+								}
+	idList<srfTriangles_t *>	frameTempTris;		// surfaces whose ambientCache is this frame's temp block
+};
 
 /*
 ====================
@@ -95,18 +130,23 @@ idRenderModel *idRenderModelPrt::InstantiateDynamicModel( const struct renderEnt
 	}
 	*/
 
-	if ( cachedModel != NULL ) {
+	idRenderModelPrtSnapshot *snapshot = dynamic_cast<idRenderModelPrtSnapshot *>( cachedModel );
+	if ( cachedModel != NULL && snapshot == NULL ) {
+		delete cachedModel;		// not ours (cannot happen: only this function makes the snapshot)
+	}
+	if ( snapshot != NULL ) {
 
-		assert( dynamic_cast<idRenderModelStatic *>(cachedModel) != NULL );
 		assert( idStr::Icmp( cachedModel->Name(), parametricParticle_SnapshotName ) == 0 );
 
-		staticModel = static_cast<idRenderModelStatic *>(cachedModel);
+		// last frame's temp pointers are stale now: clear them before anything frees the surfaces' caches
+		snapshot->DropFrameTempCaches();
 
 	} else {
 
-		staticModel = new idRenderModelStatic;
-		staticModel->InitEmpty( parametricParticle_SnapshotName );
+		snapshot = new idRenderModelPrtSnapshot;
+		snapshot->InitEmpty( parametricParticle_SnapshotName );
 	}
+	staticModel = snapshot;
 
 	particleGen_t g;
 
@@ -235,6 +275,18 @@ idRenderModel *idRenderModelPrt::InstantiateDynamicModel( const struct renderEnt
 		surf->geometry->numVerts = numVerts;
 		surf->geometry->numIndexes = numIndexes;
 		surf->geometry->bounds = stage->bounds;		// just always draw the particles
+
+		// DUDE: the vertices into this frame's temp space (see idRenderModelPrtSnapshot); a lit stage gets its
+		// tangents first, as R_CreateAmbientCache derives them before its upload
+		if ( numVerts > 0 && r_prtFrameTemp.GetBool() ) {
+			if ( stage->material->ReceivesLighting() ) {
+				R_DeriveTangents( surf->geometry );
+			}
+			surf->geometry->ambientCache = vertexCache.AllocFrameTempIfFits( verts, numVerts * sizeof( idDrawVert ) );
+			if ( surf->geometry->ambientCache != NULL ) {
+				snapshot->frameTempTris.Append( surf->geometry );
+			}
+		}
 	}
 
 	return staticModel;

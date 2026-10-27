@@ -88,6 +88,13 @@ public:
 	// will return NULL if the vertex cache is completely full
 	// As with Position(), this may not actually be a pointer you can access.
 	vertCache_t	*	AllocFrameTemp( void *data, int bytes );
+	// DUDE: AllocFrameTemp without its overflow fallback (a static block, already freed): NULL when the frame's temp
+	// space is full, so the caller can take its normal static path instead. For a surface that is rebuilt every
+	// frame and keeps the pointer in a persistent triangle surface (Doom 3's particle snapshots, Model_prt.cpp).
+	vertCache_t	*	AllocFrameTempIfFits( void *data, int bytes );
+	// DUDE: a block of this frame's temp space - never Touch()ed, Free()d or given a static index cache. Only valid
+	// for a pointer allocated THIS frame (a temp header is recycled when the frame ends).
+	bool			IsFrameTemp( const vertCache_t *block ) const { return block != NULL && block->tag == TAG_TEMP; }
 
 	// notes that a buffer is used this frame, so it can't be purged
 	// out from under the GPU

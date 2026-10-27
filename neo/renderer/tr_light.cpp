@@ -2366,12 +2366,15 @@ static void R_AddAmbientDrawsurfs( viewEntity_t *vEntity ) {
 				return;
 			}
 			// touch it so it won't get purged (GPU-skinned surfaces with r_gpuSkinNoUpload have no
-			// ambient cache — they draw from gpuSkinVB — so there is nothing to touch)
-			if ( tri->ambientCache ) {
+			// ambient cache — they draw from gpuSkinVB — so there is nothing to touch; DUDE: nor has a
+			// surface whose vertices are in this frame's temp space - Doom 3's particles - nor does it
+			// get a static index cache: it is rebuilt every frame, its indexes stream with it)
+			const bool frameTemp = vertexCache.IsFrameTemp( tri->ambientCache );
+			if ( tri->ambientCache && !frameTemp ) {
 				vertexCache.Touch( tri->ambientCache );
 			}
 
-			if ( r_useIndexBuffers.GetBool() && !tri->indexCache ) {
+			if ( r_useIndexBuffers.GetBool() && !tri->indexCache && !frameTemp ) {
 				vertexCache.Alloc( tri->indexes, tri->numIndexes * sizeof( tri->indexes[0] ), &tri->indexCache, true );
 			}
 			if ( tri->indexCache ) {

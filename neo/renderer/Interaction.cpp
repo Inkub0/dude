@@ -1172,7 +1172,9 @@ void idInteraction::AddActiveInteraction( void ) {
 
 					// touch the ambient surface so it won't get purged (a GPU-skinned surface with
 					// r_gpuSkinNoUpload has no ambient cache — it draws from gpuSkinVB — so skip the touch)
-					if ( lightTris->ambientCache ) {
+					// (DUDE: nor the frame-temp vertices of a lit particle stage, Model_prt.cpp)
+					const bool frameTemp = vertexCache.IsFrameTemp( lightTris->ambientCache );
+					if ( lightTris->ambientCache && !frameTemp ) {
 						vertexCache.Touch( lightTris->ambientCache );
 					}
 
@@ -1189,7 +1191,7 @@ void idInteraction::AddActiveInteraction( void ) {
 						vertexCache.Touch( lightTris->lightingCache );
 					}
 
-					if ( !lightTris->indexCache && r_useIndexBuffers.GetBool() ) {
+					if ( !lightTris->indexCache && r_useIndexBuffers.GetBool() && !frameTemp ) {
 						vertexCache.Alloc( lightTris->indexes, lightTris->numIndexes * sizeof( lightTris->indexes[0] ), &lightTris->indexCache, true );
 					}
 					if ( lightTris->indexCache ) {
@@ -1274,10 +1276,11 @@ void idInteraction::AddActiveInteraction( void ) {
 				if ( haveCache ) {
 					// GPU-skinned casters (r_gpuSkinNoUpload) have no ambient cache — R_CreateAmbientCache
 					// succeeded but left it NULL because the caster rasterizes from gpuSkinVB. Skip the touch.
-					if ( castTri->ambientCache ) {
+					const bool frameTemp = vertexCache.IsFrameTemp( castTri->ambientCache );	// DUDE: Model_prt.cpp
+					if ( castTri->ambientCache && !frameTemp ) {
 						vertexCache.Touch( castTri->ambientCache );
 					}
-					if ( r_useIndexBuffers.GetBool() && !castTri->indexCache ) {
+					if ( r_useIndexBuffers.GetBool() && !castTri->indexCache && !frameTemp ) {
 						vertexCache.Alloc( castTri->indexes, castTri->numIndexes * sizeof( castTri->indexes[0] ), &castTri->indexCache, true );
 					}
 					if ( castTri->indexCache ) {

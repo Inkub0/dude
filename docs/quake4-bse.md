@@ -846,3 +846,24 @@ in both games, the screenshots compare directly. `func_fx` also takes `endOrigin
 
 - After the BSE particle path is done: reuse it to fix Doom 3's particle buffer churn on Vulkan
   (`idRenderModelPrt` snapshots → frame-temporary memory), as the user asked on 2026-10-25.
+  **Built 2026-10-27** (`perf/prt-frame-temp-vertices`, plan approved by the user, gate pending). What
+  churned: the snapshot rebuilt its vertices in its own arrays each frame (fine), then freed the
+  surface's vertex cache and `R_CreateAmbientCache` uploaded it again as a static block - on Vulkan
+  a persistent RHI buffer created and destroyed per stage per frame. Now:
+  - `idRenderModelPrtSnapshot` (Model_prt.cpp): after building a stage it takes
+    `vertexCache.AllocFrameTempIfFits` (lit stages derive their tangents first, as
+    `R_CreateAmbientCache` did); it remembers which surfaces got a temp block and clears exactly
+    those pointers before the next rebuild and in its destructor (a temp header is recycled at the
+    frame's end: never `Free()`d, its tag not trusted later). The arrays stay in the snapshot.
+  - `AllocFrameTempIfFits` (VertexCache): NULL when the frame's temp space is full - the surface
+    then keeps id's static path - instead of `AllocFrameTemp`'s fallback (a static block already
+    freed, which a later `Touch` would have relinked). `IsFrameTemp` for the guards below.
+  - The ambient-surface pass, lit interactions and shadow casters skip `Touch` and the static index
+    cache (`r_useIndexBuffers 1`) for a frame-temp surface.
+  - The frame's temp space 2 MB -> 16 MB (`FRAME_MEMORY_BYTES`; CPU memory x 2 frames): GUIs,
+    decals, deform particles and Quake 4's effects share it, and its overflow is exactly the
+    per-use static block this removes. Vulkan streams the used part through its per-frame ring
+    (grows as needed).
+  - Temporary A/B for the gate, removed at merge: `r_prtFrameTemp` 1 (new) / 0 (id's path).
+  No fidelity change (the same vertices). Shared engine code: Doom 3, RoE and Lost Mission; Quake
+  4's effects were already frame-temp and only get the larger temp space.
