@@ -1366,6 +1366,37 @@ void idCommonLocal::WriteConfigToFile( const char *filename ) {
 	fileSystem->CloseFile( f );
 }
 
+// DUDE: a fresh install, or a config carried over from dhewm3 (whose binds live in dhewm.cfg,
+// which DUDE never reads), has no gamepad bindings, so a pad did nothing in game - only Start
+// opened the menu (issue #3). Once per install: if no gamepad button or stick is bound, load
+// the default Xbox-style layout, the same cfg F10's "Reset Gamepad Bindings" applies.
+static idCVar in_gamepadAutoBind( "in_gamepadAutoBind", "1", CVAR_BOOL | CVAR_ARCHIVE | CVAR_SYSTEM,
+	"1 = at startup, load the default gamepad layout (gamepad.cfg / gamepad-d3xp.cfg) if no gamepad button is bound; turns itself off afterwards" );
+
+static void Com_AutoBindGamepad( void ) {
+	if ( !in_gamepadAutoBind.GetBool() || GameTitle::Get().title == GAME_TITLE_QUAKE4 ) {
+		return;		// Quake 4's impulses differ and no default layout ships for it
+	}
+	// Resurrection of Evil, the Lost Mission and mods built on them number their weapons differently
+	const char *game = cvarSystem->GetCVarString( "fs_game" );
+	const char *gameBase = cvarSystem->GetCVarString( "fs_game_base" );
+	const bool d3xp = idStr::Icmp( game, "d3xp" ) == 0 || idStr::Icmp( game, "d3le" ) == 0
+					  || idStr::Icmp( gameBase, "d3xp" ) == 0 || idStr::Icmp( gameBase, "d3le" ) == 0;
+	const char *cfg = d3xp ? "gamepad-d3xp.cfg" : "gamepad.cfg";
+	if ( fileSystem->ReadFile( cfg, NULL, NULL ) <= 0 ) {
+		return;
+	}
+	in_gamepadAutoBind.SetBool( false );
+	for ( int k = K_FIRST_JOY; k <= K_LAST_JOY; k++ ) {
+		const char *binding = idKeyInput::GetBinding( k );
+		if ( k != K_JOY_BTN_START && binding != NULL && binding[0] != '\0' ) {
+			return;		// the player has gamepad bindings already: leave them alone
+		}
+	}
+	common->Printf( "No gamepad bindings: loading the default layout from %s\n", cfg );
+	cmdSystem->BufferCommandText( CMD_EXEC_NOW, va( "exec %s\n", cfg ) );
+}
+
 /*
 ===============
 idCommonLocal::CheckConfigSchema
@@ -3951,6 +3982,9 @@ void idCommonLocal::InitGame( void ) {
 	// reset marks the archived cvars modified again and WriteConfiguration persists the new
 	// schema stamp on shutdown (otherwise it would re-fire every launch).
 	CheckConfigSchema();
+
+	// DUDE: likewise after ClearModifiedFlags, so the bindings and the flag reach the config
+	Com_AutoBindGamepad();
 
 	// init the user command input code
 	usercmdGen->Init();
