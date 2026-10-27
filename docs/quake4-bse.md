@@ -846,7 +846,11 @@ in both games, the screenshots compare directly. `func_fx` also takes `endOrigin
 
 - After the BSE particle path is done: reuse it to fix Doom 3's particle buffer churn on Vulkan
   (`idRenderModelPrt` snapshots → frame-temporary memory), as the user asked on 2026-10-25.
-  **Built 2026-10-27** (`perf/prt-frame-temp-vertices`, plan approved by the user, gate pending). What
+  **Done 2026-10-27** (`perf/prt-frame-temp-vertices`, merged after the user's gate: Doom 3 `hell1`
+  with `r_showVertexCache` - static allocations 100.5 -> 10.4 per frame (156 -> 38 KB), temp space
+  peak 331 KB of 16 MB, no overflow; GPU 13.10 ms both ways over ~380-sample windows, `com_speeds`
+  unchanged (GPU-bound, whole-ms resolution); identical look in Doom 3 and RoE/LM; Vulkan
+  validation clean; ASAN clean; Quake 4 effects as before). What
   churned: the snapshot rebuilt its vertices in its own arrays each frame (fine), then freed the
   surface's vertex cache and `R_CreateAmbientCache` uploaded it again as a static block - on Vulkan
   a persistent RHI buffer created and destroyed per stage per frame. Now:
@@ -864,6 +868,6 @@ in both games, the screenshots compare directly. `func_fx` also takes `endOrigin
     decals, deform particles and Quake 4's effects share it, and its overflow is exactly the
     per-use static block this removes. Vulkan streams the used part through its per-frame ring
     (grows as needed).
-  - Temporary A/B for the gate, removed at merge: `r_prtFrameTemp` 1 (new) / 0 (id's path).
+  - The gate's temporary A/B cvar (`r_prtFrameTemp`) is removed.
   No fidelity change (the same vertices). Shared engine code: Doom 3, RoE and Lost Mission; Quake
   4's effects were already frame-temp and only get the larger temp space.

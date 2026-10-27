@@ -52,9 +52,6 @@ static const char *parametricParticle_SnapshotName = "_ParametricParticle_Snapsh
 
 ===============================================================================
 */
-// TEMPORARY A/B for the gate (before/after in one binary); removed at merge
-static idCVar r_prtFrameTemp( "r_prtFrameTemp", "1", CVAR_RENDERER | CVAR_BOOL, "TEMPORARY A/B: 1 = Doom 3 particle snapshots in frame-temp vertex memory, 0 = id's static block per stage per frame" );
-
 class idRenderModelPrtSnapshot : public idRenderModelStatic {
 public:
 	virtual						~idRenderModelPrtSnapshot() { DropFrameTempCaches(); }
@@ -278,7 +275,7 @@ idRenderModel *idRenderModelPrt::InstantiateDynamicModel( const struct renderEnt
 
 		// DUDE: the vertices into this frame's temp space (see idRenderModelPrtSnapshot); a lit stage gets its
 		// tangents first, as R_CreateAmbientCache derives them before its upload
-		if ( numVerts > 0 && r_prtFrameTemp.GetBool() ) {
+		if ( numVerts > 0 ) {
 			if ( stage->material->ReceivesLighting() ) {
 				R_DeriveTangents( surf->geometry );
 			}
