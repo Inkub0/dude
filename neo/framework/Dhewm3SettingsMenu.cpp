@@ -6518,6 +6518,9 @@ static CVarOption gameOptions[] = {
 	CVarOption( "in_toggleZoom", "Toggle Zoom", OT_BOOL ),
 	CVarOption( "ui_autoReload", "Auto Weapon Reload", OT_BOOL ),
 	CVarOption( "ui_autoSwitch", "Auto Weapon Switch", OT_BOOL ),
+	CVarOption( "Timing" ),
+	// DUDE: Doom 3's original 16 msec game tic; also on the main menu's Options > Game page
+	CVarOption( "com_classicTics", "Classic 62.5 Hz Game Tics (applies at the next map load)", OT_BOOL ),
 	CVarOption( "Visual" ),
 	CVarOption( "g_showHud", "Show HUD", OT_BOOL ),
 	CVarOption( "com_showFPS", []( idCVar& cvar ) {
