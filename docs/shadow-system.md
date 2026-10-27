@@ -116,9 +116,22 @@ re-renders it when the light or one of its shadow casters moves:
 - **VRAM-bounded:** `r_shadowMapCacheMB` (`-1` = auto, half of detected video memory
   via `GL_NVX_gpu_memory_info` / `GL_ATI_meminfo`; `0` = unlimited). LRU eviction by
   last-seen frame.
+- **Budget downscale** (`r_shadowMapBudgetDownscale`, default 0, opt-in): when the point
+  lights in view don't fit the cache budget, the overflow lights normally re-render into
+  the scratch cube every frame at full size. With this on, a per-view plan
+  (`RB_RHI_PlanCubeDownscale`, primary view only, before the light loop) halves the cube
+  resolution of the **farthest** lights first — each down to ¼ of its tier size, never
+  below 256 — until the set fits, so they stay cached. Sticky so lights don't flip size
+  (each flip = slot realloc + re-render): shrinking is immediate, but a light grows back
+  only when the set fits with 12% of the budget to spare, ≥60 frames after its last
+  change, one light per view; already-downscaled lights rank 25% farther per step. Their
+  scratch / movers cubes use the reduced size too (a small exact-size pool).
+  **Fidelity note:** look change, mild — distant point-light shadows get softer while the
+  budget is exceeded; nothing changes when everything fits.
 - **Diagnostics:** `r_shadowMapCacheDebug 1` prints a once/sec `cubeCache/s` line: hit
   rate + re-renders split by cause (cold / warm-caster / warm-light) + faces rasterized +
-  `split` (lights kept cached via lever B) / scratch / dynamic / deferred / evict.
+  `split` (lights kept cached via lever B) / scratch / dynamic / deferred / evict, plus
+  `downscaled` (cube lights at a budget-downscaled size) while `r_shadowMapBudgetDownscale` is on.
 - **Teardown:** `RB_RHI_FreeShadowCubeCache()` (called from
   `idRenderWorldLocal::FreeDefs`) drops the whole cache on world teardown / map reload,
   because cached cubes are keyed to light indices that `FreeDefs` frees — otherwise a
@@ -218,6 +231,7 @@ immediately. See also the private design note `emissive-gui-lights` in the agent
 | `r_shadowMapCachePerFace` | 1 | 0/1 | warm miss re-renders only the faces a mover crossed (lever A) |
 | `r_shadowMapCacheSplit` | 1 | 0/1 | moving-caster light: cache the static cube + a per-frame movers cube (lever B) |
 | `r_shadowMapCacheMB` | -1 | -1–32768 | cache VRAM budget; -1 = auto (½ VRAM), 0 = unlimited |
+| `r_shadowMapBudgetDownscale` | 0 | 0/1 | over-budget point lights: halve the farthest cubes until they fit (fidelity: softer distant shadows) |
 | `r_shadowMapCacheDebug` | 0 | 0/1 | once/sec cube-cache breakdown (hit rate + re-render causes) |
 | `r_shadowMapBias` | 0.0025 | 0–0.5 | depth bias, world/perforated receivers |
 | `r_shadowMapModelBias` | 0.005 | 0–0.5 | depth bias, model receivers |

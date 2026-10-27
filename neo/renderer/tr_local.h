@@ -1032,6 +1032,7 @@ extern idCVar r_shadowMapCache;				// cache static point-light cube maps across 
 extern idCVar r_shadowMapCacheMB;			// VRAM budget for the shadow-map cache (MB; -1 auto, 0 unlimited)
 extern idCVar r_shadowMapBudgetHysteresis;	// point-light budget stickiness (percent score bonus for recent incumbents)
 extern idCVar r_shadowMapMaxUpdates;		// max cached cube maps re-rendered per view (stagger update bursts; 0 = unlimited)
+extern idCVar r_shadowMapBudgetDownscale;	// over-budget point lights: halve the farthest ones' cube resolution until they fit (opt-in, softer)
 extern idCVar r_shadowMapStencilRadius;		// lights bigger than this (max radius axis) fall back to stencil shadows
 extern idCVar r_shadowMapSkipStencilBuild;	// skip building CPU stencil volumes for animated casters under shadow-mapped lights
 extern idCVar r_shadowMapSun;				// oversize/parallel "sun" lights: per-view fitted 2D map instead of stencil

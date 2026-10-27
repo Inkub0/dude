@@ -3348,6 +3348,30 @@ static bool RB_RHI_ShadowMapPassSun( rhi::RHI *r, viewLight_t *vLight, rhi::Shad
 	return true;
 }
 
+// RB_RHI_ShadowMapPassSun's decline test without rendering, for an oversize OMNI light: true
+// when the sun pass would turn it down (no casters, or the light sits inside / near the fitted
+// view sphere) and it falls through to the cube path. Used only by the cube downscale plan
+// (r_shadowMapBudgetDownscale) to predict which lights take a cube; keep in step with the fit above.
+static bool RB_RHI_SunFitDeclines( const viewDef_t *viewDef, const viewLight_t *vLight ) {
+	if ( !vLight->shadowMapCasters || !vLight->lightDef ) {
+		return true;
+	}
+	const float range = r_shadowMapSunRange.GetFloat();
+	const idVec3 org = viewDef->renderView.vieworg;
+	const idVec3 fwd = viewDef->renderView.viewaxis[0];
+	const float tx = idMath::Tan( DEG2RAD( viewDef->renderView.fov_x * 0.5f ) );
+	const float ty = idMath::Tan( DEG2RAD( viewDef->renderView.fov_y * 0.5f ) );
+	idVec3 C = org + fwd * ( 0.5f * range );
+	const float R = idMath::Sqrt( 0.25f + tx * tx + ty * ty ) * range;
+	const float grid = R / 32.0f;
+	for ( int i = 0; i < 3; i++ ) {
+		C[i] = idMath::Rint( C[i] / grid ) * grid;
+	}
+	idVec3 n = C - vLight->globalLightOrigin;
+	const float dist = n.Normalize();
+	return dist <= R * 1.05f;
+}
+
 /*
 ===================
 Point-light (omni) cube shadow maps
@@ -4013,6 +4037,195 @@ static void RB_RHI_ResetCubeCache( rhi::RHI *r ) {
 	rhiCubeCacheBytes = 0;
 }
 
+// ---- Budget downscale (r_shadowMapBudgetDownscale) -------------------------------
+// Opt-in; lowers fidelity. When the point lights in view need more cube VRAM than the cache
+// budget, the thrash guard above keeps the working set resident and the overflow lights
+// re-render into the scratch cube every frame at full size. With this on, a per-view plan
+// (RB_RHI_PlanCubeDownscale, before the light loop) halves the cube resolution of the FARTHEST
+// lights first -- each down to a quarter of its tier size, never below 256 -- until the set
+// fits, so they stay cached: softer distant shadows instead of a per-frame re-render.
+// Every size change reallocates the light's slot and re-renders it (a hitch), so the plan is
+// sticky: a downscaled light grows back only when the set still fits with
+// CUBE_DOWNSCALE_MARGIN_PCT of the budget to spare and its last change is
+// CUBE_DOWNSCALE_HOLD_FRAMES old, one light per view; and the farthest-first order ranks lights
+// that are already down a little farther (CUBE_DOWNSCALE_KEY_HYST), so two lights at similar
+// distances don't trade sizes as the player moves. Shrinking is never delayed (the set must fit).
+// Only the primary view plans; subviews (mirrors, cameras) see a different light set and would
+// flip shared lights every frame, so they apply the primary view's plan as it stands. The table
+// holds downscaled lights only: no entry = full tier size. Off (the default) it stays empty
+// and every lookup returns the tier size, so the cube path is unchanged.
+#define MAX_CUBE_DOWNSCALE			256
+#define CUBE_DOWNSCALE_MAX_SHIFT	2		// at most a quarter of the tier resolution
+#define CUBE_DOWNSCALE_MIN_SIZE		256		// never plan a face below this
+#define CUBE_DOWNSCALE_MARGIN_PCT	12		// budget headroom a downscaled light needs to grow back
+#define CUBE_DOWNSCALE_HOLD_FRAMES	60		// ...and frames since its last size change
+#define CUBE_DOWNSCALE_BUDGET_VIEWS	8		// budget history the plan reads (see RB_RHI_PlanCubeDownscale)
+static const float CUBE_DOWNSCALE_KEY_HYST = 0.25f;	// a downscaled light ranks this much farther per step
+struct cubeDownscale_t {
+	int		lightIndex;			// idRenderLightLocal::index
+	int		shift;				// planned halvings of the tier size; 0 = free entry
+	int		lastSeenFrame;		// rhiCubeCacheFrameNo of the last plan that included it (LRU)
+	int		lastChangeFrame;	// tr.frameCount of its last size change (grow-back hold)
+};
+static cubeDownscale_t rhiCubeDownscale[MAX_CUBE_DOWNSCALE];
+static size_t rhiCubeDownscaleBudget[CUBE_DOWNSCALE_BUDGET_VIEWS];	// the cache budget of the last planned views
+static int rhiCubeDownscaleBudgetNum = 0;
+static bool rhiCubeDownscaleActive = false;	// the cvar was on: state to drop when it goes off
+static int rhiCubeDownscaled = 0;			// r_shadowMapCacheDebug: cube lights at a downscaled size this view
+
+// Scratch / dynamic-layer cubes for downscaled lights. Their face sizes aren't tier sizes, so
+// they can't share the per-tier scratch pool (rhiShadowCubePool): alternating sizes there would
+// destroy and recreate a tier slot light after light. A small pool keyed by exact face size
+// instead, recycled least-recently-used (a slot this view already used only as a last resort).
+#define SHADOW_DOWN_POOL 8
+struct shadowDownSlot_t {
+	rhi::RenderTargetHandle	rt;
+	int						size;
+	int						lastFrame;		// rhiCubeCacheFrameNo of its last use
+};
+static shadowDownSlot_t rhiShadowCubeDownPool[SHADOW_DOWN_POOL];
+
+// `size` halved `shift` times, never below the floor (a light near it shrinks fewer steps,
+// a small one not at all).
+static int RB_RHI_CubeDownscaleSize( int size, int shift ) {
+	while ( shift > 0 && ( size >> shift ) < CUBE_DOWNSCALE_MIN_SIZE ) {
+		shift--;
+	}
+	return size >> shift;
+}
+
+static cubeDownscale_t *RB_RHI_FindCubeDownscale( int lightIndex ) {
+	for ( int i = 0; i < MAX_CUBE_DOWNSCALE; i++ ) {
+		if ( rhiCubeDownscale[i].shift > 0 && rhiCubeDownscale[i].lightIndex == lightIndex ) {
+			return &rhiCubeDownscale[i];
+		}
+	}
+	return NULL;
+}
+
+// The cube face size a light uses this view: its tier size, or the planned downscale of it.
+// Identity while r_shadowMapBudgetDownscale is off.
+static int RB_RHI_PlannedCubeSize( int lightIndex, int tierSize ) {
+	if ( !r_shadowMapBudgetDownscale.GetBool() ) {
+		return tierSize;
+	}
+	const cubeDownscale_t *e = RB_RHI_FindCubeDownscale( lightIndex );
+	return e ? RB_RHI_CubeDownscaleSize( tierSize, e->shift ) : tierSize;
+}
+
+// Record the plan's shift for a light (0 = full size: frees its entry). A full table recycles
+// the entry least recently planned (a light long out of view); if every entry was planned this
+// view, returns false and the light stays at full size.
+static bool RB_RHI_SetCubeDownscale( int lightIndex, int shift, bool changed ) {
+	cubeDownscale_t *e = RB_RHI_FindCubeDownscale( lightIndex );
+	if ( shift <= 0 ) {
+		if ( e ) {
+			memset( e, 0, sizeof( *e ) );
+		}
+		return true;
+	}
+	if ( e == NULL ) {
+		int victim = -1;
+		for ( int i = 0; i < MAX_CUBE_DOWNSCALE; i++ ) {
+			const cubeDownscale_t &c = rhiCubeDownscale[i];
+			if ( c.shift <= 0 ) {
+				victim = i;
+				break;
+			}
+			if ( c.lastSeenFrame != rhiCubeCacheFrameNo
+			     && ( victim < 0 || c.lastSeenFrame < rhiCubeDownscale[victim].lastSeenFrame ) ) {
+				victim = i;
+			}
+		}
+		if ( victim < 0 ) {
+			return false;
+		}
+		e = &rhiCubeDownscale[victim];
+		e->lightIndex = lightIndex;
+	}
+	e->shift = shift;
+	e->lastSeenFrame = rhiCubeCacheFrameNo;
+	if ( changed ) {
+		e->lastChangeFrame = tr.frameCount;
+	}
+	return true;
+}
+
+// A scratch (or dynamic-layer) cube of exactly `size` for a downscaled light. Returns 0 only if
+// creation failed; the caller then falls back to the tier's full-size scratch cube.
+static rhi::RenderTargetHandle RB_RHI_DownscaledPoolTarget( rhi::RHI *r, int size ) {
+	int freeSlot = -1, oldSlot = -1, usedSlot = -1;
+	for ( int i = 0; i < SHADOW_DOWN_POOL; i++ ) {
+		shadowDownSlot_t &s = rhiShadowCubeDownPool[i];
+		if ( s.rt && r->GetRenderTargetImage( s.rt ) == 0 ) {
+			s.rt = 0;		// lost context (vid_restart)
+			s.size = 0;
+		}
+		if ( s.rt && s.size == size ) {
+			s.lastFrame = rhiCubeCacheFrameNo;
+			return s.rt;
+		}
+		if ( s.rt == 0 ) {
+			if ( freeSlot < 0 ) { freeSlot = i; }
+		} else if ( s.lastFrame != rhiCubeCacheFrameNo ) {
+			if ( oldSlot < 0 || s.lastFrame < rhiShadowCubeDownPool[oldSlot].lastFrame ) { oldSlot = i; }
+		} else if ( usedSlot < 0 ) {
+			usedSlot = i;	// in use this view: still safe to replace (destruction is deferred), only churnier
+		}
+	}
+	const int slot = ( freeSlot >= 0 ) ? freeSlot : ( ( oldSlot >= 0 ) ? oldSlot : usedSlot );
+	shadowDownSlot_t &s = rhiShadowCubeDownPool[slot];
+	if ( s.rt ) {
+		r->DestroyRenderTarget( s.rt );
+	}
+	s.rt = r->CreateRenderTargetCube( rhi::IF_DEPTH24, size );
+	s.size = s.rt ? size : 0;
+	s.lastFrame = rhiCubeCacheFrameNo;
+	RB_RHI_ForgetTexBinds();				// create() disturbed unit 0's cached bind
+	return s.rt;
+}
+
+// Drop every downscale decision and the exact-size scratch cubes: the cvar went off (lights
+// return to full size) or the world is torn down (light indices get reused).
+static void RB_RHI_FreeCubeDownscale( rhi::RHI *r ) {
+	for ( int i = 0; i < SHADOW_DOWN_POOL; i++ ) {
+		shadowDownSlot_t &s = rhiShadowCubeDownPool[i];
+		if ( s.rt && r && r->GetRenderTargetImage( s.rt ) != 0 ) {
+			r->DestroyRenderTarget( s.rt );
+		}
+		s.rt = 0;
+		s.size = 0;
+		s.lastFrame = 0;
+	}
+	memset( rhiCubeDownscale, 0, sizeof( rhiCubeDownscale ) );
+	rhiCubeDownscaleBudgetNum = 0;
+	rhiCubeDownscaleActive = false;
+}
+
+// The plan changed a light's size: drop its cached cube before the light loop, so the VRAM a
+// downscale frees is there for every light this view (the loop allocates first-come; a light
+// ahead of this one would otherwise still see the old, bigger cube and spill to scratch for a
+// frame). The light then cold-renders at its new size -- what AcquireCubeTarget's
+// resolution-changed path would have done when it got there.
+static void RB_RHI_DropResizedCube( rhi::RHI *r, int lightIndex, int size ) {
+	for ( int i = 0; i < MAX_SHADOW_CUBE_CACHE; i++ ) {
+		shadowCubeCache_t &s = rhiCubeCache[i];
+		if ( s.rt && s.lightIndex == lightIndex ) {
+			if ( s.size != size ) {
+				if ( r->GetRenderTargetImage( s.rt ) != 0 ) {
+					r->DestroyRenderTarget( s.rt );
+				}
+				rhiCubeCacheBytes -= s.bytes;
+				s.lightIndex = -1;
+				s.rt = 0;
+				s.bytes = 0;
+				s.token = 0;
+			}
+			return;
+		}
+	}
+}
+
 // ---- Static 2D (projected/spot) shadow-map cache ---------------------------------
 // The 2D analogue of the point-cube cache above. Projected depth maps are small (a
 // 1024^2 DEPTH24 map is ~4 MB), so this skips the VRAM budget/byte accounting the cube
@@ -4161,6 +4374,9 @@ void RB_RHI_ResetWorldTargets( void ) {
 		rhiShadowMapPool[i].rt  = 0;	rhiShadowMapPool[i].size  = 0;
 		rhiShadowCubePool[i].rt = 0;	rhiShadowCubePool[i].size = 0;
 	}
+	for ( int i = 0; i < SHADOW_DOWN_POOL; i++ ) {		// r_shadowMapBudgetDownscale's exact-size scratch cubes
+		rhiShadowCubeDownPool[i].rt = 0;	rhiShadowCubeDownPool[i].size = 0;
+	}
 
 	rhiSsaoRT = rhiSsaoBlurRT = rhiSsaoResultRT = 0;
 	rhiSsaoW = rhiSsaoH = rhiSsaoViewW = rhiSsaoViewH = 0;
@@ -4246,6 +4462,7 @@ void RB_RHI_FreeShadowCubeCache() {
 	// lights don't inherit a phantom budget bonus from the old one.
 	RB_RHI_ResetLightBudgetHyst();
 	RB_RHI_ResetRtMovingTrack();	// same reuse hazard: stale pose baselines would misread as movement
+	RB_RHI_FreeCubeDownscale( rhi::GetRHI() );	// same: downscale decisions are keyed by light index
 }
 
 // Render a point light's occluder depth into `cubeTarget`, one 90-degree face at a time.
@@ -4317,13 +4534,21 @@ static bool RB_RHI_ShadowMapPassCube( rhi::RHI *r, viewLight_t *vLight, rhi::Sha
 	// caller's GetRenderTargetImage sample.
 	const float radius = vLight->lightDef->parms.lightRadius.Length();
 	const int tier = RB_RHI_ShadowTier( radius );
-	const int size = RB_RHI_TierSize( base, tier, 128, cubeHi );
+	const int tierSize = RB_RHI_TierSize( base, tier, 128, cubeHi );
+	const int lightIndex = vLight->lightDef->index;
+	// r_shadowMapBudgetDownscale: the per-view plan may have halved this light's cube so the
+	// lights in view fit the cache budget (RB_RHI_PlanCubeDownscale). The token folds the size,
+	// so a planned change re-renders. size == tierSize whenever the cvar is off.
+	int size = RB_RHI_PlannedCubeSize( lightIndex, tierSize );
+	const bool downscaled = ( size != tierSize );
+	if ( downscaled ) {
+		rhiCubeDownscaled++;
+	}
 
 	// static cache lookup: on a hit the stored cube is unchanged, so we sample it and
 	// skip the whole render. On a miss AcquireCubeTarget hands back a persistent target
 	// (token stored); if caching is off or the light won't fit the budget it returns 0
 	// and we fall back to the shared scratch pool that regenerates every frame.
-	const int lightIndex = vLight->lightDef->index;
 	// static/dynamic split (r_shadowMapCacheSplit, lever B): a light with a moving/animated
 	// caster normally bypasses the cache and regenerates the whole cube every frame. With the
 	// split on we cache the STATIC (world) casters and re-render only the movers into a small
@@ -4360,7 +4585,13 @@ static bool RB_RHI_ShadowMapPassCube( rhi::RHI *r, viewLight_t *vLight, rhi::Sha
 		if ( !dynamic ) {
 			rhiCubeCacheScratch++;		// static light that didn't fit the VRAM budget
 		}
-		target = RB_RHI_ShadowPoolTarget( r, true, tier, size );
+		// a downscaled light re-renders its scratch cube at the reduced size too (cheaper fill);
+		// should that fail, the tier's full-size scratch cube as without the downscale
+		target = downscaled ? RB_RHI_DownscaledPoolTarget( r, size ) : 0;
+		if ( target == 0 ) {
+			size = tierSize;
+			target = RB_RHI_ShadowPoolTarget( r, true, tier, size );
+		}
 	}
 	rhiShadowCube = target;
 	rhiShadowCubeSize = size;
@@ -4454,11 +4685,20 @@ static bool RB_RHI_ShadowMapPassCube( rhi::RHI *r, viewLight_t *vLight, rhi::Sha
 		int tierDyn = tier;
 		int sizeDyn = size;
 		const int drop = idMath::ClampInt( 0, 2, r_shadowMapSplitDynDrop.GetInteger() );
-		if ( drop > 0 && tier > 0 ) {
-			tierDyn = ( tier - drop > 0 ) ? ( tier - drop ) : 0;
-			sizeDyn = RB_RHI_TierSize( base, tierDyn, 128, cubeHi );
+		rhi::RenderTargetHandle dynTarget = 0;
+		if ( downscaled ) {
+			// r_shadowMapBudgetDownscale: the static cube is no tier size, so halve it `drop` times
+			// into the exact-size pool. Never larger than the static cube, so the shader's ratio
+			// gate (> 0.5) and its PCF/bias widening hold.
+			sizeDyn = Max( 128, size >> drop );
+			dynTarget = RB_RHI_DownscaledPoolTarget( r, sizeDyn );
+		} else {
+			if ( drop > 0 && tier > 0 ) {
+				tierDyn = ( tier - drop > 0 ) ? ( tier - drop ) : 0;
+				sizeDyn = RB_RHI_TierSize( base, tierDyn, 128, cubeHi );
+			}
+			dynTarget = RB_RHI_ShadowPoolTarget( r, true, tierDyn, sizeDyn );
 		}
-		const rhi::RenderTargetHandle dynTarget = RB_RHI_ShadowPoolTarget( r, true, tierDyn, sizeDyn );
 		if ( dynTarget != 0 && dynTarget != target ) {
 			const bool allFaces[6] = { true, true, true, true, true, true };
 			RB_RHI_RenderCubeFaces( r, vLight, prog, dynTarget, range, allFaces, /*faceCull=*/true, CF_DYNAMIC );
@@ -4591,13 +4831,36 @@ static void RB_RHI_ResetRtMovingTrack() {
 	memset( rhiRtMovingTrack, 0, sizeof( rhiRtMovingTrack ) );
 }
 
-static bool RB_RHI_LightIsMoving( const viewLight_t *vLight ) {
-	// pose-only hash: the same fields the cube token's light sub-hash folds, minus the
-	// settings (range/size/dither) that would masquerade as movement when tuned live
+// pose-only hash: the same fields the cube token's light sub-hash folds, minus the
+// settings (range/size/dither) that would masquerade as movement when tuned live
+static unsigned long long RB_RHI_LightPoseToken( const viewLight_t *vLight ) {
 	unsigned long long tok = 1469598103934665603ULL;
 	tok = RB_RHI_HashBytes( tok, vLight->globalLightOrigin.ToFloatPtr(), 3 * sizeof( float ) );
 	tok = RB_RHI_HashBytes( tok, vLight->lightDef->parms.lightCenter.ToFloatPtr(), 3 * sizeof( float ) );
 	tok = RB_RHI_HashBytes( tok, &vLight->lightDef->parms.axis, sizeof( idMat3 ) );
+	return tok;
+}
+
+// RB_RHI_LightIsMoving's answer for this view without touching the tracker: the cube
+// downscale plan (r_shadowMapBudgetDownscale) runs before the light loop and must not
+// consume the pose change the loop's own call is about to see.
+static bool RB_RHI_LightIsMovingPeek( const viewLight_t *vLight ) {
+	const unsigned long long tok = RB_RHI_LightPoseToken( vLight );
+	const int lightIndex = vLight->lightDef->index;
+	for ( int i = 0; i < MAX_RT_MOVING_TRACK; i++ ) {
+		const rtMovingTrack_t &t = rhiRtMovingTrack[i];
+		if ( t.lastSeenFrame != 0 && t.lightIndex == lightIndex ) {
+			if ( t.poseTok != tok ) {
+				return true;		// moves this view
+			}
+			return ( rhiCubeCacheFrameNo - t.lastMoveFrame ) <= RT_MOVING_HYST_VIEWS;
+		}
+	}
+	return false;					// first sight: gets baselined, not moving
+}
+
+static bool RB_RHI_LightIsMoving( const viewLight_t *vLight ) {
+	const unsigned long long tok = RB_RHI_LightPoseToken( vLight );
 
 	const int lightIndex = vLight->lightDef->index;
 	int free = -1, oldest = -1;
@@ -11399,6 +11662,7 @@ static void RB_RHI_ResetShadowTallies( rhi::RHI *r ) {
 	rhiCubeSlotEvictions = 0;
 	rhiCubeCacheSplit = 0;
 	rhiCubeCacheRtMoving = 0;
+	rhiCubeDownscaled = 0;
 	rhiMapCacheHits = 0;
 	rhiMapCacheRendered = 0;
 	rhiCubeCacheFrameNo++;			// bump before the light loop so lastFrame == "this view"
@@ -11457,7 +11721,7 @@ static void RB_RHI_LogShadowCacheSummary() {
 	// per-frame spam. Hit% is over cached lookups (excludes scratch/dynamic lights, which
 	// never enter the cache). This is what says which caching lever is worth building.
 	if ( r_shadowMapCacheDebug.GetBool() ) {
-		static int accHits, accCold, accWarmCaster, accWarmLight, accScratch, accDynamic, accDeferred, accEvict, accSlotEvict, accFaces, accSplit, accRtMoving, accFrames, accStartMs;
+		static int accHits, accCold, accWarmCaster, accWarmLight, accScratch, accDynamic, accDeferred, accEvict, accSlotEvict, accFaces, accSplit, accRtMoving, accDownscaled, accFrames, accStartMs;
 		const int nowMs = Sys_Milliseconds();
 		if ( accStartMs == 0 ) { accStartMs = nowMs; }
 		accHits       += rhiCubeCacheHits;
@@ -11472,15 +11736,19 @@ static void RB_RHI_LogShadowCacheSummary() {
 		accFaces      += rhiShadowCubeFaces;		// actual cube FACES rasterized -> the GPU cost per-face invalidation cuts
 		accSplit      += rhiCubeCacheSplit;			// moving-caster lights kept cached via the static/dynamic split
 		accRtMoving   += rhiCubeCacheRtMoving;		// moving lights served by a ray, no cube at all (r_rtMovingLights)
+		accDownscaled += rhiCubeDownscaled;			// cube lights at a budget-downscaled size (r_shadowMapBudgetDownscale)
 		accFrames++;
 		if ( nowMs - accStartMs >= 1000 ) {
 			const int rendered = accCold + accWarmCaster + accWarmLight;
 			const int lookups  = accHits + rendered;
 			const int hitPct   = lookups > 0 ? ( 100 * accHits ) / lookups : 0;
-			common->Printf( "cubeCache/s: %d hit (%d%%) | rendered %d = cold %d + warm[caster %d, light %d] | faces %d | split %d, rtMoving %d, scratch %d, dynamic %d, deferred %d, evict %d+%d slot | %d frames\n",
+			// "downscaled N" only while r_shadowMapBudgetDownscale is on (the line is unchanged otherwise)
+			common->Printf( "cubeCache/s: %d hit (%d%%) | rendered %d = cold %d + warm[caster %d, light %d] | faces %d | split %d, rtMoving %d, scratch %d%s, dynamic %d, deferred %d, evict %d+%d slot | %d frames\n",
 			                accHits, hitPct, rendered, accCold, accWarmCaster, accWarmLight, accFaces,
-			                accSplit, accRtMoving, accScratch, accDynamic, accDeferred, accEvict, accSlotEvict, accFrames );
-			accHits = accCold = accWarmCaster = accWarmLight = accScratch = accDynamic = accDeferred = accEvict = accSlotEvict = accFaces = accSplit = accRtMoving = accFrames = 0;
+			                accSplit, accRtMoving, accScratch,
+			                r_shadowMapBudgetDownscale.GetBool() ? va( ", downscaled %d", accDownscaled ) : "",
+			                accDynamic, accDeferred, accEvict, accSlotEvict, accFrames );
+			accHits = accCold = accWarmCaster = accWarmLight = accScratch = accDynamic = accDeferred = accEvict = accSlotEvict = accFaces = accSplit = accRtMoving = accDownscaled = accFrames = 0;
 			accStartMs = nowMs;
 		}
 	}
@@ -11584,6 +11852,231 @@ static lightShadowClass_t RB_RHI_ClassifyLightShadow( rhi::RHI *r, viewLight_t *
 	cls.oversize        = oversize;
 	cls.rtServesAll     = rtServesAll;
 	return cls;
+}
+
+/*
+===================
+RB_RHI_PlanCubeDownscale
+
+r_shadowMapBudgetDownscale (opt-in): once per primary view, right after the cube-cache frame
+bump and before the light loop. Collects the point lights that will render a cube this view
+(mirroring the loop's routing: lit, not DI-covered, shadow maps on, not ray-served, the sun fit
+declined an oversize one, not an RT moving light, inside r_shadowMapPointLimit, holding a cache
+slot), and if their cubes overflow the cache budget halves the farthest ones until they fit.
+See the notes at rhiCubeDownscale for the hysteresis.
+===================
+*/
+#define MAX_CUBE_PLAN 512
+struct cubePlanLight_t {
+	int		lightIndex;
+	int		tierSize;			// full (tier) face size
+	int		maxShift;			// halvings the floor allows
+	int		prevShift;			// shift held going into this view
+	int		lastChangeFrame;	// of the held shift (grow-back hold)
+	float	key;				// farthest-first order: distance, ranked farther while already down
+	int		fitShift;			// shift to fit the budget
+	int		marginShift;		// shift to fit the budget minus the grow-back margin
+};
+static cubePlanLight_t	rhiCubePlan[MAX_CUBE_PLAN];
+static const viewLight_t *rhiCubePlanElig[MAX_CUBE_PLAN];		// RB_RHI_PointLightInBudget's ranking population
+static double			rhiCubePlanScore[MAX_CUBE_PLAN];
+
+// Greedy farthest-first fit over rhiCubePlan[0..n) (sorted farthest first): starting from every
+// light at full size, halve the farthest light down to its floor, then the next, until the set
+// fits `budget`. Writes each light's halvings to fitShift, or to marginShift.
+static void RB_RHI_CubePlanFit( int n, size_t budget, bool margin ) {
+	size_t total = 0;
+	for ( int i = 0; i < n; i++ ) {
+		total += RB_RHI_CubeBytes( rhiCubePlan[i].tierSize );
+		( margin ? rhiCubePlan[i].marginShift : rhiCubePlan[i].fitShift ) = 0;
+	}
+	for ( int i = 0; i < n && total > budget; i++ ) {
+		cubePlanLight_t &p = rhiCubePlan[i];
+		int s = 0;
+		while ( total > budget && s < p.maxShift ) {
+			total -= RB_RHI_CubeBytes( p.tierSize >> s ) - RB_RHI_CubeBytes( p.tierSize >> ( s + 1 ) );
+			s++;
+		}
+		( margin ? p.marginShift : p.fitShift ) = s;
+	}
+}
+
+static void RB_RHI_PlanCubeDownscale( rhi::RHI *r, const viewDef_t *viewDef ) {
+	if ( !r_shadowMapBudgetDownscale.GetBool() ) {
+		if ( rhiCubeDownscaleActive ) {
+			RB_RHI_FreeCubeDownscale( r );		// switched off: every light back to full size
+		}
+		return;
+	}
+	rhiCubeDownscaleActive = true;
+	// primary view only (subviews apply its plan); nothing to plan without a light loop
+	if ( !viewDef->viewEntitys || viewDef->isSubview || !viewDef->isWindowView || r_skipInteractions.GetBool() ) {
+		return;
+	}
+	// nothing to fit when there's no cache (every cube is scratch), no shadow maps, or no cap:
+	// every light back to full size
+	if ( !r_shadowMapCache.GetBool() || !r_shadowMapping.GetBool() ) {
+		memset( rhiCubeDownscale, 0, sizeof( rhiCubeDownscale ) );
+		rhiCubeDownscaleBudgetNum = 0;
+		return;
+	}
+	const size_t budget = RB_RHI_CacheBudgetBytes();
+	if ( budget == (size_t)-1 ) {
+		memset( rhiCubeDownscale, 0, sizeof( rhiCubeDownscale ) );
+		rhiCubeDownscaleBudgetNum = 0;
+		return;
+	}
+	// The auto budget is measured VRAM, and Vulkan frees a destroyed cube only once the frame's
+	// fence passes: for a few frames after the plan drops big cubes, VMA still counts them while
+	// rhiCubeCacheBytes doesn't, so the budget dips by what was just freed. Shrinking against that
+	// dip would over-shrink (then grow back = more churn), so shrink against the highest budget of
+	// the last few views and grow back only against the lowest -- a real budget change still lands,
+	// a few views later.
+	memmove( rhiCubeDownscaleBudget + 1, rhiCubeDownscaleBudget, ( CUBE_DOWNSCALE_BUDGET_VIEWS - 1 ) * sizeof( size_t ) );
+	rhiCubeDownscaleBudget[0] = budget;
+	if ( rhiCubeDownscaleBudgetNum < CUBE_DOWNSCALE_BUDGET_VIEWS ) {
+		rhiCubeDownscaleBudgetNum++;
+	}
+	size_t budgetHi = budget, budgetLo = budget;
+	for ( int i = 1; i < rhiCubeDownscaleBudgetNum; i++ ) {
+		budgetHi = Max( budgetHi, rhiCubeDownscaleBudget[i] );
+		budgetLo = Min( budgetLo, rhiCubeDownscaleBudget[i] );
+	}
+
+	const int cubeHi = idMath::ClampInt( 128, 4096, glConfig.maxCubeMapSize );		// as RB_RHI_ShadowMapPassCube
+	const int base = idMath::ClampInt( 128, cubeHi, r_shadowMapPointSize.GetInteger() );
+	const bool split = r_shadowMapCacheSplit.GetBool();
+	const bool rtLive = ictx.interactionRtProg != 0 && r->GetTlasAddress() != 0;
+	const int limit = r_shadowMapPointLimit.GetInteger();
+	const idVec3 &viewOrg = viewDef->renderView.vieworg;
+
+	// RB_RHI_PointLightInBudget ranks each light against every eligible point light; score them
+	// once (the scores read the incumbency snapshot, so they hold for the whole view)
+	int numElig = 0;
+	if ( limit > 0 ) {
+		for ( const viewLight_t *vl = viewDef->viewLights; vl; vl = vl->next ) {
+			if ( !RB_RHI_PointLightShadowEligible( vl ) ) {
+				continue;
+			}
+			if ( numElig == MAX_CUBE_PLAN ) {
+				return;				// implausibly many point lights: keep the standing plan
+			}
+			rhiCubePlanElig[numElig] = vl;
+			rhiCubePlanScore[numElig] = RB_RHI_LightEffectiveScore( vl );
+			numElig++;
+		}
+	}
+
+	const bool savedFlashlight = ictx.lightIsFlashlight;	// RB_RHI_ClassifyLightShadow sets it per light
+	int n = 0;
+	for ( viewLight_t *vl = viewDef->viewLights; vl && n < MAX_CUBE_PLAN; vl = vl->next ) {
+		// the light loop's skips (fog/blend, nothing lit, no lightDef, DI-covered)
+		if ( vl->lightShader->IsFogLight() || vl->lightShader->IsBlendLight() ) {
+			continue;
+		}
+		if ( !vl->localInteractions && !vl->globalInteractions && !vl->translucentInteractions ) {
+			continue;
+		}
+		if ( vl->lightDef == NULL ) {
+			continue;
+		}
+		if ( rhiReStirDIApplyThisView && !vl->lightShader->IsAmbientLight()
+		     && RB_RHI_SceneLightCovered( viewDef, vl->lightDef->index ) ) {
+			continue;
+		}
+		// RB_RHI_SelectLightShadowTechnique's routing up to the cube pass
+		const lightShadowClass_t cls = RB_RHI_ClassifyLightShadow( r, vl );
+		if ( cls.rtServesAll || !cls.smEnabled || !cls.lightMayShadow || !cls.hasInteractions
+		     || !cls.isPoint || cls.isParallel ) {
+			continue;
+		}
+		if ( cls.oversize ) {
+			if ( !r_shadowMapSun.GetBool()						// stencil
+			     || ( r_rtSunShadows.GetBool() && rtLive )			// the RT sun ray
+			     || !RB_RHI_SunFitDeclines( viewDef, vl ) ) {		// a fitted sun map
+				continue;
+			}
+		}
+		if ( r_rtMovingLights.GetBool() && rtLive && RB_RHI_LightIsMovingPeek( vl ) ) {
+			continue;			// ray-served moving light, no cube
+		}
+		if ( limit > 0 ) {
+			const double myScore = RB_RHI_LightEffectiveScore( vl );
+			int better = 0;
+			for ( int j = 0; j < numElig; j++ ) {
+				const viewLight_t *other = rhiCubePlanElig[j];
+				if ( other != vl && ( rhiCubePlanScore[j] > myScore
+				                      || ( rhiCubePlanScore[j] == myScore && other < vl ) ) ) {
+					better++;
+				}
+			}
+			if ( better >= limit ) {
+				continue;		// outside the point-light budget: unshadowed
+			}
+		}
+		if ( !split ) {
+			// split off: a moving-caster light renders whole-cube scratch and never holds a slot
+			bool dynamicCaster = false;
+			for ( const drawSurf_t *surf = vl->shadowMapCasters; surf && !dynamicCaster; surf = surf->nextOnLight ) {
+				dynamicCaster = RB_RHI_CasterIsDynamic( surf );
+			}
+			if ( dynamicCaster ) {
+				continue;
+			}
+		}
+
+		cubePlanLight_t &p = rhiCubePlan[n++];
+		p.lightIndex = vl->lightDef->index;
+		p.tierSize = RB_RHI_TierSize( base, RB_RHI_ShadowTier( vl->lightDef->parms.lightRadius.Length() ), 128, cubeHi );
+		p.maxShift = 0;
+		while ( p.maxShift < CUBE_DOWNSCALE_MAX_SHIFT && ( p.tierSize >> ( p.maxShift + 1 ) ) >= CUBE_DOWNSCALE_MIN_SIZE ) {
+			p.maxShift++;
+		}
+		const cubeDownscale_t *e = RB_RHI_FindCubeDownscale( p.lightIndex );
+		p.prevShift = e ? Min( e->shift, p.maxShift ) : 0;
+		p.lastChangeFrame = e ? e->lastChangeFrame : 0;
+		p.key = ( vl->globalLightOrigin - viewOrg ).Length() * ( 1.0f + CUBE_DOWNSCALE_KEY_HYST * (float)p.prevShift );
+		p.fitShift = p.marginShift = 0;
+	}
+	ictx.lightIsFlashlight = savedFlashlight;
+	if ( n == 0 ) {
+		return;
+	}
+
+	// farthest first (ties by light index, so the order is stable)
+	std::sort( rhiCubePlan, rhiCubePlan + n, []( const cubePlanLight_t &a, const cubePlanLight_t &b ) {
+		return a.key > b.key || ( a.key == b.key && a.lightIndex < b.lightIndex );
+	} );
+	RB_RHI_CubePlanFit( n, budgetHi, false );
+	RB_RHI_CubePlanFit( n, budgetLo - budgetLo / 100 * CUBE_DOWNSCALE_MARGIN_PCT, true );	// marginShift >= fitShift
+
+	// Hysteresis: shrink at once to what fits; otherwise keep the held size, except that ONE
+	// light per view -- the nearest whose hold has passed -- grows back as far as the margin plan
+	// allows, so grow-backs (each a cold render at the bigger size) spread over frames. Every
+	// shift stays >= its fitShift, so the set never needs more than the fit plan's bytes.
+	int growIdx = -1;
+	for ( int i = n - 1; i >= 0; i-- ) {
+		const cubePlanLight_t &p = rhiCubePlan[i];
+		if ( p.prevShift > p.marginShift && tr.frameCount - p.lastChangeFrame >= CUBE_DOWNSCALE_HOLD_FRAMES ) {
+			growIdx = i;
+			break;
+		}
+	}
+	for ( int i = 0; i < n; i++ ) {
+		const cubePlanLight_t &p = rhiCubePlan[i];
+		int shift = p.prevShift;
+		if ( shift < p.fitShift ) {
+			shift = p.fitShift;
+		} else if ( i == growIdx ) {
+			shift = p.marginShift;
+		}
+		if ( !RB_RHI_SetCubeDownscale( p.lightIndex, shift, shift != p.prevShift ) ) {
+			shift = 0;		// downscale table full of this view's lights: stays at full size
+		}
+		if ( shift != p.prevShift ) {
+			RB_RHI_DropResizedCube( r, p.lightIndex, RB_RHI_CubeDownscaleSize( p.tierSize, shift ) );
+		}
+	}
 }
 
 /*
@@ -11763,7 +12256,10 @@ static void RB_RHI_LogLightShadowClass( const viewDef_t *viewDef, viewLight_t *v
 		                          : idMath::ClampInt( 256, 4096, glConfig.maxTextureSize );
 		const int dbgBase = idMath::ClampInt( dbgLo, dbgHi,
 		    isPoint ? r_shadowMapPointSize.GetInteger() : r_shadowMapSize.GetInteger() );
-		const int dbgRes = RB_RHI_TierSize( dbgBase, RB_RHI_ShadowTier( radius ), dbgLo, dbgHi );
+		int dbgRes = RB_RHI_TierSize( dbgBase, RB_RHI_ShadowTier( radius ), dbgLo, dbgHi );
+		if ( isPoint ) {
+			dbgRes = RB_RHI_PlannedCubeSize( vLight->lightDef->index, dbgRes );	// r_shadowMapBudgetDownscale (identity when off)
+		}
 		common->Printf( "  light %d: %s%s map=%s res=%d litG=%d litL=%d casters=%d dist=%.0f radius=%.0f range=%.0f\n",
 		                vLight->lightDef->index,
 		                isPoint ? "point" : ( isParallel ? "parallel" : "projected" ),
@@ -11832,6 +12328,7 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 	// R1b diagnostics: WHY a lit light is not DI-covered (r_shadowMapDebug 1 breakdown)
 	int dbgUncAmbient = 0, dbgUncFog = 0, dbgUncBlend = 0, dbgUncNoDef = 0, dbgUncWeapon = 0, dbgUncNotInBuffer = 0;
 	RB_RHI_ResetShadowTallies( r );
+	RB_RHI_PlanCubeDownscale( r, viewDef );	// r_shadowMapBudgetDownscale: fit this view's cubes to the cache budget
 	if ( !r_skipInteractions.GetBool() ) {
 		for ( viewLight_t *vLight = viewDef->viewLights; vLight; vLight = vLight->next ) {
 			backEnd.vLight = vLight;

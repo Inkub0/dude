@@ -5353,7 +5353,7 @@ windowDef OptionsMenuParent {
 	//ADVANCED panel — render feature toggles, moved inline from the old ADVANCED
 	// pop-up. Live render cvars (no restart); inert on the legacy ARB backend.
 		windowDef SystemAdvanced {
-			rect		130, 48, 320, 268
+			rect		130, 48, 320, 272		// DUDE: 272 = room for a 12th row (ADV13 at 253)
 			visible		0
 
 			windowDef ADV1 {
@@ -5810,6 +5810,51 @@ windowDef OptionsMenuParent {
 					choices		"Off;On"
 					values		"0;1"
 					cvar		"r_contactShadows"
+					choiceType	1
+					font		"fonts/bank"
+					textscale	0.25
+					textalign	0
+					textaligny	-6
+					forecolor	0.6, 0.8, 0.8, 1
+				}
+			}
+			// DUDE: r_shadowMapBudgetDownscale - when the point lights in view don't fit the
+			// shadow-cache VRAM budget, halve the farthest cubes until they fit (softer distant
+			// shadows instead of re-rendering the overflow every frame). Off = full resolution.
+			windowDef ADV13 {
+				rect		0, 253, 320, 16
+				windowDef ADV13L {
+					rect		0, 0, 8, 16
+					background	"gui/mainmenu/select_edge"
+					matcolor	0, 0, 0, 1
+					noevents	1
+				}
+				windowDef ADV13M {
+					rect		8, 0, 304, 16
+					background	"gui/mainmenu/select_border"
+					matcolor	0, 0, 0, 1
+					noevents	1
+				}
+				windowDef ADV13R {
+					rect		312, 0, 8, 16
+					background	"gui/mainmenu/select_angle"
+					matcolor	0, 0, 0, 1
+					noevents	1
+				}
+				windowDef ADV13Title {
+					rect		1, 1, 205, 14
+					text		"Adaptive Shadow Res"
+					font		"fonts/bank"
+					textscale	0.25
+					textalign	0
+					textaligny	-6
+					forecolor	1, 1, 1, 1
+				}
+				choiceDef ADV13Primary {
+					rect		213, 1, 99, 14
+					choices		"Off;On"
+					values		"0;1"
+					cvar		"r_shadowMapBudgetDownscale"
 					choiceType	1
 					font		"fonts/bank"
 					textscale	0.25
