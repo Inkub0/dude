@@ -4393,47 +4393,49 @@ static void DrawGraphicsMenu()
 
 // Developer tab: live render-debug toggles, shadow-map tuning and emissive-surface
 // controls. Not a "faithful" tab — purely for dialling values in-game during development.
-// DUDE PBR per-category defaults grid (docs/pbr-materials.md): an 8x4 table of the
-// {metalness, roughness, wetness, env} preset each category drives. Edits the live
+// DUDE PBR per-category defaults grid (docs/pbr-materials.md): one row per class (Quake 4's
+// materialType names + DUDE's additions, grouped) of the {metalness, roughness, wetness,
+// env} preset each category drives. Edits the live
 // defaults table (R_PbrSetCategoryDefault); category-tagged materials pick it up next
 // frame, no reload. Returns true if any value changed. Shared by the Developer tab and
 // the material editor's Categories tab. Env glow only does anything on metals; wetness
 // and (on organics) metalness are available for uniformity even where near-inert.
 static bool PbrCategoryGrid()
 {
-	static const struct { int cat; const char *label; } rows[] = {
-		{ PBR_CAT_METAL,   "Bare Metal" },
-		{ PBR_CAT_PAINTED, "Painted Metal" },
-		{ PBR_CAT_CERAMIC, "Ceramic Sheen" },
-		{ PBR_CAT_RUST,    "Rusted Metal" },
-		{ PBR_CAT_STONE,   "Stone / Concrete" },
-		{ PBR_CAT_SKIN,    "Skin (faces)" },
-		{ PBR_CAT_EYES,    "Eyes / Teeth" },
-		{ PBR_CAT_FLESH,   "Flesh / Gore" },
-	};
 	bool changed = false;
 	const ImGuiTableFlags flags = ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_SizingStretchSame | ImGuiTableFlags_RowBg;
 	if ( ImGui::BeginTable( "pbr_categories", 5, flags ) ) {
-		ImGui::TableSetupColumn( "Category", ImGuiTableColumnFlags_WidthFixed, 130.0f );
+		ImGui::TableSetupColumn( "Category", ImGuiTableColumnFlags_WidthFixed, 150.0f );
 		ImGui::TableSetupColumn( "Metalness" );
 		ImGui::TableSetupColumn( "Roughness" );
 		ImGui::TableSetupColumn( "Wetness" );
 		ImGui::TableSetupColumn( "Env glow" );
 		ImGui::TableHeadersRow();
-		for ( int i = 0; i < IM_ARRAYSIZE( rows ); i++ ) {
+		const char *group = NULL;
+		for ( int i = 0; i < R_PbrNumCategoryInfos(); i++ ) {
+			const pbrCategoryInfo_t &info = R_PbrCategoryInfo( i );
+			if ( group == NULL || idStr::Cmp( group, info.group ) != 0 ) {
+				group = info.group;		// group heading row
+				ImGui::TableNextRow();
+				ImGui::TableNextColumn();
+				ImGui::TextDisabled( "%s", group );
+			}
 			float m, r, w, e;
-			R_PbrCategoryDefaults( rows[i].cat, m, r, w, e );
+			R_PbrCategoryDefaults( info.cat, m, r, w, e );
 			ImGui::TableNextRow();
-			ImGui::PushID( rows[i].cat );
+			ImGui::PushID( info.cat );
 			ImGui::TableNextColumn();
 			ImGui::AlignTextToFramePadding();
-			ImGui::TextUnformatted( rows[i].label );
+			ImGui::TextUnformatted( info.label );
+			if ( ImGui::IsItemHovered() ) {
+				ImGui::SetTooltip( "table token: %s", info.token );
+			}
 			bool c = false;
 			ImGui::TableNextColumn(); ImGui::SetNextItemWidth( -FLT_MIN ); c |= ImGui::SliderFloat( "##m", &m, 0.0f,  1.0f, "%.2f" );
 			ImGui::TableNextColumn(); ImGui::SetNextItemWidth( -FLT_MIN ); c |= ImGui::SliderFloat( "##r", &r, 0.03f, 1.0f, "%.2f" );
 			ImGui::TableNextColumn(); ImGui::SetNextItemWidth( -FLT_MIN ); c |= ImGui::SliderFloat( "##w", &w, 0.0f,  4.0f, "%.2f" );
 			ImGui::TableNextColumn(); ImGui::SetNextItemWidth( -FLT_MIN ); c |= ImGui::SliderFloat( "##e", &e, 0.0f,  4.0f, "%.2f" );
-			if ( c ) { R_PbrSetCategoryDefault( rows[i].cat, m, r, w, e ); changed = true; }
+			if ( c ) { R_PbrSetCategoryDefault( info.cat, m, r, w, e ); changed = true; }
 			ImGui::PopID();
 		}
 		ImGui::EndTable();
@@ -6976,15 +6978,17 @@ void Com_Dhewm3Settings_f( const idCmdArgs &args )
 // edits the surface under the crosshair live and writes an override line.
 // ===========================================================================
 
-// combo order (friendly) mapped to pbrCategory_t values
-static const char *pbrEditCatNames[] = {
-	"none (pinned)", "metal", "metal_painted", "ceramic_sheen",
-	"metal_rust", "stone", "skin", "eyes", "flesh"
-};
-static const int pbrEditCatEnum[] = {
-	PBR_CAT_NONE, PBR_CAT_METAL, PBR_CAT_PAINTED, PBR_CAT_CERAMIC,
-	PBR_CAT_RUST, PBR_CAT_STONE, PBR_CAT_SKIN, PBR_CAT_EYES, PBR_CAT_FLESH
-};
+// combo entry i: 0 = "none (pinned)", i > 0 = the class at display position i - 1
+// (R_PbrCategoryInfo), shown by its table token
+static int PbrEditor_CatForCombo( int i )
+{
+	return i <= 0 ? PBR_CAT_NONE : R_PbrCategoryInfo( i - 1 ).cat;
+}
+
+static const char *PbrEditor_ComboName( int i )
+{
+	return i <= 0 ? "none (pinned)" : R_PbrCategoryInfo( i - 1 ).token;
+}
 
 static const idMaterial *pbrEditMat = NULL;	// material under edit (NULL = none picked)
 static idStr pbrEditName;
@@ -7044,12 +7048,28 @@ static void PbrEditor_DrawMaterialTab()
 	}
 	ImGui::Separator();
 
+	const int comboCount = R_PbrNumCategoryInfos() + 1;
 	int comboIdx = 0;
-	for ( int i = 0; i < IM_ARRAYSIZE( pbrEditCatEnum ); i++ ) {
-		if ( pbrEditCatEnum[i] == pbrEditCat ) { comboIdx = i; }
+	for ( int i = 0; i < comboCount; i++ ) {
+		if ( PbrEditor_CatForCombo( i ) == pbrEditCat ) { comboIdx = i; }
 	}
-	if ( ImGui::Combo( "Category", &comboIdx, pbrEditCatNames, IM_ARRAYSIZE( pbrEditCatNames ) ) ) {
-		pbrEditCat = pbrEditCatEnum[comboIdx];
+	bool comboChanged = false;
+	if ( ImGui::BeginCombo( "Category", PbrEditor_ComboName( comboIdx ) ) ) {
+		const char *group = NULL;
+		for ( int i = 0; i < comboCount; i++ ) {
+			if ( i > 0 && ( group == NULL || idStr::Cmp( group, R_PbrCategoryInfo( i - 1 ).group ) != 0 ) ) {
+				group = R_PbrCategoryInfo( i - 1 ).group;
+				ImGui::SeparatorText( group );
+			}
+			if ( ImGui::Selectable( PbrEditor_ComboName( i ), i == comboIdx ) && i != comboIdx ) {
+				comboIdx = i;
+				comboChanged = true;
+			}
+		}
+		ImGui::EndCombo();
+	}
+	if ( comboChanged ) {
+		pbrEditCat = PbrEditor_CatForCombo( comboIdx );
 		// re-attaching to a category re-fills the sliders from its preset (so you see and
 		// start from its live values); selecting "none" keeps the current numbers as a pin
 		if ( pbrEditCat > PBR_CAT_NONE && pbrEditCat < PBR_CAT_COUNT ) {
@@ -7075,7 +7095,7 @@ static void PbrEditor_DrawMaterialTab()
 	if ( pinned ) {
 		ImGui::TextDisabled( "pinned (custom values) — pick a category above to re-attach and track it" );
 	} else {
-		ImGui::TextDisabled( "tracking '%s' — move any slider to fork this material to a custom pin", pbrEditCatNames[comboIdx] );
+		ImGui::TextDisabled( "tracking '%s' — move any slider to fork this material to a custom pin", PbrEditor_ComboName( comboIdx ) );
 	}
 
 	// tracking -> inherit (-1) so the material follows its category live; pinned -> all

@@ -12,7 +12,7 @@ shader untouched; the vanilla and plain-PBR paths render bit-identically to befo
 
 ## 1. What it does
 
-- Polished floors (ceramic_sheen), bare metal and low-roughness table entries
+- Polished floors (ceramic), bare metal and low-roughness table entries
   reflect on-screen geometry: fixtures, screens, characters, lights.
 - Glass and other cube-reflection surfaces (`r_ssrGlassProbes`, on by default
   with `r_ssr`) reflect a baked cubemap of the actual room instead of Doom 3's

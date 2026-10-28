@@ -36,10 +36,8 @@ import os
 import re
 import sys
 
-# the categories with live sliders (Material.cpp PBR_CategoryForName); anything else -
-# "none", the long tail (glass / wood / cardboard ...) - keeps its explicit numbers
-CATEGORIES = ("skin", "eyes", "flesh", "metal", "metal_painted", "ceramic_sheen",
-              "metal_rust", "stone")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from pbr_classes import CLASS_ORDER, STONE_SPLIT, canonical  # noqa: E402  the shared class vocabulary
 
 CAT_BLOCK_HEADER = "# ---- category defaults (baked from overrides) ----"
 
@@ -74,22 +72,26 @@ def parse_num(tok, lo, hi):
 def parse_entry(toks):
     """(metal, rough, category, wet, env) exactly as the engine would hold them."""
     t = (toks + [""] * 6)[:6]
-    cat = t[3].lower() if t[3].lower() in CATEGORIES else "none"
+    cat = canonical(t[3])          # old Doom 3 names load as their unified class
     return (parse_num(t[1], 0.0, 1.0), parse_num(t[2], 0.03, 1.0), cat,
             parse_num(t[4], 0.0, 8.0), parse_num(t[5], 0.0, 4.0))
 
 
-def parse_cat_row(toks):
-    """'@cat <name> m r w e' -> (name, values), or None when the engine would not take it
-    as a category row (sscanf needs all four floats; unknown names are dropped)."""
+def parse_cat_rows(toks):
+    """'@cat <name> m r w e' -> [(class, values), ...], or [] when the engine would not take
+    it as a category row (sscanf needs all four floats; unknown names are dropped). An old
+    name loads as its unified class; "stone" seeds every class it was split into."""
     if len(toks) < 6 or toks[0].lower() != "@cat":
-        return None
+        return []
     if any(_FLOAT.match(t) is None for t in toks[2:6]):
-        return None
-    name = toks[1].lower()
-    if name not in CATEGORIES:
-        return None
-    return name, tuple(round(atof(t), 4) for t in toks[2:6])
+        return []
+    vals = tuple(round(atof(t), 4) for t in toks[2:6])
+    if toks[1].lower() == "stone":
+        return [(c, vals) for c in STONE_SPLIT]
+    name = canonical(toks[1])
+    if name not in CLASS_ORDER:
+        return []
+    return [(name, vals)]
 
 
 def effective(*texts):
@@ -104,9 +106,8 @@ def effective(*texts):
             if toks[0].lower() == "@cat":
                 # (a malformed @cat row falls through the engine's sscanf into a junk material
                 # literally named "@cat"; nothing can ever look that up, so it is not modelled)
-                row = parse_cat_row(toks)
-                if row:
-                    categories[row[0]] = row[1]
+                for name, vals in parse_cat_rows(toks):
+                    categories[name] = vals
                 continue
             if len(toks) >= 3:
                 materials[toks[0].lower()] = parse_entry(toks)
@@ -122,9 +123,8 @@ def fmt_num(tok):
 
 def fmt_row(toks, date):
     name, m, r, cat, w, e = (toks + [""] * 6)[:6]
-    if not cat or cat[0] in "*-":
-        cat = "none"
-    return (f"{name:<52} {fmt_num(m):>4} {fmt_num(r):>4}  {cat:<13}  {fmt_num(w)}  {fmt_num(e)}"
+    cat = canonical(cat)          # baked rows always carry the unified class name
+    return (f"{name:<52} {fmt_num(m):>4} {fmt_num(r):>4}  {cat:<15}  {fmt_num(w)}  {fmt_num(e)}"
             f"   # baked from live overrides {date}")
 
 
@@ -137,9 +137,10 @@ def bake(table, overrides, date):
         if not s:
             continue
         toks = s.split()
-        row = parse_cat_row(toks)
-        if row:
-            cat_rows[row[0]] = i
+        cats = parse_cat_rows(toks)
+        if cats:
+            for name, _ in cats:
+                cat_rows[name] = i
         elif len(toks) >= 3 and toks[0].lower() != "@cat":
             rows.setdefault(toks[0].lower(), []).append(i)
 
@@ -153,35 +154,37 @@ def bake(table, overrides, date):
             if cat_rows[k] >= at:
                 cat_rows[k] += 1
 
+    def bake_cat(name, vals, toks):
+        if have_cats.get(name) == vals:
+            return
+        newline = "@cat %s %.3f %.3f %.3f %.3f" % ((name,) + tuple(atof(t) for t in toks[2:6]))
+        if name in cat_rows:
+            lines[cat_rows[name]] = newline
+        else:
+            if cat_rows:
+                at = max(cat_rows.values()) + 1
+            else:       # no block yet: open one above the first data row
+                at = next((i for i, l in enumerate(lines) if strip_comment(l)), len(lines))
+                lines.insert(at, CAT_BLOCK_HEADER)
+                shift(at)
+                at += 1
+            lines.insert(at, newline)
+            shift(at)
+            cat_rows[name] = at
+        report["cats"].append((name, have_cats.get(name), vals))
+        have_cats[name] = vals
+
     for raw in overrides.splitlines():
         s = strip_comment(raw)
         if not s:
             continue
         toks = s.split()
         if toks[0].lower() == "@cat":
-            row = parse_cat_row(toks)
-            if not row:
+            cats = parse_cat_rows(toks)
+            if not cats:
                 report["skipped"].append(s)
-                continue
-            name, vals = row
-            if have_cats.get(name) == vals:
-                continue
-            newline = "@cat %s %.3f %.3f %.3f %.3f" % ((name,) + tuple(atof(t) for t in toks[2:6]))
-            if name in cat_rows:
-                lines[cat_rows[name]] = newline
-            else:
-                if cat_rows:
-                    at = max(cat_rows.values()) + 1
-                else:       # no block yet: open one above the first data row
-                    at = next((i for i, l in enumerate(lines) if strip_comment(l)), len(lines))
-                    lines.insert(at, CAT_BLOCK_HEADER)
-                    shift(at)
-                    at += 1
-                lines.insert(at, newline)
-                shift(at)
-                cat_rows[name] = at
-            report["cats"].append((name, have_cats.get(name), vals))
-            have_cats[name] = vals
+            for name, vals in cats:
+                bake_cat(name, vals, toks)
             continue
         if len(toks) < 3:
             report["skipped"].append(s)
