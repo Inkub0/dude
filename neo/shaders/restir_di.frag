@@ -55,7 +55,7 @@
 //   u_shadowFalloffS.z    = SH MODE (r_rtReStirDISH): the per-light cosine N.L is NOT applied here; loc 3 carries SH1 =
 //                           direction * luminance (NRD REBLUR_FrontEnd_PackSh) and the apply re-resolves the cosine
 //                           against the FULL-res bump normal - the shading detail survives the denoise + reduced res
-//   --- r_rtReStirDICombineGI (RTGI bounce folded into THIS buffer, one NRD denoise; rtgi_bounce.glsl) ---
+//   --- combined GI (r_rtgi on: the RTGI bounce folded into THIS buffer, one NRD denoise; rtgi_bounce.glsl) ---
 //   u_specularParms       = ( combine on/off, fog strength, fog coef (exp), skip fast lights in the bounce )   [fog: rtgi_apply's r_rtgiFogAttenuate]
 //   u_pbrParms            = ( gather radius, r_rtgiEmissive, r_rtgiEmissiveClamp, r_rtgiLightScale )
 //   u_pbrParms2           = ( ambient floor, shadow-ray gate, eye pullback per unit depth, r_rtgiIntensity )
@@ -440,7 +440,7 @@ void main() {
 																		// recorded for UNLIT young pixels too (they ran the loop; view 7 must show them)
 	vec3 shDir  = vec3( 0.0 );										// SH mode: accumulated direction * luminance
 
-	// r_rtReStirDICombineGI: the ONE-bounce indirect term from the same pixel, folded into the same buffer so ONE
+	// Combined GI (r_rtgi on): the ONE-bounce indirect term from the same pixel, folded into the same buffer so ONE
 	// NRD denoise serves direct + indirect (the bounce's own pass stands down). Finished exactly as rtgi_apply.frag
 	// would: albedo (the receiver's, 1 outside apply mode) * Li * r_rtgiIntensity, faded through the view's fog
 	// (pow( exp( depth * coef ), strength )), then demodulated by the same B as the direct term so the apply's

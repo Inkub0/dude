@@ -2994,10 +2994,11 @@ uint64_t VulkanBackend::ComputeGfxCfgSignature() const {
 	mixB( r_rtgi ); mixB( r_rtao ); mixB( r_rtSunShadows ); mixB( r_rtMovingLights );
 	mixB( r_rtAllLights ); mixB( r_rtReflections ); mixB( r_rtgiCheckerboard );
 	// ReSTIR DI (docs/rtx-restir-di.md): the pass + its NRD guide MRT, the apply (flips the prepass to the
-	// 4-attachment albedo layout), its checkerboard / resolution (resize the gather + NRD), the combined-GI
-	// mode and the debug view (which stands the apply down). dude_rtx 2 flips these through the preset.
+	// 4-attachment albedo layout), its checkerboard / resolution (resize the gather + NRD) and the debug view
+	// (which stands the apply down). dude_rtx 2 flips these through the preset. (The combined-GI mode follows
+	// r_rtgi, mixed above.)
 	mixB( r_rtReStirDI ); mixB( r_rtReStirDIApply ); mixB( r_rtReStirDICheckerboard );
-	mixB( r_rtReStirDICombineGI ); mixI( r_rtReStirDIDebug );
+	mixI( r_rtReStirDIDebug );
 	mixB( r_nrdSigma );							// R0: changes the NRD instance's denoiser table (NrdCreate rebuild)
 	// R6: DI is ReLAX-only; the ReLAX pair joins the instance whenever r_rtReStirDI is on (already mixed above)
 	mixB( r_rtReStirDIGradient ); mixI( r_rtReStirDIGradientStratum ); mixB( r_rtReStirDISH );	// R1: gradient / confidence / side-copy targets + the SH attachments

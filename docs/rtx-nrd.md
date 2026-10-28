@@ -138,7 +138,7 @@ NRD v4.18's headers/README.
 |---|---|---|---|---|
 | RTAO (H4) | `REBLUR_DIFFUSE_OCCLUSION` | `r_rtao`, `r_rtaoHistory` **45** frames | `r_rtaoResScale` | 1 cosine ray; weapon masked to 0 (`rtao_ray.frag:88`); no confidence |
 | RTGI (H6) | `REBLUR_DIFFUSE` | `r_rtgi`, `r_rtgiHistory` **14**, `r_rtgiConfidence` 1.8 | 0.75 + checkerboard | 1 bounce; weapon masked to 0 (`rtgi_ray.frag:107`); luminance confidence (`rtgi_confidence.frag`); stands down under DI |
-| ReSTIR DI (H7) | `REBLUR_DIFFUSE` / `_SH` | `r_rtReStirDI`, history 16 | 0.75 + checkerboard | covered by Plan R0-R6; in combined mode (`r_rtReStirDICombineGI`, the `dude_rtx 2` default) the GI bounce rides DI's denoise, so R0-R6 reach it automatically |
+| ReSTIR DI (H7) | `REBLUR_DIFFUSE` / `_SH` | `r_rtReStirDI`, history 16 | 0.75 + checkerboard | covered by Plan R0-R6; with `r_rtgi` on (combined mode - always, since `r_rtReStirDICombineGI` was retired) the GI bounce rides DI's denoise, so R0-R6 reach it automatically |
 | SIGMA_SHADOW | `SIGMA_SHADOW` | - | - | **in the instance (`NrdCreate` table) but never dispatched** since H3 was abandoned; NRD still allocates its share of the permanent + transient pools |
 
 Not NRD (own temporal, out of scope here): SSR / RT reflections (`ssr_temporal`), volumetrics, the RT shadow blur, FSR2.

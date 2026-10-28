@@ -3323,7 +3323,7 @@ static void ApplyEnhancementPreset( int idx, int rtMode )
 		}
 		// dude_rtx 2 "Path Tracing" (H7, docs/rtx-restir-di.md): ReSTIR direct lighting replaces the per-light
 		// forward draws (r_rtAllLights' ray-per-light loop stays for the fast-changing lights DI leaves forward),
-		// and where the tier runs RTGI the bounce rides the same gather + denoise (r_rtReStirDICombineGI).
+		// and where the tier runs RTGI the bounce rides the same gather + denoise (always, while r_rtgi is on).
 		const bool fullRt = ( rtMode == RTX_PATHTRACED );
 		r_rtReStirDI.SetBool( fullRt );
 		r_rtReStirDIApply.SetBool( fullRt );
@@ -5174,11 +5174,6 @@ static void DrawDbgGroup_ReStirDI()
 		"The view weapon, translucents, blood films, fog/blend + ambient lights and sub-views stay forward. "
 		"Off = DI is debug-only and the forward path is untouched. A/B: same look, cheaper in light-dense rooms. "
 		"The debug view below overrides this. (r_rtReStirDIApply)" );
-	CvarCheckbox( "Fold GI light bounces", r_rtReStirDICombineGI, "With RTGI on, the DI gather also traces the "
-		"one-bounce GI ray at the same pixel and folds the bounce (albedo * intensity, fog-faded) into the DI "
-		"radiance, so ONE NRD denoise + ONE apply serve direct + indirect - about the cost of DI alone. RTGI's own "
-		"pass stands down; DI's resolution / checkerboard / history / NRD knobs then shape the bounce too. "
-		"0 = DI only (RTGI stays stood down while DI is on). (r_rtReStirDICombineGI)" );
 	CvarCheckbox( "Weapon Lights Forward", r_rtReStirDIDynamicForward, "Keep the first-person weapon lights "
 		"(flashlight, muzzle flash) on the forward per-light path instead of DI - they are masked out of DI's field "
 		"anyway. Every other light (including moving, flickering and (re)appearing lights) rides DI + the gradient "

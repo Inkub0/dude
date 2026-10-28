@@ -2,7 +2,7 @@
 // point against the scene TLAS, the hit shaded cheaply (geo-table fetch -> bindless albedo -> scene lights with
 // their real cookie/falloff textures -> per-pixel emissive -> one dominant-light shadow ray) and the incoming
 // radiance returned. Lifted VERBATIM from rtgi_ray.frag so RB_RHI_RtgiPass (its own pass) and the ReSTIR DI
-// gather (restir_di.frag, r_rtReStirDICombineGI: direct + indirect in ONE buffer, ONE NRD denoise) share one
+// gather (restir_di.frag, with r_rtgi on: direct + indirect in ONE buffer, ONE NRD denoise) share one
 // implementation that cannot drift. The caller owns the uniform packing and fills RtgiBounceParms.
 //
 // Needs: renderparms.glsl, rt_light_eval.glsl, rt_light_tex.glsl, rt_hash_grid.glsl + rtgi_cache.glsl (the irradiance
