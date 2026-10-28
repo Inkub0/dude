@@ -86,7 +86,7 @@ layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer DiL
 
 VARY(0) in vec2 var_TexCoord;
 
-layout(location = 0) out vec4 fragColor;	// ( |L_prev - L_now|, max( L_prev, L_now ), 0, 1 )
+layout(location = 0) out vec4 fragColor;	// ( |L_prev - L_now|, max( L_prev, L_now ), exact relative change, 1 )
 
 void main() {
 	fragColor = vec4( 0.0, 0.0, 0.0, 1.0 );
@@ -350,8 +350,14 @@ void main() {
 	// frame, 100 % change, reset), while an occluded light is still present with a zero visibility. So: reset when the
 	// light is absent on either side, or when it is LIT on both sides and its lit value changed by the threshold (a
 	// dimming, a brightening, a swinging cookie); a side that is zero with the light present is a shadow - no reset.
+	// EXACT verdict (shadowSel): both values describe the same point under the same light - a static surface at its stored
+	// point, or this frame's pick valued at the current point. Its relative change (with the confidence pass's darkness bias)
+	// rides in .z, which the filter spreads by MAX instead of averaging: an averaging A-trous dilutes one changed stratum
+	// among unchanged ones ~9x per pass, so a thin trailing band or a sentry's small shadow barely dropped the confidence.
+	float exactRel = 0.0;
+	const bool exactVerdict = !( wIsPrev && !bestStatic );
 	{
-		const bool exact   = !( wIsPrev && !bestStatic );
+		const bool exact   = exactVerdict;
 		const bool litBoth = Lprev > 0.0 && Lnow > 0.0;
 		const bool changed = cacheRowAbsent
 		                   || ( litBoth && abs( Lprev - Lnow ) > cp.resetThresh * ( max( Lprev, Lnow ) + cp.resetBias ) );
@@ -394,7 +400,11 @@ void main() {
 				Lprev = dkPrevLum;
 				Lnow  = dNow;
 			}
+			exactRel = relD;		// static, at the stored point: always exact
 		}
 	}
-	fragColor = vec4( abs( Lprev - Lnow ), max( Lprev, Lnow ), 0.0, 1.0 );
+	if ( shadowSel && exactVerdict ) {
+		exactRel = max( exactRel, abs( Lprev - Lnow ) / ( max( Lprev, Lnow ) + max( u_tessParms.z, 1e-4 ) ) );
+	}
+	fragColor = vec4( abs( Lprev - Lnow ), max( Lprev, Lnow ), exactRel, 1.0 );
 }

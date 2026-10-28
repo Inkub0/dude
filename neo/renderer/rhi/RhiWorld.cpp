@@ -506,7 +506,7 @@ static bool  rhiReStirDIPrevValid = false;
 // gradient pass needs to know about THIS frame's gather (valid side data, its checkerboard parity).
 static rhi::RenderTargetHandle rhiReStirDIGradRT[2] = { 0, 0 };	// RG16F ( |dL|, max L ) at gw x gh
 static int   rhiReStirDIGradW = 0, rhiReStirDIGradH = 0;
-static rhi::RenderTargetHandle rhiReStirDIGradConfRT[2] = { 0, 0 };	// R16F confidence at rw x rh
+static rhi::RenderTargetHandle rhiReStirDIGradConfRT[2] = { 0, 0 };	// RG16F confidence at rw x rh (.x = NRD's, .y = the hold's un-squared state)
 static int   rhiReStirDIGradConfW = 0, rhiReStirDIGradConfH = 0;
 static int   rhiReStirDIGradConfIdx = 0;
 static rhi::RenderTargetHandle rhiReStirDIYoungRT[2] = { 0, 0 };	// R3a: per-pixel young ( reason / 4, age / 64 ), gather layout, ping-pong (the age is last frame's + 1)
@@ -8998,7 +8998,7 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		const int stratum = idMath::ClampInt( 2, 6, r_rtReStirDIGradientStratum.GetInteger() );
 		const int gw = ( rw + stratum - 1 ) / stratum, gh = ( rh + stratum - 1 ) / stratum;
 		if ( gradOn ) {
-			// targets: 2 x RG16F gradient (gw x gh, A-trous ping-pong), 2 x R16F confidence (rw x rh, temporal ping-pong)
+			// targets: 2 x RGBA16F gradient (gw x gh, A-trous ping-pong), 2 x RG16F confidence (rw x rh, temporal ping-pong)
 			for ( int k = 0; k < 2; k++ ) {
 				if ( rhiReStirDIGradRT[k] && r->GetRenderTargetImage( rhiReStirDIGradRT[k] ) == 0 ) { rhiReStirDIGradRT[k] = 0; }
 				if ( rhiReStirDIGradConfRT[k] && r->GetRenderTargetImage( rhiReStirDIGradConfRT[k] ) == 0 ) { rhiReStirDIGradConfRT[k] = 0; rhiReStirDIGradConfValid = false; }
@@ -9012,8 +9012,8 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 				rhiReStirDIGradConfW = rhiReStirDIGradConfH = 0;	rhiReStirDIGradConfValid = false;
 			}
 			for ( int k = 0; k < 2; k++ ) {
-				if ( !rhiReStirDIGradRT[k] )     { rhiReStirDIGradRT[k]     = r->CreateRenderTarget( rhi::IF_RG16F, gw, gh ); }
-				if ( !rhiReStirDIGradConfRT[k] ) { rhiReStirDIGradConfRT[k] = r->CreateRenderTarget( rhi::IF_R16F, rw, rh ); }
+				if ( !rhiReStirDIGradRT[k] )     { rhiReStirDIGradRT[k]     = r->CreateRenderTarget( rhi::IF_RGBA16F, gw, gh ); }	// .z = exact relative change
+				if ( !rhiReStirDIGradConfRT[k] ) { rhiReStirDIGradConfRT[k] = r->CreateRenderTarget( rhi::IF_RG16F, rw, rh ); }	// .x NRD, .y hold state
 			}
 			rhi::ShaderHandle gradProg = r->LoadShader( "restir_di_gradient" );
 			rhi::ShaderHandle filtProg = r->LoadShader( "restir_di_gradient_filter" );
@@ -9075,6 +9075,7 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 					fp.mvpMatrix[0] = fp.mvpMatrix[5] = fp.mvpMatrix[10] = fp.mvpMatrix[15] = 1.0f;
 					fp.localParam0[0] = (float)( 1 << pass );
 					fp.localParam0[1] = (float)gw;	fp.localParam0[2] = (float)gh;
+					fp.localParam0[3] = ( pass == 0 ) ? 1.0f : 0.0f;	// max-dilate the exact relative change by one stratum, first pass only
 					r->BeginTargetPass( rhiReStirDIGradRT[ src ^ 1 ], NULL );
 					RB_RHI_DrawFullscreen( r, filtProg, fp, r->GetRenderTargetImage( rhiReStirDIGradRT[ src ] ) );
 					r->EndPass();
