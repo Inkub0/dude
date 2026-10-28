@@ -1056,6 +1056,10 @@ add_globbed_headers(src_renderbump "tools/compilers/renderbump")
 set(src_aobake
 	tools/compilers/aobake/aobake.cpp
 )
+if(DHEWM3_VULKAN)
+	# GPU tracer (headless Vulkan ray query); the CPU tracer covers every other build
+	list(APPEND src_aobake tools/compilers/aobake/aobake_gpu.cpp)
+endif()
 
 add_globbed_headers(src_aobake "tools/compilers/aobake")
 

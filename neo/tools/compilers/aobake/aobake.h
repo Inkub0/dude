@@ -31,7 +31,8 @@ void AO_GeneratedPathForSurface( const char *modelName, int surfaceIndex, idStr 
 // keyed by model + surface index. Static models (LWO/ASE) bake their resident geometry; MD5
 // characters are instantiated in their reference/bind pose first. Uses the r_occlusionMapBake*
 // cvars for parameters. Returns true if it wrote at least one map. Called by the bakeAO*
-// commands and, under r_occlusionMapsAutoBake, lazily by the renderer. Pure CPU + filesystem.
+// commands and, under r_occlusionMapsAutoBake, lazily by the renderer. No GL; the rays go to
+// the GPU tracer (aobake_gpu.h) when r_occlusionMapBakeGPU and a ray-query GPU allow, else the CPU.
 bool AO_BakeModelToCache( const idRenderModel *model, const idDeclSkin *skin = NULL );
 
 #endif /* !__AOBAKE_H__ */

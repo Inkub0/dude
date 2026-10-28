@@ -390,6 +390,8 @@ ID_INLINE idImage::idImage() {
 
 // data is RGBA
 void	R_WriteTGA( const char *filename, const byte *data, int width, int height, bool flipVertical = false );
+// data is 8 bit grayscale (TGA type 3; LoadTGA expands it to R = G = B, A = 255)
+void	R_WriteGrayTGA( const char *filename, const byte *data, int width, int height, bool flipVertical = false );
 // data is an 8 bit index into palette, which is RGB (no A)
 void	R_WritePalTGA( const char *filename, const byte *data, const byte *palette, int width, int height, bool flipVertical = false );
 // data is in top-to-bottom raster order unless flipVertical is set
