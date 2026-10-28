@@ -16,6 +16,9 @@
 //                   pulse many lights by 5-15 % every frame, and a per-light comparison is noise-free, so this is a real
 //                   threshold, not a noise guard. A light switching OFF is a 100 % change of ITS OWN value regardless.
 //   u_windowCoord.z = view-Y sign (-1 Vulkan top-down: flip the velocity row)
+//   u_windowCoord.xy = ( MIX mode, reset threshold ): MIX mode writes NRD IN_DISOCCLUSION_THRESHOLD_MIX instead - 1 where the
+//                      EXACT change (.z, past the dead zone) reaches r_rtReStirDIGradientReset, else 0. Instant (no hold): a
+//                      change resets ReLAX's history once, and its history-fix reconstruction takes over from there.
 
 #include "renderparms.glsl"
 
@@ -32,6 +35,11 @@ float ign( vec2 p ) { return fract( 52.9829189 * fract( dot( p, vec2( 0.06711056
 void main() {
 	vec2  uv = var_TexCoord;
 	vec3  g  = texture( u_gradient, uv ).xyz;
+	if ( u_windowCoord.x > 0.5 ) {
+		float ex = max( g.z - u_localParam1.z, 0.0 ) / max( 1.0 - u_localParam1.z, 1e-3 );
+		fragColor = vec4( ( ex >= u_windowCoord.y ) ? 1.0 : 0.0 );
+		return;
+	}
 	// .z = the EXACT verdicts' relative change, max-dilated one stratum (restir_di_gradient_filter.frag): a sharp change
 	// the averaging filter would have diluted (a thin trailing shadow band, a small occluder's shadow) still counts
 	float rel = max( g.x / ( g.y + u_localParam0.w ), g.z );
