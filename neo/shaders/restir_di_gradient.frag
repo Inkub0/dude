@@ -99,6 +99,32 @@ void main() {
 	const bool  pbr       = u_localParam1.y > 0.5;
 	const float staticPx  = u_parallaxParms.w;
 	ivec2 base = ivec2( gl_FragCoord.xy ) * stratum;
+	const bool  shadowSel = u_parallaxParms2.z > 0.5;		// r_rtReStirDIGradientShadow
+
+	uvec2 tableAddr = uvec2( floatBitsToUint( u_shadowParms.x ), floatBitsToUint( u_shadowParms.y ) );
+	uvec2 prevAddr  = uvec2( floatBitsToUint( u_shadowParms.z ), floatBitsToUint( u_shadowParms.w ) );
+	uvec2 prevTableAddr = uvec2( floatBitsToUint( u_parallaxParms2.x ), floatBitsToUint( u_parallaxParms2.y ) );
+	if ( ( tableAddr.x | tableAddr.y ) == 0u || ( prevAddr.x | prevAddr.y ) == 0u ) { return; }
+	RtLights lights     = RtLights( uvec2( floatBitsToUint( u_color.x ), floatBitsToUint( u_color.y ) ) );
+	RtLights prevLights = RtLights( prevAddr );
+	const uint nLights    = uint( u_color.z );
+	const uint nPrevLights = uint( max( u_parallaxParms2.w, 0.0 ) + 0.5 );
+	const uint tableCap   = uint( max( u_tessParms.y, 0.0 ) + 0.5 );
+
+	// SHADOW EDGES (r_rtReStirDIGradientShadow): the brightest pick below sees a shadow ARRIVING (last frame's lit value,
+	// re-shaded under the current scene, comes out 0) but not one LEAVING: there the brightest sample is THIS frame's lit
+	// value, and its previous value can only be estimated with the CURRENT scene - the occluder has already gone, so both
+	// sides read lit and the dark history behind a walking NPC was never dropped (its shadow smeared). A pixel that shaded
+	// the SAME light in both frames carries last frame's REAL visibility in its stored value, so re-shading it under the
+	// current scene at its stored point is exact both ways. Each stratum therefore prefers such a pixel - on a static
+	// surface, with the biggest change between its two stored values (evidence only: they sit a jitter apart, so the
+	// verdict is still the exact re-shade) - and falls back to the brightest sample when none shows a real change.
+	float shScore = -1.0;
+	float shPrevLum = 0.0, shCurLum = 0.0;
+	uint  shPrevRow = 0u, shCurRow = 0u;
+	vec2  shFrag = vec2( 0.0 );
+	vec3  shPrevP = vec3( 0.0 ), shPrevN = vec3( 0.0, 0.0, 1.0 );
+	float shPrevVz = -1.0;
 
 	// 1. the brightest sample of EITHER frame among the stratum's pixels that have a valid temporal position
 	float bestScore = -1.0;
@@ -156,14 +182,44 @@ void main() {
 																		// a false light change, confidence 0, NRD history pinned, the pixel boosted forever: red trails)
 			float prevLum = ( prevRowPlus1 != 0u ) ? pvz.y : 0.0;			// a valid surface with no light last frame counts as dark
 
+			// the stored sample's world position: last frame's SCREEN pixel centre at its stored view z through last
+			// frame's inverse view (the same reconstruction the gather used, so a static point lands exactly)
+			vec2  pndc = ( vec2( prevPix ) + 0.5 ) * ( u_screenCorrection.xy * 2.0 ) - 1.0;
+			float pd   = -pvz.x;
+			vec3  Pv   = vec3( pndc.x * pd * u_localParam0.x, pndc.y * u_windowCoord.z * pd * u_localParam0.y, pvz.x );
+			vec3  Pprev = ( u_projectionMatrix * vec4( Pv, 1.0 ) ).xyz;
+			// STATIC. Screen form (below): the surface moved less than N full-res pixels on screen - true only while the
+			// camera holds still, so every turn sent all pixels down the approximate mover path. World form (shadowSel):
+			// the motion vector matches where the CAMERA alone would have put this point last frame (last frame's view,
+			// same projection), i.e. only the camera moved - the exact previous-point re-shade holds while turning too.
+			bool isStatic = length( vel * fullRes ) <= staticPx;
+			if ( shadowSel ) {
+				vec3  Pc  = ( u_prevMvpMatrix * vec4( S.Pw, 1.0 ) ).xyz;
+				float pdc = -Pc.z;
+				isStatic = false;
+				if ( pdc > 1e-3 ) {
+					vec2 camUV = vec2( Pc.x / ( pdc * u_localParam0.x ), Pc.y / ( pdc * u_windowCoord.z * u_localParam0.y ) ) * 0.5 + 0.5;
+					isStatic = length( ( camUV - prevUV ) * fullRes ) <= staticPx;
+				}
+				// the shadow candidate: static, the same light picked in both frames (slot AND serial), not an emitter
+				if ( isStatic && prevRowPlus1 != 0u && curRowPlus1 != 0u && curLum >= 0.0
+						&& prevRowPlus1 <= nPrevLights && curRowPlus1 <= nLights
+						&& lights.l[ curRowPlus1 - 1u ].pad0 == prevLights.l[ prevRowPlus1 - 1u ].pad0
+						&& lights.l[ curRowPlus1 - 1u ].pad1 == prevLights.l[ prevRowPlus1 - 1u ].pad1
+						&& ( lights.l[ curRowPlus1 - 1u ].flags & DUDE_LIGHT_EMISSIVE ) == 0u ) {
+					float ch = abs( prevLum - curLum );
+					if ( ch > shScore ) {
+						shScore   = ch;
+						shPrevLum = prevLum;	shCurLum = curLum;
+						shPrevRow = prevRowPlus1;	shCurRow = curRowPlus1;
+						shFrag    = sfrag;
+						shPrevP   = Pprev;	shPrevN = pN;	shPrevVz = pvz.x;
+					}
+				}
+			}
+
 			float score = max( prevLum, max( curLum, 0.0 ) );
 			if ( score > bestScore ) {
-				// the stored sample's world position: last frame's SCREEN pixel centre at its stored view z through last
-				// frame's inverse view (the same reconstruction the gather used, so a static point lands exactly)
-				vec2  pndc = ( vec2( prevPix ) + 0.5 ) * ( u_screenCorrection.xy * 2.0 ) - 1.0;
-				float pd   = -pvz.x;
-				vec3  Pv   = vec3( pndc.x * pd * u_localParam0.x, pndc.y * u_windowCoord.z * pd * u_localParam0.y, pvz.x );
-				vec3  Pprev = ( u_projectionMatrix * vec4( Pv, 1.0 ) ).xyz;
 				bestScore   = score;
 				bestIsCur   = ( curLum > prevLum );
 				bestPrevLum = prevLum;
@@ -174,26 +230,26 @@ void main() {
 				bestPrevP   = Pprev;
 				bestPrevN   = pN;
 				bestPrevVz  = pvz.x;
-				// STATIC = the surface under this pixel moved less than N full-res pixels on screen - the velocity says exactly
-				// that (a static point's velocity is only the jitter delta, under a pixel). NOT a world-distance test against
-				// the stored point: the jitter-corrected reprojection often lands on the NEIGHBOURING pixel, and on a floor or
-				// wall at a grazing angle one pixel apart is many "pixel sizes" of surface, which flagged most static floors as
-				// movers whenever FSR2 was on (and the mover path compares two different points - view 5 flicker, 2026-10-12)
-				bestStatic  = length( vel * fullRes ) <= staticPx;
+				// STATIC (isStatic above): screen motion, or with shadowSel the camera-only reprojection. NOT a world-distance
+				// test against the stored point: the jitter-corrected reprojection often lands on the NEIGHBOURING pixel, and on
+				// a floor or wall at a grazing angle one pixel apart is many "pixel sizes" of surface, which flagged most static
+				// floors as movers whenever FSR2 was on (and the mover path compares two different points - view 5 flicker,
+				// 2026-10-12). Both forms compare UVs of the same pixel, never two points.
+				bestStatic  = isStatic;
 			}
 		}
 	}
 	if ( bestScore < 0.0 ) { return; }											// nothing reprojectable: no evidence either way
-
-	uvec2 tableAddr = uvec2( floatBitsToUint( u_shadowParms.x ), floatBitsToUint( u_shadowParms.y ) );
-	uvec2 prevAddr  = uvec2( floatBitsToUint( u_shadowParms.z ), floatBitsToUint( u_shadowParms.w ) );
-	uvec2 prevTableAddr = uvec2( floatBitsToUint( u_parallaxParms2.x ), floatBitsToUint( u_parallaxParms2.y ) );
-	if ( ( tableAddr.x | tableAddr.y ) == 0u || ( prevAddr.x | prevAddr.y ) == 0u ) { return; }
-	RtLights lights     = RtLights( uvec2( floatBitsToUint( u_color.x ), floatBitsToUint( u_color.y ) ) );
-	RtLights prevLights = RtLights( prevAddr );
-	const uint nLights    = uint( u_color.z );
-	const uint nPrevLights = uint( max( u_parallaxParms2.w, 0.0 ) + 0.5 );
-	const uint tableCap   = uint( max( u_tessParms.y, 0.0 ) + 0.5 );
+	// a same-light static pixel whose stored values differ by a quarter or more: judge THAT one (exactly, at its stored
+	// previous point under the current scene); below that the brightest sample keeps catching lights that switch / move
+	if ( shadowSel && shScore > 0.0 && shScore >= 0.25 * max( shPrevLum, shCurLum ) ) {
+		bestPrevLum = shPrevLum;	bestCurLum = shCurLum;
+		bestPrevRow = shPrevRow;	bestCurRow = shCurRow;
+		bestIsCur   = shCurLum > shPrevLum;
+		bestFrag    = shFrag;
+		bestPrevP   = shPrevP;	bestPrevN = shPrevN;	bestPrevVz = shPrevVz;
+		bestStatic  = true;			// same light + static -> wIsPrev + atPrevPoint below: the exact comparison
+	}
 	if ( bestPrevRow != 0u && bestPrevRow > nPrevLights ) { return; }		// stale / corrupt side data: no evidence
 	if ( bestCurRow  != 0u && bestCurRow  > nLights )     { return; }
 	// E2 v3: an EMITTER row (DUDE_LIGHT_EMISSIVE) is never re-shaded here - its shade draws a fresh sample point every

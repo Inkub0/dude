@@ -9040,6 +9040,7 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 				}
 				gp.parallaxParms[0] = (float)stratum;	gp.parallaxParms[1] = (float)rw;	gp.parallaxParms[2] = (float)rh;
 				gp.parallaxParms[3] = r_rtReStirDIGradientStatic.GetFloat();		// static threshold, full-res pixels
+				gp.parallaxParms2[2] = r_rtReStirDIGradientShadow.GetBool() ? 1.0f : 0.0f;	// shadow-aware pick + camera-only static test
 				memcpy( gp.prevMvpMatrix, rhiReStirDIPrevView, sizeof( gp.prevMvpMatrix ) );	// last frame's world -> view
 				float prevInvView[16];
 				if ( !RB_RHI_InvertMatrix( rhiReStirDIPrevView, prevInvView ) ) { memcpy( prevInvView, invView, sizeof( prevInvView ) ); }
@@ -9209,6 +9210,11 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		// R2 (Plan R2): ReLAX family + its settings (Remix direct-light preset / RTXDI sample as the starting values)
 		da.denoiser            = 1;								// R6: DI is ReLAX-only
 		da.fastFrames          = r_rtReStirDIRelaxFast.GetInteger();	// ReLAX diffuseMaxFastAccumulatedFrameNum (Remix direct: 1, "to reduce trail")
+		if ( r_rtReStirDIRelaxFastMs.GetFloat() > 0.0f ) {
+			// in TIME, like the main history: 8 frames were 200 ms of trail at 40 fps but 55 ms at 144
+			const float fps = 1000.0f / RB_RHI_SmoothedFrameMs();
+			da.fastFrames = Max( 1, (int)( r_rtReStirDIRelaxFastMs.GetFloat() * 0.001f * fps + 0.5f ) );
+		}
 		da.relaxPrepass        = r_rtReStirDIRelaxPrepass.GetFloat();
 		da.relaxPhiLuminance   = r_rtReStirDIRelaxPhi.GetFloat();
 		da.relaxAtrous         = r_rtReStirDIRelaxAtrous.GetInteger();
