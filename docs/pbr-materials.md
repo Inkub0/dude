@@ -296,9 +296,9 @@ original generated columns, one line per material:
 ```
 
 Any numeric column may be `*` (inherit). Unlike the generated table, an override
-entry **may still carry a category** — a real category (`metal`, `metal_painted`,
-`ceramic_sheen`, `metal_rust`, `stone`, `skin`, `eyes`, `flesh`) makes the line
-*track the live Developer-tab sliders*; `none` (or an absent category) **pins** the
+entry **may still carry a category** — a real class (§6.1: `solidmetal`,
+`hollowmetal`, `concrete`, `rock`, `skin`, `glass`, …) makes the line *track its
+class's live preset*; `none` (or an absent category) **pins** the
 explicit metalness/roughness numbers so a hand-tuned surface always wins. `wetness`
 (per-material specular-energy multiplier — the wet/sweat/slime film) and `env`
 (per-material metal env-glow multiplier over `r_pbrEnvScale`) are override-only
@@ -306,12 +306,13 @@ per-material knobs, `*` = inherit. `tools/pbr_make_overrides.py` emits a *full
 snapshot* override (every material, current classification, `wetness`/`env` = `*`)
 from the generated table, so the whole set is hand-editable in one file; unedited
 lines can be deleted (the generated table still supplies the default). Lines in a
-**slider-driven category** (metal, painted, ceramic, rust, stone, skin, eyes,
-flesh) get `*` for metalness/roughness too — those columns are ignored at draw time
-(the category cvar wins), so writing `*` keeps them from going stale when a category
-default changes and matches what the in-game editor writes. Only pinned `none` and
-long-tail categories (glass/wood/cloth…) carry explicit numbers, because those
-*are* read.
+**class** get `*` for metalness/roughness too — those columns are ignored at draw
+time (the class preset wins), so writing `*` keeps them from going stale when a preset
+changes and matches what the in-game editor writes. Only pinned `none` rows carry
+explicit numbers, because those *are* read. (Before §6.1 the long tail — glass, wood,
+cloth, cardboard, plastic, liquid — was not a live class and carried its numbers;
+every one of those rows held exactly its class default, so they became plain classes
+with no visual change.)
 
 **Surfacing the no-bump gap.** With `--root`/`--game`, the generator also appends,
 as *commented* ready-to-edit lines, every **lit material the classifier left
@@ -383,9 +384,68 @@ with no category) pins its explicit numbers. The long-tail categories (wood, gla
 liquid…) map to `none` internally, so they keep their baked table numbers. Per-material
 `wetness`/`env` columns are honored when set to a number, else inherit the category row.
 
+### 6.1 One class vocabulary for every title — Quake 4's materialType names (2026-10-28)
+
+Quake 4 declares a gameplay **materialType** (impact decals/sounds) on its materials:
+19 types in `q4base` `materials/types/types.mtt`, each with an `rgb` that also colours
+the per-pixel "hit" maps (`materialImage`). DUDE's PBR classes now **use those names**,
+so a Quake 4 material's declared type and its PBR class read the same, and DUDE's own
+classes are kept as **refinements** of a Quake 4 type or for what Quake 4 has no type for:
+
+| group | classes (Quake 4 name / *DUDE addition*) | was (Doom 3 table) |
+|---|---|---|
+| Metal | solidmetal, hollowmetal, monstermetal, *rust* | metal, metal_painted, —, metal_rust |
+| Mineral | concrete, *ceramic*, rock, dirt, sand, gravel | stone (split), ceramic_sheen |
+| Organic | flesh, *skin*, *eyes*, *wood*, *cloth*, *cardboard* | same names |
+| Synthetic | armor, electronics, plastic, rubber | plastic |
+| Glass / liquid | glass, bpglass, water, oil, gelatinousfluid | glass, liquid |
+
+Quake 4's `none` (no decals / no effects) is not emitted as a PBR class; `none` keeps its
+DUDE meaning (pinned explicit numbers). **Every class is live** (its own `@cat` preset row,
+editable in the Categories grid and selectable in the material editor) — the old 8-live /
+long-tail split is gone. Enum: `pbrCategory_t` in `Material.h` (the first nine keep their
+values, new ones appended); names, labels and UI groups: `pbrCategoryInfos[]` in
+`Material.cpp`, mirrored for the tools by `tools/pbr_classes.py`.
+
+**Migration (zero visual change, verified by resolving every material before/after:
+3,488 Doom 3 + 3,884 RoE materials identical).** `metal`→`solidmetal`,
+`metal_painted`→`hollowmetal` (station panelling is thin plate — Quake 4's definition),
+`ceramic_sheen`→`ceramic`, `metal_rust`→`rust`, `liquid`→`water`; Doom 3's `stone` split
+by name into `concrete` (brick, tile, cement, trims, stairs, pillars — and the default),
+`rock` (rock/cliff/cave/lava/ice tokens, `textures/rock*`, `caves/cav*`, the rest of
+`hell/`), `sand`, `dirt` (only names *starting* dirt/mud — `skpanel11_dirt` is a dirty
+panel) and `gravel`, all five seeded from stone's preset. Old names stay accepted as
+**aliases** on load (older override files, the user's dude-folder deltas); an old
+`@cat stone` row seeds all five split classes. The editor's next save rewrites them
+under the new names, and `pbr_bake_inplace.py` canonicalizes on bake.
+
+**Quake 4 table** — `q4base/pbr/pbr_materials.cfg`, generated by
+`tools/pbr_classify_q4.py` from the retail pk4s (deterministic; Raven's material guides
+expanded first — 5,167 materials, 3,178 lit, 3,131 in scope). Signals, strongest first;
+every row's comment names the one that decided it:
+
+| signal | rows | how |
+|---|---|---|
+| declared `materialType` | 416 | authoritative |
+| hit map (`materialImage`) | 336 | per-pixel types.mtt colour histogram, dominant type (grey 128 placeholder and off-palette pixels ignored; a retired brown type → cloth) |
+| texture-share | 99 | same diffuse / normal map as a declared or hit-mapped material |
+| variant | 50 | `_ut`/`_glow`/`_slime` suffixes, `textures/common_*/c_X` copies, left/right twins |
+| name / folder rules | 1,981 | tokens + directory priors (weapons excluded, as in Doom 3) |
+| head mesh | 14 | `models/lipsync/marine_head/` meshes (+ skins swapping them) → eyes/teeth |
+
+Refinements on top: declared `flesh` on a head mesh → `skin` (gear words such as helmet
+excluded), eye/teeth tokens → `eyes`, rust tokens on metal → `rust`, tile on concrete →
+`ceramic`. 2,896 rows classified, 235 listed commented-out (mostly `models/weapons`,
+`textures/test`, decals) for hand editing. Retail labelling decides the look: Raven types
+most walls `solidmetal` (so do the folder priors that follow its majority — 1,875 rows)
+and the marine bodies, fatigues and two helmets `flesh` (blood decals); the Quake 4 table
+carries its own `@cat` presets, so those classes tune per title. Development install: the
+engine reads it from the dude folder (`~/.local/share/dude/q4base/pbr/`) until a shipping
+path for DUDE's Quake 4 data exists.
+
 ### Per-category defaults — a table, not cvars (refactored 2026-08-12)
 
-The per-category values are **no longer individual cvars**. Each of the 8 categories is a
+The per-category values are **no longer individual cvars**. Each category (8 at the time; every class since §6.1) is a
 preset of **four** values — `{metalness, roughness, wetness, env}` — held in a table
 (`pbrCatDefaults[]` in `Material.cpp`, `R_PbrCategoryDefaults`/`R_PbrSetCategoryDefault`)
 and persisted as `@cat <name> m r w e` rows in `pbr/pbr_overrides.cfg` (the dude-folder

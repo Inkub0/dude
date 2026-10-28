@@ -170,10 +170,13 @@ void idMaterial::CommonInit() {
 	'#' starts a comment. Any numeric column may be '*' (also '-' / 'auto') meaning
 	*inherit*: metalness/roughness fall back to the per-category slider or the r_pbr*
 	global, wetness falls back to the per-category wetness cvar (1.0 off-category),
-	env falls back to 1.0. [category] is a class name (metal, metal_painted,
-	ceramic_sheen, metal_rust, stone, skin, eyes, flesh) or "none"; a real category
-	makes the entry track the live Developer-tab sliders, "none"/absent pins the
-	explicit numbers. Keys match case-insensitively. reloadPbrTable
+	env falls back to 1.0. [category] is a class token (pbrCategoryInfos below:
+	Quake 4's materialType names - solidmetal, hollowmetal, concrete, rock, flesh,
+	glass... - plus DUDE's skin, eyes, ceramic, rust, wood, cloth, cardboard) or
+	"none"; a real category makes the entry track its live preset row ("@cat"), and
+	"none"/absent pins the explicit numbers. The pre-unification Doom 3 names
+	(metal, metal_painted, ceramic_sheen, metal_rust, stone, liquid) still load as
+	aliases, so older override files keep working. Keys match case-insensitively. reloadPbrTable
 	(RenderSystem_init.cpp) invalidates the cache and re-applies to parsed materials,
 	so edits tune live in-game.
 
@@ -200,36 +203,84 @@ static float PBR_ParseNum( const char *tok ) {
 	return atof( tok );
 }
 
-// maps the generated table's category column to the classes with live cvars;
-// anything unrecognized (wood, glass, the long tail) stays PBR_CAT_NONE and
-// keeps its baked values
+// DUDE: the class vocabulary, in UI display order (docs/pbr-materials.md). Tokens are
+// Quake 4's materialType names where Raven defined one, so a Quake 4 material's declared
+// type and its PBR class read the same.
+static const pbrCategoryInfo_t pbrCategoryInfos[] = {
+	{ PBR_CAT_SOLIDMETAL,      "solidmetal",      "Solid Metal",          "Metal" },
+	{ PBR_CAT_HOLLOWMETAL,     "hollowmetal",     "Hollow Metal (panels)", "Metal" },
+	{ PBR_CAT_MONSTERMETAL,    "monstermetal",    "Monster Metal",        "Metal" },
+	{ PBR_CAT_RUST,            "rust",            "Rusted Metal",         "Metal" },
+	{ PBR_CAT_CONCRETE,        "concrete",        "Concrete / Brick",     "Mineral" },
+	{ PBR_CAT_CERAMIC,         "ceramic",         "Ceramic Sheen",        "Mineral" },
+	{ PBR_CAT_ROCK,            "rock",            "Rock",                 "Mineral" },
+	{ PBR_CAT_DIRT,            "dirt",            "Dirt",                 "Mineral" },
+	{ PBR_CAT_SAND,            "sand",            "Sand",                 "Mineral" },
+	{ PBR_CAT_GRAVEL,          "gravel",          "Gravel",               "Mineral" },
+	{ PBR_CAT_SKIN,            "skin",            "Skin (faces)",         "Organic" },
+	{ PBR_CAT_EYES,            "eyes",            "Eyes / Teeth",         "Organic" },
+	{ PBR_CAT_FLESH,           "flesh",           "Flesh / Gore",         "Organic" },
+	{ PBR_CAT_WOOD,            "wood",            "Wood",                 "Organic" },
+	{ PBR_CAT_CLOTH,           "cloth",           "Cloth",                "Organic" },
+	{ PBR_CAT_CARDBOARD,       "cardboard",       "Cardboard / Paper",    "Organic" },
+	{ PBR_CAT_ARMOR,           "armor",           "Armor",                "Synthetic" },
+	{ PBR_CAT_ELECTRONICS,     "electronics",     "Electronics",          "Synthetic" },
+	{ PBR_CAT_PLASTIC,         "plastic",         "Plastic",              "Synthetic" },
+	{ PBR_CAT_RUBBER,          "rubber",          "Rubber",               "Synthetic" },
+	{ PBR_CAT_GLASS,           "glass",           "Glass",                "Glass / Liquid" },
+	{ PBR_CAT_BPGLASS,         "bpglass",         "Bulletproof Glass",    "Glass / Liquid" },
+	{ PBR_CAT_WATER,           "water",           "Water",                "Glass / Liquid" },
+	{ PBR_CAT_OIL,             "oil",             "Oil",                  "Glass / Liquid" },
+	{ PBR_CAT_GELATINOUSFLUID, "gelatinousfluid", "Gelatinous Fluid",     "Glass / Liquid" },
+};
+static_assert( sizeof( pbrCategoryInfos ) / sizeof( pbrCategoryInfos[0] ) == PBR_CAT_COUNT - 1,
+               "pbrCategoryInfos needs one row per class" );
+
+// the pre-unification Doom 3 names, still accepted on load (old override files)
+static const struct { const char *name; int cat; } pbrCategoryAliases[] = {
+	{ "metal",         PBR_CAT_SOLIDMETAL },
+	{ "metal_painted", PBR_CAT_HOLLOWMETAL },
+	{ "ceramic_sheen", PBR_CAT_CERAMIC },
+	{ "metal_rust",    PBR_CAT_RUST },
+	{ "stone",         PBR_CAT_CONCRETE },	// an "@cat stone" row seeds all five mineral classes it was split into
+	{ "liquid",        PBR_CAT_WATER },
+};
+
+int R_PbrNumCategoryInfos( void ) {
+	return PBR_CAT_COUNT - 1;
+}
+
+const pbrCategoryInfo_t &R_PbrCategoryInfo( int i ) {
+	return pbrCategoryInfos[ idMath::ClampInt( 0, PBR_CAT_COUNT - 2, i ) ];
+}
+
+// table category column -> class; "none", absent and unknown tokens -> PBR_CAT_NONE
+// (the entry's explicit numbers stand)
 static int PBR_CategoryForName( const char *cat ) {
-	if ( !cat[0] || cat[0] == '*' || cat[0] == '-' ||
-	     !idStr::Icmp( cat, "none" ) )          return PBR_CAT_NONE;
-	if ( !idStr::Icmp( cat, "skin" ) )          return PBR_CAT_SKIN;
-	if ( !idStr::Icmp( cat, "eyes" ) )          return PBR_CAT_EYES;
-	if ( !idStr::Icmp( cat, "flesh" ) )         return PBR_CAT_FLESH;
-	if ( !idStr::Icmp( cat, "metal" ) )         return PBR_CAT_METAL;
-	if ( !idStr::Icmp( cat, "metal_painted" ) ) return PBR_CAT_PAINTED;
-	if ( !idStr::Icmp( cat, "ceramic_sheen" ) ) return PBR_CAT_CERAMIC;
-	if ( !idStr::Icmp( cat, "metal_rust" ) )    return PBR_CAT_RUST;
-	if ( !idStr::Icmp( cat, "stone" ) )         return PBR_CAT_STONE;
+	if ( !cat[0] || cat[0] == '*' || cat[0] == '-' ) {
+		return PBR_CAT_NONE;
+	}
+	for ( int i = 0; i < PBR_CAT_COUNT - 1; i++ ) {
+		if ( !idStr::Icmp( cat, pbrCategoryInfos[i].token ) ) {
+			return pbrCategoryInfos[i].cat;
+		}
+	}
+	for ( int i = 0; i < (int)( sizeof( pbrCategoryAliases ) / sizeof( pbrCategoryAliases[0] ) ); i++ ) {
+		if ( !idStr::Icmp( cat, pbrCategoryAliases[i].name ) ) {
+			return pbrCategoryAliases[i].cat;
+		}
+	}
 	return PBR_CAT_NONE;
 }
 
-// enum -> table token, for the material editor's write-back (inverse of the above)
-static const char *PBR_NameForCategory( int cat ) {
-	switch ( cat ) {
-	case PBR_CAT_SKIN:    return "skin";
-	case PBR_CAT_EYES:    return "eyes";
-	case PBR_CAT_FLESH:   return "flesh";
-	case PBR_CAT_METAL:   return "metal";
-	case PBR_CAT_PAINTED: return "metal_painted";
-	case PBR_CAT_CERAMIC: return "ceramic_sheen";
-	case PBR_CAT_RUST:    return "metal_rust";
-	case PBR_CAT_STONE:   return "stone";
-	default:              return "none";
+// class -> table token, for the material editor's write-back (inverse of the above)
+const char *R_PbrCategoryToken( int cat ) {
+	for ( int i = 0; i < PBR_CAT_COUNT - 1; i++ ) {
+		if ( pbrCategoryInfos[i].cat == cat ) {
+			return pbrCategoryInfos[i].token;
+		}
 	}
+	return "none";
 }
 
 // DUDE per-category PBR defaults (docs/pbr-materials.md). Each category is a preset of
@@ -239,15 +290,32 @@ static const char *PBR_NameForCategory( int cat ) {
 // in the pbr config override these at load, and the Categories UI writes them back.
 // wetness/env are multipliers (1 = neutral); env rides on top of the global r_pbrEnvScale.
 static pbrCatDefaults_t pbrCatDefaults[PBR_CAT_COUNT] = {
-	/* PBR_CAT_NONE    */ { 0.0f, 0.58f, 1.0f, 1.0f },	// unused (pinned materials carry their own)
-	/* PBR_CAT_SKIN    */ { 0.0f, 0.40f, 1.0f, 1.0f },
-	/* PBR_CAT_EYES    */ { 0.0f, 0.15f, 1.0f, 1.0f },
-	/* PBR_CAT_FLESH   */ { 0.0f, 0.55f, 1.0f, 1.0f },
-	/* PBR_CAT_METAL   */ { 0.8f, 0.32f, 1.0f, 1.0f },
-	/* PBR_CAT_PAINTED */ { 0.2f, 0.55f, 1.0f, 1.0f },
-	/* PBR_CAT_CERAMIC */ { 0.2f, 0.45f, 1.0f, 1.0f },
-	/* PBR_CAT_RUST    */ { 0.4f, 0.78f, 1.0f, 1.0f },
-	/* PBR_CAT_STONE   */ { 0.0f, 0.90f, 1.0f, 1.0f },
+	/* PBR_CAT_NONE            */ { 0.0f, 0.58f, 1.0f, 1.0f },	// unused (pinned materials carry their own)
+	/* PBR_CAT_SKIN            */ { 0.0f, 0.40f, 1.0f, 1.0f },
+	/* PBR_CAT_EYES            */ { 0.0f, 0.15f, 1.0f, 1.0f },
+	/* PBR_CAT_FLESH           */ { 0.0f, 0.55f, 1.0f, 1.0f },
+	/* PBR_CAT_SOLIDMETAL      */ { 0.8f, 0.32f, 1.0f, 1.0f },
+	/* PBR_CAT_HOLLOWMETAL     */ { 0.2f, 0.55f, 1.0f, 1.0f },
+	/* PBR_CAT_CERAMIC         */ { 0.2f, 0.45f, 1.0f, 1.0f },
+	/* PBR_CAT_RUST            */ { 0.4f, 0.78f, 1.0f, 1.0f },
+	/* PBR_CAT_CONCRETE        */ { 0.0f, 0.90f, 1.0f, 1.0f },
+	/* PBR_CAT_ROCK            */ { 0.0f, 0.90f, 1.0f, 1.0f },
+	/* PBR_CAT_DIRT            */ { 0.0f, 0.90f, 1.0f, 1.0f },
+	/* PBR_CAT_SAND            */ { 0.0f, 0.90f, 1.0f, 1.0f },
+	/* PBR_CAT_GRAVEL          */ { 0.0f, 0.90f, 1.0f, 1.0f },
+	/* PBR_CAT_MONSTERMETAL    */ { 0.8f, 0.32f, 1.0f, 1.0f },
+	/* PBR_CAT_ARMOR           */ { 0.1f, 0.50f, 1.0f, 1.0f },
+	/* PBR_CAT_ELECTRONICS     */ { 0.2f, 0.40f, 1.0f, 1.0f },
+	/* PBR_CAT_PLASTIC         */ { 0.0f, 0.45f, 1.0f, 1.0f },
+	/* PBR_CAT_RUBBER          */ { 0.0f, 0.70f, 1.0f, 1.0f },
+	/* PBR_CAT_GLASS           */ { 0.0f, 0.05f, 1.0f, 1.0f },
+	/* PBR_CAT_BPGLASS         */ { 0.0f, 0.05f, 1.0f, 1.0f },
+	/* PBR_CAT_WATER           */ { 0.0f, 0.15f, 1.0f, 1.0f },
+	/* PBR_CAT_OIL             */ { 0.0f, 0.10f, 1.0f, 1.0f },
+	/* PBR_CAT_GELATINOUSFLUID */ { 0.0f, 0.20f, 1.0f, 1.0f },
+	/* PBR_CAT_WOOD            */ { 0.0f, 0.75f, 1.0f, 1.0f },
+	/* PBR_CAT_CLOTH           */ { 0.0f, 0.85f, 1.0f, 1.0f },
+	/* PBR_CAT_CARDBOARD       */ { 0.0f, 0.85f, 1.0f, 1.0f },
 };
 
 void R_PbrCategoryDefaults( int cat, float &metal, float &rough, float &wet, float &env ) {
@@ -296,6 +364,15 @@ static void PBR_ParseTableBuffer( const char *buf, const char *label ) {
 			float cm = 0, cr = 0, cw = 0, ce = 0;
 			if ( sscanf( line.c_str(), "%15s %63s %f %f %f %f", kw, cname, &cm, &cr, &cw, &ce ) == 6
 			     && !idStr::Icmp( kw, "@cat" ) ) {
+				if ( !idStr::Icmp( cname, "stone" ) ) {
+					// pre-unification row: Doom 3's "stone" was split into these five, which
+					// all start from its preset
+					static const int split[] = { PBR_CAT_CONCRETE, PBR_CAT_ROCK, PBR_CAT_DIRT, PBR_CAT_SAND, PBR_CAT_GRAVEL };
+					for ( int i = 0; i < (int)( sizeof( split ) / sizeof( split[0] ) ); i++ ) {
+						R_PbrSetCategoryDefault( split[i], cm, cr, cw, ce );
+					}
+					continue;
+				}
 				const int cat = PBR_CategoryForName( cname );
 				if ( cat != PBR_CAT_NONE ) {
 					R_PbrSetCategoryDefault( cat, cm, cr, cw, ce );
@@ -419,7 +496,7 @@ bool R_PbrWriteOverrideLine( const idMaterial *mat, float metal, float rough,
 	wTok = ( wet  >= 0.0f ) ? idStr( va( "%.2f", wet ) )  : idStr( "*" );
 	eTok = ( env  >= 0.0f ) ? idStr( va( "%.2f", env ) )  : idStr( "*" );
 	idStr line = va( "%s %s %s %s %s %s", name.c_str(), mTok.c_str(), rTok.c_str(),
-	                 PBR_NameForCategory( category ), wTok.c_str(), eTok.c_str() );
+	                 R_PbrCategoryToken( category ), wTok.c_str(), eTok.c_str() );
 
 	// copy out of the rotating static buffer RelativePathToOSPath returns
 	idStr osPath = fileSystem->RelativePathToOSPath( "pbr/pbr_overrides.cfg", "fs_savepath" );
@@ -538,7 +615,7 @@ bool R_PbrWriteCategoryDefaults( void ) {
 	for ( int cat = PBR_CAT_NONE + 1; cat < PBR_CAT_COUNT; cat++ ) {
 		float m, r, w, e;
 		R_PbrCategoryDefaults( cat, m, r, w, e );
-		out += va( "@cat %s %.3f %.3f %.3f %.3f\n", PBR_NameForCategory( cat ), m, r, w, e );
+		out += va( "@cat %s %.3f %.3f %.3f %.3f\n", R_PbrCategoryToken( cat ), m, r, w, e );
 	}
 
 	idFile *wf = fileSystem->OpenExplicitFileWrite( osPath.c_str() );

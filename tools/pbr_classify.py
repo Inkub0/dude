@@ -28,6 +28,9 @@ import re
 import sys
 import zipfile
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from pbr_classes import CLASS_ORDER, canonical, split_stone  # noqa: E402  the shared class vocabulary
+
 # category -> (metalness, roughness); bands from docs/pbr-materials.md sec. 3,
 # calibrated around r_pbrRoughness 0.58 = the Blinn-exp-16-equivalent look.
 #
@@ -415,14 +418,16 @@ def main():
         for name in sorted(entries):
             cat, source = entries[name]
             metal, rough = CATEGORIES[cat]
-            cat_counts[cat] = cat_counts.get(cat, 0) + 1
-            f.write("%s %.2f %.2f %s  # (%s)\n" % (name, metal, rough, cat, source))
+            # the rules below still speak the old Doom 3 names; the table speaks the unified
+            # class vocabulary (tools/pbr_classes.py), "stone" split by name
+            cls = split_stone(name) if cat == "stone" else canonical(cat)
+            cat_counts[cls] = cat_counts.get(cls, 0) + 1
+            f.write("%s %.2f %.2f %s  # (%s)\n" % (name, metal, rough, cls, source))
 
     total = len(entries)
     print("wrote %s: %d entries" % (out_path, total))
-    for cat in CATEGORIES:
-        if cat in cat_counts:
-            print("  %-11s %5d" % (cat, cat_counts[cat]))
+    for cat in sorted(cat_counts, key=lambda c: CLASS_ORDER.get(c, 99)):
+        print("  %-15s %5d" % (cat, cat_counts[cat]))
     print("  no entry (global fallback): %d unclassified, %d skip-dir, %d out-of-scope"
           % (stats.get("unclassified", 0), stats.get("skip-dir", 0), stats.get("out-of-scope", 0)))
     return 0

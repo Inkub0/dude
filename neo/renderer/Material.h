@@ -444,12 +444,11 @@ public:
 						// number pins the knob for this one material. Only read under r_pbr.
 	float				GetPbrWetness( void ) const { return pbrWetness; }
 	float				GetPbrEnv( void ) const { return pbrEnv; }
-						// material class from the table's category column; the backend maps
-						// the main classes to live per-category cvars (Developer tab
-						// sliders), which then supersede the baked numbers above. An entry
-						// (generated OR override) may carry a category so it tracks the
-						// sliders; category "none" reports PBR_CAT_NONE and its explicit
-						// numbers stand, so a hand-pinned material always wins.
+						// material class from the table's category column (pbrCategory_t); a
+						// tagged material tracks its class's live preset row (@cat, the
+						// Categories sliders), which supersedes the baked numbers above.
+						// Category "none" reports PBR_CAT_NONE and its explicit numbers
+						// stand, so a hand-pinned material always wins.
 	int					GetPbrCategory( void ) const { return pbrCategory; }
 						// (re)runs the table lookup for this material; called at parse time
 						// and by the reloadPbrTable console command
@@ -805,23 +804,53 @@ private:
 	shaderStageExtra_t *stageExtras;		// DUDE: numStages entries next to stages (GetStageExtra)
 };
 
-// DUDE PBR: the main material classes the generated table tags entries with.
-// Only these get live per-category cvars; the long tail (wood, glass, cloth,
-// liquid...) keeps its baked table values. PBR_CAT_NONE = untagged, category
-// "none", or long-tail: explicit values that are never superseded by sliders.
+// DUDE PBR: the material classes the table tags entries with, one vocabulary for every
+// title (docs/pbr-materials.md). Quake 4's own materialType classes (materials/types/
+// types.mtt) keep Raven's names; DUDE's additions refine one of them (skin/eyes refine
+// flesh, rust refines the metals, ceramic refines concrete) or cover what Quake 4 has no
+// type for (wood, cloth, cardboard). Every class tracks its live preset row (@cat).
+// PBR_CAT_NONE = untagged / category "none": the entry's explicit values stand (pinned).
+// The first nine keep their historical values; new classes are appended.
 typedef enum {
 	PBR_CAT_NONE = 0,
-	PBR_CAT_SKIN,
+	PBR_CAT_SKIN,			// faces/heads (refines flesh)
 	PBR_CAT_EYES,			// eyes + teeth (cornea/enamel: hardest, wettest face surfaces)
 	PBR_CAT_FLESH,
-	PBR_CAT_METAL,			// bare metal
-	PBR_CAT_PAINTED,		// painted/coated metal
-	PBR_CAT_CERAMIC,		// ceramic sheen: painted floors + tile on floors and walls
-							// (split from the wall panelling for the light-streak look)
-	PBR_CAT_RUST,			// rusted/corroded metal
-	PBR_CAT_STONE,
+	PBR_CAT_SOLIDMETAL,		// heavy, bare metal: girders, pipes, grates, machined steel
+	PBR_CAT_HOLLOWMETAL,	// thin metal plate: station panelling, ducts, computer covers
+	PBR_CAT_CERAMIC,		// ceramic sheen: painted floors + tile on floors and walls (refines concrete)
+	PBR_CAT_RUST,			// rusted/corroded metal (refines the metals)
+	PBR_CAT_CONCRETE,		// construction stone: concrete, brick, plaster
+	PBR_CAT_ROCK,			// natural rock, caves, ice, lava rock
+	PBR_CAT_DIRT,
+	PBR_CAT_SAND,
+	PBR_CAT_GRAVEL,
+	PBR_CAT_MONSTERMETAL,	// metal grafted onto monsters (Strogg)
+	PBR_CAT_ARMOR,			// worn armour plates (kevlar / composite)
+	PBR_CAT_ELECTRONICS,	// consoles, monitors, computer housings
+	PBR_CAT_PLASTIC,
+	PBR_CAT_RUBBER,
+	PBR_CAT_GLASS,
+	PBR_CAT_BPGLASS,		// bulletproof glass
+	PBR_CAT_WATER,
+	PBR_CAT_OIL,
+	PBR_CAT_GELATINOUSFLUID,
+	PBR_CAT_WOOD,
+	PBR_CAT_CLOTH,
+	PBR_CAT_CARDBOARD,
 	PBR_CAT_COUNT			// number of categories (array sizing); not a real category
 } pbrCategory_t;
+
+// one row per class for the editor UIs, in display order (grouped)
+struct pbrCategoryInfo_t {
+	int				cat;		// pbrCategory_t
+	const char *	token;		// table / config name (Quake 4's materialType name where one exists)
+	const char *	label;		// UI label
+	const char *	group;		// UI group heading
+};
+int							R_PbrNumCategoryInfos( void );
+const pbrCategoryInfo_t &	R_PbrCategoryInfo( int i );		// i in display order, 0 .. R_PbrNumCategoryInfos() - 1
+const char *				R_PbrCategoryToken( int cat );	// pbrCategory_t -> table token ("none" for PBR_CAT_NONE)
 
 // DUDE per-category PBR defaults (docs/pbr-materials.md): each category is a preset of
 // four values every material tagged with it tracks live. Persisted as "@cat <name> m r

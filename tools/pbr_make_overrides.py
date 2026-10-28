@@ -39,6 +39,9 @@ import argparse
 import os
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from pbr_classes import CLASS_ORDER, canonical  # noqa: E402  the shared class vocabulary
+
 
 def parse_num(tok):
     """A table numeric column: '*'/'-'/'auto' -> None (inherit), else float."""
@@ -150,19 +153,21 @@ HEADER = """\
 # Columns:
 #   <material>  <metalness>  <roughness>  <category>  <wetness>  <env>
 #
-#   metalness  0 = dielectric (stone/wood/skin/plastic), 1 = bare metal.
-#              Effective value clamped by r_pbrMetalnessMax.
+#   metalness  0 = dielectric (concrete/wood/skin/plastic), 1 = bare metal.
 #   roughness  0.03 = mirror .. 1.0 = fully matte.
-#   category   metal | metal_painted | ceramic_sheen | metal_rust | stone |
-#              skin | eyes | flesh | none  (long-tail names like glass/wood/cloth
-#              behave as 'none'). A real category tracks the live per-category
-#              Developer-tab sliders and IGNORES the metalness/roughness numbers
-#              on this line; set it to 'none' (or leave it) to PIN the numbers.
+#   category   a material class (tools/pbr_classes.py): Quake 4's materialType names
+#              solidmetal | hollowmetal | monstermetal | concrete | rock | dirt |
+#              sand | gravel | flesh | armor | electronics | plastic | rubber |
+#              glass | bpglass | water | oil | gelatinousfluid, plus DUDE's
+#              rust | ceramic | skin | eyes | wood | cloth | cardboard - or none.
+#              A real class tracks its live preset (@cat row, Categories panel)
+#              and IGNORES the metalness/roughness numbers on this line; set it to
+#              'none' (or leave it) to PIN the numbers.
 #   wetness    per-material specular-energy multiplier (the wet/sweat/slime film).
-#              1.0 = neutral. '*' = inherit (skin/eyes -> r_pbrSkinWetness,
-#              flesh -> r_pbrFleshWetness, everything else 1.0).
+#              1.0 = neutral. '*' = inherit (the class's @cat preset; 1.0 pinned).
 #   env        per-material metal env-glow multiplier over r_pbrEnvScale (only
-#              affects metals). 1.0 = neutral. '*' = inherit (1.0).
+#              affects metals). 1.0 = neutral. '*' = inherit (the class's @cat
+#              preset; 1.0 pinned).
 #
 # Any numeric column may be '*' to inherit. To hard-pin one surface: give it real
 # metalness/roughness numbers and set its category to 'none'. To make a wall look
@@ -225,11 +230,9 @@ SLIM_PARENT_HEADER = """\
 # Columns: <material> <metalness> <roughness> <category> <wetness> <env>; '*' = inherit.
 """
 
-# order categories for grouped, skimmable output
-CAT_ORDER = {
-    "metal": 0, "metal_painted": 1, "ceramic_sheen": 2, "metal_rust": 3,
-    "stone": 4, "skin": 5, "eyes": 6, "flesh": 7,
-}
+# order categories for grouped, skimmable output (old Doom 3 names sort as their class)
+CAT_ORDER = {**CLASS_ORDER, **{old: CLASS_ORDER[canonical(old)] for old in
+                               ("metal", "metal_painted", "ceramic_sheen", "metal_rust", "stone", "liquid")}}
 
 
 def main():
