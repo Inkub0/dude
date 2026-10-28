@@ -1,0 +1,76 @@
+// DUDE offline AO baker, GPU tracer (docs/occlusion-maps.md, neo/tools/compilers/aobake/aobake_gpu.cpp).
+// One thread per baked texel: integrate the cosine-weighted hemisphere visibility exactly the way the CPU
+// tracer does (AO_SampleVisibility in aobake.cpp) - lift the origin off the surface by `bias`, cast the
+// shared hemisphere directions rotated into the texel's normal frame, and for each hit within maxDist add
+// the distance falloff 1 - d / maxDist; count hits within `contact` for the buried-texel test.
+//
+// The occluders are one BLAS of the model's drawn, opaque triangles, uploaded with a winding chosen so
+// Vulkan's front face is the engine's outward face: culling back faces here IS the CPU tracer's
+// "front-face hits only" rule (an occluder only counts when its normal opposes the ray).
+// Not used by any renderer; the baker opens its own headless Vulkan device for it.
+#extension GL_EXT_ray_query : require
+
+layout( local_size_x = 64 ) in;
+
+layout( set = 0, binding = 0 ) uniform accelerationStructureEXT u_occluders;
+
+struct AoSample {
+	vec4	pos;		// xyz = object-space surface point
+	vec4	nrm;		// xyz = interpolated vertex normal (not normalized)
+};
+layout( std430, set = 0, binding = 1 ) readonly buffer Samples { AoSample s[]; } samples;
+layout( std430, set = 0, binding = 2 ) readonly buffer Hemi { vec4 d[]; } hemi;		// tangent-space dirs, +Z = normal
+layout( std430, set = 0, binding = 3 ) writeonly buffer Results { vec2 r[]; } results;	// x = visibility, y = buried (0/1)
+
+layout( push_constant ) uniform PC {
+	uint	count;		// samples in this dispatch
+	uint	rays;		// hemisphere directions (entries in hemi)
+	float	maxDist;	// occlusion ray length
+	float	bias;		// origin lift along the normal
+	float	contact;	// buried-texel distance (0 = off)
+} pc;
+
+void main() {
+	const uint i = gl_GlobalInvocationID.x;
+	if ( i >= pc.count ) {
+		return;
+	}
+
+	vec3 n = samples.s[i].nrm.xyz;
+	const float len = length( n );
+	n = ( len > 0.0 ) ? n / len : vec3( 0.0, 0.0, 1.0 );
+
+	// orthonormal basis with n as +Z (Duff et al.) - AO_Basis
+	const float sgn = ( n.z >= 0.0 ) ? 1.0 : -1.0;
+	const float a = -1.0 / ( sgn + n.z );
+	const float b = n.x * n.y * a;
+	const vec3 t = vec3( 1.0 + sgn * n.x * n.x * a, sgn * b, -sgn * n.x );
+	const vec3 bt = vec3( b, sgn + n.y * n.y * a, -n.y );
+
+	const vec3 orig = samples.s[i].pos.xyz + n * pc.bias;
+
+	float occ = 0.0;
+	uint nearHits = 0u;
+	for ( uint k = 0u; k < pc.rays; k++ ) {
+		const vec3 l = hemi.d[k].xyz;
+		const vec3 dir = t * l.x + bt * l.y + n * l.z;
+
+		rayQueryEXT rq;
+		rayQueryInitializeEXT( rq, u_occluders, gl_RayFlagsOpaqueEXT | gl_RayFlagsCullBackFacingTrianglesEXT,
+		                       0xFFu, orig, 0.0, dir, pc.maxDist );
+		while ( rayQueryProceedEXT( rq ) ) {
+		}
+		if ( rayQueryGetIntersectionTypeEXT( rq, true ) == gl_RayQueryCommittedIntersectionTriangleEXT ) {
+			const float d = rayQueryGetIntersectionTEXT( rq, true );
+			if ( d > 0.0 ) {
+				occ += 1.0 - d / pc.maxDist;
+				if ( d < pc.contact ) {
+					nearHits++;
+				}
+			}
+		}
+	}
+
+	const bool buried = ( pc.contact > 0.0 ) && ( nearHits * 2u > pc.rays );
+	results.r[i] = vec2( 1.0 - occ / float( pc.rays ), buried ? 1.0 : 0.0 );
+}

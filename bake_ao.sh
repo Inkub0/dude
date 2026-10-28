@@ -12,6 +12,7 @@
 #   ./bake_ao.sh +bakeAOFolder models/mapobjects
 #   ./bake_ao.sh +bakeAO models/md5/monsters/imp/imp.md5mesh
 #   AO_RAYS=256 ./bake_ao.sh +bakeAOFolder models/mapobjects/cpu   # override tunables
+#   AO_GPU=0 ./bake_ao.sh +bakeAO ...                               # force the CPU tracer
 #
 # Everything after the script name is passed straight to the engine, so you can chain
 # multiple +bakeAO* commands. A final +quit is appended automatically.
@@ -37,12 +38,14 @@ trap 'rm -rf "$CFG_THROWAWAY"' EXIT
 # bake tunables (override via env); match the shipped defaults used for the batch bakes
 AO_RAYS="${AO_RAYS:-128}"
 AO_SIZE="${AO_SIZE:-0}"       # 0 = auto (match each surface's texture size)
-AO_THREADS="${AO_THREADS:-0}" # 0 = auto (all hardware threads)
+AO_THREADS="${AO_THREADS:-0}" # 0 = auto (all hardware threads) -- the CPU tracer
+AO_GPU="${AO_GPU:-1}"         # 1 = trace on the GPU (Vulkan ray query) when available, 0 = CPU only
 
 exec xvfb-run -a "$DUDE" \
 	+set fs_configpath "$CFG_THROWAWAY" \
 	+set r_occlusionMapBakeSize "$AO_SIZE" \
 	+set r_occlusionMapBakeRays "$AO_RAYS" \
 	+set r_occlusionMapBakeThreads "$AO_THREADS" \
+	+set r_occlusionMapBakeGPU "$AO_GPU" \
 	"$@" \
 	+quit

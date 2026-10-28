@@ -13,8 +13,9 @@ Doom 3 GPL Source Code (see ArbProgram.h for license header)
 // plus a lazy on-demand entry point (AO_BakeModelToCache) the renderer calls under
 // r_occlusionMapsAutoBake. Static models (LWO/ASE) bake their resident geometry directly;
 // MD5 characters are instantiated in their reference/bind pose first (that snapshot carries
-// the deformed geometry -- the base MD5 model exposes none). Pure CPU + filesystem — no GL —
-// so it is safe to call mid-frame.
+// the deformed geometry -- the base MD5 model exposes none). No GL -- so it is safe to call
+// mid-frame. The ray casting runs on the GPU when it can (aobake_gpu.cpp: a headless Vulkan
+// ray-query device of its own, r_occlusionMapBakeGPU) and on a CPU thread pool otherwise.
 //
 // The approach mirrors renderbump: rasterize each triangle into UV/texture space, and for
 // every covered texel find the object-space point + interpolated normal, then integrate
@@ -30,6 +31,9 @@ Doom 3 GPL Source Code (see ArbProgram.h for license header)
 
 #include "tools/compilers/compiler_public.h"
 #include "tools/compilers/aobake/aobake.h"
+#ifdef DHEWM3_VULKAN
+#include "tools/compilers/aobake/aobake_gpu.h"
+#endif
 
 #include <thread>		// per-texel parallel bake (fork-join worker pool)
 #include <atomic>
@@ -47,6 +51,9 @@ idCVar r_occlusionMapBakeDetail( "r_occlusionMapBakeDetail", "1.5", CVAR_RENDERE
 // NOT archived on purpose: the ideal worker count is a property of the machine, and archiving it
 // would freeze whatever value a past run happened to use. 0 = auto (all hardware threads).
 idCVar r_occlusionMapBakeThreads( "r_occlusionMapBakeThreads", "0", CVAR_RENDERER | CVAR_INTEGER, "AO baker: worker threads for the per-texel bake (0 = auto = all hardware threads; 1 = serial)", 0, 256 );
+// Not archived either (a property of the machine). Falls back to the CPU on its own when no GPU
+// with Vulkan ray query is present, so 1 is safe everywhere.
+idCVar r_occlusionMapBakeGPU( "r_occlusionMapBakeGPU", "1", CVAR_RENDERER | CVAR_BOOL, "AO baker: cast the occlusion rays on the GPU (Vulkan ray query, a headless device of the baker's own) when one is available; 0 = always the CPU tracer. Vulkan builds only" );
 
 /*
 ====================================================================================
@@ -599,6 +606,28 @@ struct aoTriSetup_t {
 	idVec3	n0, n1, n2;					// vertex normals
 };
 
+// Finish one texel from its traced visibility: multiply in the bump-map cavity, apply the contrast
+// and store it. Overlapping UVs keep the darker (more-occluded) value, which is order-independent,
+// so the CPU rows and the GPU batches can resolve texels in any order with the same result.
+static void AO_StoreTexel( int x, int y, float vis, byte *ao, byte *covered, int size,
+                           const aoBump_t *bump, float detail, float contrast ) {
+	// surface-detail cavity from the bump/normal map (grooves/seams darken).
+	if ( bump && detail > 0.0f ) {
+		float u = ( x + 0.5f ) / (float)size;
+		float v = ( y + 0.5f ) / (float)size;
+		vis *= AO_DetailCavity( *bump, u, v, 2.0f / (float)size, detail );
+	}
+
+	vis = idMath::Pow( idMath::ClampFloat( 0.0f, 1.0f, vis ), contrast );
+
+	int o = y * size + x;
+	byte val = (byte)( idMath::ClampFloat( 0.0f, 1.0f, vis ) * 255.0f + 0.5f );
+	if ( !covered[o] || val < ao[o] ) {
+		ao[o] = val;
+	}
+	covered[o] = 1;
+}
+
 // Integrate AO for a single output row `y` across every triangle that covers it, writing into
 // ao/covered. The parallel bake assigns each row to exactly one worker, so this thread owns row
 // `y`'s texels exclusively -- no locking is needed. `ctx` is this thread's private grid-walk
@@ -635,33 +664,93 @@ static void AO_BakeRow( int y, const aoGrid_t &g, const idList<aoTriSetup_t> &se
 				continue;
 			}
 
-			// surface-detail cavity from the bump/normal map (grooves/seams darken).
-			if ( bump && detail > 0.0f ) {
-				float u = ( x + 0.5f ) / (float)size;
-				float v = ( y + 0.5f ) / (float)size;
-				vis *= AO_DetailCavity( *bump, u, v, 2.0f / (float)size, detail );
-			}
-
-			vis = idMath::Pow( idMath::ClampFloat( 0.0f, 1.0f, vis ), contrast );
-
-			int o = y * size + x;
-			byte val = (byte)( idMath::ClampFloat( 0.0f, 1.0f, vis ) * 255.0f + 0.5f );
-			// overlapping UVs: keep the darker (more-occluded) contribution
-			if ( !covered[o] || val < ao[o] ) {
-				ao[o] = val;
-			}
-			covered[o] = 1;
+			AO_StoreTexel( x, y, vis, ao, covered, size, bump, detail, contrast );
 			wroteAny = true;
 		}
 	}
 }
 
+#ifdef DHEWM3_VULKAN
+// GPU variant of the per-texel integration (aobake_gpu.cpp): enumerate every covered texel centre
+// with the same inside test as AO_BakeRow, hand them to the GPU tracer in batches, then finish each
+// texel on the CPU exactly as the row walker does (buried skip, cavity, contrast, darker-wins). The
+// occluders and hemisphere were uploaded by AO_BakeGeoModel. Returns 1 if a texel was written, 0 if
+// none was, -1 on a GPU failure (the caller then redoes the surface on the CPU).
+static int AO_BakeSurfaceGpu( const idList<aoTriSetup_t> &setups, byte *ao, byte *covered, int size,
+                              float maxDist, float bias, float contrast, const aoBump_t *bump,
+                              float detail, float contact ) {
+	const int batch = 1 << 20;
+	idList<aoGpuSample_t> samples;
+	idList<int> texel;
+	idList<float> vis;
+	idList<byte> buried;
+	samples.Resize( batch );
+	texel.Resize( batch );
+	bool wroteAny = false;
+
+	// trace + resolve whatever has been gathered so far
+	auto flush = [&]() -> bool {
+		const int n = samples.Num();
+		if ( n == 0 ) {
+			return true;
+		}
+		vis.SetNum( n );
+		buried.SetNum( n );
+		if ( !AOGpu_Trace( samples.Ptr(), n, maxDist, bias, contact, vis.Ptr(), buried.Ptr() ) ) {
+			return false;
+		}
+		for ( int i = 0; i < n; i++ ) {
+			if ( buried[i] ) {
+				continue;		// hidden under a co-located sub-mesh: see AO_BakeRow
+			}
+			AO_StoreTexel( texel[i] % size, texel[i] / size, vis[i], ao, covered, size, bump, detail, contrast );
+			wroteAny = true;
+		}
+		samples.SetNum( 0, false );
+		texel.SetNum( 0, false );
+		return true;
+	};
+
+	for ( int ti = 0; ti < setups.Num(); ti++ ) {
+		const aoTriSetup_t &s = setups[ti];
+		for ( int y = s.minY; y < s.maxY; y++ ) {
+			const float py = y + 0.5f;
+			for ( int x = s.minX; x < s.maxX; x++ ) {
+				float px = x + 0.5f;
+				float w0 = AO_Edge( s.bx, s.by, s.cx, s.cy, px, py ) * s.invArea;
+				float w1 = AO_Edge( s.cx, s.cy, s.ax, s.ay, px, py ) * s.invArea;
+				float w2 = AO_Edge( s.ax, s.ay, s.bx, s.by, px, py ) * s.invArea;
+				if ( w0 < 0.0f || w1 < 0.0f || w2 < 0.0f ) {
+					continue;		// texel center outside this triangle
+				}
+				const idVec3 point  = s.p0 * w0 + s.p1 * w1 + s.p2 * w2;
+				const idVec3 normal = s.n0 * w0 + s.n1 * w1 + s.n2 * w2;
+				aoGpuSample_t smp;
+				smp.pos[0] = point.x;  smp.pos[1] = point.y;  smp.pos[2] = point.z;  smp.pos[3] = 0.0f;
+				smp.nrm[0] = normal.x; smp.nrm[1] = normal.y; smp.nrm[2] = normal.z; smp.nrm[3] = 0.0f;
+				samples.Append( smp );
+				texel.Append( y * size + x );
+				if ( samples.Num() >= batch && !flush() ) {
+					return -1;
+				}
+			}
+		}
+	}
+	if ( !flush() ) {
+		return -1;
+	}
+	return wroteAny ? 1 : 0;
+}
+#endif
+
 // Bake one surface: rasterize its triangles, integrate AO per texel, dilate, write TGA to
 // outPath. Returns false if nothing was written (degenerate UVs / no coverage). `bump` may be
-// NULL (no bump stage) -> geometry-only AO.
+// NULL (no bump stage) -> geometry-only AO. `hemi` is the shared cosine-weighted direction set
+// (`rays` entries). `gpu`: trace with the GPU tracer (its occluders/hemisphere already uploaded),
+// falling back to the CPU grid `g` if the GPU fails.
 static bool AO_BakeSurface( const aoGrid_t &g, const srfTriangles_t *tri, const char *outPath,
-                            int size, int rays, float maxDist, float bias, float contrast, int dilate,
-                            const aoBump_t *bump, float detail, float contact ) {
+                            int size, const idVec3 *hemi, int rays, float maxDist, float bias, float contrast,
+                            int dilate, const aoBump_t *bump, float detail, float contact, bool gpu ) {
 	if ( !tri || !tri->verts || !tri->indexes || tri->numIndexes < 3 ) {
 		return false;
 	}
@@ -711,17 +800,23 @@ static bool AO_BakeSurface( const aoGrid_t &g, const srfTriangles_t *tri, const 
 		return false;
 	}
 
-	// Cosine-weighted hemisphere directions, computed once and shared by every texel/worker (they
-	// are read-only and depend only on the ray count). Hoists the per-ray trig out of the hot loop.
-	idList<idVec3> hemi;
-	hemi.SetNum( rays );
-	for ( int i = 0; i < rays; i++ ) {
-		hemi[i] = AO_CosineHemisphere( i, rays );
-	}
-	const idVec3 *hemiPtr = hemi.Ptr();
-
 	byte *aoPtr  = ao.Ptr();
 	byte *covPtr = covered.Ptr();
+
+	bool traced = false;
+#ifdef DHEWM3_VULKAN
+	if ( gpu ) {
+		const int r = AO_BakeSurfaceGpu( setups, aoPtr, covPtr, size, maxDist, bias, contrast, bump, detail, contact );
+		if ( r >= 0 ) {
+			wroteAny = ( r > 0 );
+			traced = true;
+		} else {
+			// the GPU failed part-way: start the surface over on the CPU
+			memset( aoPtr, 255, size * size );
+			memset( covPtr, 0, size * size );
+		}
+	}
+#endif
 
 	// Integrate AO per output row, fanning the rows across worker threads. The ray casting is the
 	// whole cost and every texel is independent; rows are disjoint texel sets so no synchronization
@@ -734,10 +829,12 @@ static bool AO_BakeSurface( const aoGrid_t &g, const srfTriangles_t *tri, const 
 	if ( nThreads < 1 ) nThreads = 1;
 	if ( nThreads > size ) nThreads = size;		// no point in more workers than rows
 
-	if ( nThreads <= 1 ) {
+	if ( traced ) {
+		// done on the GPU
+	} else if ( nThreads <= 1 ) {
 		aoTraceCtx_t ctx;
 		for ( int y = 0; y < size; y++ ) {
-			AO_BakeRow( y, g, setups, aoPtr, covPtr, size, hemiPtr, rays, maxDist, bias, contrast,
+			AO_BakeRow( y, g, setups, aoPtr, covPtr, size, hemi, rays, maxDist, bias, contrast,
 			            bump, detail, contact, ctx, wroteAny );
 		}
 	} else {
@@ -757,7 +854,7 @@ static bool AO_BakeSurface( const aoGrid_t &g, const srfTriangles_t *tri, const 
 					if ( y >= size ) {
 						break;
 					}
-					AO_BakeRow( y, g, setups, aoPtr, covPtr, size, hemiPtr, rays, maxDist, bias, contrast,
+					AO_BakeRow( y, g, setups, aoPtr, covPtr, size, hemi, rays, maxDist, bias, contrast,
 					            bump, detail, contact, ctx, wrote );
 				}
 				wroteFlags[t] = wrote ? 1 : 0;
@@ -907,13 +1004,52 @@ static bool AO_BakeGeoModel( const idRenderModel *geoModel, const char *pathName
 	int effThreads = ( reqThreads > 0 ) ? reqThreads : (int)std::thread::hardware_concurrency();
 	if ( effThreads < 1 ) effThreads = 1;
 
-	common->Printf( "bakeAO: '%s' (%d surfaces, %d rays, %s, dist %.1f, %d threads)\n",
-	                pathName, geoModel->NumSurfaces(), rays,
-	                autoSize ? "auto px" : va( "%dpx", idMath::ClampInt( 16, 4096, sizeCvar ) ), maxDist,
-	                effThreads );
-
 	aoGrid_t grid;
 	AO_BuildGrid( geoModel, grid );
+
+	// Cosine-weighted hemisphere directions, computed once and shared by every surface, texel and
+	// worker (they depend only on the ray count). Hoists the per-ray trig out of the hot loop.
+	idList<idVec3> hemi;
+	hemi.SetNum( rays );
+	for ( int i = 0; i < rays; i++ ) {
+		hemi[i] = AO_CosineHemisphere( i, rays );
+	}
+
+	// GPU tracer: the grid's triangles (the drawn, opaque occluders) become its BLAS. Each is wound
+	// so ( v1 - v0 ) x ( v2 - v0 ) is the oriented normal the CPU culls by (aobake_gpu.h) -- the
+	// reverse of the engine's own face-plane winding. The CPU grid is still built: it is the
+	// fallback if the GPU fails mid-model.
+	bool gpu = false;
+#ifdef DHEWM3_VULKAN
+	const bool gpuHeld = r_occlusionMapBakeGPU.GetBool() && AOGpu_Acquire();
+	if ( gpuHeld ) {
+		idList<float> xyz;
+		xyz.SetNum( grid.tris.Num() * 9 );
+		for ( int i = 0; i < grid.tris.Num(); i++ ) {
+			const aoTri_t &t = grid.tris[i];
+			const bool keep = ( t.v[1] - t.v[0] ).Cross( t.v[2] - t.v[0] ) * t.normal >= 0.0f;
+			const idVec3 *order[3] = { &t.v[0], keep ? &t.v[1] : &t.v[2], keep ? &t.v[2] : &t.v[1] };
+			for ( int k = 0; k < 3; k++ ) {
+				xyz[i * 9 + k * 3 + 0] = order[k]->x;
+				xyz[i * 9 + k * 3 + 1] = order[k]->y;
+				xyz[i * 9 + k * 3 + 2] = order[k]->z;
+			}
+		}
+		idList<float> dirs;
+		dirs.SetNum( rays * 3 );
+		for ( int i = 0; i < rays; i++ ) {
+			dirs[i * 3 + 0] = hemi[i].x;
+			dirs[i * 3 + 1] = hemi[i].y;
+			dirs[i * 3 + 2] = hemi[i].z;
+		}
+		gpu = AOGpu_SetOccluders( xyz.Ptr(), grid.tris.Num() ) && AOGpu_SetHemisphere( dirs.Ptr(), rays );
+	}
+#endif
+
+	common->Printf( "bakeAO: '%s' (%d surfaces, %d rays, %s, dist %.1f, %s)\n",
+	                pathName, geoModel->NumSurfaces(), rays,
+	                autoSize ? "auto px" : va( "%dpx", idMath::ClampInt( 16, 4096, sizeCvar ) ), maxDist,
+	                gpu ? "GPU" : va( "%d threads", effThreads ) );
 
 	const float detail = idMath::ClampFloat( 0.0f, 4.0f, r_occlusionMapBakeDetail.GetFloat() );
 
@@ -955,14 +1091,19 @@ static bool AO_BakeGeoModel( const idRenderModel *geoModel, const char *pathName
 		aoBump_t bump;
 		const bool hasBump = ( detail > 0.0f ) && AO_LoadBump( bumpMat, bump );
 		if ( AO_BakeSurface( grid, surf->geometry, outPath.c_str(),
-		                     size, rays, maxDist, bias, contrast, dilate,
-		                     hasBump ? &bump : NULL, detail, contact ) ) {
+		                     size, hemi.Ptr(), rays, maxDist, bias, contrast, dilate,
+		                     hasBump ? &bump : NULL, detail, contact, gpu ) ) {
 			any = true;
 		}
 		if ( hasBump ) {
 			AO_FreeBump( bump );
 		}
 	}
+#ifdef DHEWM3_VULKAN
+	if ( gpuHeld ) {
+		AOGpu_Release();
+	}
+#endif
 	return any;
 }
 
@@ -1073,6 +1214,14 @@ void BakeAOFolder_f( const idCmdArgs &args ) {
 	int total = 0, baked = 0;
 	int start = Sys_Milliseconds();
 
+#ifdef DHEWM3_VULKAN
+	// hold the GPU tracer across the whole folder so its device is created once, not per model
+	const bool gpuHeld = r_occlusionMapBakeGPU.GetBool();
+	if ( gpuHeld ) {
+		AOGpu_Acquire();		// a failure is reported once; every model then bakes on the CPU
+	}
+#endif
+
 	static const char *exts[] = { "lwo", "ase", "md5mesh", NULL };
 	for ( int e = 0; exts[e]; e++ ) {
 		idFileList *files = fileSystem->ListFilesTree( folder, va( ".%s", exts[e] ) );
@@ -1086,6 +1235,12 @@ void BakeAOFolder_f( const idCmdArgs &args ) {
 		}
 		fileSystem->FreeFileList( files );
 	}
+
+#ifdef DHEWM3_VULKAN
+	if ( gpuHeld ) {
+		AOGpu_Release();
+	}
+#endif
 
 	common->Printf( "bakeAOFolder: baked %d of %d models in %d ms\n", baked, total, Sys_Milliseconds() - start );
 	R_ResetOcclusionMapCache();

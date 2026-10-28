@@ -106,7 +106,9 @@ lazy auto-bake passes the drawing entity's skin for that reason.
   model exposes none) and baked the same way; concave organic geometry (folds, sockets, muscle
   overlaps) is exactly where baked self-AO pays off most. Keyed by the surface's persistent id
   (== mesh index), so a skin that culls a mesh still lines the rest up.
-- Pure CPU + filesystem (no GL), accelerated by a uniform grid; seconds per model.
+- No GL. The rays are cast **on the GPU** when one with Vulkan ray query is present
+  (`r_occlusionMapBakeGPU 1`, the default; Vulkan builds only) and on a CPU thread pool over a
+  uniform grid otherwise — see *GPU tracer* below. Seconds per model either way.
 
 **Surface detail from the bump/normal map.** Geometric ray-AO only sees the low-poly mesh, so
 the detail authored into the normal map (seams, rivets, vents, handles) would be invisible. The
@@ -210,6 +212,8 @@ for release.
 | `r_occlusionMapBakeDilate` | 4 | 0–32 | baker: seam padding in pixels |
 | `r_occlusionMapBakeDetail` | 1.5 | 0–4 | baker: bump/normal-map cavity strength (0 = geometry only) |
 | `r_occlusionMapBakeContact` | 1.0 | 0–16 | baker: buried-texel contact distance, world units (capped at 2% of the model's longest axis); a texel mostly blocked within it sits under a co-located sub-mesh and is skipped (0 = off) |
+| `r_occlusionMapBakeGPU` | 1 | 0/1 | baker: cast the rays on the GPU (Vulkan ray query) when available, else the CPU; not archived; Vulkan builds only |
+| `r_occlusionMapBakeThreads` | 0 | 0–256 | baker: CPU tracer worker threads (0 = all hardware threads); not archived |
 
 Ambient strength = `r_occlusionMapScale`; direct-diffuse strength =
 `r_occlusionMapScale × r_occlusionMapDirect`.
@@ -301,3 +305,34 @@ dispatches static models straight to `AO_BakeGeoModel()`, and MD5 models through
 `r_showSkel 0`, calls `InstantiateDynamicModel`, then bakes the snapshot). Runtime resolve +
 per-surface cache: `RB_RHI_SurfaceOcclusion` / `R_ResetOcclusionMapCache` in
 [`RhiWorld.cpp`](../neo/renderer/rhi/RhiWorld.cpp).
+
+### GPU tracer
+
+[`aobake_gpu.cpp`](../neo/tools/compilers/aobake/aobake_gpu.cpp) +
+[`shaders/aobake.comp`](../neo/shaders/aobake.comp) (2026-10-28). The ray casting is the whole
+cost of a bake; it now runs as a ray-query compute shader, one thread per texel, against a
+hardware BLAS of the model's occluders (the same drawn, opaque, non-eyewear triangles the CPU grid
+holds). Everything around it stays on the CPU and is shared with the CPU path: UV rasterization
+enumerates the covered texel centres, the GPU returns visibility + the buried flag per texel, and
+`AO_StoreTexel` applies the bump cavity, contrast and the darker-wins overlap rule.
+
+- **Own headless device.** The tracer creates a Vulkan 1.3 instance/device of its own (no surface,
+  nothing shared with the renderer), so it works under GL3, Vulkan, xvfb (`bake_ao.sh`) and the
+  lazy auto-bake alike. It picks a discrete GPU over an integrated one and skips CPU
+  implementations (lavapipe); with no ray-query GPU it prints why once and the CPU tracer runs.
+  `bakeAOFolder` holds the device for the whole folder; `bakeAO` / the lazy path open it per model.
+- **Same integral.** Same Hammersley directions (uploaded, not recomputed), same origin bias,
+  distance falloff, contact test. The CPU's *front-face hits only* rule maps onto Vulkan's
+  back-face cull: each occluder is uploaded wound so `(v1 - v0) x (v2 - v0)` is its oriented
+  normal (Vulkan's front face is counter-clockwise seen from the ray origin).
+- **Fallback.** A device error mid-surface redoes that surface on the CPU and the rest of the
+  acquisition bakes on the CPU. Dispatches are capped at ~32M rays so a slow GPU stays under the
+  Windows 2 s watchdog.
+- **Output.** Not byte-identical to the CPU bake (the hardware intersector is watertight and
+  exhaustive where the CPU grid walk steps in half cells), but the same to within 8-bit
+  quantization: `tools/aobake/test_aobake_gpu.sh` traces synthetic models both ways with the
+  CPU tracer copied verbatim out of `aobake.cpp` — mean |Δvis| ≤ 0.0003, 99th percentile
+  ≤ 0.007, buried flags identical, plus a facing test proving the cull convention. Throughput
+  there (RTX 3080 Ti vs Ryzen 9900X, 24 threads, 1M texels × 128 rays): **262 ms vs 3.36 s**
+  (~13×, including the BLAS build). Folder bakes gain less: model load, bump load and TGA writes
+  stay on the CPU.
