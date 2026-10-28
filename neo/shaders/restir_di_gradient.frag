@@ -99,7 +99,6 @@ void main() {
 	const bool  pbr       = u_localParam1.y > 0.5;
 	const float staticPx  = u_parallaxParms.w;
 	ivec2 base = ivec2( gl_FragCoord.xy ) * stratum;
-	const bool  shadowSel = u_parallaxParms2.z > 0.5;		// r_rtReStirDIGradientShadow
 
 	uvec2 tableAddr = uvec2( floatBitsToUint( u_shadowParms.x ), floatBitsToUint( u_shadowParms.y ) );
 	uvec2 prevAddr  = uvec2( floatBitsToUint( u_shadowParms.z ), floatBitsToUint( u_shadowParms.w ) );
@@ -111,7 +110,7 @@ void main() {
 	const uint nPrevLights = uint( max( u_parallaxParms2.w, 0.0 ) + 0.5 );
 	const uint tableCap   = uint( max( u_tessParms.y, 0.0 ) + 0.5 );
 
-	// SHADOW EDGES (r_rtReStirDIGradientShadow): the brightest pick below sees a shadow ARRIVING (last frame's lit value,
+	// SHADOW EDGES: the brightest pick below sees a shadow ARRIVING (last frame's lit value,
 	// re-shaded under the current scene, comes out 0) but not one LEAVING: there the brightest sample is THIS frame's lit
 	// value (or, under the checkerboard, some other light's), and its previous value can only be estimated with the
 	// CURRENT scene - the occluder has already gone, both sides read lit, and the dark history behind a walking NPC was
@@ -189,22 +188,21 @@ void main() {
 			float pd   = -pvz.x;
 			vec3  Pv   = vec3( pndc.x * pd * u_localParam0.x, pndc.y * u_windowCoord.z * pd * u_localParam0.y, pvz.x );
 			vec3  Pprev = ( u_projectionMatrix * vec4( Pv, 1.0 ) ).xyz;
-			// STATIC. Screen form (below): the surface moved less than N full-res pixels on screen - true only while the
-			// camera holds still, so every turn sent all pixels down the approximate mover path. World form (shadowSel):
-			// the motion vector matches where the CAMERA alone would have put this point last frame (last frame's view,
-			// same projection), i.e. only the camera moved - the exact previous-point re-shade holds while turning too.
-			bool isStatic = length( vel * fullRes ) <= staticPx;
-			if ( shadowSel ) {
+			// STATIC = the motion vector matches where the CAMERA alone would have put this point last frame (last frame's
+			// view, same projection): only the camera moved, so the exact previous-point re-shade holds while turning too.
+			// (The screen form - "moved under N pixels on screen" - was true only while the camera held still, so every
+			// turn sent all pixels down the approximate mover path.)
+			bool isStatic = false;
+			{
 				vec3  Pc  = ( u_prevMvpMatrix * vec4( S.Pw, 1.0 ) ).xyz;
 				float pdc = -Pc.z;
-				isStatic = false;
 				if ( pdc > 1e-3 ) {
 					vec2 camUV = vec2( Pc.x / ( pdc * u_localParam0.x ), Pc.y / ( pdc * u_windowCoord.z * u_localParam0.y ) ) * 0.5 + 0.5;
 					isStatic = length( ( camUV - prevUV ) * fullRes ) <= staticPx;
 				}
 			}
 			// the darkest-previous candidate: static, a light was chosen there last frame (a valid row, not an emitter)
-			if ( shadowSel && isStatic && prevRowPlus1 != 0u && prevRowPlus1 <= nPrevLights
+			if ( isStatic && prevRowPlus1 != 0u && prevRowPlus1 <= nPrevLights
 					&& ( prevLights.l[ prevRowPlus1 - 1u ].flags & DUDE_LIGHT_EMISSIVE ) == 0u && prevLum < dkPrevLum ) {
 				dkPrevLum = prevLum;
 				dkPrevRow = prevRowPlus1;
@@ -224,11 +222,11 @@ void main() {
 				bestPrevP   = Pprev;
 				bestPrevN   = pN;
 				bestPrevVz  = pvz.x;
-				// STATIC (isStatic above): screen motion, or with shadowSel the camera-only reprojection. NOT a world-distance
+				// STATIC (isStatic above): the camera-only reprojection. NOT a world-distance
 				// test against the stored point: the jitter-corrected reprojection often lands on the NEIGHBOURING pixel, and on
 				// a floor or wall at a grazing angle one pixel apart is many "pixel sizes" of surface, which flagged most static
 				// floors as movers whenever FSR2 was on (and the mover path compares two different points - view 5 flicker,
-				// 2026-10-12). Both forms compare UVs of the same pixel, never two points.
+				// 2026-10-12). The test compares UVs of the same pixel, never two points.
 				bestStatic  = isStatic;
 			}
 		}
@@ -350,7 +348,7 @@ void main() {
 	// frame, 100 % change, reset), while an occluded light is still present with a zero visibility. So: reset when the
 	// light is absent on either side, or when it is LIT on both sides and its lit value changed by the threshold (a
 	// dimming, a brightening, a swinging cookie); a side that is zero with the light present is a shadow - no reset.
-	// EXACT verdict (shadowSel): both values describe the same point under the same light - a static surface at its stored
+	// EXACT verdict: both values describe the same point under the same light - a static surface at its stored
 	// point, or this frame's pick valued at the current point. Its relative change (with the confidence pass's darkness bias)
 	// rides in .z, which the filter spreads by MAX instead of averaging: an averaging A-trous dilutes one changed stratum
 	// among unchanged ones ~9x per pass, so a thin trailing band or a sentry's small shadow barely dropped the confidence.
@@ -369,7 +367,7 @@ void main() {
 	// table) re-shaded at the stored point under the current scene - and keep whichever judgement shows the bigger change
 	// relative to its brightness (the confidence pass's darkness bias, u_tessParms.z, so a dark-on-dark wobble never
 	// outbids a real change of the brightest sample). After the cache block: the cache resets on LIGHT changes only.
-	if ( shadowSel && dkPrevRow != 0u && any( notEqual( dkFrag, bestFrag ) ) ) {
+	if ( dkPrevRow != 0u && any( notEqual( dkFrag, bestFrag ) ) ) {
 		uint defPlus1 = prevLights.l[ dkPrevRow - 1u ].pad0;
 		uint dkCurRow = 0u;
 		if ( defPlus1 != 0u && defPlus1 <= tableCap ) {
@@ -403,7 +401,7 @@ void main() {
 			exactRel = relD;		// static, at the stored point: always exact
 		}
 	}
-	if ( shadowSel && exactVerdict ) {
+	if ( exactVerdict ) {
 		exactRel = max( exactRel, abs( Lprev - Lnow ) / ( max( Lprev, Lnow ) + max( u_tessParms.z, 1e-4 ) ) );
 	}
 	fragColor = vec4( abs( Lprev - Lnow ), max( Lprev, Lnow ), exactRel, 1.0 );

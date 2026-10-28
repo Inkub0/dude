@@ -5362,7 +5362,7 @@ static void DrawDbgGroup_ReStirDI()
 		"confidence. Higher = a smaller change already rejects history. RTXDI / Remix 8. (r_rtReStirDIGradientPower)" );
 	CvarSliderF( "  Rise Smoothing", r_rtReStirDIGradientHistory, 0.0f, 32.0f, "%.0f", "Hold (frames): confidence drops at "
 		"once after a change and recovers over this many frames, so a spot a shadow just left keeps a short history while it "
-		"refills instead of snapping back to the stale one. Remix holds 8; default 4; 0 = none. (r_rtReStirDIGradientHistory)" );
+		"refills instead of snapping back to the stale one. Remix holds 8; default 9; 0 = none. (r_rtReStirDIGradientHistory)" );
 	CvarSliderF( "  Floor", r_rtReStirDIGradientFloor, 0.0f, 1.0f, "%.2f", "Minimum confidence (ReLAX applies it directly). "
 		"Remix 0.1. (r_rtReStirDIGradientFloor)" );
 	CvarSliderF( "  Darkness Bias", r_rtReStirDIGradientBias, 0.0f, 1.0f, "%.3f", "Darkness bias added to the change's "
@@ -5372,18 +5372,14 @@ static void DrawDbgGroup_ReStirDI()
 		"100% change. (r_rtReStirDIGradientDeadzone)" );
 	CvarSliderF( "  Static Threshold", r_rtReStirDIGradientStatic, 0.0f, 16.0f, "%.1f", "Tolerance (full-res px) for treating "
 		"a surface point as static and re-shading it at its exact stored previous position, so a static world under a static "
-		"light compares bit-identical (no jitter frying). With Shadow Edges on it measures the motion the CAMERA does not "
-		"explain (so it holds while turning); off, the raw screen motion. 0 = never static. (r_rtReStirDIGradientStatic)" );
+		"light compares bit-identical (no jitter frying). It measures the motion the CAMERA does not explain, so it holds "
+		"while turning. 0 = never static. (r_rtReStirDIGradientStatic)" );
 	CvarSliderI( "  Stratum", r_rtReStirDIGradientStratum, 2, 6, "One re-shade + one ray per NxN block of the gather res. "
 		"3 = RTXDI (1/9 of pixels); 5 = NRD's 1/5 res (~1/3 the cost). The A-trous reach scales with it. (r_rtReStirDIGradientStratum)" );
 	CvarSliderI( "  Filter Passes", r_rtReStirDIGradientFilterPasses, 0, 4, "A-trous passes over the gradient (strides "
 		"1/2/4/8). 4 = RTXDI (wide, smooth reset); 2 hugs a change tighter (a walking NPC's shadow edge); 0 = unfiltered. "
 		"EXACT detections are max-spread by one stratum on the first pass instead of averaged, so thin trailing bands and "
 		"small shadows keep their full strength. (r_rtReStirDIGradientFilterPasses)" );
-	CvarCheckbox( "  Shadow Edges", r_rtReStirDIGradientShadow, "Catch a shadow LEAVING as well as arriving: each stratum "
-		"also re-shades its darkest previous sample under the current scene (the pixel whose light was blocked last frame "
-		"reads lit now), works with the checkerboard, and 'static' means the motion the camera does not explain. Off = the "
-		"brightest sample only (the trailing edge of an NPC's shadow kept its dark history). (r_rtReStirDIGradientShadow)" );
 	CvarSliderF( "  Reset Threshold", r_rtReStirDIGradientReset, 0.0f, 1.0f, "%.2f", "Where an EXACT detected change (past "
 		"the Deadzone) reaches this, the pixel's ReLAX history is RESET as a true disocclusion and rebuilt cleanly from the "
 		"current frame (NRD disocclusion-threshold mix), instead of merely trusted less - low confidence alone leaves a "
