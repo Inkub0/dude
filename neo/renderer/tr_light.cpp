@@ -1338,6 +1338,17 @@ idRenderModel *R_EntityDefDynamicModel( idRenderEntityLocal *def ) {
 
 		def->dynamicModel = def->cachedDynamicModel;
 		def->dynamicModelFrameCount = tr.frameCount;
+	} else if ( def->dynamicModelFrameCount != tr.frameCount ) {
+		// DUDE skinned motion vectors: the snapshot is reused unchanged (the game's callback reported no new
+		// frame - Quake 4 poses only on its 60 Hz tics, so above 60 fps most frames land here). Its GPU-skinned
+		// pose is what this frame shows: stamp it, so the next re-skin keeps it as the previous pose instead
+		// of zeroing the animation's velocity (the denoiser's history then trailed behind the face and limbs).
+		for ( int i = 0; i < def->dynamicModel->NumSurfaces(); i++ ) {
+			srfTriangles_t *tri = def->dynamicModel->Surface( i )->geometry;
+			if ( tri != NULL && tri->gpuSkinVB != 0 ) {
+				tri->gpuSkinShownFrame = tr.frameCount;
+			}
+		}
 	}
 
 	// set model depth hack value
