@@ -9,6 +9,8 @@ SAMPLER_BINDING(10) uniform sampler2D u_velocity;		// R3a: velocity at the gathe
 
 
 SAMPLER_BINDING(11) uniform sampler2D u_youngIn;		// young pass: LAST frame's young ( reason / 4, age / 64 ); boost pass: THIS frame's
+SAMPLER_BINDING(13) uniform sampler2D u_prevConfidence;	// young pass: LAST frame's R1 gradient confidence (.x = what NRD got), gather res
+//   u_texGen1S.x          = r_rtReStirDIBoostConfidence: boost where last frame's confidence was below this (0 = off)
 //   u_tessParms           = ( K picks, boost-ON NRD history (<= 0: trigger off), HOLD frames, last frame's checkerboard parity / -1 )
 // Returns the reason the pixel is young: 0 = not, 1 = NRD's history short at the previous position (only with a positive
 // threshold), 2 = REVEALED - no previous pixel of the footprint is this surface AND one of them was NEARER (an occluder stood
@@ -32,6 +34,11 @@ int diBoostWanted( vec2 sfrag, in DiSurface S, out float ageOut ) {
 		float h = texelFetch( u_prevDenoised, prevPix, 0 ).a;
 		if ( !( h >= hOn ) ) { return 1; }									// young by NRD's own count (NaN / garbage counts as young)
 	}
+	// LOW CONFIDENCE: the R1 gradient distrusted or reset this pixel's history last frame (a moving shadow's edge, a light
+	// that changed). ReLAX shows its fresh 1-spp signal there - a seated NPC's idling shadow edge stayed raw noise because
+	// its history kept being dropped - so it gets the K picks like a disocclusion, and is then held like one. Last frame's
+	// confidence at the pixel's previous position (the map is in last frame's screen space, gather res).
+	if ( u_texGen1S.x > 0.0 && texelFetch( u_prevConfidence, prevPix, 0 ).x < u_texGen1S.x ) { return 1; }
 	if ( prevCb < 0 ) { return 0; }											// no side data: nothing to compare against
 	// the same-surface test over the previous pixels around the reprojection (a tap not traced last frame under
 	// checkerboard holds nothing and is skipped)

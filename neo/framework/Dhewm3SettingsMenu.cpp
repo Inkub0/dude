@@ -5325,6 +5325,10 @@ static void DrawDbgGroup_ReStirDI()
 		"pixel ALSO gets the boosted picks; held until 2x this. 0 = history trigger OFF (only true disocclusions + pixels "
 		"entering the screen are boosted - boosting the short-history footprints of flickering lights cost ~1.4 ms standing "
 		"still). (r_rtReStirDIBoostHistory)" );
+	CvarSliderF( "Boost Low Confidence", r_rtReStirDIBoostConfidence, 0.0f, 1.0f, "%.2f", "ALSO boost pixels whose gradient "
+		"confidence was below this last frame: where the gradient dropped or reset history (a moving or idling NPC's shadow "
+		"edge) the denoiser shows the fresh 1-spp signal, so the extra picks turn raw noise into a clean edge in a frame or "
+		"two. Costs rays only where confidence is low (more under flickering lights). 0 = off. (r_rtReStirDIBoostConfidence)" );
 
 	// ===== Anti-lag & Gradient Confidence: the two INTERLOCKED lag-mitigation mechanisms (one replaces the other) =====
 	ImGui::SeparatorText( "Anti-lag & Gradient Confidence" );
@@ -5362,7 +5366,7 @@ static void DrawDbgGroup_ReStirDI()
 		"confidence. Higher = a smaller change already rejects history. RTXDI / Remix 8. (r_rtReStirDIGradientPower)" );
 	CvarSliderF( "  Rise Smoothing", r_rtReStirDIGradientHistory, 0.0f, 32.0f, "%.0f", "Hold (frames): confidence drops at "
 		"once after a change and recovers over this many frames, so a spot a shadow just left keeps a short history while it "
-		"refills instead of snapping back to the stale one. Remix holds 8; default 9; 0 = none. (r_rtReStirDIGradientHistory)" );
+		"refills instead of snapping back to the stale one. Remix holds 8; default 14; 0 = none. (r_rtReStirDIGradientHistory)" );
 	CvarSliderF( "  Floor", r_rtReStirDIGradientFloor, 0.0f, 1.0f, "%.2f", "Minimum confidence (ReLAX applies it directly). "
 		"Remix 0.1. (r_rtReStirDIGradientFloor)" );
 	CvarSliderF( "  Darkness Bias", r_rtReStirDIGradientBias, 0.0f, 1.0f, "%.3f", "Darkness bias added to the change's "

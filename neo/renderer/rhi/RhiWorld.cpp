@@ -8962,6 +8962,15 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		if ( rhiReStirDIYoungValid && !boostAll ) { RB_RHI_BindRTImage( r, 11, r->GetRenderTargetImage( rhiReStirDIYoungRT[ yi ^ 1 ] ) ); }	// last frame's young
 		else { RB_RHI_BindUnit( 11, globalImages->blackImage ); }					// no history of holds: black = reason 0
 		backEnd.glState.tmu[11].current2DMap = -1;
+		// last frame's R1 confidence (the gradient runs after this pass, so [idx ^ 1] is last frame's): pixels it distrusted
+		// are boosted too (r_rtReStirDIBoostConfidence). Only at this gather size; else white = no low-confidence boost.
+		const rhi::RenderTargetHandle prevConfRT = rhiReStirDIGradConfRT[ rhiReStirDIGradConfIdx ^ 1 ];
+		const bool prevConfOk = rhiReStirDIGradConfValid && prevConfRT != 0 && rhiReStirDIGradConfW == rw && rhiReStirDIGradConfH == rh
+			&& r->GetRenderTargetImage( prevConfRT ) != 0;
+		if ( prevConfOk ) { RB_RHI_BindRTImage( r, 13, r->GetRenderTargetImage( prevConfRT ) ); }
+		else { RB_RHI_BindUnit( 13, globalImages->whiteImage ); }
+		backEnd.glState.tmu[13].current2DMap = -1;
+		parms.texGen1S[0] = prevConfOk ? r_rtReStirDIBoostConfidence.GetFloat() : 0.0f;
 		RB_RHI_DrawFullscreen( r, youngProg, parms, 0 );
 		r->EndPass();
 		r->GpuScopeEnd();
