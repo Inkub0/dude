@@ -7871,6 +7871,11 @@ bool VulkanBackend::RtaoDenoise( const rhi::RtaoDenoiseArgs &a ) {
 	const bool haveConf = a.giMode && a.confImage >= 1 && a.confImage <= (ImageHandle)imageTable.size()
 		&& imageTable[a.confImage - 1].live;
 	ImageRec *conf = haveConf ? &imageTable[a.confImage - 1] : NULL;
+	// ReSTIR DI R1: optional per-pixel forced history reset (IN_DISOCCLUSION_THRESHOLD_MIX, ReLAX only - its temporal pass
+	// mixes the disocclusion threshold toward a ZERO alternate where the mix is 1, so every reprojection tap fails there)
+	const bool haveMix = a.giMode && a.denoiser == 1 && nrdRelax && a.disoccMixImage >= 1
+		&& a.disoccMixImage <= (ImageHandle)imageTable.size() && imageTable[a.disoccMixImage - 1].live;
+	ImageRec *mix = haveMix ? &imageTable[a.disoccMixImage - 1] : NULL;
 	// the guides may live in attachments 1/2 of the ray target itself (CreateRenderTargetRtaoMrt)
 	const int vzAtt = a.viewzAtt, nmAtt = a.normalAtt;
 	if ( vzAtt < 0 || vzAtt >= vz->colorCount || nmAtt < 0 || nmAtt >= norm->colorCount ) {
@@ -7915,6 +7920,14 @@ bool VulkanBackend::RtaoDenoise( const rhi::RtaoDenoiseArgs &a ) {
 	cs.isMotionVectorInWorldSpace = false;
 	if ( a.disocclusionThreshold > 0.0f ) { cs.disocclusionThreshold = a.disocclusionThreshold; }	// R0 diagnostic knob
 	cs.isHistoryConfidenceAvailable = haveConf;			// H6f: feed IN_DIFF_CONFIDENCE (GI edge-ghosting antilag)
+	cs.isDisocclusionThresholdMixAvailable = haveMix;	// R1: forced history resets where the gradient saw a big exact change
+	if ( haveMix ) {
+		// NRD validates the alternate as > 0 (InstanceImpl.cpp: a 0 here asserted - SIGABRT shortly after a load in a debug
+		// build - and a release build rejects the settings). 1e-20 passes and still fails every tap: at mix 1 the shader's
+		// lerp( threshold, 1e-20, 1 ) rounds to ~0 in fp32, saturate( ~0 * slope ) * frustumSize - NRD_EPS (1e-6) < 0, so no
+		// reprojection tap passes -> the pixel is disoccluded. Where the mix is 0 the regular threshold applies unchanged.
+		cs.disocclusionThresholdAlternate = 1e-20f;
+	}
 	// R0: NRD's own validation overlay (OUT_VALIDATION) on request - the debug view that shows accumulated frames /
 	// history resets / antilag per pixel, so a lag problem is SEEN instead of inferred from the lit result
 	const bool validation = a.validation && NrdEnsureValidation( a.w, a.h );
@@ -8029,6 +8042,9 @@ bool VulkanBackend::RtaoDenoise( const rhi::RtaoDenoiseArgs &a ) {
 	if ( haveConf ) {
 		nrdUserViews[(uint32_t)nrd::ResourceType::IN_DIFF_CONFIDENCE] = conf->view;	// H6f
 	}
+	if ( haveMix ) {
+		nrdUserViews[(uint32_t)nrd::ResourceType::IN_DISOCCLUSION_THRESHOLD_MIX] = mix->view;	// R1 forced resets
+	}
 	if ( validation ) {
 		nrdUserViews[(uint32_t)nrd::ResourceType::OUT_VALIDATION] = nrdValidView;		// R0 debug overlay
 	}
@@ -8133,6 +8149,7 @@ bool VulkanBackend::RtaoDenoise( const rhi::RtaoDenoiseArgs &a ) {
 	addPre( norm->colorImage[nmAtt], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL );
 	if ( !mvScratch ) { addPre( vel.image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL ); }	// scratch path handled velocity via the copy above
 	if ( haveConf ) { addPre( conf->image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL ); }	// H6f
+	if ( haveMix )  { addPre( mix->image,  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL ); }	// R1
 	addPre( outImg,              outReady ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED );
 	if ( shMode ) {
 		addPre( ray->colorImage[a.shAtt], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL );
@@ -8182,6 +8199,7 @@ bool VulkanBackend::RtaoDenoise( const rhi::RtaoDenoiseArgs &a ) {
 	addPost( norm->colorImage[nmAtt], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL );
 	if ( !mvScratch ) { addPost( vel.image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL ); }	// scratch path left velocity in SHADER_READ_ONLY
 	addPost( outImg,              VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL );
+	if ( haveMix )  { addPost( mix->image,  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL ); }	// back for next frame's mix pass
 	if ( haveConf ) { addPost( conf->image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL ); }	// else it stays GENERAL and next frame's
 																						// confidence pass samples / targets it wrongly (validation 09600)
 	if ( shMode ) {

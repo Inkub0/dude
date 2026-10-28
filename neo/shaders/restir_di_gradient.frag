@@ -40,7 +40,7 @@
 //   u_parallaxParms2.xy = LAST frame's lightDef -> row table device address (bit-cast): the CURRENT frame's brightest light
 //                       looked up in last frame's buffer (the second gradient direction, below)
 //   u_tessParms.x     = last frame's checkerboard parity (0 = off, 1 = even, 2 = odd): where a screen pixel's data sits
-//   u_tessParms.z     = gradient height (unused by the shader)
+//   u_tessParms.z     = the confidence pass's darkness bias (r_rtReStirDIGradientBias): weighs the two shadow-edge judgements
 //   u_parallaxParms   = ( stratum size, internal rw, internal rh, static threshold px )
 //   u_parallaxParms2.w = LAST frame's light count (bounds for the stored rows: a stale slot after a map change must not be
 //                       dereferenced - an out-of-bounds buffer_reference read is a GPU page fault = VK device lost)
@@ -86,7 +86,7 @@ layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer DiL
 
 VARY(0) in vec2 var_TexCoord;
 
-layout(location = 0) out vec4 fragColor;	// ( |L_prev - L_now|, max( L_prev, L_now ), 0, 1 )
+layout(location = 0) out vec4 fragColor;	// ( |L_prev - L_now|, max( L_prev, L_now ), exact relative change, 1 )
 
 void main() {
 	fragColor = vec4( 0.0, 0.0, 0.0, 1.0 );
@@ -99,6 +99,32 @@ void main() {
 	const bool  pbr       = u_localParam1.y > 0.5;
 	const float staticPx  = u_parallaxParms.w;
 	ivec2 base = ivec2( gl_FragCoord.xy ) * stratum;
+
+	uvec2 tableAddr = uvec2( floatBitsToUint( u_shadowParms.x ), floatBitsToUint( u_shadowParms.y ) );
+	uvec2 prevAddr  = uvec2( floatBitsToUint( u_shadowParms.z ), floatBitsToUint( u_shadowParms.w ) );
+	uvec2 prevTableAddr = uvec2( floatBitsToUint( u_parallaxParms2.x ), floatBitsToUint( u_parallaxParms2.y ) );
+	if ( ( tableAddr.x | tableAddr.y ) == 0u || ( prevAddr.x | prevAddr.y ) == 0u ) { return; }
+	RtLights lights     = RtLights( uvec2( floatBitsToUint( u_color.x ), floatBitsToUint( u_color.y ) ) );
+	RtLights prevLights = RtLights( prevAddr );
+	const uint nLights    = uint( u_color.z );
+	const uint nPrevLights = uint( max( u_parallaxParms2.w, 0.0 ) + 0.5 );
+	const uint tableCap   = uint( max( u_tessParms.y, 0.0 ) + 0.5 );
+
+	// SHADOW EDGES: the brightest pick below sees a shadow ARRIVING (last frame's lit value,
+	// re-shaded under the current scene, comes out 0) but not one LEAVING: there the brightest sample is THIS frame's lit
+	// value (or, under the checkerboard, some other light's), and its previous value can only be estimated with the
+	// CURRENT scene - the occluder has already gone, both sides read lit, and the dark history behind a walking NPC was
+	// never dropped (its shadow smeared). So each stratum ALSO judges its DARKEST previous sample that had a light, on a
+	// static surface: on a trailing edge that is the pixel whose light was blocked last frame, and its stored value
+	// carries that real previous visibility - re-shaded at its stored point under the current scene it reads lit now,
+	// an exact change. In a region that stays shadowed or stays lit it re-shades to its stored value: no change, no
+	// false reset. Needs no current sample of the same pixel (none exists under the checkerboard: a still pixel is traced
+	// every OTHER frame). One extra shade + ray per stratum; the bigger relative change of the two judgements wins.
+	float dkPrevLum = 1e30;
+	uint  dkPrevRow = 0u;
+	vec2  dkFrag = vec2( 0.0 );
+	vec3  dkPrevP = vec3( 0.0 ), dkPrevN = vec3( 0.0, 0.0, 1.0 );
+	float dkPrevVz = -1.0;
 
 	// 1. the brightest sample of EITHER frame among the stratum's pixels that have a valid temporal position
 	float bestScore = -1.0;
@@ -156,14 +182,36 @@ void main() {
 																		// a false light change, confidence 0, NRD history pinned, the pixel boosted forever: red trails)
 			float prevLum = ( prevRowPlus1 != 0u ) ? pvz.y : 0.0;			// a valid surface with no light last frame counts as dark
 
+			// the stored sample's world position: last frame's SCREEN pixel centre at its stored view z through last
+			// frame's inverse view (the same reconstruction the gather used, so a static point lands exactly)
+			vec2  pndc = ( vec2( prevPix ) + 0.5 ) * ( u_screenCorrection.xy * 2.0 ) - 1.0;
+			float pd   = -pvz.x;
+			vec3  Pv   = vec3( pndc.x * pd * u_localParam0.x, pndc.y * u_windowCoord.z * pd * u_localParam0.y, pvz.x );
+			vec3  Pprev = ( u_projectionMatrix * vec4( Pv, 1.0 ) ).xyz;
+			// STATIC = the motion vector matches where the CAMERA alone would have put this point last frame (last frame's
+			// view, same projection): only the camera moved, so the exact previous-point re-shade holds while turning too.
+			// (The screen form - "moved under N pixels on screen" - was true only while the camera held still, so every
+			// turn sent all pixels down the approximate mover path.)
+			bool isStatic = false;
+			{
+				vec3  Pc  = ( u_prevMvpMatrix * vec4( S.Pw, 1.0 ) ).xyz;
+				float pdc = -Pc.z;
+				if ( pdc > 1e-3 ) {
+					vec2 camUV = vec2( Pc.x / ( pdc * u_localParam0.x ), Pc.y / ( pdc * u_windowCoord.z * u_localParam0.y ) ) * 0.5 + 0.5;
+					isStatic = length( ( camUV - prevUV ) * fullRes ) <= staticPx;
+				}
+			}
+			// the darkest-previous candidate: static, a light was chosen there last frame (a valid row, not an emitter)
+			if ( isStatic && prevRowPlus1 != 0u && prevRowPlus1 <= nPrevLights
+					&& ( prevLights.l[ prevRowPlus1 - 1u ].flags & DUDE_LIGHT_EMISSIVE ) == 0u && prevLum < dkPrevLum ) {
+				dkPrevLum = prevLum;
+				dkPrevRow = prevRowPlus1;
+				dkFrag    = sfrag;
+				dkPrevP   = Pprev;	dkPrevN = pN;	dkPrevVz = pvz.x;
+			}
+
 			float score = max( prevLum, max( curLum, 0.0 ) );
 			if ( score > bestScore ) {
-				// the stored sample's world position: last frame's SCREEN pixel centre at its stored view z through last
-				// frame's inverse view (the same reconstruction the gather used, so a static point lands exactly)
-				vec2  pndc = ( vec2( prevPix ) + 0.5 ) * ( u_screenCorrection.xy * 2.0 ) - 1.0;
-				float pd   = -pvz.x;
-				vec3  Pv   = vec3( pndc.x * pd * u_localParam0.x, pndc.y * u_windowCoord.z * pd * u_localParam0.y, pvz.x );
-				vec3  Pprev = ( u_projectionMatrix * vec4( Pv, 1.0 ) ).xyz;
 				bestScore   = score;
 				bestIsCur   = ( curLum > prevLum );
 				bestPrevLum = prevLum;
@@ -174,26 +222,16 @@ void main() {
 				bestPrevP   = Pprev;
 				bestPrevN   = pN;
 				bestPrevVz  = pvz.x;
-				// STATIC = the surface under this pixel moved less than N full-res pixels on screen - the velocity says exactly
-				// that (a static point's velocity is only the jitter delta, under a pixel). NOT a world-distance test against
-				// the stored point: the jitter-corrected reprojection often lands on the NEIGHBOURING pixel, and on a floor or
-				// wall at a grazing angle one pixel apart is many "pixel sizes" of surface, which flagged most static floors as
-				// movers whenever FSR2 was on (and the mover path compares two different points - view 5 flicker, 2026-10-12)
-				bestStatic  = length( vel * fullRes ) <= staticPx;
+				// STATIC (isStatic above): the camera-only reprojection. NOT a world-distance
+				// test against the stored point: the jitter-corrected reprojection often lands on the NEIGHBOURING pixel, and on
+				// a floor or wall at a grazing angle one pixel apart is many "pixel sizes" of surface, which flagged most static
+				// floors as movers whenever FSR2 was on (and the mover path compares two different points - view 5 flicker,
+				// 2026-10-12). The test compares UVs of the same pixel, never two points.
+				bestStatic  = isStatic;
 			}
 		}
 	}
 	if ( bestScore < 0.0 ) { return; }											// nothing reprojectable: no evidence either way
-
-	uvec2 tableAddr = uvec2( floatBitsToUint( u_shadowParms.x ), floatBitsToUint( u_shadowParms.y ) );
-	uvec2 prevAddr  = uvec2( floatBitsToUint( u_shadowParms.z ), floatBitsToUint( u_shadowParms.w ) );
-	uvec2 prevTableAddr = uvec2( floatBitsToUint( u_parallaxParms2.x ), floatBitsToUint( u_parallaxParms2.y ) );
-	if ( ( tableAddr.x | tableAddr.y ) == 0u || ( prevAddr.x | prevAddr.y ) == 0u ) { return; }
-	RtLights lights     = RtLights( uvec2( floatBitsToUint( u_color.x ), floatBitsToUint( u_color.y ) ) );
-	RtLights prevLights = RtLights( prevAddr );
-	const uint nLights    = uint( u_color.z );
-	const uint nPrevLights = uint( max( u_parallaxParms2.w, 0.0 ) + 0.5 );
-	const uint tableCap   = uint( max( u_tessParms.y, 0.0 ) + 0.5 );
 	if ( bestPrevRow != 0u && bestPrevRow > nPrevLights ) { return; }		// stale / corrupt side data: no evidence
 	if ( bestCurRow  != 0u && bestCurRow  > nLights )     { return; }
 	// E2 v3: an EMITTER row (DUDE_LIGHT_EMISSIVE) is never re-shaded here - its shade draws a fresh sample point every
@@ -310,8 +348,14 @@ void main() {
 	// frame, 100 % change, reset), while an occluded light is still present with a zero visibility. So: reset when the
 	// light is absent on either side, or when it is LIT on both sides and its lit value changed by the threshold (a
 	// dimming, a brightening, a swinging cookie); a side that is zero with the light present is a shadow - no reset.
+	// EXACT verdict: both values describe the same point under the same light - a static surface at its stored
+	// point, or this frame's pick valued at the current point. Its relative change (with the confidence pass's darkness bias)
+	// rides in .z, which the filter spreads by MAX instead of averaging: an averaging A-trous dilutes one changed stratum
+	// among unchanged ones ~9x per pass, so a thin trailing band or a sentry's small shadow barely dropped the confidence.
+	float exactRel = 0.0;
+	const bool exactVerdict = !( wIsPrev && !bestStatic );
 	{
-		const bool exact   = !( wIsPrev && !bestStatic );
+		const bool exact   = exactVerdict;
 		const bool litBoth = Lprev > 0.0 && Lnow > 0.0;
 		const bool changed = cacheRowAbsent
 		                   || ( litBoth && abs( Lprev - Lnow ) > cp.resetThresh * ( max( Lprev, Lnow ) + cp.resetBias ) );
@@ -319,5 +363,46 @@ void main() {
 			rtgiCacheRequestReset( cp, Sp.Pw, Sp.Nw, u_modelViewMatrix[3].xyz );
 		}
 	}
-	fragColor = vec4( abs( Lprev - Lnow ), max( Lprev, Lnow ), 0.0, 1.0 );
+	// SHADOW EDGES (above): judge the darkest previous sample too - last frame's light (its row now, through this frame's
+	// table) re-shaded at the stored point under the current scene - and keep whichever judgement shows the bigger change
+	// relative to its brightness (the confidence pass's darkness bias, u_tessParms.z, so a dark-on-dark wobble never
+	// outbids a real change of the brightest sample). After the cache block: the cache resets on LIGHT changes only.
+	if ( dkPrevRow != 0u && any( notEqual( dkFrag, bestFrag ) ) ) {
+		uint defPlus1 = prevLights.l[ dkPrevRow - 1u ].pad0;
+		uint dkCurRow = 0u;
+		if ( defPlus1 != 0u && defPlus1 <= tableCap ) {
+			DiLightMap table = DiLightMap( tableAddr );
+			uint rp1 = table.row[ defPlus1 - 1u ];
+			if ( rp1 != 0u && rp1 <= nLights && lights.l[ rp1 - 1u ].pad1 == prevLights.l[ dkPrevRow - 1u ].pad1 ) { dkCurRow = rp1; }
+		}
+		DiSurface Sd; float rawD; vec4 ntD;
+		if ( dkCurRow != 0u && diSurfaceAt( dkFrag, applyMode, pbr, Sd, rawD, ntD ) ) {
+			Sd.Pw = dkPrevP;
+			Sd.Nw = dkPrevN;
+			Sd.d  = -dkPrevVz;
+			if ( applyMode ) {
+				Sd.Vw    = normalize( u_projectionMatrix[3].xyz - Sd.Pw );
+				Sd.NdotV = max( dot( Sd.Nw, Sd.Vw ), 1e-4 );
+			}
+			float dNow = 0.0;
+			vec3 c, ld; float dl, ndl;
+			if ( diShadeLight( lights, dkCurRow - 1u, Sd, c, ld, dl, ndl, false ) ) {
+				float vis = ( ( lights.l[ dkCurRow - 1u ].flags & DUDE_LIGHT_NOSHADOWS ) != 0u )
+					? 1.0 : traceVisibility( Sd.Pw, Sd.Nw, ld, dl, diLightBlurScale( lights.l[ dkCurRow - 1u ].flags ), occDist );
+				dNow = diGradientLuminance( c, Sd.B, vis );
+			}
+			const float bias = max( u_tessParms.z, 1e-4 );
+			float relB = abs( Lprev - Lnow ) / ( max( Lprev, Lnow ) + bias );
+			float relD = abs( dkPrevLum - dNow ) / ( max( dkPrevLum, dNow ) + bias );
+			if ( relD > relB ) {
+				Lprev = dkPrevLum;
+				Lnow  = dNow;
+			}
+			exactRel = relD;		// static, at the stored point: always exact
+		}
+	}
+	if ( exactVerdict ) {
+		exactRel = max( exactRel, abs( Lprev - Lnow ) / ( max( Lprev, Lnow ) + max( u_tessParms.z, 1e-4 ) ) );
+	}
+	fragColor = vec4( abs( Lprev - Lnow ), max( Lprev, Lnow ), exactRel, 1.0 );
 }

@@ -1074,6 +1074,8 @@ extern idCVar r_rtReStirDIGradientHistory;	// R1: rise-only temporal smoothing l
 extern idCVar r_rtReStirDIGradientFloor;	// R1: minimum confidence (ReBLUR raises it to historyFix / history)
 extern idCVar r_rtReStirDIGradientBias;		// R1: darkness bias in the change denominator
 extern idCVar r_rtReStirDIGradientDeadzone;	// R1: relative per-light change below which nothing counts (authored flicker)
+extern idCVar r_rtReStirDIGradientReset;	// R1: exact change >= this -> ReLAX history reset (disocclusion mix); 0 = off
+extern idCVar r_rtReStirDIRelaxFastMs;		// ReLAX fast history in ms (0 = r_rtReStirDIRelaxFast frames)
 extern idCVar r_rtReStirDIGradientStatic;	// R1: static threshold (full-res px) for the exact previous-position re-shade
 extern idCVar r_rtReStirDIGradientStratum;	// R1: NxN stratum size (3 = RTXDI, 5 = NRD's 1/5 res)
 extern idCVar r_rtReStirDIGradientFilterPasses;	// R1: A-trous passes over the gradient (4 = RTXDI)

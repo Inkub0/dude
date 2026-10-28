@@ -506,7 +506,9 @@ static bool  rhiReStirDIPrevValid = false;
 // gradient pass needs to know about THIS frame's gather (valid side data, its checkerboard parity).
 static rhi::RenderTargetHandle rhiReStirDIGradRT[2] = { 0, 0 };	// RG16F ( |dL|, max L ) at gw x gh
 static int   rhiReStirDIGradW = 0, rhiReStirDIGradH = 0;
-static rhi::RenderTargetHandle rhiReStirDIGradConfRT[2] = { 0, 0 };	// R16F confidence at rw x rh
+static rhi::RenderTargetHandle rhiReStirDIDisoccMixRT = 0;			// R16F IN_DISOCCLUSION_THRESHOLD_MIX at rw x rh (r_rtReStirDIGradientReset)
+static rhi::ImageHandle rhiReStirDIDisoccMixThisView = 0;
+static rhi::RenderTargetHandle rhiReStirDIGradConfRT[2] = { 0, 0 };	// RG16F confidence at rw x rh (.x = NRD's, .y = the hold's un-squared state)
 static int   rhiReStirDIGradConfW = 0, rhiReStirDIGradConfH = 0;
 static int   rhiReStirDIGradConfIdx = 0;
 static rhi::RenderTargetHandle rhiReStirDIYoungRT[2] = { 0, 0 };	// R3a: per-pixel young ( reason / 4, age / 64 ), gather layout, ping-pong (the age is last frame's + 1)
@@ -4405,6 +4407,7 @@ void RB_RHI_ResetWorldTargets( void ) {
 	rhiReStirDIPrevValid = false;								// no valid reprojection history across a lost context
 	rhiReStirDIGradRT[0] = rhiReStirDIGradRT[1] = 0;	rhiReStirDIGradW = rhiReStirDIGradH = 0;	// R1
 	rhiReStirDIGradConfRT[0] = rhiReStirDIGradConfRT[1] = 0;	rhiReStirDIGradConfW = rhiReStirDIGradConfH = 0;
+	rhiReStirDIDisoccMixRT = 0;
 	rhiReStirDIGradConfValid = false;	rhiReStirDIGatherPrevValid = false;
 	rhiReStirDIYoungRT[0] = rhiReStirDIYoungRT[1] = 0;	rhiReStirDIYoungW = rhiReStirDIYoungH = 0;	rhiReStirDIYoungValid = false;
 	s_diLightMapBuf = 0;	s_diLightMapAddr = 0;
@@ -8989,6 +8992,7 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	rhi::ImageHandle diGradConfImg = 0;
 	rhiReStirDIGradConfThisView = 0;
 	rhiReStirDIGradThisView = 0;
+	rhiReStirDIDisoccMixThisView = 0;
 	{
 		const int prevSlot = ( (int)( ( tr.frameCount + RT_REFL_LIGHT_SLOTS - 1 ) % RT_REFL_LIGHT_SLOTS ) );
 		const bool prevLightsValid = s_sceneLightSlotFrame[ prevSlot ] == tr.frameCount - 1 && s_sceneLightSlotAddr[ prevSlot ] != 0;
@@ -8998,7 +9002,7 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		const int stratum = idMath::ClampInt( 2, 6, r_rtReStirDIGradientStratum.GetInteger() );
 		const int gw = ( rw + stratum - 1 ) / stratum, gh = ( rh + stratum - 1 ) / stratum;
 		if ( gradOn ) {
-			// targets: 2 x RG16F gradient (gw x gh, A-trous ping-pong), 2 x R16F confidence (rw x rh, temporal ping-pong)
+			// targets: 2 x RGBA16F gradient (gw x gh, A-trous ping-pong), 2 x RG16F confidence (rw x rh, temporal ping-pong)
 			for ( int k = 0; k < 2; k++ ) {
 				if ( rhiReStirDIGradRT[k] && r->GetRenderTargetImage( rhiReStirDIGradRT[k] ) == 0 ) { rhiReStirDIGradRT[k] = 0; }
 				if ( rhiReStirDIGradConfRT[k] && r->GetRenderTargetImage( rhiReStirDIGradConfRT[k] ) == 0 ) { rhiReStirDIGradConfRT[k] = 0; rhiReStirDIGradConfValid = false; }
@@ -9007,13 +9011,15 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 				for ( int k = 0; k < 2; k++ ) { if ( rhiReStirDIGradRT[k] ) { r->DestroyRenderTarget( rhiReStirDIGradRT[k] ); rhiReStirDIGradRT[k] = 0; } }
 				rhiReStirDIGradW = rhiReStirDIGradH = 0;
 			}
+			if ( rhiReStirDIDisoccMixRT && r->GetRenderTargetImage( rhiReStirDIDisoccMixRT ) == 0 ) { rhiReStirDIDisoccMixRT = 0; }
 			if ( rhiReStirDIGradConfW != rw || rhiReStirDIGradConfH != rh ) {
+				if ( rhiReStirDIDisoccMixRT ) { r->DestroyRenderTarget( rhiReStirDIDisoccMixRT ); rhiReStirDIDisoccMixRT = 0; }
 				for ( int k = 0; k < 2; k++ ) { if ( rhiReStirDIGradConfRT[k] ) { r->DestroyRenderTarget( rhiReStirDIGradConfRT[k] ); rhiReStirDIGradConfRT[k] = 0; } }
 				rhiReStirDIGradConfW = rhiReStirDIGradConfH = 0;	rhiReStirDIGradConfValid = false;
 			}
 			for ( int k = 0; k < 2; k++ ) {
-				if ( !rhiReStirDIGradRT[k] )     { rhiReStirDIGradRT[k]     = r->CreateRenderTarget( rhi::IF_RG16F, gw, gh ); }
-				if ( !rhiReStirDIGradConfRT[k] ) { rhiReStirDIGradConfRT[k] = r->CreateRenderTarget( rhi::IF_R16F, rw, rh ); }
+				if ( !rhiReStirDIGradRT[k] )     { rhiReStirDIGradRT[k]     = r->CreateRenderTarget( rhi::IF_RGBA16F, gw, gh ); }	// .z = exact relative change
+				if ( !rhiReStirDIGradConfRT[k] ) { rhiReStirDIGradConfRT[k] = r->CreateRenderTarget( rhi::IF_RG16F, rw, rh ); }	// .x NRD, .y hold state
 			}
 			rhi::ShaderHandle gradProg = r->LoadShader( "restir_di_gradient" );
 			rhi::ShaderHandle filtProg = r->LoadShader( "restir_di_gradient_filter" );
@@ -9040,6 +9046,7 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 				}
 				gp.parallaxParms[0] = (float)stratum;	gp.parallaxParms[1] = (float)rw;	gp.parallaxParms[2] = (float)rh;
 				gp.parallaxParms[3] = r_rtReStirDIGradientStatic.GetFloat();		// static threshold, full-res pixels
+				gp.tessParms[2] = r_rtReStirDIGradientBias.GetFloat();			// weighs the two judgements as the confidence pass will
 				memcpy( gp.prevMvpMatrix, rhiReStirDIPrevView, sizeof( gp.prevMvpMatrix ) );	// last frame's world -> view
 				float prevInvView[16];
 				if ( !RB_RHI_InvertMatrix( rhiReStirDIPrevView, prevInvView ) ) { memcpy( prevInvView, invView, sizeof( prevInvView ) ); }
@@ -9073,6 +9080,7 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 					fp.mvpMatrix[0] = fp.mvpMatrix[5] = fp.mvpMatrix[10] = fp.mvpMatrix[15] = 1.0f;
 					fp.localParam0[0] = (float)( 1 << pass );
 					fp.localParam0[1] = (float)gw;	fp.localParam0[2] = (float)gh;
+					fp.localParam0[3] = ( pass == 0 ) ? 1.0f : 0.0f;	// max-dilate the exact relative change by one stratum, first pass only
 					r->BeginTargetPass( rhiReStirDIGradRT[ src ^ 1 ], NULL );
 					RB_RHI_DrawFullscreen( r, filtProg, fp, r->GetRenderTargetImage( rhiReStirDIGradRT[ src ] ) );
 					r->EndPass();
@@ -9115,6 +9123,25 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 				r->GpuScopeEnd();
 				diGradConfImg = r->GetRenderTargetImage( rhiReStirDIGradConfRT[ ci ] );
 				rhiReStirDIGradConfThisView = diGradConfImg;
+				// 4. ReLAX history RESETS where an exact change is big (r_rtReStirDIGradientReset): the same shader in MIX mode
+				// writes IN_DISOCCLUSION_THRESHOLD_MIX (1 = treat as disoccluded). Confidence alone only shortens ReLAX's window
+				// for the frame, so the stale shadow behind a walking NPC kept fading out for ~100 ms (and a confidence of 0
+				// without a history reset skips ReLAX's history fix, so it came out noisy).
+				const float resetThr = r_rtReStirDIGradientReset.GetFloat();
+				if ( relaxMode && resetThr > 0.0f ) {
+					if ( !rhiReStirDIDisoccMixRT ) { rhiReStirDIDisoccMixRT = r->CreateRenderTarget( rhi::IF_R16F, rw, rh ); }
+					if ( rhiReStirDIDisoccMixRT ) {
+						rhi::RenderParams mp = cp;
+						mp.windowCoord[0] = 1.0f;				// MIX mode
+						mp.windowCoord[1] = resetThr;
+						r->GpuScopeBegin( "restir.di.disoccmix" );
+						r->BeginTargetPass( rhiReStirDIDisoccMixRT, NULL );
+						RB_RHI_DrawFullscreen( r, confProg, mp, rhiReStirDIGradThisView );
+						r->EndPass();
+						r->GpuScopeEnd();
+						rhiReStirDIDisoccMixThisView = r->GetRenderTargetImage( rhiReStirDIDisoccMixRT );
+					}
+				}
 				rhiReStirDIGradConfIdx = ci ^ 1;
 				rhiReStirDIGradConfValid = true;
 				RB_RHI_ForgetTexBinds();
@@ -9209,6 +9236,11 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		// R2 (Plan R2): ReLAX family + its settings (Remix direct-light preset / RTXDI sample as the starting values)
 		da.denoiser            = 1;								// R6: DI is ReLAX-only
 		da.fastFrames          = r_rtReStirDIRelaxFast.GetInteger();	// ReLAX diffuseMaxFastAccumulatedFrameNum (Remix direct: 1, "to reduce trail")
+		if ( r_rtReStirDIRelaxFastMs.GetFloat() > 0.0f ) {
+			// in TIME, like the main history: 8 frames were 200 ms of trail at 40 fps but 55 ms at 144
+			const float fps = 1000.0f / RB_RHI_SmoothedFrameMs();
+			da.fastFrames = Max( 1, (int)( r_rtReStirDIRelaxFastMs.GetFloat() * 0.001f * fps + 0.5f ) );
+		}
 		da.relaxPrepass        = r_rtReStirDIRelaxPrepass.GetFloat();
 		da.relaxPhiLuminance   = r_rtReStirDIRelaxPhi.GetFloat();
 		da.relaxAtrous         = r_rtReStirDIRelaxAtrous.GetInteger();
@@ -9219,6 +9251,7 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		da.historyFixFrameNum = r_rtReStirDIHistoryFix.GetInteger();	// spatial reconstruction on thin/disoccluded (moving) history
 		da.edgeStopScale      = r_rtReStirDIEdgeStop.GetFloat();		// >1 blurs across detail edges (grate-noise lever; costs detail)
 		da.confImage = diConfImg;							// IN_DIFF_CONFIDENCE (0 = not provided this frame)
+		da.disoccMixImage = ( diConfImg != 0 ) ? rhiReStirDIDisoccMixThisView : 0;	// R1: forced ReLAX history resets (r_rtReStirDIGradientReset)
 		da.denoisingRange = 20000.0f;
 		da.frameIndex = (unsigned int)tr.frameCount;
 		da.reset = !rhiReStirDIPrevValid || diCut;			// first DI frame / interruption / R0: camera cut
