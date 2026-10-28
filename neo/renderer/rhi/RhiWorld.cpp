@@ -925,7 +925,13 @@ static int                  s_sceneFogCount   = 0;	// stock fog-light volumes ap
 // gather's side channel stores row + 1 + 0.25 x boost reason in an RGBA32F attachment (fp32: exact far beyond this).
 #define RT_EMIT_MAX_ROWS     4096
 #define RT_SCENE_MAX_ROWS    ( RT_REFL_MAX_LIGHTS + RT_EMIT_MAX_ROWS )	// placed lights + fog (<= 256) + emitter rows
-static int                  s_sceneRowCount   = 0;	// EVERY row of the current slot: lights + fog + emitters (what DI, the grid and the bounce iterate)
+static int                  s_sceneRowCount   = 0;	// EVERY row of the current slot: lights + fog + emitters + ambient rows (what DI, the grid and the bounce iterate)
+// r_rtgiAmbient fold (2/3): Doom 3's AMBIENT lights as bounce sources - rows behind the emitter rows, BOUNCEONLY without
+// EMISSIVE (rt_light_eval.glsl dudeLightIsAmbientRow). DI skips them (BOUNCEONLY), the grid fill leaves them out, the
+// bounce walks this range on its own (rtgi_bounce.glsl). Reflections / volumetrics never reach past the placed lights.
+#define RT_AMB_MAX_ROWS      64
+static int                  s_sceneAmbStart   = 0;	// first ambient row of the current slot
+static int                  s_sceneAmbCount   = 0;	// ambient rows (0 = the fold is off / none in reach)
 static int  rhiRtReflW = 0, rhiRtReflH = 0;
 static rhi::RenderTargetHandle rhiRtReflHistRT[2] = { 0, 0 };	// temporal history ping-pong
 static int  rhiRtReflHistIdx = 0;					// slot that receives this frame's resolve
@@ -2096,6 +2102,36 @@ static idImage *RB_RHI_FillParallaxParms( rhi::RenderParams &parms, const drawIn
 	return parallaxImage;
 }
 
+/*
+===================
+RB_RHI_AmbientFloorSource
+
+r_rtgiAmbient 1/3 (the FLOOR): the ray-traced lighting the ambient lights are measured against this view, as an
+albedo-free irradiance-like buffer the ambient draw samples at its pixel. At the Path Tracing tier (ReSTIR DI lighting
+the scene, r_rtReStirDICombineGI) it is the DI buffer - direct + the one bounce, demodulated, already at scene scale;
+otherwise the RTGI gather (the bounce alone), which RB_RHI_RtgiApply scales by r_rtgiIntensity. Both sit in a shader-
+read layout for the open HDR scene pass (their applies sample them there too). 0 = none this view. VK only.
+===================
+*/
+static rhi::ImageHandle RB_RHI_AmbientFloorSource( rhi::RHI *r, float &scale, bool &linear ) {
+	scale = 1.0f;
+	linear = false;
+	if ( r == NULL || rhi::GetActiveBackendType() != rhi::BT_VULKAN ) {
+		return 0;
+	}
+	if ( rhiReStirDIApplyThisView && rhiReStirDIRanThisView && rhiReStirDIRT != 0 ) {
+		// R2: ReLAX's non-SH output and the raw ReLAX-mode gather are LINEAR (as RB_RHI_ReStirDIApply decodes it)
+		linear = rhiReStirDIRelaxThisView && ( !rhiReStirDIDenoisedThisView || !rhiReStirDIShThisView );
+		return ( rhiReStirDIDenoisedThisView && r->GetRtgiOutputImage() != 0 ) ? r->GetRtgiOutputImage()
+			: r->GetRenderTargetImage( rhiReStirDIRT );
+	}
+	if ( rhiRtgiRanThisView && rhiRtgiRayRT != 0 ) {
+		scale = idMath::ClampFloat( 0.0f, 8.0f, r_rtgiIntensity.GetFloat() );
+		return rhiRtgiDenoisedThisView ? r->GetRtgiOutputImage() : r->GetRenderTargetImage( rhiRtgiRayRT );
+	}
+	return 0;
+}
+
 static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 	// ReSTIR DI Stage D: an opaque WORLD surface under a DI-covered light is lit by the deferred DI apply, not here.
 	// Everything the G-buffer cannot describe stays forward: the depth-hacked view weapon / models, translucent
@@ -2201,12 +2237,29 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 	idImage *occlusionImage = RB_RHI_FillOcclusionParms( parms, din );
 
 	// RTGI reconcile (docs/rtx-rtgi.md H6c): on an AMBIENT draw with r_rtgi on, the fullscreen GI apply
-	// (RB_RHI_RtgiApply) adds real bounce light, so Doom 3's FAKE cube-map ambient is fully REPLACED (keeping
-	// any of it would double-count the indirect term). u_color.x (otherwise unused) signals this to
-	// ambientlight.frag: 0 = GI off, keep the fake ambient; 1 = GI on, drop it. (Was the r_rtgiAmbientKeep
-	// knob - removed; the fake ambient is now always fully replaced when GI is on.)
+	// (RB_RHI_RtgiApply) adds real bounce light, and r_rtgiAmbient picks what the ambient light still draws. u_color.x
+	// (otherwise unused) tells ambientlight.frag: 0 = GI off, the vanilla ambient; 1 = REPLACE (draw nothing: modes 0
+	// and 2, where the fold carries the fill through the bounce instead); 2 = FLOOR (modes 1 and 3): add only what the
+	// RT lighting at the pixel falls short of this light - u_color.y = the RT buffer's scale, .z = 1 for a linear
+	// buffer (else NRD YCoCg), u_screenCorrection.xy = gl_FragCoord -> view uv; the buffer rides unit 5 (the specular
+	// map slot, which the ambient shader never reads). No RT buffer this view (a subview, the gather off): the floor
+	// is against zero, i.e. the vanilla ambient.
+	rhi::ImageHandle ambientFloorImg = 0;
 	if ( din->ambientLight && r_rtgi.GetBool() ) {
-		parms.color[0] = 1.0f;			// GI on -> fully replace the fake ambient (ambientlight.frag: *(x - 1) = *0)
+		const int ambMode = r_rtgiAmbient.GetInteger();
+		parms.color[0] = 1.0f;
+		if ( ambMode == 1 || ambMode == 3 ) {
+			bool linear = false;
+			ambientFloorImg = RB_RHI_AmbientFloorSource( ictx.r, parms.color[1], linear );
+			parms.color[0] = 2.0f;
+			parms.color[2] = linear ? 1.0f : 0.0f;
+			if ( ambientFloorImg == 0 ) {
+				parms.color[1] = 0.0f;	// nothing to measure against: the full vanilla ambient
+			} else if ( backEnd.viewDef != NULL ) {
+				parms.screenCorrection[0] = 1.0f / (float)( backEnd.viewDef->viewport.x2 - backEnd.viewDef->viewport.x1 + 1 );
+				parms.screenCorrection[1] = 1.0f / (float)( backEnd.viewDef->viewport.y2 - backEnd.viewDef->viewport.y1 + 1 );
+			}
+		}
 	}
 
 	idImage *parallaxImage = RB_RHI_FillParallaxParms( parms, din );
@@ -2219,6 +2272,12 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 	RB_RHI_BindUnit( 4, din->diffuseImage );
 	RB_RHI_BindUnit( 5, pbrOrganicSpecFallback ? din->diffuseImage : din->specularImage );
 	RB_RHI_BindUnit( 6, globalImages->specularTableImage );
+	if ( ambientFloorImg != 0 ) {
+		// r_rtgiAmbient floor: the RT lighting buffer on unit 5 in place of the specular map (the ambient shader reads
+		// none). Without it the specular map stays bound - a complete descriptor the shader then never samples.
+		RB_RHI_BindRTImage( ictx.r, 5, ambientFloorImg );
+		backEnd.glState.tmu[5].current2DMap = -1;			// direct bind bypassed the tmu cache
+	}
 	// unit 10: per-material baked occlusion map (u_occlusionMap). Only bound when this
 	// surface has one and r_occlusionMaps is on; the shader gates on u_occlusionParms.x,
 	// so other draws simply don't sample it. (Unit 9 = SSAO is bound once in DrawWorld.)
@@ -6280,6 +6339,7 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 	s_sceneLightCacheView = viewDef;	s_sceneLightCacheFrame = tr.frameCount;	cacheCount = 0;	cacheAddr = 0;	s_sceneRowCount = 0;
 	s_sceneLightGen++;		// every lightDef's stamp is now stale until the fill below re-includes it
 	s_sceneFogCount = 0;
+	s_sceneAmbStart = s_sceneAmbCount = 0;
 	*outAddr = 0;
 	s_diSkipDark = s_diSkipSuppressed = s_diSkipCapacity = s_diSkipNoShader = s_diSkipFogBlendAmb = 0;
 	s_diSkipEmissiveDrop = 0;
@@ -6323,6 +6383,10 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 	}
 	static RtReflLightGPU fogs[ SCENE_FOG_MAX ];
 	int nFog = 0;
+	static RtReflLightGPU ambRows[ RT_AMB_MAX_ROWS ];
+	int nAmb = 0;
+	const int ambMode = r_rtgiAmbient.GetInteger();
+	const bool foldAmbient = r_rtgi.GetBool() && ( ambMode == 2 || ambMode == 3 );
 	// Two passes: the lights the frontend LIT in this view first - under the ReSTIR DI apply the buffer IS the lit set, and a
 	// 256-entry buffer filled in lightDef order from everything within reach was full before some on-screen lights got their
 	// turn ("not-in-buffer 6 of 18: capacity 7", 2026-10-12) - then the off-screen ones (reflections, haze) until it is full.
@@ -6360,7 +6424,11 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 			continue;
 		}
 		if ( ls == NULL ) { if ( viewLightOf[ i ] != NULL ) { s_diSkipNoShader++; } continue; }
-		if ( ls->IsBlendLight() || ls->IsAmbientLight() ) { if ( viewLightOf[ i ] != NULL ) { s_diSkipFogBlendAmb++; } continue; }
+		// an ambient light is not a light the DI / reflections / haze can use (no position the fill comes from); the
+		// r_rtgiAmbient fold keeps it as a bounce-only AMBIENT row (collected apart, appended behind the emitters)
+		const bool ambRow = ls->IsAmbientLight() && foldAmbient;
+		if ( ls->IsBlendLight() || ( ls->IsAmbientLight() && !ambRow ) ) { if ( viewLightOf[ i ] != NULL ) { s_diSkipFogBlendAmb++; } continue; }
+		if ( ambRow && nAmb >= RT_AMB_MAX_ROWS ) { continue; }
 		// honour the per-view light gating exactly like the frontend (tr_light.cpp): the player's THIRD-person
 		// flashlight / muzzle flash is suppressed in their own view, first-person weapon lights exist only in
 		// it. Skipping this put the body-attached world flashlight (it bobs with the walk cycle) in the buffer.
@@ -6408,8 +6476,10 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 		if ( col[0] < 0.001f && col[1] < 0.001f && col[2] < 0.001f ) { if ( vl != NULL ) { s_diSkipDark++; } continue; }	// dark / off (the frontend's own threshold)
 		// order: projected/parallel (the authored feature lights) first, then nearest first - consumers that
 		// keep only a short candidate list per ray (volumetrics) must not lose a spot to a crowd of fill lights
-		sortKey[ n ] = ( ( ld->parms.pointLight && !ld->parms.parallel ) ? 1.0e9f : 0.0f )
-		             + Max( ( cullOrg - viewOrg ).Length() - cullRad, 0.0f );
+		if ( !ambRow ) {
+			sortKey[ n ] = ( ( ld->parms.pointLight && !ld->parms.parallel ) ? 1.0e9f : 0.0f )
+			             + Max( ( cullOrg - viewOrg ).Length() - cullRad, 0.0f );
+		}
 		// R6: only the first-person weapon lights (flashlight / muzzle flash) stay forward - the R1 gradient confidence
 		// now resets history where any other light moves / switches / appears, so those ride DI + the gradient instead of
 		// flipping paths. DUDE's own fill lights (emissive screens, item glow) are never forced forward. 0 = none (all DI).
@@ -6423,8 +6493,10 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 			s_diSkipEmissiveDrop++;
 			continue;
 		}
-		RtReflLightGPU &L = lights[ n++ ];
-		s_sceneLightCoveredGen[ i ] = diFast ? 0u : s_sceneLightGen;	// Stage D membership: DI covers this lightDef in this view (a weapon light stays forward)
+		RtReflLightGPU &L = ambRow ? ambRows[ nAmb++ ] : lights[ n++ ];
+		if ( !ambRow ) {
+			s_sceneLightCoveredGen[ i ] = diFast ? 0u : s_sceneLightGen;	// Stage D membership: DI covers this lightDef in this view (a weapon light stays forward)
+		}
 		L.cull[0] = cullOrg[0]; L.cull[1] = cullOrg[1]; L.cull[2] = cullOrg[2]; L.cull[3] = cullRad;
 		L.pos[0] = ld->globalLightOrigin[0];
 		L.pos[1] = ld->globalLightOrigin[1];
@@ -6438,7 +6510,9 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 		                                                                        // path's lightMayShadow): DI / volumetrics skip its visibility ray
 		        | ( ld->parms.allowLightInViewID ? 8u : 0u )	// bit3 = first-person weapon light (flashlight, muzzle flash)
 		        | ( diFast ? 32u : 0u );						// bit5 = fast-changing: ReSTIR DI skips it, the forward path lights it
-		{
+		if ( ambRow ) {
+			L.flags = ( L.flags & 3u ) | 4u | 128u;	// parallel / projected kept; no shadows (vanilla's never cast any); BOUNCEONLY without EMISSIVE = ambient row; no haze
+		} else {
 			// bits 8..15 = volumetric haze scale (0..255). A HUGE light (a cave-wide "sky glow", an outdoor
 			// fill) is ambience, not a shaft: integrated over its whole volume it washes the view in its own
 			// colour. Its haze fades with size beyond r_volLargeLightRadius; room-scale lights stay at 1.
@@ -6451,7 +6525,7 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 		// visibility ray's soft grate coverage (restir_di_shade.glsl traceVisibility): the very number
 		// RB_RHI_RtShadowBlurLight derives for this light, so a grate's shadow softens identically on both tiers.
 		// 0 (hard texels) while r_rtShadowBlur is off. (The retired reservoir's stable lightDef id lived here before.)
-		if ( r_rtShadowBlur.GetBool() && r_rtShadowBlurIntensity.GetFloat() > 0.0f ) {
+		if ( !ambRow && r_rtShadowBlur.GetBool() && r_rtShadowBlurIntensity.GetFloat() > 0.0f ) {
 			const float bs = RB_RHI_RtShadowBlurLightRadius( ld->parms, ld->globalLightOrigin, viewOrg );
 			L.flags |= RB_RHI_FloatToHalfBits( idMath::ClampFloat( 0.0f, 65000.0f, bs ) ) << 16;
 		}
@@ -6467,8 +6541,8 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 		// its stage colours above but carries the first live stage's cookie - the other stages' shapes are
 		// approximated by it. 0 = untextured -> the consumer's analytic frustum attenuation.
 		L.projTex = L.falloffTex = L.pad0 = L.pad1 = 0;
-		L.pad0 = (unsigned int)i + 1u;				// R1: lightDef index + 1 (the table key; 0 = not a light: fog rows)
-		L.pad1 = ld->dudeSerial;					// R1: creation serial - the lightDef slot is reused on free, the serial never is
+		L.pad0 = ambRow ? 0u : (unsigned int)i + 1u;	// R1: lightDef index + 1 (the table key; 0 = not a DI light: fog / ambient rows)
+		L.pad1 = ambRow ? 0u : ld->dudeSerial;		// R1: creation serial - the lightDef slot is reused on free, the serial never is
 		if ( r_rtLightTextures.GetBool() ) {
 			const shaderStage_t *liveStage = NULL;
 			for ( int s = 0; s < ls->GetNumStages(); s++ ) {
@@ -6542,7 +6616,7 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 			const float intensity = idMath::ClampFloat( 0.0f, 64.0f, r_rtEmissiveIntensity.GetFloat() );
 			const float reachMul  = idMath::ClampFloat( 0.0f, 8.0f, r_rtEmissiveReach.GetFloat() );
 			const float reachDef  = idMath::ClampFloat( 0.0f, 4096.0f, r_rtEmissiveReachDefault.GetFloat() );
-			const int   cap       = Min( idMath::ClampInt( 0, RT_EMIT_MAX_ROWS, r_rtEmissiveMaxRows.GetInteger() ), RT_SCENE_MAX_ROWS - n - nFog );
+			const int   cap       = Min( idMath::ClampInt( 0, RT_EMIT_MAX_ROWS, r_rtEmissiveMaxRows.GetInteger() ), RT_SCENE_MAX_ROWS - n - nFog - nAmb );
 			const float minArea   = Max( 0.0f, r_rtEmissiveFixtureMinArea.GetFloat() );
 			const float fullArea  = Max( minArea + 1e-3f, r_rtEmissiveFixtureFullArea.GetFloat() );
 			const float fluxScale = Max( idMath::ClampFloat( 0.0f, 64.0f, r_rtEmissiveScale.GetFloat() ), 1e-3f );
@@ -6665,22 +6739,27 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 		}
 		lastMode = mode; lastTable = table;
 	}
-	if ( n + nFog + nEm == 0 ) {
+	// r_rtgiAmbient fold: the ambient rows go LAST, behind the emitter rows (the emitter cap above left them room)
+	nAmb = Min( nAmb, RT_SCENE_MAX_ROWS - n - nFog - nEm );
+	for ( int k = 0; k < nAmb; k++ ) { sorted[ n + nFog + nEm + k ] = ambRows[ k ]; }
+	if ( n + nFog + nEm + nAmb == 0 ) {
 		return 0;
 	}
 	const int slot      = (int)( tr.frameCount % RT_REFL_LIGHT_SLOTS );
 	const int slotBytes = RT_SCENE_MAX_ROWS * (int)sizeof( RtReflLightGPU );
-	r->UpdateBuffer( s_rtReflLightBuf, slot * slotBytes, ( n + nFog + nEm ) * (int)sizeof( RtReflLightGPU ), sorted );
+	r->UpdateBuffer( s_rtReflLightBuf, slot * slotBytes, ( n + nFog + nEm + nAmb ) * (int)sizeof( RtReflLightGPU ), sorted );
 	*outAddr = s_rtReflLightAddr + (unsigned long long)( slot * slotBytes );
 	cacheCount = n;	cacheAddr = *outAddr;
-	s_sceneRowCount = n + nFog + nEm;
+	s_sceneRowCount = n + nFog + nEm + nAmb;
+	s_sceneAmbStart = n + nFog + nEm;
+	s_sceneAmbCount = nAmb;
 	// R1 (docs/rtx-restir-di.md Plan R1): the lightDef -> row table for THIS frame's buffer (RTXDI's light index
 	// mapping buffer), so next frame's gradient pass can find "the same light" after the sort reshuffles the rows.
 	// row + 1 per lightDef, 0 = not in the buffer this frame (switched off / culled). Same ring slot idiom as the
 	// light buffer; the slot's addresses + frame stamp are kept so the DI pass can name LAST frame's pair.
 	s_sceneLightSlotAddr[ slot ]  = *outAddr;
 	s_sceneLightSlotFrame[ slot ] = tr.frameCount;
-	s_sceneLightSlotCount[ slot ] = n + nFog + nEm;		// EVERY row (the gradient's stored rows may be emitter rows)
+	s_sceneLightSlotCount[ slot ] = n + nFog + nEm + nAmb;	// EVERY row (the gradient's stored rows may be emitter rows)
 	s_diLightMapSlotAddr[ slot ]  = 0;
 	if ( numDefs <= DI_LIGHTMAP_MAX ) {
 		if ( s_diLightMapBuf == 0 ) {
@@ -6707,6 +6786,14 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 // rows + emitter rows): the count the DI gather, the light-grid fill and the combined bounce iterate. The placed-light
 // count the gather RETURNS stays the reflections' / volumetrics' count (they never see an emitter row).
 static int RB_RHI_SceneRowCount( void ) { return s_sceneRowCount; }
+// r_rtgiAmbient fold: the ambient rows of the current slot for the bounce, packed ( first row << 8 ) | count (count <= 64,
+// first < 2^24) and bit-cast into a float uniform; 0 = none. rtgi_bounce.glsl RtgiBounceParms.ambientRows unpacks it.
+static float RB_RHI_SceneAmbientRowsBits( void ) {
+	const unsigned int bits = ( s_sceneAmbCount > 0 ) ? ( ( (unsigned int)s_sceneAmbStart << 8 ) | (unsigned int)s_sceneAmbCount ) : 0u;
+	float f;
+	memcpy( &f, &bits, sizeof( f ) );
+	return f;
+}
 
 /*
 ===================
@@ -8365,7 +8452,7 @@ static void RB_RHI_RtgiPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	const int giNumLights = RB_RHI_GatherSceneLights( r, viewDef, &giLightAddr );
 	memcpy( &parms.color[0], &giLightAddr, sizeof( giLightAddr ) );	// color.xy = light-buffer device address
 	parms.color[2] = (float)giNumLights;
-	parms.color[3] = 0.0f;							// no ambient floor at the hit: a pure bounce (only lit surfaces contribute)
+	parms.color[3] = RB_RHI_SceneAmbientRowsBits();	// r_rtgiAmbient fold: the ambient rows the hit is also lit by (bit-cast; 0 = none)
 	parms.diffuseModifier[0] = idMath::ClampFloat( 0.0f, 16.0f, r_rtgiEmissive.GetFloat() );	// self-illum glow scale
 	if ( r_rtEmissiveLighting.GetBool() && R_RtEmissiveTableAddress( NULL, NULL, NULL ) != 0 ) {
 		parms.diffuseModifier[0] = 0.0f;			// emissive mode: the emitters are sampled as lights; glow at a bounce hit would count them twice
@@ -8784,7 +8871,7 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		}
 		parms.pbrParms[2] = idMath::ClampFloat( 0.0f, 16.0f, r_rtgiEmissiveClamp.GetFloat() );
 		parms.pbrParms[3] = idMath::ClampFloat( 0.0f, 8.0f, r_rtgiLightScale.GetFloat() );
-		parms.pbrParms2[0] = 0.0f;											// ambient floor: a pure bounce (as RB_RHI_RtgiPass)
+		parms.pbrParms2[0] = RB_RHI_SceneAmbientRowsBits();					// r_rtgiAmbient fold: the ambient rows (as RB_RHI_RtgiPass; bit-cast)
 		parms.pbrParms2[1] = r_rtgiShadow.GetBool() ? 1.0f : 0.0f;			// H6d dominant-light shadow ray at the hit
 		parms.pbrParms2[2] = 0.004f;										// eye pullback per unit depth (crease-leak fix)
 		parms.pbrParms2[3] = idMath::ClampFloat( 0.0f, 8.0f, r_rtgiIntensity.GetFloat() );

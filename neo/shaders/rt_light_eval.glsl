@@ -31,6 +31,10 @@ const uint DUDE_LIGHT_DIFORWARD  = 32u;	// ReSTIR DI skips it (r_rtReStirDIDynam
 // consumer that has no emitter branch (reflections, volumetrics - they never receive these rows anyway) lights nothing.
 const uint DUDE_LIGHT_EMISSIVE   = 64u;
 const uint DUDE_LIGHT_BOUNCEONLY = 128u;	// emissive mode OFF, r_rtEmissiveBounce on: the DI gather skips the row, the GI bounce lights with it
+// BOUNCEONLY WITHOUT EMISSIVE = a Doom 3 AMBIENT light (r_rtgiAmbient fold, RhiWorld.cpp RB_RHI_GatherSceneLights): rows
+// behind the emitter rows that only the GI bounce reads, through its own loop (rtgi_bounce.glsl rtgiAmbientAt). The light
+// grid leaves them out, so the cell loops never meet one; the bounce's full-buffer loop skips them by this test.
+bool dudeLightIsAmbientRow( uint flags ) { return ( flags & ( DUDE_LIGHT_BOUNCEONLY | DUDE_LIGHT_EMISSIVE ) ) == DUDE_LIGHT_BOUNCEONLY; }
 // flags bits 8-15 = volumetric haze scale * 255; bits 16-31 = the hybrid shadow blur's per-light blur scale as a half
 // float (ReSTIR DI soft grate coverage, restir_di_shade.glsl diLightBlurScale; 0 while r_rtShadowBlur is off)
 
