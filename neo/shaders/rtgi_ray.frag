@@ -151,7 +151,7 @@ void main() {
 	bp.emissiveScale  = u_diffuseModifier.x;
 	bp.emissiveClamp  = u_localParam0.w;
 	bp.lightScale     = u_diffuseModifier.y;
-	bp.ambientFloor   = u_color.w;
+	bp.ambientRows    = floatBitsToUint( u_color.w );	// r_rtgiAmbient fold: ( first row << 8 ) | count, 0 = none
 	bp.eyePullback    = u_localParam1.w;
 	bp.sampleFrame    = u_localParam1.x;			// frame index: advances the R2 bounce-direction sequence
 	// the irradiance cache (r_rtgiCache): the hit reads its cell, this pixel then teaches its own cell what it saw.

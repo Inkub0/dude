@@ -3833,6 +3833,22 @@ static void DrawEnhGroup_AmbientOcclusion()
 			CvarSliderF( "Intensity##rtgi", r_rtgiIntensity, 0.0f, 4.0f, "%.2f", "Strength of the bounced light added to the scene. 1.00 is the physical one-bounce "
 				"result; raise for punchier colour bleed, lower for a subtle fill." );
 
+			// r_rtgiAmbient: what Doom 3's ambient lights (the mappers' fill - hell's walls) do once GI is on
+			{
+				int sel = idMath::ClampInt( 0, 3, r_rtgiAmbient.GetInteger() );
+				if ( ImGui::Combo( "Ambient Lights##rtgi", &sel, "Replace (GI only)\0Floor (vanilla fill where GI is dark)\0Fold into GI bounce\0Floor + Fold\0" ) ) {
+					r_rtgiAmbient.SetInteger( sel );
+				}
+				AddTooltip( "What Doom 3's ambient lights - the flat fill mappers use to keep areas readable, like hell's walls - "
+					"do once GI is on.\n"
+					"Replace: they draw nothing and GI stands in for them; dark where few real lights bounce.\n"
+					"Floor: each adds only what the ray-traced lighting falls short of it - vanilla fill where GI is dark, "
+					"nothing extra where GI is bright (no double-counting).\n"
+					"Fold: they become sources of the GI bounce instead (no shadows) - their fill arrives bounced and "
+					"ray-occluded, dimmer than vanilla.\n"
+					"Floor + Fold: the floor, measured against a GI that already includes the folded fill. (r_rtgiAmbient)" );
+			}
+
 			CvarSliderF( "Fog Awareness##rtgi", r_rtgiFogAttenuate, 0.0f, 4.0f, "%.2f", "Fades the bounced light out with distance through fog, so GI stops washing out "
 				"Doom 3's distance fog (the far haze reads thin without it). 1.00 is the physical amount; "
 				"raise toward 4 for a stronger foggy look (needed where a map's fog distance is huge and "

@@ -102,7 +102,7 @@ void lgFillBlock() {
 		vec4  rcull = vec4( 0.0 );
 		if ( rli < pc.nLights ) {
 			rflags = lights.l[ rli ].flags;
-			if ( ( rflags & ( DUDE_LIGHT_FOGVOLUME | DUDE_LIGHT_DIFORWARD ) ) == 0u ) {
+			if ( ( rflags & ( DUDE_LIGHT_FOGVOLUME | DUDE_LIGHT_DIFORWARD ) ) == 0u && !dudeLightIsAmbientRow( rflags ) ) {	// (ambient rows: the bounce's own loop)
 				rcull = lights.l[ rli ].cull;
 				vec3  q  = rcull.xyz - clamp( rcull.xyz, boxLo, boxHi );
 				float rB = rcull.w + halfDB + 0.01 * csB;

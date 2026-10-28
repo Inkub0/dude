@@ -8,6 +8,7 @@ SAMPLER_BINDING(1) uniform sampler2D u_bumpMap;
 SAMPLER_BINDING(2) uniform sampler2D u_lightFalloff;
 SAMPLER_BINDING(3) uniform sampler2D u_lightProjection;
 SAMPLER_BINDING(4) uniform sampler2D u_diffuseMap;
+SAMPLER_BINDING(5) uniform sampler2D u_rtLight;    // DUDE r_rtgiAmbient floor: the RT lighting buffer (bound only when u_color.x = 2)
 SAMPLER_BINDING(9) uniform sampler2D u_ssao;   // DUDE GTAO buffer (R = ambient visibility)
 SAMPLER_BINDING(10) uniform sampler2D u_occlusionMap; // DUDE baked AO map (R = visibility)
 
@@ -82,11 +83,26 @@ void main() {
 		outRgb *= mix( 1.0, aoMap, u_occlusionParms.y );
 	}
 
-	// RTGI reconcile (docs/rtx-rtgi.md H6c): when r_rtgi is on, the fullscreen GI apply adds real bounce
-	// light, so Doom 3's FAKE cube-map ambient is fully REPLACED to avoid double-counting. u_color.x carries
-	// 1.0 when GI is on (so x - 1 = 0 zeroes the fake ambient here); 0 = GI off = no change.
-	if ( u_color.x > 0.5 ) {
-		outRgb *= ( u_color.x - 1.0 );
+	// RTGI reconcile (docs/rtx-rtgi.md H6c, r_rtgiAmbient): with r_rtgi on the fullscreen GI apply adds real bounce
+	// light. u_color.x = 0: GI off, the vanilla ambient. 1 = REPLACE: draw nothing (the GI stands in, or - in the fold
+	// mode - carries this light's fill through the bounce). 2 = FLOOR: add only what the RT lighting at this pixel falls
+	// short of this light's fill, so indirect = max( RT, ambient ) with no double-counting where the GI is bright. The RT
+	// buffer (u_rtLight: albedo-free irradiance, NRD YCoCg unless u_color.z = 1, times u_color.y) is compared through
+	// this surface's diffuse, the factor both the RT apply and the ambient above multiply by. Several overlapping ambient
+	// lights each take the floor on their own (the sum can exceed a single max) - Doom's ambience is rarely stacked.
+	if ( u_color.x > 1.5 ) {
+		vec3 rt = vec3( 0.0 );
+		if ( u_color.y > 0.0 ) {
+			vec3 c = texture( u_rtLight, gl_FragCoord.xy * u_screenCorrection.xy ).rgb;
+			if ( u_color.z < 0.5 ) {
+				float t = c.x - c.z;
+				c = vec3( t + c.y, c.x + c.z, t - c.y );		// NRD YCoCg -> linear (rtgi_apply.frag)
+			}
+			rt = max( c, vec3( 0.0 ) ) * u_color.y;
+		}
+		outRgb = max( outRgb - diff * rt, vec3( 0.0 ) );
+	} else if ( u_color.x > 0.5 ) {
+		outRgb = vec3( 0.0 );
 	}
 
 	fragColor = vec4( outRgb, 1.0 );

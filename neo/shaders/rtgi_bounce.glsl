@@ -31,7 +31,7 @@ struct RtgiBounceParms {
 	float emissiveScale;	// r_rtgiEmissive
 	float emissiveClamp;	// r_rtgiEmissiveClamp (peak channel)
 	float lightScale;		// r_rtgiLightScale
-	float ambientFloor;		// u_color.w in RB_RHI_RtgiPass (0 = pure bounce)
+	uint  ambientRows;		// r_rtgiAmbient fold: the AMBIENT rows of the light buffer, ( first row << 8 ) | count; 0 = none
 	float eyePullback;		// ray origin pulled toward the eye per unit depth (crease-leak fix)
 	float sampleFrame;		// frame index (tr.frameCount & 0xFFFF) advancing the R2 bounce-direction sequence
 	// RT irradiance cache (docs/rtx-irradiance-cache.md C2): when cacheLookup, the hit also receives the INDIRECT light
@@ -50,6 +50,30 @@ struct RtgiBounceParms {
 	// bounce's skipForwardLights set. gridAddr 0 (the standalone RTGI pass, or the grid off) = the full light loop.
 	LgParms grid;
 };
+
+// r_rtgiAmbient fold: what Doom 3's AMBIENT lights (rows [first, first + count) of the buffer, dudeLightIsAmbientRow) give
+// the bounce hit H - vanilla's ambient shading: the light's colour * falloff * projection * the flat-surface value of its
+// constant-direction "normal" term (tr.ambientLightVector against an unbumped normal: 0.78; the hit has no bump), no
+// cosine to a position, no shadows (an ambient light never cast any). Returns albedo(H) * that * the bounce light scale.
+vec3 rtgiAmbientAt( RtgiBounceParms bp, vec3 hitWorld, vec3 albedo ) {
+	vec3 sum = vec3( 0.0 );
+	if ( bp.ambientRows == 0u ) { return sum; }
+	RtLights lights = RtLights( bp.lightAddr );
+	uint first = bp.ambientRows >> 8;
+	uint count = bp.ambientRows & 0xFFu;
+	for ( uint k = 0u; k < count; k++ ) {
+		uint li = first + k;
+		if ( !dudeLightInRange( lights, li, hitWorld ) ) { continue; }
+		const uint lflags = lights.l[ li ].flags;
+		vec3 ldir; float dl;
+		dudeLightDir( lights, li, hitWorld, ldir, dl );
+		vec3 atten = bp.texturedLights
+			? dudeLightAttenTex( lights, li, hitWorld, dl, lflags, bp.gate, false, 0.0 )
+			: vec3( dudeLightAtten( lights, li, hitWorld, dl, lflags, bp.gate, false ) );
+		sum += lights.l[ li ].color * atten;
+	}
+	return albedo * sum * ( 0.78 * bp.lightScale );
+}
 
 // branchless orthonormal basis around n (Duff et al. / Frisvad)
 void onb( vec3 n, out vec3 t, out vec3 b ) {
@@ -149,6 +173,13 @@ int rtgiTraceBounce( RtgiBounceParms bp, vec3 Pw, vec3 Nw, vec3 eyeW, float d, v
 		vec3 Lout;
 		if ( rtgiCacheLookupTail( bp.cache, hitWorld, hitN, eyeW, Lout ) ) {
 			Li = Lout * bp.cache.scale;
+			// the fold's ambient light at H is H's own direct term, which the stored L_out never holds (the tail update learns
+			// the DI-chosen light + the indirect): added live, as the emissive below, at the cost of the albedo sample
+			if ( bp.ambientRows != 0u ) {
+				vec4 bcolT = unpackUnorm4x8( g.baseColor );
+				vec3 albT  = ( g.texIndex != 0u ) ? textureLod( u_rtTextures[ nonuniformEXT( g.texIndex - 1u ) ], hitST, 0.0 ).rgb : bcolT.rgb;
+				Li += rtgiAmbientAt( bp, hitWorld, albT );
+			}
 			uint emitT = ( g.flags >> 16 ) & 0xFFFFu;
 			if ( emitT != 0u ) {
 				vec3  e  = textureLod( u_rtTextures[ nonuniformEXT( emitT - 1u ) ], hitST, 0.0 ).rgb * bp.emissiveScale;
@@ -170,8 +201,9 @@ int rtgiTraceBounce( RtgiBounceParms bp, vec3 Pw, vec3 Nw, vec3 eyeW, float d, v
 
 	// Li = outgoing radiance at the hit toward the shading pixel. Diffuse only; the receiver's own albedo
 	// and the 1/pi * pi (cosine-sampling) factors are applied at the H6c consume site, so here we return
-	// the hit's lit colour. bp.ambientFloor is a small ambient floor (0 keeps it a pure bounce).
-	Li = albedo * bp.ambientFloor;
+	// the hit's lit colour. It starts from the r_rtgiAmbient fold's ambient lights (none: 0, a pure bounce) - slow
+	// fill, so the cache learns it; never the dominant light (nothing to shadow-test).
+	Li = rtgiAmbientAt( bp, hitWorld, albedo );
 	LiCache = Li;
 	vec3  domContrib = vec3( 0.0 );			// H6d: the brightest reaching light's contribution, for one shadow ray
 	vec3  domDir = vec3( 0.0 );
@@ -201,6 +233,7 @@ int rtgiTraceBounce( RtgiBounceParms bp, vec3 Pw, vec3 Nw, vec3 eyeW, float d, v
 			if ( gate && !dudeLightInRange( lights, li, hitWorld ) ) { continue; }
 			const uint lflags = lights.l[ li ].flags;
 			if ( ( lflags & DUDE_LIGHT_FOGVOLUME ) != 0u ) { continue; }				// a fog row is not a light
+			if ( dudeLightIsAmbientRow( lflags ) ) { continue; }						// an ambient row: rtgiAmbientAt above
 			const bool fast = ( lflags & DUDE_LIGHT_DIFORWARD ) != 0u;
 			if ( bp.skipForwardLights && fast ) { continue; }
 			vec3  ldir; float dl;
