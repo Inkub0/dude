@@ -1439,6 +1439,7 @@ void idMD5Mesh::UpdateSurface( const struct renderEntity_s *ent, const idJointMa
 			tri->gpuSkinVB = r->CreateBuffer( rhi::BU_SKIN, numOut * (int)sizeof( idDrawVert ), skinTemplate );
 			tri->gpuSkinVerts = numOut;
 			tri->gpuSkinFrame = -1;
+			tri->gpuSkinShownFrame = -1;
 		}
 		// one dispatch per surface per frame (an entity in several views instantiates once)
 		// skinned motion vectors: a second per-surface buffer receives last frame's positions (the kernel
@@ -1460,11 +1461,14 @@ void idMD5Mesh::UpdateSurface( const struct renderEntity_s *ent, const idJointMa
 			tri->gpuSkinPrevVB = 0;	tri->gpuSkinPrevAddr = 0;	tri->gpuSkinPrevValid = false;
 		}
 		if ( tri->gpuSkinVB && tri->gpuSkinFrame != tr.frameCount ) {
-			// gpuSkinVB holds the PREVIOUS frame's pose only if it was skinned last frame too; after a gap
-			// (entity out of view) the kernel stores the current pose instead = zero animation velocity
-			const bool prevPoseInVB = ( tri->gpuSkinFrame == tr.frameCount - 1 );
+			// gpuSkinVB holds the PREVIOUS frame's pose only if it was drawn last frame - skinned then, or
+			// reused unchanged from the cached dynamic model (a game posing only on its tics, render rate above
+			// them: Quake 4). After a real gap (entity out of view) the kernel stores the current pose instead
+			// = zero animation velocity.
+			const bool prevPoseInVB = ( tri->gpuSkinFrame == tr.frameCount - 1 || tri->gpuSkinShownFrame == tr.frameCount - 1 );
 			tri->gpuSkinPrevValid = ( tri->gpuSkinPrevVB != 0 );
 			tri->gpuSkinFrame = tr.frameCount;
+			tri->gpuSkinShownFrame = tr.frameCount;
 			const int numJoints = ent->numJoints;
 			// Share ONE frame-snapshot of the joint palette across all of this entity's sub-meshes.
 			// InstantiateDynamicModel updates a model's meshes contiguously with the same ent->joints,

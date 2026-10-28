@@ -173,6 +173,11 @@ typedef struct srfTriangles_s {
 	int							tessDeformVerts;		// vert count the buffer was sized for (realloc on change)
 	int							tessDeformIndexes;		// expanded index count (the draw count)
 	int							tessDeformFrame;		// tr.frameCount it was last dispatched (deform once/frame)
+	// Skinned motion vectors: tr.frameCount this surface's gpuSkinVB pose was last DRAWN - skinned that frame
+	// or reused from the entity's cached dynamic model (R_EntityDefDynamicModel). A game that re-poses only on
+	// its own tics (Quake 4 at a render rate above 60 Hz) shows the same pose for several frames; the next
+	// re-skin must still treat that pose as last frame's, or the animation's velocity drops to zero.
+	int							gpuSkinShownFrame;
 } srfTriangles_t;
 
 typedef idList<srfTriangles_t *> idTriList;
