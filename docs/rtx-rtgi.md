@@ -52,8 +52,13 @@ reflections and volumetrics.
   `RB_RHI_NormalPrepass` forces the standalone 4-att target + fills the SL_DIFFUSE stage when `r_rtgi` is on
   (merged 3-att path untouched, `r_rtgi` off byte-identical). `rtgi_apply.frag` adds
   `albedo * gathered-irradiance * r_rtgiIntensity` into `rhiHdrRT` before FSR2/tonemap (own "rtgi apply"
-  scope). Reconcile: `ambientlight.frag` dims the fake cube-map ambient by `r_rtgiAmbientKeep`
-  (carried in the otherwise-unused `u_color.x`, +1 encoded so 0 = GI-off) so real GI doesn't double-count.
+  scope). Reconcile: Doom 3's ambient lights (ambientLight materials) under GI follow `r_rtgiAmbient`
+  (was `r_rtgiAmbientKeep`, then a hard "replace"): 0 = replace (draw nothing), 1 = FLOOR (`ambientlight.frag`
+  adds only `max( 0, ambient - diffuse * RT )`, RT = the denoised GI buffer, or DI + GI at the PT tier, on unit 5),
+  2 = FOLD (ambient lights become bounce-only rows behind the emitter rows - BOUNCEONLY without EMISSIVE - lighting
+  every bounce hit through `rtgiAmbientAt`; the grid and DI never see them), **3 = both (default, user-verified on
+  commoutside 2026-10-28)**. Carried in `u_color` (x = mode, y = RT scale, z = linear source). Ambient lights are
+  rare in SP: commoutside, comm1, alphalabs2, RoE erebus6 / phobos2 - hell1 has none.
 
   **View-weapon leak fix (user-verified 2026-09-29).** The GI bled onto the first-person weapon (the
   world's panel/rail lines ghosting across the barrels). Two causes, both fixed:
@@ -118,11 +123,11 @@ under it (H6c) so the net exposure stays close to the shipped look, not brighter
   YCoCg-packs radiance + writes normHitDist for NRD).
 - `neo/shaders/rtgi_apply.{vert,frag}` — the fullscreen additive apply (`albedo * YCoCg-unpacked GI * intensity`).
 - `neo/shaders/rtgi_debug.{vert,frag}` — the `r_rtgiDebug` overlay (YCoCg-decoded raw / denoised blit).
-- `neo/shaders/gbuffer.frag` — `out_Albedo` (4th prepass attachment); `ambientlight.frag` — the `r_rtgiAmbientKeep` reconcile.
+- `neo/shaders/gbuffer.frag` — `out_Albedo` (4th prepass attachment); `ambientlight.frag` — the `r_rtgiAmbient` floor.
 - `RhiWorld.cpp` — `RB_RHI_RtgiPass` (gather + `giMode` NRD denoise), `RB_RHI_RtgiApply`, `RB_RHI_RtgiDebugOverlay`,
   the `rhiRtgi*` statics, `RB_RHI_NormalPrepass` (4-att albedo), `RB_RHI_RtaoPass` (stands down when `r_rtgi`).
 - `VulkanBackend.cpp` / `RHI.h` — `CreateRenderTargetRtgiMrt`; the 3→4 color-attachment widening +
   `GetRenderTargetImage4`; `RtaoDenoise` `giMode` + `RtgiEnsureOutput` / `GetRtgiOutputImage`; `NRD_ID_REBLUR_GI`.
 - `RenderSystem_init.cpp` / `tr_local.h` — the `r_rtgi*` cvars (`r_rtgi`, `r_rtgiRadius`, `r_rtgiResScale`,
-  `r_rtgiLightScale`, `r_rtgiEmissive`, `r_rtgiIntensity`, `r_rtgiAmbientKeep`, `r_rtgiDebug`).
+  `r_rtgiLightScale`, `r_rtgiEmissive`, `r_rtgiIntensity`, `r_rtgiAmbient`, `r_rtgiDebug`).
 - `tr_main.cpp` — `r_rtgi` in the RT-world implication gate + the per-frame TLAS-rebuild exception.
