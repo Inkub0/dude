@@ -1580,11 +1580,11 @@ static void AddCVarOptionTooltips( const idCVar& cvar, const char* desc = nullpt
 // DUDE: every cvar control in the hand-drawn groups goes through SettingsRow, which
 //  - applies the Debugging tab's search filter (a non-matching row is not drawn; the group's
 //    heading is emitted lazily, before its first matching row, so only groups with hits show),
-//  - records the row's cvar for the group's Defaults button (Debugging tab only), and
+//  - records the row's cvar for the group's Restore defaults button (Debugging tab only), and
 //  - remembers its verdict, so the row's trailing reset button (RowResetButton) follows it.
 // Labels never carry the cvar name: CvarTip opens every tooltip with it instead.
 struct settingsRows_t {
-	bool			debugTab = false;		// drawing the Debugging tab: groups get a Defaults button
+	bool			debugTab = false;		// drawing the Debugging tab: groups get a Restore defaults button
 	bool			filtering = false;		// the Debugging search box has text
 	ImGuiTextFilter	filter;
 	const char *	groupLabel = nullptr;	// the open group (filter mode: heading not yet emitted)
@@ -1592,7 +1592,7 @@ struct settingsRows_t {
 	bool			groupMatches = false;	// the search matches the group's own name: all its rows show
 	bool			groupFlat = false;		// this group was opened in filter mode (flat, no header)
 	bool			rowShown = true;		// the last row's verdict
-	bool			collect = false;		// recording the open group's cvars for its Defaults button
+	bool			collect = false;		// recording the open group's cvars for its Restore defaults button
 	const idCVar *	groupMaster = nullptr;	// never reset by Defaults (that is the user's on/off)
 	idStrList		groupCvars;
 	int				groupMatchCount = 0;	// rows shown under the current search (all groups, this frame)
@@ -1651,11 +1651,26 @@ static bool SettingsRow( const char *label, const char *cvarName )
 // the per-knob reset button after a row (SameLine + SmallButton), skipped with its row
 static bool RowResetButton( const char *id )
 {
-	if ( !s_rows.rowShown ) {
+	if ( s_rows.filtering && !s_rows.rowShown ) {
 		return false;
 	}
 	ImGui::SameLine();
 	return ImGui::SmallButton( id );
+}
+
+// the reset button every cvar slider carries (the helpers below add it; custom sliders call it after their tooltip):
+// SameLine + "reset", back to the cvar's code default. Skipped with its row while searching.
+static void CvarResetButton( idCVar &cv )
+{
+	if ( s_rows.filtering && !s_rows.rowShown ) {
+		return;
+	}
+	ImGui::SameLine();
+	ImGui::PushID( cv.GetName() );
+	if ( ImGui::SmallButton( "reset" ) ) {
+		cv.Reset();
+	}
+	ImGui::PopID();
 }
 
 // group sub-heading / explanatory text: hidden while searching (the results are a flat list)
@@ -1725,6 +1740,7 @@ static float CvarSliderF( const char* label, idCVar& cv, float mn, float mx, con
 		cv.SetFloat( f );
 	}
 	CvarTip( cv, tip );
+	CvarResetButton( cv );
 	return f;
 }
 
@@ -1736,6 +1752,7 @@ static int CvarSliderI( const char* label, idCVar& cv, int mn, int mx, const cha
 		cv.SetInteger( i );
 	}
 	CvarTip( cv, tip );
+	CvarResetButton( cv );
 	return i;
 }
 
@@ -1769,6 +1786,7 @@ static void CvarStopsSliderF( const char* label, idCVar& cv, const float* stops,
 		cv.SetFloat( stops[idx] );
 	}
 	CvarTip( cv, tip );
+	CvarResetButton( cv );
 }
 
 enum OptionType {
@@ -1864,6 +1882,7 @@ struct CVarOption {
 					// TODO: make format configurable?
 					ImGui::SliderFloat(label, &f, minVal, maxVal, "%.2f", 0);
 					AddCVarOptionTooltips( *cvar );
+					CvarResetButton( *cvar );
 					if(f != fOrig) {
 						cvar->SetFloat(f);
 					}
@@ -1875,6 +1894,7 @@ struct CVarOption {
 					int iOrig = i;
 					ImGui::SliderInt(label, &i, minVal, maxVal);
 					AddCVarOptionTooltips( *cvar );
+					CvarResetButton( *cvar );
 					if (i != iOrig) {
 						cvar->SetInteger(i);
 					}
@@ -1976,7 +1996,7 @@ static bool BeginSettingsGroup( const char* label, idCVar* masterCvar = nullptr,
 	s_rows.groupLabel  = label;
 	s_rows.groupFlat   = false;
 	s_rows.groupMaster = masterCvar;
-	s_rows.collect     = s_rows.debugTab;	// the Debugging tab's Defaults button resets what the body draws
+	s_rows.collect     = s_rows.debugTab;	// the Debugging tab's Restore defaults button resets what the body draws
 	s_rows.groupCvars.Clear();
 	ImGui::Indent();
 	ImGui::BeginDisabled( gateBody && masterCvar != nullptr && !masterCvar->GetBool() );
@@ -1990,17 +2010,17 @@ static void EndSettingsGroup()
 		s_rows.groupFlat = false;
 	} else {
 		if ( s_rows.collect && s_rows.groupCvars.Num() > 0 ) {
-			// Defaults: every cvar this group's body drew, back to its code default. The group's on/off
+			// Restore defaults: every cvar this group's body drew, back to its code default. The group's on/off
 			// (its header switch) is left alone - that is a choice, not a tuning value.
 			ImGui::Spacing();
-			if ( ImGui::SmallButton( "Defaults" ) ) {
+			if ( ImGui::SmallButton( "Restore defaults" ) ) {
 				for ( int i = 0; i < s_rows.groupCvars.Num(); i++ ) {
 					ResetNamedCvar( s_rows.groupCvars[i].c_str() );
 				}
 			}
 			if ( ImGui::BeginItemTooltip() ) {
 				ImGui::PushTextWrapPos( ImGui::GetFontSize() * 35.0f );
-				ImGui::Text( "Reset this group's %d settings to their code defaults (not a preset's values; a "
+				ImGui::Text( "Restore this group's %d settings to their code defaults (not a preset's values; a "
 					"preset-owned setting then reads as a Custom preset). The group's on/off switch is left alone.",
 					s_rows.groupCvars.Num() );
 				ImGui::PopTextWrapPos();
@@ -2164,6 +2184,7 @@ static CVarOption anisoOptions[] = {
 			if ( texAni != cvar.GetInteger() ) {
 				cvar.SetInteger( texAni );
 			}
+			CvarResetButton( cvar );
 		} else {
 			ImGui::BeginDisabled();
 			int texAni = 0;
@@ -2228,6 +2249,7 @@ static CVarOption lightingOptions[] = {
 			cvar.SetFloat( f );
 		}
 		AddCVarOptionTooltips( cvar );
+		CvarResetButton( cvar );
 		ImGui::EndDisabled();
 	} ),
 	CVarOption( "r_specularExp", []( idCVar& cvar ) {
@@ -2237,6 +2259,7 @@ static CVarOption lightingOptions[] = {
 			cvar.SetFloat( f );
 		}
 		AddCVarOptionTooltips( cvar );
+		CvarResetButton( cvar );
 		ImGui::EndDisabled();
 	} ),
 	// light flare/glare deform sprites (the "bloom" around some lights). Vanilla
@@ -2300,6 +2323,7 @@ static CVarOption newLightOptions[] = {
 		if ( ImGui::SliderFloat( "Self-lit Items Glow", &f, 0.0f, 1.0f, "%.2f", 0 ) ) {
 			cvar.SetFloat( idMath::ClampFloat( 0.0f, 1.0f, f ) );
 		}
+		CvarResetButton( cvar );
 		const char* descr = "Pickups with glowing parts (armor, medkits, ammo lights, powerups) give off a very\n"
 			"faint light of their glow's colour, so they're findable in pitch-black rooms.\n"
 			"0 = vanilla (no light), 1 = full faint glow. Only noticeable in near-total darkness.";
@@ -2334,12 +2358,14 @@ static CVarOption tessellationOptions[] = {
 			cvar.SetFloat( f );
 		}
 		AddCVarOptionTooltips( cvar );
+		CvarResetButton( cvar );
 	} ),
 	CVarOption( "r_tessDisplace", []( idCVar& cvar ) {
 		float f = cvar.GetFloat();
 		if ( ImGui::SliderFloat( "Displacement", &f, -4.0f, 4.0f, "%.2f", 0 ) ) {
 			cvar.SetFloat( f );
 		}
+		CvarResetButton( cvar );
 		const char* descr = "Normal-map displacement: push surface detail along the normal by this many world\n"
 			"units. Doom 3 has no runtime height maps, so height is approximated from the bump\n"
 			"map, positive raises detail, negative carves it in. 0 = pure PN silhouette smoothing.";
@@ -2350,6 +2376,7 @@ static CVarOption tessellationOptions[] = {
 		if ( ImGui::SliderFloat( "Tessellation Distance", &f, 0.0f, 2048.0f, "%.0f", 0 ) ) {
 			cvar.SetFloat( f );
 		}
+		CvarResetButton( cvar );
 		const char* descr = "View distance (world units) beyond which tessellation rolls back toward flat,\n"
 			"an LOD/performance guard. 0 = full tessellation at any distance.";
 		AddCVarOptionTooltips( cvar, descr );
@@ -2363,6 +2390,7 @@ static CVarOption parallaxOptions[] = {
 		if ( ImGui::SliderFloat( "Parallax Depth", &f, 0.0f, 2.0f, "%.2f", 0 ) ) {
 			cvar.SetFloat( idMath::ClampFloat( 0.0f, 4.0f, f ) );
 		}
+		CvarResetButton( cvar );
 		const char* descr = "Strength of the parallax relief. 0 = flat, higher exaggerates the apparent depth.";
 		AddCVarOptionTooltips( cvar, descr );
 	} ),
@@ -2371,6 +2399,7 @@ static CVarOption parallaxOptions[] = {
 		if ( ImGui::SliderFloat( "Parallax Self-Shadow", &f, 0.0f, 1.0f, "%.2f", 0 ) ) {
 			cvar.SetFloat( idMath::ClampFloat( 0.0f, 1.0f, f ) );
 		}
+		CvarResetButton( cvar );
 		const char* descr = "The parallax relief casts soft contact shadows from the light direction, which is\n"
 			"what makes the fake depth read as real. 0 = off. Adds a second (half-step) march\n"
 			"per lit pixel.";
@@ -2416,6 +2445,7 @@ static CVarOption postProcessOptions[] = {
 			AddTooltip( "r_hdrDudeKnee: where the DUDE curve begins rolling off highlights. Below it the scene\n"
 				"is untouched (faithful blacks + midtones); above it highlights compress toward white.\n"
 				"Lower = start sooner and keep more highlight range; higher = touch only the very brightest." );
+			CvarResetButton( NamedCvar( "r_hdrDudeKnee" ) );
 			float ddesat = cvarSystem->GetCVarFloat( "r_hdrDudeDesat" );
 			if ( ImGui::SliderFloat( "DUDE Highlight White-Hot", &ddesat, 0.0f, 4.0f, "%.2f" ) ) {
 				cvarSystem->SetCVarFloat( "r_hdrDudeDesat", ddesat );
@@ -2423,6 +2453,7 @@ static CVarOption postProcessOptions[] = {
 			AddTooltip( "r_hdrDudeDesat: how strongly bright cores (fireballs, lava, muzzle flash) fade toward\n"
 				"white as they compress, so they read as detail instead of a flat saturated blob.\n"
 				"0 = pure hue-preserving (the red-blob look); raise it to give hot cores a white centre." );
+			CvarResetButton( NamedCvar( "r_hdrDudeDesat" ) );
 			float dtint = cvarSystem->GetCVarFloat( "r_hdrDudeTint" );
 			if ( ImGui::SliderFloat( "DUDE White-Hot Tint", &dtint, 0.0f, 1.0f, "%.2f" ) ) {
 				cvarSystem->SetCVarFloat( "r_hdrDudeTint", dtint );
@@ -2430,6 +2461,7 @@ static CVarOption postProcessOptions[] = {
 			AddTooltip( "r_hdrDudeTint: what colour the white-hot centre is. 0 = neutral white, which can make a\n"
 				"saturated lava/fire core read pink on its way to white; 1 = keep the highlight's own hue.\n"
 				"~0.35 keeps molten cores a warm yellow-white. Raise it if bright colours look washed or pink." );
+			CvarResetButton( NamedCvar( "r_hdrDudeTint" ) );
 		}
 
 		// Emissive overbright, same tonemap-gated block. Pushes additive self-illum
@@ -2443,6 +2475,7 @@ static CVarOption postProcessOptions[] = {
 			"so they exceed 1.0 and the tonemap curve treats them as real highlights (and eye-adaptation\n"
 			"has bright anchors). 1 = off; ~1.60 default (tuned for DUDE). When active it auto-disables the\n"
 			"legacy light-flare/glare haze (r_flareSize). No effect while Tonemap is Off." );
+		CvarResetButton( NamedCvar( "r_hdrOverbright" ) );
 		float obsat = cvarSystem->GetCVarFloat( "r_hdrOverbrightSat" );
 		if ( ImGui::SliderFloat( "Overbright Saturation", &obsat, 1.0f, 3.0f, "%.2f" ) ) {
 			cvarSystem->SetCVarFloat( "r_hdrOverbrightSat", obsat );
@@ -2450,6 +2483,7 @@ static CVarOption postProcessOptions[] = {
 		AddTooltip( "r_hdrOverbrightSat: pre-saturate coloured emissive (fire, lava) before the tonemap so\n"
 			"it doesn't wash to white when overbright pushes it very bright. White lights are unaffected.\n"
 			"1 = off. Only acts on overbright additive stages." );
+		CvarResetButton( NamedCvar( "r_hdrOverbrightSat" ) );
 
 		// Eye adaptation (Phase B1): auto-exposure driven by the scene's average luminance. The
 		// Exposure slider (Display group) becomes the mid-gray target; brighter scenes expose down over time.
@@ -2472,6 +2506,7 @@ static CVarOption postProcessOptions[] = {
 		}
 		AddTooltip( "r_hdrBloom: glow bled from bright pixels, added before the tonemap — the punch the\n"
 			"curve otherwise rolls off. 0 = off. opengl3 / Vulkan." );
+		CvarResetButton( NamedCvar( "r_hdrBloom" ) );
 		ImGui::BeginDisabled( bloom <= 0.0f );
 		float bthr = cvarSystem->GetCVarFloat( "r_hdrBloomThreshold" );
 		if ( ImGui::SliderFloat( "Bloom Threshold", &bthr, 0.0f, 8.0f, "%.2f" ) ) {
@@ -2480,6 +2515,7 @@ static CVarOption postProcessOptions[] = {
 		AddTooltip( "r_hdrBloomThreshold: brightness a pixel must exceed to bloom. Lower it to catch\n"
 			"fire/lava directly (can replace the emissive overbright); raise to bloom only the\n"
 			"brightest highlights." );
+		CvarResetButton( NamedCvar( "r_hdrBloomThreshold" ) );
 		ImGui::EndDisabled();
 
 		ImGui::EndDisabled();
@@ -2503,9 +2539,11 @@ static CVarOption postProcessOptions[] = {
 		float inten = cvar.GetFloat();
 		if ( ImGui::SliderFloat( "Intensity##grain", &inten, 0.0f, 0.25f, "%.2f" ) ) { cvar.SetFloat( inten ); }
 		AddCVarOptionTooltips( cvar );
+		CvarResetButton( cvar );
 		float gsz = r_postFilmGrainSize.GetFloat();
 		if ( ImGui::SliderFloat( "Size (px)##grain", &gsz, 1.0f, 4.0f, "%.2f" ) ) { r_postFilmGrainSize.SetFloat( gsz ); }
 		AddCVarOptionTooltips( r_postFilmGrainSize );
+		CvarResetButton( r_postFilmGrainSize );
 		ImGui::EndDisabled();
 	} ),
 	CVarOption( "r_postChromaticAberration", "Chromatic Aberration", OT_FLOAT, 0.0f, 0.5f ),
@@ -2592,12 +2630,14 @@ static CVarOption particleOptions[] = {
 		}
 		AddTooltip( "How visible smoke stays over a fully black background, as a percentage of its normal "
 			"opacity. 15% is barely visible; 100% = no dimming." );
+		CvarResetButton( r_smokeDarkBlendFloor );
 		float kneePct = r_smokeDarkBlendKnee.GetFloat() * 100.0f;
 		if ( ImGui::SliderFloat( "Full-opacity Light Level", &kneePct, 5.0f, 100.0f, "%.0f%%" ) ) {
 			r_smokeDarkBlendKnee.SetFloat( idMath::ClampFloat( 0.05f, 1.0f, kneePct / 100.0f ) );
 		}
 		AddTooltip( "Background brightness at which smoke returns to full opacity. Lower = smoke recovers "
 			"quickly with just a little light; higher = stays dim except in bright areas." );
+		CvarResetButton( r_smokeDarkBlendKnee );
 		ImGui::EndDisabled();
 	} ),
 };
@@ -3013,6 +3053,7 @@ static void DrawDisplaySettings()
 	                       "locks to the wrong refresh rate. Set it to your monitor's refresh, or a clean "
 	                       "divisor of it (e.g. 72 on a 144 Hz panel). In VRR mode this is managed for you "
 	                       "(paced just below refresh); a lower value here still wins." );
+	CvarResetButton( com_maxFPS );
 
 	// render interpolation (docs/render-interpolation.md): only the presets set it before; its tuning is in the
 	// Debugging tab (Post & Temporal -> Frame Interpolation)
@@ -3868,6 +3909,7 @@ static void DrawEnhGroup_NewLightEffects()
 				"authored feature lights whose cones read as shafts; cheapest, but the stock maps have few of "
 				"them. All lights: point lights too, as a fainter ambience (Point Light Haze below) - far more "
 				"presence, about twice the cost." );
+			CvarResetButton( r_volLights );
 
 			CvarSliderF( "Haze Density", r_volDensity, 0.0f, 4.0f, "%.2f", "How much haze is in the air. Low = a hint of light in the cones; high = a smoke machine." );
 
@@ -3933,7 +3975,7 @@ static void DrawGroup_Antialiasing()
 {
 	if ( BeginSettingsGroup( "Antialiasing & Upscaling" ) ) {
 		// Hardware MSAA (r_multiSamples) — works on every backend, needs a renderer restart
-		// (Apply at the bottom of the tab).
+		// (Apply in the restart bar at the top of the tab).
 		static const char* msaaLevels[] = { "No Antialiasing", "2x", "4x", "8x", "16x" };
 		int msaa = r_multiSamples.GetInteger();
 		int msaaModeIndex = Min( 4, ( msaa > 1 ) ? idMath::ILog2( msaa ) : 0 );
@@ -3945,8 +3987,9 @@ static void DrawGroup_Antialiasing()
 		AddCVarOptionTooltips( r_multiSamples, "Hardware multisample antialiasing applied across the whole 3D "
 			"scene (the entire framebuffer), which makes it by far the most GPU-expensive antialiasing option "
 			"here - much heavier than the post-process FXAA/SMAA below. It smooths geometry edges only, not "
-			"specular/normal-map shimmer. Needs a renderer restart to change (Apply at the bottom of the tab); "
+			"specular/normal-map shimmer. Needs a renderer restart to change (Apply in the restart bar at the top of the tab); "
 			"not all GPUs/drivers support every mode, especially 16x." );
+		CvarResetButton( r_multiSamples );
 		RestartMark();
 
 		// Post AA — ONE effective selection (mirrors the classic System-menu AA row).
@@ -3985,6 +4028,7 @@ static void DrawGroup_Antialiasing()
 			"least shimmer reduction); higher values blend fine subpixel detail toward its neighbourhood, "
 			"cutting more of the specular/normal-map crawl but softening textures slightly. ~0.75 is a "
 			"good balance." );
+		CvarResetButton( r_fxaaStrength );
 		ImGui::EndDisabled();	// FXAA strength gate
 
 		// FSR2 sub-options — only meaningful while FSR2 TAA is the selection above.
@@ -4035,6 +4079,7 @@ static void DrawGroup_Antialiasing()
 			}
 			AddTooltip( "The render scale directly, 0.50 - 1.00 of the display size per axis. "
 				"Only editable with Custom selected above. (r_fsrScale)" );
+			CvarResetButton( r_fsrScale );
 			ImGui::EndDisabled();	// custom slider gate
 
 			// what the scene actually renders at, for the current window
@@ -4062,6 +4107,7 @@ static void DrawGroup_Antialiasing()
 			}
 			AddTooltip( "FSR2's built-in sharpening pass, countering the slight softening of any "
 				"temporal accumulation. 0 disables the pass. (r_fsrSharpness)" );
+			CvarResetButton( r_fsrSharpness );
 			CvarCheckbox( "Reactive Mask", r_fsrReactive, "Deghosts additive/translucent content (particles, muzzle flashes, GUI "
 				"screens): an opaque-only snapshot is compared against the final frame, and where "
 				"they diverge FSR2 trusts its history less. Leave on. (r_fsrReactive)" );
@@ -4074,6 +4120,7 @@ static void DrawGroup_Antialiasing()
 				}
 				AddTooltip( "Higher = less ghosting on particles but more shimmer on them. "
 					"(r_fsrReactiveScale)" );
+				CvarResetButton( r_fsrReactiveScale );
 				ImGui::EndDisabled();
 			}
 			ImGui::EndDisabled();	// aa != 3 (FSR2 not selected)
@@ -4457,6 +4504,7 @@ static void DrawDisplayColorControls()
 	AddTooltip( "r_hdrExposure: linear exposure multiplier applied before the tonemap curve.\n"
 		"Raises or lowers the scene brightness feeding the curve; default 1.5 (tuned for DUDE). "
 		"Needs HDR + a tonemap curve (see Post-Processing)." );
+	CvarResetButton( NamedCvar( "r_hdrExposure" ) );
 	float hgamma = cvarSystem->GetCVarFloat( "r_hdrGamma" );
 	if ( ImGui::SliderFloat( "HDR Gamma", &hgamma, 0.5f, 2.5f, "%.2f" ) ) {
 		cvarSystem->SetCVarFloat( "r_hdrGamma", hgamma );
@@ -4464,6 +4512,7 @@ static void DrawDisplayColorControls()
 	AddTooltip( "r_hdrGamma: display gamma applied on top of the tonemap curve (the normal Gamma\n"
 		"above is bypassed while a curve is active). >1 lifts shadows/midtones for a softer image;\n"
 		"<1 deepens contrast; 1 = off. Needs HDR + a tonemap curve (see Post-Processing)." );
+	CvarResetButton( NamedCvar( "r_hdrGamma" ) );
 	ImGui::EndDisabled();
 
 	// r_gammaInShader (displayColorOptions[2]) - technical toggle, always available.
@@ -4914,6 +4963,7 @@ static void DrawDbgGroup_Materials()
 		"softening the lighting terminator so faces stop reading as plastic. Doubles as the on/off, so "
 		"dragging this to 0 also unticks it in the Graphics tab. Default 0.6. Preset-owned (Potato 0 = "
 		"faithful floor, Low+ 0.6), so moving it reads as a Custom preset." );
+	CvarResetButton( r_skinShading );
 
 	}
 
@@ -4926,6 +4976,7 @@ static void DrawDbgGroup_Materials()
 		"wider glow, lower = tighter. The red channel's reach; green and blue derive shorter, which is "
 		"what makes the falloff warm. Flesh scatters ~30% deeper than face skin. Default 0.32. NOT "
 		"preset-owned, so it survives a preset change." );
+	CvarResetButton( r_skinScatter );
 	}
 	ImGui::EndDisabled();
 	EndSettingsGroup();
@@ -5276,7 +5327,6 @@ static void DrawDbgGroup_RTEmitters()
 	CvarSliderF( "Emitter Intensity", r_rtEmissiveIntensity, 0.0f, 8.0f, "%.2f", "A trim on every emitter's radiance. With "
 		"the power match below on, 1 reproduces the placed lights' level; without it this scales the authored glow brightness. "
 		"(r_rtEmissiveIntensity)" );
-	if ( RowResetButton( "reset##rtEmissiveIntensity" ) ) { r_rtEmissiveIntensity.Reset(); }
 	CvarCheckbox( "Inherit the replaced light's power", r_rtEmissivePowerMatch, "Each fixture's radiance is set from the colour "
 		"and radius of the placed light it replaces and its own area, so a small fixture lights its room as its light did and a "
 		"big panel glows softly. An emitter in no placed light is matched to a light of its own colour at the default reach. "
@@ -5287,14 +5337,11 @@ static void DrawDbgGroup_RTEmitters()
 		"fixture drops the placed light it sits in and inherits (part of) its power; a smaller glow (a computer LED, the "
 		"electric box's red lamp) is an indicator - it never drops a light and lights at its authored brightness only. "
 		"Rebuilds the census. (r_rtEmissiveFixtureMinArea)" );
-	if ( RowResetButton( "reset##rtEmissiveFixtureMinArea" ) ) { r_rtEmissiveFixtureMinArea.Reset(); }
 	CvarSliderF( "Fixture Full-power Area", r_rtEmissiveFixtureFullArea, 1.0f, 512.0f, "%.0f", "The effective emitting area at "
 		"which an emitter inherits its light's FULL power (a white 8 x 8 patch, a tube). Between the minimum and this the "
 		"inherited share ramps up, so a dim or tiny glow stands in for only a fraction of its light. (r_rtEmissiveFixtureFullArea)" );
-	if ( RowResetButton( "reset##rtEmissiveFixtureFullArea" ) ) { r_rtEmissiveFixtureFullArea.Reset(); }
 	CvarSliderF( "Max Matched Radiance", r_rtEmissiveMaxRadiance, 1.0f, 512.0f, "%.0f", "The brightest radiance the power match "
 		"may give one emitter (a small patch replacing a big light would otherwise blaze). (r_rtEmissiveMaxRadiance)" );
-	if ( RowResetButton( "reset##rtEmissiveMaxRadiance" ) ) { r_rtEmissiveMaxRadiance.Reset(); }
 	ImGui::EndDisabled();	// r_rtEmissivePowerMatch
 
 	// ===== Physical =====
@@ -5308,7 +5355,6 @@ static void DrawDbgGroup_RTEmitters()
 	CvarSliderF( "Cull Irradiance", r_rtEmissiveCullIrradiance, 0.0005f, 0.05f, "%.4f", "The irradiance (radiance x area / "
 		"distance^2) below which an emitter no longer counts: sets each row's cull radius. Lower = farther reach, more candidates "
 		"per grid cell. (r_rtEmissiveCullIrradiance)" );
-	if ( RowResetButton( "reset##rtEmissiveCullIrradiance" ) ) { r_rtEmissiveCullIrradiance.Reset(); }
 	CvarCheckbox( "Auto Exposure (eye adaptation)", r_rtEmissiveAutoExposure, "Run the HDR eye adaptation while physical "
 		"emitters light the scene - its own range / speed / key / metering knobs (HDR section) apply. Physical light has far more "
 		"dynamic range than the placed lights the maps were lit for. (r_rtEmissiveAutoExposure)" );
@@ -5337,11 +5383,9 @@ static void DrawDbgGroup_RTEmitters()
 		"emitter with the inverse square: right beside the fixture, dark on the far wall. Past a quarter of the reach the "
 		"falloff relaxes toward Doom's law, so a hall fixture lights the hall it was authored for; the light fades out at twice "
 		"the reach. 1 = the authored radius, 0 = pure physics. (r_rtEmissiveReach)" );
-	if ( RowResetButton( "reset##rtEmissiveReach" ) ) { r_rtEmissiveReach.Reset(); }
 	CvarSliderF( "Reach of uncovered emitters", r_rtEmissiveReachDefault, 0.0f, 2048.0f, "%.0f", "The reach (world units) of an "
 		"emitter that sits inside no placed light - a glow panel in a dark corner has no radius to inherit. 0 = pure physics "
 		"for those. (r_rtEmissiveReachDefault)" );
-	if ( RowResetButton( "reset##rtEmissiveReachDefault" ) ) { r_rtEmissiveReachDefault.Reset(); }
 
 	// ===== Sampling =====
 	SettingsHeading( "Sampling" );
@@ -5365,6 +5409,7 @@ static void DrawDbgGroup_RTEmitters()
 			"win; the light grid then ranks them per cell against the placed lights, so a row costs the same as a placed "
 			"light). The buffer holds 4096 fixture rows; the console line 'emissive mode: ...' says how many entered and whether the "
 			"cap bit. 0 = no emitter lights. (r_rtEmissiveMaxRows)" );
+		CvarResetButton( r_rtEmissiveMaxRows );
 		}
 	}
 	CvarCheckbox( "Analytic Emitter Target", r_rtEmissiveCheapTarget, nullptr );
@@ -5381,7 +5426,6 @@ static void DrawDbgGroup_RTEmitters()
 	ImGui::BeginDisabled( !r_rtEmissiveTable.GetBool() && !r_rtEmissiveLighting.GetBool() );
 	CvarSliderF( "Emissive Scale", r_rtEmissiveScale, 0.0f, 16.0f, "%.2f", "Global multiplier on every emitter's flux and "
 		"emitted colour (the stand-in for a per-material intensity table). A change rebuilds the table. (r_rtEmissiveScale)" );
-	if ( RowResetButton( "reset##rtEmissiveScale" ) ) { r_rtEmissiveScale.Reset(); }
 	CvarCheckbox( "Infer Fixtures from Flares", r_rtEmissiveFlareInfer, "A fixture whose material has no glow stage (its "
 		"'tube' is a white patch in the diffuse map) is found through the flare the mapper put on it: the bright part of "
 		"the diffuse under the flare becomes a small light. Marked FLARE-INFERRED in the census / overlay. A change "
@@ -6022,7 +6066,6 @@ static void DrawDbgGroup_MotionVectors()
 
 	CvarSliderF( "Debug Gain", r_mvDebugScale, 1.0f, 40.0f, "%.0f", "Amplifies the debug overlay only — per-frame screen velocities are tiny, so crank this "
 		"up to see slow motion. Does not affect the velocity fed to the consumers." );
-	if ( RowResetButton( "reset##mvscale" ) ) { r_mvDebugScale.Reset(); }
 
 	SettingsHeading( "Sources" );
 	CvarCheckbox( "Per-Bone Motion on Skinned Characters", r_skinnedMotionVectors, nullptr );
@@ -6102,9 +6145,6 @@ static void DrawDbgGroup_ShadowMaps()
 		"lower lets some light through, so a fence dims a room instead of blacking it "
 		"out — closer to how vanilla faked these with soft light textures. Only affects "
 		"perforated casters; solid-geometry shadows stay fully dark." );
-	if ( RowResetButton( "reset##perfstrength" ) ) {
-		r_shadowMapPerforatedStrength.Reset();
-	}
 	ImGui::EndDisabled();
 
 	SettingsHeading( "Adaptive resolution (radius-scaled)" );
@@ -6118,9 +6158,6 @@ static void DrawDbgGroup_ShadowMaps()
 	CvarSliderF( "Reference Radius", r_shadowMapSizeScaleRadius, 16.0f, 2048.0f, "%.0f", "The light radius that maps to the base resolution. Lights larger than this "
 		"get more resolution; smaller ones get less. Lower it to push more lights into the "
 		"higher-resolution tiers." );
-	if ( RowResetButton( "reset##refradius" ) ) {
-		r_shadowMapSizeScaleRadius.Reset();
-	}
 	ImGui::EndDisabled();
 	CvarSliderI( "Budget Stickiness", r_shadowMapBudgetHysteresis, 0, 100, nullptr );
 
@@ -6136,9 +6173,6 @@ static void DrawDbgGroup_ShadowMaps()
 		"2D/spot path; 6 (default) is a soft, well-filtered edge; higher smooths stair-stepping "
 		"at low resolution but costs more per lit point-light fragment. Free on VRAM (filtering "
 		"only)." );
-	if ( RowResetButton( "reset##cubepcf" ) ) {
-		r_shadowMapCubePcf.Reset();
-	}
 
 	CvarCheckbox( "Cull Off-Screen Faces", r_shadowMapFaceCull, "Skip rasterizing occluders into cube faces whose 90-degree cone can't reach "
 		"the view frustum — those faces are never sampled by anything on screen. Big win at high "
@@ -6147,9 +6181,6 @@ static void DrawDbgGroup_ShadowMaps()
 	CvarSliderF( "Cube Range Scale", r_shadowMapPointRangeScale, 0.1f, 32.0f, "%.2fx", "Scales the cube shadow's far plane + depth normalizer. If distant/floor "
 		"shadows under a light are missing, this controls how far the map reaches. 1.0 = the "
 		"light's own radius." );
-	if ( RowResetButton( "reset##range" ) ) {
-		r_shadowMapPointRangeScale.Reset();
-	}
 
 	SettingsHeading( "Sun & large lights" );
 
@@ -6204,6 +6235,7 @@ static void DrawDbgGroup_ShadowMaps()
 	if ( s_rows.rowShown ) CvarTip( r_shadowMapCacheMB,  "VRAM the shadow cache may use. 0 = unlimited (cache every static light). Lights "
 		"that don't fit fall back to per-frame regeneration, so lowering this never breaks shadows, "
 		"it just caches fewer of them." );
+	CvarResetButton( r_shadowMapCacheMB );
 	ImGui::EndDisabled();	// auto budget
 
 	if ( vram > 0 ) {
@@ -6246,23 +6278,18 @@ static void DrawDbgGroup_EmissiveFill()
 
 	CvarSliderF( "Reach (distance)", r_emissiveLightRadius, 0.25f, 16.0f, "%.2f", "How far the fill light reaches, as a multiple of the screen's own size. Small/medium screens "
 		"scale linearly; large ones roll off toward the Max Reach cap below. Default 1.80." );
-	if ( RowResetButton( "reset##emradius" ) ) { r_emissiveLightRadius.Reset(); }
 
 	CvarSliderF( "Max Reach (big signs)", r_emissiveLightMaxReach, 32.0f, 512.0f, "%.0f", "Soft cap (world units) that reach saturates toward, so a big hanging sign doesn't cast across "
 		"the whole room. Lower = big signs reined in harder; raise toward 512 for near-linear scaling. Default 120." );
-	if ( RowResetButton( "reset##emmaxreach" ) ) { r_emissiveLightMaxReach.Reset(); }
 
 	CvarSliderF( "Fade-off", r_emissiveLightFalloff, 0.0f, 1.0f, "%.2f", "How far the glow reaches and how gently it fades. 0 = a tight, bright pool with a sharp edge; "
 		"1 = a soft glow that reaches further out. Default 0.5." );
-	if ( RowResetButton( "reset##emfalloff" ) ) { r_emissiveLightFalloff.Reset(); }
 
 	CvarSliderF( "Beam Spread", r_emissiveLightSpread, 0.5f, 3.5f, "%.2f", "Width of the fill cone. 0.5 = a tight beam, 1.60 = default, 3.5 = a wide near-hemisphere "
 		"that wraps around the screen (but still clipped behind the mount)." );
-	if ( RowResetButton( "reset##emspread" ) ) { r_emissiveLightSpread.Reset(); }
 
 	CvarSliderF( "Colour saturation", r_emissiveLightSaturation, 0.0f, 1.0f, "%.2f", "How much of the screen's own colour the bleed keeps. 0 = white, 0.75 = default tint, "
 		"1 = full screen hue (a coloured spotlight)." );
-	if ( RowResetButton( "reset##emsat" ) ) { r_emissiveLightSaturation.Reset(); }
 
 	ImGui::Spacing();
 
@@ -6286,14 +6313,12 @@ static void DrawDbgGroup_DecalsGlass()
 
 	CvarSliderF( "Glass Reflection Brightness", r_gl3ReflectionScale, 0.0f, 1.5f, "%.2f", "Brightness of the environment-map reflection on glass. 1.00 = the untouched cube; "
 		"0.70 = default, dampened 30% so the sheen matches legacy against the brighter enhanced scene." );
-	if ( RowResetButton( "reset##reflscale" ) ) { r_gl3ReflectionScale.Reset(); }
 
 	SettingsHeading( "Decals" );
 	SettingsNoteDisabled( "Decal sheen: texture mod packs make blood and dirt decals shiny. No effect on the stock assets." );
 
 	CvarSliderF( "Blood decal sheen", r_decalBloodSheen, 0.0f, 1.0f, "%.2f", "Specular highlight + cube reflection on blood splats, smears and pools. "
 		"0.00 = matte, 1.00 = as authored by the mod pack; 0.35 = default." );
-	if ( RowResetButton( "reset##bloodsheen" ) ) { r_decalBloodSheen.Reset(); }
 
 	CvarCheckbox( "Matte dirt decals", r_decalMatte, "Dirt, stain and drip decals get no specular highlight and no cube reflection. "
 		"Off = as authored by the mod pack." );
@@ -6301,33 +6326,27 @@ static void DrawDbgGroup_DecalsGlass()
 	CvarSliderF( "Decals dull metal", r_decalMetalMask, 0.0f, 1.0f, "%.2f", "Dirt on metal is not metal: a decal removes the metalness of the surface under it by its "
 		"coverage, so stains read matte against the clean plate around them. Stock and mod decals alike. "
 		"0.00 = off, 1.00 = default. Needs PBR materials (High preset and up)." );
-	if ( RowResetButton( "reset##decalmetal" ) ) { r_decalMetalMask.Reset(); }
 
 	CvarSliderF( "Decals roughen surfaces", r_decalRoughen, 0.0f, 1.0f, "%.2f", "Dirt scatters light: a decal roughens the surface under it by its coverage, so highlights and "
 		"reflections break up across stains - on metal and on glossy non-metals alike. "
 		"0.00 = off, 1.00 = default. Needs PBR materials (High preset and up)." );
-	if ( RowResetButton( "reset##decalrough" ) ) { r_decalRoughen.Reset(); }
 
 	CvarSliderF( "Wet blood", r_decalWetBlood, 0.0f, 0.5f, "%.3f", "Blood decals glint off the lights around them as a wet film with its own relief - every blood decal, "
 		"stock or mod, map-placed or splattered during play. Strength of the highlight; 0 = off (matte, "
 		"stock-faithful blood), 0.057 = default. "
 		"With a texture pack, it replaces the pack's own blood highlight "
 		"(the pack's environment sheen still follows Blood decal sheen). Needs PBR materials." );
-	if ( RowResetButton( "reset##wetblood" ) ) { r_decalWetBlood.Reset(); }
 
 	ImGui::BeginDisabled( r_decalWetBlood.GetFloat() <= 0.0f );
 	CvarSliderF( "Wet blood relief", r_decalWetBloodRelief, 0.0f, 1.0f, "%.2f", "How strongly the film follows the blood's own height - bulging edges, ripples inside. Higher = the glint "
 		"breaks into more sparkles, visible from more angles; 0.00 = a flat film that only glints at a light's exact "
 		"mirror angle. 0.17 = default." );
-	if ( RowResetButton( "reset##bloodrelief" ) ) { r_decalWetBloodRelief.Reset(); }
 
 	CvarSliderF( "Wet blood threshold", r_decalWetBloodThreshold, 0.0f, 0.95f, "%.2f", "How much blood there must be before it glints at all. Splat textures trail off into a mist too faint "
 		"to see; raise this until the bare floor around a splat stops looking wet. The film feathers in just above "
 		"the threshold. 0.30 = default." );
-	if ( RowResetButton( "reset##bloodfloor" ) ) { r_decalWetBloodThreshold.Reset(); }
 
 	CvarSliderF( "Wet blood roughness", r_decalWetBloodRough, 0.05f, 0.8f, "%.2f", "Lower = tight, sharp glints (fresh blood); higher = a broad soft sheen (drying blood). 0.18 = default." );
-	if ( RowResetButton( "reset##bloodrough" ) ) { r_decalWetBloodRough.Reset(); }
 	ImGui::EndDisabled();
 
 	ImGui::EndDisabled();	// glass reflections (backend supported)
@@ -6366,11 +6385,9 @@ static void DrawDbgGroup_GTAO()
 	CvarSliderF( "Direct Light AO", r_ssaoDirectLight, 0.0f, 1.0f, "%.2f", "How strongly AO darkens direct (dynamic) light's diffuse. Doom 3 has almost no "
 		"ambient, so THIS is what makes AO visible in normal gameplay. 1 = full, 0.75 = default, 0 = "
 		"ambient-only (most faithful, but usually invisible here). Applies to whichever producer runs." );
-	if ( RowResetButton( "reset##ssaodirect" ) ) { r_ssaoDirectLight.Reset(); }
 
 	CvarSliderF( "Floor (min visibility)", r_ssaoFloor, 0.0f, 1.0f, "%.2f", "Anti-crush floor: how dark a fully-occluded spot may get. 0 = can reach black, "
 		"0.03 = default, 1 = no darkening. Raise it if AO makes dark areas too murky to read." );
-	if ( RowResetButton( "reset##ssaofloor" ) ) { r_ssaoFloor.Reset(); }
 
 	CvarCheckbox( "Specular Occlusion", r_ssaoSpecular, "Also dim specular highlights in occluded areas on direct lights (stronger "
 		"anti-plastic look; a mild deviation from vanilla). Scaled by Direct Light AO. Off by default." );
@@ -6386,21 +6403,17 @@ static void DrawDbgGroup_GTAO()
 
 	CvarSliderF( "Intensity (GTAO)", r_ssaoIntensity, 0.0f, 4.0f, "%.2f", "Strength of the screen-space darkening. 0 = none, 1.2 = default (compensates for the "
 		"march), higher pushes the occlusion deeper. GTAO only - RTAO has its own Intensity below." );
-	if ( RowResetButton( "reset##ssaoint" ) ) { r_ssaoIntensity.Reset(); }
 
 	CvarSliderF( "Radius (world units)", r_ssaoRadius, 1.0f, 256.0f, "%.0f", "How far the occlusion samples reach, in world units. Small = tight contact creases "
 		"only; large = broad, softer occlusion (and more expensive). Default 48." );
-	if ( RowResetButton( "reset##ssaorad" ) ) { r_ssaoRadius.Reset(); }
 
 	// (Resolution, Depth-Mip Acceleration and Temporal Accumulation are on Graphics > Ambient Occlusion & GI.)
 
 	CvarSliderI( "Directions (slices)", r_ssaoSlices, 1, 8, "How many horizon-search directions per pixel. More = smoother, less directional "
 		"noise. A big cost knob. Default 3. Check the cost with r_vkGpuTime 2 (the 'ao' scope)." );
-	if ( RowResetButton( "reset##ssaoslices" ) ) { r_ssaoSlices.Reset(); }
 
 	CvarSliderI( "Steps per direction", r_ssaoSteps, 1, 12, "How many samples are marched along each direction (how finely each horizon is "
 		"found). More = more accurate occlusion at range. Default 3." );
-	if ( RowResetButton( "reset##ssaosteps" ) ) { r_ssaoSteps.Reset(); }
 
 	CvarCheckbox( "Temporal-Funded Budget", r_ssaoTemporalTrade, "Preset lever: force 4 directions x 6 steps with Temporal Accumulation ON (overriding "
 		"the sliders above) - cheaper than brute-force sampling for the same look, slightly softer. "
@@ -6412,12 +6425,10 @@ static void DrawDbgGroup_GTAO()
 	CvarSliderF( "Mip Bias", r_ssaoDepthMipBias, 0.05f, 1.0f, "%.2f", "How eagerly the march drops to coarser mips: LOD = log2(stepPixels * this). Higher = "
 		"coarser sooner (faster, but coarse depth smears occlusion across silhouettes into halos); "
 		"lower = stays on finer mips (sharper, keeps most of the speedup). Default 0.1." );
-	if ( RowResetButton( "reset##ssaomipbias" ) ) { r_ssaoDepthMipBias.Reset(); }
 
 	CvarSliderI( "Mip Coarseness Cap", r_ssaoDepthMipMaxLod, 1, 5, "Caps how coarse the march may ever go. The coarsest mips (box-averaged depth) are "
 		"where occlusion smears across silhouettes into halos, so a lower cap kills halos at a small "
 		"speed cost; 5 = uncapped (old behaviour). Default 2." );
-	if ( RowResetButton( "reset##ssaomipcap" ) ) { r_ssaoDepthMipMaxLod.Reset(); }
 	ImGui::EndDisabled();
 
 
@@ -6425,7 +6436,6 @@ static void DrawDbgGroup_GTAO()
 	CvarSliderF( "Temporal Feedback", r_ssaoTemporalFeedback, 0.0f, 0.97f, "%.2f", "Fraction of the reprojected previous-frame AO kept each frame. Higher = smoother "
 		"and steadier (and effectively cheaper) but more latency/ghosting; 0 = no accumulation. "
 		"Default 0.90." );
-	if ( RowResetButton( "reset##ssaofeedback" ) ) { r_ssaoTemporalFeedback.Reset(); }
 	ImGui::EndDisabled();
 
 	CvarCheckbox( "Normal Buffer (bump-mapped)", r_ssaoNormalBuffer, "Feed GTAO from a real bump-mapped normal G-buffer (an extra opaque geometry pass) "
@@ -6446,7 +6456,6 @@ static void DrawDbgGroup_GTAO()
 	ImGui::BeginDisabled( !r_ssaoBentNormal.GetBool() );
 	CvarSliderF( "Bent Strength", r_ssaoBentStrength, 0.0f, 1.0f, "%.2f", "How far the ambient lookup bends from the surface normal toward the bent normal. "
 		"0 = surface normal (no effect), 1 = fully bent. Default 0.5." );
-	if ( RowResetButton( "reset##ssaobentstr" ) ) { r_ssaoBentStrength.Reset(); }
 	ImGui::EndDisabled();
 
 	ImGui::EndDisabled();	// GTAO (ssao on && !rtao && !rtgi)
@@ -6457,12 +6466,10 @@ static void DrawDbgGroup_GTAO()
 	ImGui::BeginDisabled( !r_occlusionMaps.GetBool() );
 	CvarSliderF( "AO Map Strength", r_occlusionMapScale, 0.0f, 1.0f, "%.2f", "How strongly the occlusion map darkens the ambient term. 0 = off, 1 = the map "
 		"at full darkening. Default 1.0." );
-	if ( RowResetButton( "reset##oclscale" ) ) { r_occlusionMapScale.Reset(); }
 
 	CvarSliderF( "Direct Light AO (map)", r_occlusionMapDirect, 0.0f, 1.0f, "%.2f", "How strongly the occlusion map darkens direct (dynamic) light's diffuse, as a "
 		"fraction of AO Map Strength. Doom 3 is mostly dynamic light, so this is what makes the "
 		"map visible; lower it if AO looks baked-in under moving lights. 0 = ambient-only. Default 0.9." );
-	if ( RowResetButton( "reset##ocldirect" ) ) { r_occlusionMapDirect.Reset(); }
 	ImGui::EndDisabled();	// r_occlusionMaps
 
 	ImGui::EndDisabled();	// backend supported
@@ -6489,7 +6496,6 @@ static void DrawDbgGroup_RTAO()
 
 	CvarSliderF( "Ray Length", r_rtaoRadius, 8.0f, 512.0f, "%.0f", "How far each occlusion ray reaches, in world units. Longer rays gather broader, more "
 		"grounded darkening from distant geometry than GTAO's screen-space radius can. Default 80." );
-	if ( RowResetButton( "reset##rtaorad" ) ) { r_rtaoRadius.Reset(); }
 
 
 
@@ -6510,18 +6516,15 @@ static void DrawDbgGroup_RTAO()
 	CvarSliderI( "History Length", r_rtaoHistory, 0, 63, "Max frames NRD's ReBLUR accumulates for the 1-ray/px occlusion. 45 = the tuned default "
 		"(clean with the least blur). 0 = NRD's own default (~30). Raise for smoother/less noise at "
 		"the cost of more lag/trailing on moving occluders; lower (12-20) for snappier-but-noisier." );
-	if ( RowResetButton( "reset##rtaohist" ) ) { r_rtaoHistory.Reset(); }
 	CvarSliderF( "History (ms)", r_rtaoHistoryMs, 0.0f, 2000.0f, "%.0f ms", nullptr );
 
 	CvarSliderF( "Fast-History Clamp", r_rtaoFastClamp, 1.0f, 3.0f, "%.2f", "ReBLUR fastHistoryClampingSigmaScale: how tightly the slow main history is clamped to "
 		"the responsive fast history. 2.0 = NRD default; NRD notes '1.1 is a safe value for occlusion' "
 		"- the A/B for AO trailing behind moving occluders (NPCs, doors). Lower = snappier, noisier." );
-	if ( RowResetButton( "reset##rtaofastclamp" ) ) { r_rtaoFastClamp.Reset(); }
 
 	CvarSliderI( "History-Fix Frames", r_rtaoHistoryFix, 0, 5, "ReBLUR historyFixFrameNum: frames of strong spatial reconstruction after a history "
 		"reset (disocclusion). 3 = NRD default; the NRD sample uses 2 for occlusion. Must stay below "
 		"the fast-history window (6)." );
-	if ( RowResetButton( "reset##rtaohistfix" ) ) { r_rtaoHistoryFix.Reset(); }
 
 	ImGui::EndDisabled();	// RTAO section (rtCapable && ssao && !rtgi)
 	EndSettingsGroup();
@@ -6705,6 +6708,7 @@ static void DrawShadowDebugMenu()
 	}
 	s_rows.filtering = false;
 	s_rows.debugTab  = false;
+	s_rows.rowShown  = true;
 }
 
 static idStrList alDevices;
