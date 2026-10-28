@@ -7922,7 +7922,11 @@ bool VulkanBackend::RtaoDenoise( const rhi::RtaoDenoiseArgs &a ) {
 	cs.isHistoryConfidenceAvailable = haveConf;			// H6f: feed IN_DIFF_CONFIDENCE (GI edge-ghosting antilag)
 	cs.isDisocclusionThresholdMixAvailable = haveMix;	// R1: forced history resets where the gradient saw a big exact change
 	if ( haveMix ) {
-		cs.disocclusionThresholdAlternate = 0.0f;		// saturate( 0 * slope ) * frustumSize - eps < 0: no tap passes -> disoccluded
+		// NRD validates the alternate as > 0 (InstanceImpl.cpp: a 0 here asserted - SIGABRT shortly after a load in a debug
+		// build - and a release build rejects the settings). 1e-20 passes and still fails every tap: at mix 1 the shader's
+		// lerp( threshold, 1e-20, 1 ) rounds to ~0 in fp32, saturate( ~0 * slope ) * frustumSize - NRD_EPS (1e-6) < 0, so no
+		// reprojection tap passes -> the pixel is disoccluded. Where the mix is 0 the regular threshold applies unchanged.
+		cs.disocclusionThresholdAlternate = 1e-20f;
 	}
 	// R0: NRD's own validation overlay (OUT_VALIDATION) on request - the debug view that shows accumulated frames /
 	// history resets / antilag per pixel, so a lag problem is SEEN instead of inferred from the lit result
