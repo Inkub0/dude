@@ -1715,6 +1715,7 @@ bool VulkanBackend::PickPhysicalDevice() {
 	}
 	std::vector<VkPhysicalDevice> devices( count );
 	vkEnumeratePhysicalDevices( instance, &count, devices.data() );
+	r_vkDeviceNames.Clear();		// the settings menu's GPU list (index = r_vkDevice)
 
 	int best = -1;
 	int bestScore = -1;
@@ -1728,6 +1729,7 @@ bool VulkanBackend::PickPhysicalDevice() {
 			props.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU ? "discrete" :
 			props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU ? "integrated" :
 			props.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU ? "cpu" : "other";
+		r_vkDeviceNames.Append( va( "%s (%s)", props.deviceName, type ) );
 		common->Printf( "VK: device %u: %s (%s, api %u.%u.%u)\n", i, props.deviceName, type,
 			VK_API_VERSION_MAJOR( props.apiVersion ), VK_API_VERSION_MINOR( props.apiVersion ),
 			VK_API_VERSION_PATCH( props.apiVersion ) );

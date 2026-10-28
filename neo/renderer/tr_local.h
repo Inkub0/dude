@@ -1107,6 +1107,7 @@ extern idCVar r_rtgiBilateralUpscale;		// RT GI: depth+normal-aware upscale of t
 extern idCVar r_rtgiShadow;					// RT GI (H6d): shadow ray at the bounce hit toward the dominant light
 extern idCVar r_rtgiDebug;					// RT GI debug view (H6a: 1 = raw radiance-gather buffer)
 extern idCVar r_rtgiIntensity;				// RT GI apply strength (bounced radiance multiplier, H6c)
+extern idStrList r_vkDeviceNames;			// Vulkan physical devices in enumeration order (= r_vkDevice index), filled at device pick; empty off Vulkan
 extern idCVar r_rtgiAmbient;				// RT GI vs the ambient lights: 0 replace, 1 floor ( max( RT, ambient ) ), 2 fold into the bounce, 3 both
 extern idCVar r_rtgiFogAttenuate;			// RT GI reconcile: fade bounce light out through the view's fog so GI stops washing out distance fog
 extern idCVar r_rtgiCache;					// RT irradiance cache (docs/rtx-irradiance-cache.md): the bounce hit reads a hashed world-space cache of indirect light (multi-bounce)
