@@ -1359,12 +1359,16 @@ bool RB_RHI_TessellateSurf( const drawSurf_s *surfIn, bool forBlendPass ) {
 	// character/monster skin — the intro McNeil + marine tessellate, the rocks stay flat.
 	// (Blood-overlay decals still ride in on the model path: their monster model resolves
 	// to monsters/… even though the decal material is textures/decals/….)
+	// Quake 4 keeps every head mesh under models/lipsync/marine_head/ (33 meshes, all
+	// heads - the lip-synced head entity bound to the body), which none of the Doom 3
+	// substrings matches ("marine_head/" is not "heads/"), so "lipsync/" admits them.
 	const idRenderModel *entModel = space->entityDef->parms.hModel;
 	const char *modelName = entModel ? entModel->Name() : "";
 	const bool modelIsChar = idStr::FindText( modelName, "monsters/", false ) != -1
 	  || idStr::FindText( modelName, "characters/", false ) != -1
 	  || idStr::FindText( modelName, "chars/", false ) != -1
-	  || idStr::FindText( modelName, "heads/", false ) != -1;
+	  || idStr::FindText( modelName, "heads/", false ) != -1
+	  || idStr::FindText( modelName, "lipsync/", false ) != -1;
 	const bool cinematicActor = idStr::FindText( modelName, "cinematics/", false ) != -1
 	  && ( idStr::FindText( matName, "models/characters/", false ) != -1
 	    || idStr::FindText( matName, "models/monsters/", false ) != -1 );
@@ -1403,9 +1407,16 @@ bool RB_RHI_TessellateSurf( const drawSurf_s *surfIn, bool forBlendPass ) {
 	//  - "glasses"  : scientist eyeglasses (models/characters/scientist/head02/
 	//                 glasses2 + its glasses2_fx lens-reflection pass).
 	// (confirmed by r_tessDebug capture; docs/tessellation.md)
+	// Guns held by NPCs are often surfaces of the character mesh itself, so they pass
+	// the model test above and got PN-smoothed like flesh: Quake 4's marines, medic,
+	// tech and Strogg marines carry models/weapons/mp_guns/w_hb, w_mg_lo...; Doom 3's
+	// zombie security guards (w_pistol, shotgun, machinegun), the chaingun commando,
+	// Sawyer's chainsaw, the sentry, Campbell's / Sabaoth's BFG and the cyberdemon /
+	// revenant launchers likewise. Machined weapons are rigid - exclude every
+	// models/weapons/ material (the view weapon is already out via weaponDepthHack).
 	static const char * const tessSkipNames[] = {
 		"eye", "teeth", "tongue", "mouth", "jaw", "lashes", "characters/common/",
-		"gog", "zsechead", "marsec", "helmet", "glasses"
+		"gog", "zsechead", "marsec", "helmet", "glasses", "models/weapons/"
 	};
 	for ( int i = 0; i < (int)( sizeof( tessSkipNames ) / sizeof( tessSkipNames[0] ) ); i++ ) {
 		if ( idStr::FindText( matName, tessSkipNames[i], false ) != -1 ) {
