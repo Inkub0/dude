@@ -802,6 +802,7 @@ struct rhiPrevModel_t {
 							// (a one-frame bogus velocity — e.g. a rocket that spawns debris on impact).
 	int			frame;		// tr.frameCount when last written
 	bool		valid;		// mvp holds a real matrix (distinguishes a never-written slot)
+	float		prevThisFrame[16];	// the previous MVP handed out at this frame's first visit (repeat visits reuse it)
 };
 static idList<rhiPrevModel_t>	rhiPrevModels;		// [0] = worldSpace; [entityDef->index + 1] = entities
 // previous rendered frame's applied projection jitter (pixels, +Y-up), for the R1/B velocity
@@ -809,9 +810,37 @@ static idList<rhiPrevModel_t>	rhiPrevModels;		// [0] = worldSpace; [entityDef->i
 static float rhiPrevJitter[2] = { 0.0f, 0.0f };
 
 // Read this space's previous-frame MVP into prevMvp and stage curMvp for next frame. When no
-// usable previous frame exists (first sighting / despawn gap / a second primary view in one
-// frame) prevMvp is set to curMvp so the shader writes zero velocity. Called once per space.
+// usable previous frame exists (first sighting / despawn gap) prevMvp is set to curMvp so the
+// shader writes zero velocity. Called each time the prepass's surface loop ENTERS a space - and
+// the draw surfaces are sorted by material, not by space, so one space can come up in several
+// runs per frame. A repeat visit in the same frame returns the previous MVP its first visit
+// resolved: it used to find its own fresh stamp and hand out ZERO velocity for every later run -
+// the mars_city1 restroom's mirror, sinks and dispensers (inlined into _area23, after its walls)
+// read as glued to the screen under mouse-look, and NRD/FSR2 smeared their history onto the wall
+// (issue #2's veil; 2026-10-28, r_motionVectorsDebug).
+// TEMPORARY diagnostic (entity motion vectors read zero under mouse-look, mars_city1 restroom 2026-10-28):
+// r_motionVectorsDebug 1 prints once a second why spaces got zero velocity. Remove once fixed.
+static idCVar r_motionVectorsDebug( "r_motionVectorsDebug", "0", CVAR_RENDERER | CVAR_BOOL, "TEMPORARY: print per second why spaces got zero motion vectors" );
+static int rhiMvDbgOk, rhiMvDbgRevisit, rhiMvDbgFirst, rhiMvDbgSameFrame, rhiMvDbgGap, rhiMvDbgPtr, rhiMvDbgLast, rhiMvDbgShown;
+static void RB_RHI_MotionDebugNote( const viewEntity_t *space, int key, const char *why, int storedFrame ) {
+	if ( rhiMvDbgShown >= 6 ) {
+		return;
+	}
+	rhiMvDbgShown++;
+	const char *model = ( space->entityDef && space->entityDef->parms.hModel ) ? space->entityDef->parms.hModel->Name() : "(world)";
+	common->Printf( "  mv0: key %d %s stored frame %d now %d model %s\n", key, why, storedFrame, tr.frameCount, model );
+}
+
 static void RB_RHI_MotionPrevMvp( const viewEntity_t *space, const float curMvp[16], float prevMvp[16] ) {
+	if ( r_motionVectorsDebug.GetBool() ) {
+		const int nowMs = Sys_Milliseconds();
+		if ( nowMs - rhiMvDbgLast >= 1000 ) {
+			common->Printf( "motionVectors/s: ok %d, repeat-run %d | zero: first %d, sameFrame %d, gap %d, ptr %d\n",
+				rhiMvDbgOk, rhiMvDbgRevisit, rhiMvDbgFirst, rhiMvDbgSameFrame, rhiMvDbgGap, rhiMvDbgPtr );
+			rhiMvDbgOk = rhiMvDbgRevisit = rhiMvDbgFirst = rhiMvDbgSameFrame = rhiMvDbgGap = rhiMvDbgPtr = rhiMvDbgShown = 0;
+			rhiMvDbgLast = nowMs;
+		}
+	}
 	const int key = space->entityDef ? space->entityDef->index + 1 : 0;
 	if ( key < 0 ) {						// paranoia: a negative index would corrupt the list
 		memcpy( prevMvp, curMvp, sizeof( float ) * 16 );
@@ -825,6 +854,11 @@ static void RB_RHI_MotionPrevMvp( const viewEntity_t *space, const float curMvp[
 		}
 	}
 	rhiPrevModel_t &e = rhiPrevModels[key];
+	if ( e.valid && e.frame == tr.frameCount && e.entityDef == (const void *)space->entityDef ) {
+		memcpy( prevMvp, e.prevThisFrame, sizeof( float ) * 16 );	// a later run of this space this frame
+		if ( r_motionVectorsDebug.GetBool() ) { rhiMvDbgRevisit++; }
+		return;
+	}
 	// usable = written on the immediately preceding rendered frame BY THE SAME ENTITY. The pointer
 	// guard rejects a reused slot (a fresh idRenderEntityLocal is a different pointer), so a
 	// despawn+respawn into the same index starts at zero velocity instead of inheriting the
@@ -832,9 +866,21 @@ static void RB_RHI_MotionPrevMvp( const viewEntity_t *space, const float curMvp[
 	// view this frame -> also zero velocity. (worldSpace is entityDef==NULL both sides -> matches.)
 	if ( e.valid && e.frame == tr.frameCount - 1 && e.entityDef == (const void *)space->entityDef ) {
 		memcpy( prevMvp, e.mvp, sizeof( float ) * 16 );
+		if ( r_motionVectorsDebug.GetBool() ) { rhiMvDbgOk++; }
 	} else {
 		memcpy( prevMvp, curMvp, sizeof( float ) * 16 );
+		if ( r_motionVectorsDebug.GetBool() ) {
+			const char *why;
+			if ( !e.valid )                                          { rhiMvDbgFirst++;     why = "first"; }
+			else if ( e.frame == tr.frameCount )                     { rhiMvDbgSameFrame++; why = "sameFrame"; }
+			else if ( e.entityDef != (const void *)space->entityDef ) { rhiMvDbgPtr++;       why = "ptr"; }
+			else                                                     { rhiMvDbgGap++;       why = "gap"; }
+			if ( key != 0 || e.valid ) {
+				RB_RHI_MotionDebugNote( space, key, why, e.valid ? e.frame : -1 );
+			}
+		}
 	}
+	memcpy( e.prevThisFrame, prevMvp, sizeof( float ) * 16 );
 	memcpy( e.mvp, curMvp, sizeof( float ) * 16 );
 	e.entityDef = (const void *)space->entityDef;
 	e.frame = tr.frameCount;
