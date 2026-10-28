@@ -5329,9 +5329,15 @@ static void DrawDbgGroup_ReStirDI()
 	// ===== Anti-lag & Gradient Confidence: the two INTERLOCKED lag-mitigation mechanisms (one replaces the other) =====
 	ImGui::SeparatorText( "Anti-lag & Gradient Confidence" );
 	ImGui::TextDisabled( "NRD built-in fast-history anti-lag" );
-	CvarSliderI( "Fast History", r_rtReStirDIRelaxFast, 1, 63, "ReLAX diffuseMaxFastAccumulatedFrameNum - the short 'fast' "
-		"history the long one is clamped to; the main built-in anti-lag. Remix direct light ships 1 ('to reduce trail'); NRD "
-		"default 6. (r_rtReStirDIRelaxFast)" );
+	CvarSliderF( "Fast History (ms)", r_rtReStirDIRelaxFastMs, 0.0f, 250.0f, "%.0f ms", "The short 'fast' history in TIME "
+		"(converted through the frame rate every frame, like the main history): ReLAX clamps the long history to it, so it "
+		"bounds how long any change can trail. RTXDI: main / 6 (360 -> 60 ms); Remix direct: 1 frame. 0 = use the frame "
+		"count below. (r_rtReStirDIRelaxFastMs)" );
+	ImGui::BeginDisabled( r_rtReStirDIRelaxFastMs.GetFloat() > 0.0f );
+	CvarSliderI( "Fast History (frames)", r_rtReStirDIRelaxFast, 1, 63, "ReLAX diffuseMaxFastAccumulatedFrameNum as a frame "
+		"count - used only while Fast History (ms) is 0 (8 frames are 200 ms of trail at 40 fps but 55 ms at 144). Remix "
+		"direct light ships 1 ('to reduce trail'); NRD default 6. (r_rtReStirDIRelaxFast)" );
+	ImGui::EndDisabled();
 	CvarSliderF( "Fast Clamp", r_rtReStirDIFastClamp, 1.0f, 3.0f, "%.1f", "ReLAX fastHistoryClampingSigmaScale [1;3] - how "
 		"tightly the slow history is clamped to the fast one. Lower = less lag, more flicker. NRD default 2.0; the NRD sample "
 		"uses 1.5. (r_rtReStirDIFastClamp)" );
@@ -5354,9 +5360,9 @@ static void DrawDbgGroup_ReStirDI()
 	ImGui::BeginDisabled( !r_rtReStirDIGradient.GetBool() );
 	CvarSliderF( "  Power", r_rtReStirDIGradientPower, 1.0f, 32.0f, "%.0f", "Sharpening power of (1 - relative change) -> "
 		"confidence. Higher = a smaller change already rejects history. RTXDI / Remix 8. (r_rtReStirDIGradientPower)" );
-	CvarSliderF( "  Rise Smoothing", r_rtReStirDIGradientHistory, 0.0f, 32.0f, "%.0f", "Temporal smoothing (frames) applied "
-		"ONLY while confidence RISES after a change (drops apply at once). Our gather is fresh every frame, so 2 just bridges "
-		"gradient flicker; 0 = none. (r_rtReStirDIGradientHistory)" );
+	CvarSliderF( "  Rise Smoothing", r_rtReStirDIGradientHistory, 0.0f, 32.0f, "%.0f", "Hold (frames): confidence drops at "
+		"once after a change and recovers over this many frames, so a spot a shadow just left keeps a short history while it "
+		"refills instead of snapping back to the stale one. Remix holds 8; default 4; 0 = none. (r_rtReStirDIGradientHistory)" );
 	CvarSliderF( "  Floor", r_rtReStirDIGradientFloor, 0.0f, 1.0f, "%.2f", "Minimum confidence (ReLAX applies it directly). "
 		"Remix 0.1. (r_rtReStirDIGradientFloor)" );
 	CvarSliderF( "  Darkness Bias", r_rtReStirDIGradientBias, 0.0f, 1.0f, "%.3f", "Darkness bias added to the change's "
@@ -5364,14 +5370,25 @@ static void DrawDbgGroup_ReStirDI()
 	CvarSliderF( "  Deadzone", r_rtReStirDIGradientDeadzone, 0.0f, 0.9f, "%.2f", "Relative per-light change below which "
 		"nothing counts as a lighting change. 0.2 ignores Doom's authored 5-20% flicker; a light switching off is still a "
 		"100% change. (r_rtReStirDIGradientDeadzone)" );
-	CvarSliderF( "  Static Threshold", r_rtReStirDIGradientStatic, 0.0f, 16.0f, "%.1f", "Screen-space motion (full-res px) "
-		"below which a surface point is treated as static and re-shaded at its exact stored previous position, so a static "
-		"world under a static light compares bit-identical (no jitter frying). 0 = always current surface. (r_rtReStirDIGradientStatic)" );
+	CvarSliderF( "  Static Threshold", r_rtReStirDIGradientStatic, 0.0f, 16.0f, "%.1f", "Tolerance (full-res px) for treating "
+		"a surface point as static and re-shading it at its exact stored previous position, so a static world under a static "
+		"light compares bit-identical (no jitter frying). With Shadow Edges on it measures the motion the CAMERA does not "
+		"explain (so it holds while turning); off, the raw screen motion. 0 = never static. (r_rtReStirDIGradientStatic)" );
 	CvarSliderI( "  Stratum", r_rtReStirDIGradientStratum, 2, 6, "One re-shade + one ray per NxN block of the gather res. "
 		"3 = RTXDI (1/9 of pixels); 5 = NRD's 1/5 res (~1/3 the cost). The A-trous reach scales with it. (r_rtReStirDIGradientStratum)" );
 	CvarSliderI( "  Filter Passes", r_rtReStirDIGradientFilterPasses, 0, 4, "A-trous passes over the gradient (strides "
 		"1/2/4/8). 4 = RTXDI (wide, smooth reset); 2 hugs a change tighter (a walking NPC's shadow edge); 0 = unfiltered. "
-		"(r_rtReStirDIGradientFilterPasses)" );
+		"EXACT detections are max-spread by one stratum on the first pass instead of averaged, so thin trailing bands and "
+		"small shadows keep their full strength. (r_rtReStirDIGradientFilterPasses)" );
+	CvarCheckbox( "  Shadow Edges", r_rtReStirDIGradientShadow, "Catch a shadow LEAVING as well as arriving: each stratum "
+		"also re-shades its darkest previous sample under the current scene (the pixel whose light was blocked last frame "
+		"reads lit now), works with the checkerboard, and 'static' means the motion the camera does not explain. Off = the "
+		"brightest sample only (the trailing edge of an NPC's shadow kept its dark history). (r_rtReStirDIGradientShadow)" );
+	CvarSliderF( "  Reset Threshold", r_rtReStirDIGradientReset, 0.0f, 1.0f, "%.2f", "Where an EXACT detected change (past "
+		"the Deadzone) reaches this, the pixel's ReLAX history is RESET as a true disocclusion and rebuilt cleanly from the "
+		"current frame (NRD disocclusion-threshold mix), instead of merely trusted less - low confidence alone leaves a "
+		"stale shadow fading out. Lower = more resets (crisper moving shadows, a little more noise where they pass); "
+		"0 = off (confidence only). (r_rtReStirDIGradientReset)" );
 	ImGui::EndDisabled();	// r_rtReStirDIGradient
 
 	ImGui::EndDisabled();	// r_rtReStirDI
