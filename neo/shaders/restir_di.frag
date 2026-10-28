@@ -480,7 +480,11 @@ void main() {
 		// pixels the plain gather already taught, so it does not teach them twice. The view WEAPON (nt.a < 0.5: shaded
 		// here only for the denoiser's continuity) and MOVERS (an NPC, a door, a platform: told from the camera's own
 		// motion through the velocity) never teach - a moving mesh mints a thousand garbage world cells a frame.
-		if ( cacheOn && bp.cache.update && hit != 2 && nt.a >= 0.5 ) {
+		// A surface with NO diffuse stage (G-buffer albedo exactly black: a mirror, chrome, a visor) teaches nothing either:
+		// its look is a subview / env stage, and the RT scene may not even hold it (the washroom mirror is noshadows, so
+		// rays hit the wall behind it) - teaching its zero L_out darkened the wall's cells around it.
+		const bool noDiffuseStage = all( equal( S.albedo, vec3( 0.0 ) ) );
+		if ( cacheOn && bp.cache.update && hit != 2 && nt.a >= 0.5 && !noDiffuseStage ) {
 			bool mover = false;
 			if ( bp.cache.moverTest ) {
 				vec2 uvc = sfrag * u_screenCorrection.xy;
@@ -522,7 +526,11 @@ void main() {
 			if ( u_specularParms.y > 0.0 ) {
 				gi *= pow( exp( d * u_specularParms.z ), u_specularParms.y );		// rtgi_apply's fog transmittance
 			}
-			vec3 giRad = max( albedo * gi, vec3( 0.0 ) ) / B;
+			// demodulated like the direct term: the apply multiplies by B (plain path) or by D = albedo * ( 1 - metal * kd )
+			// (specReshade, B = 1), so albedo / D = 1 / ( 1 - metal * kd ) keeps rtgi_apply's albedo * gi without dividing by
+			// a near-zero albedo (r_pbrMetalDiffuse >= 0 keeps 1 - metal * kd in [1 - kd, 1]; kd = 1 is clamped)
+			vec3 giDemod = ( u_shadowFalloffS.z > 1.5 ) ? vec3( 1.0 / max( 1.0 - S.metal * S.kd, 0.05 ) ) : albedo / B;
+			vec3 giRad = max( gi * giDemod, vec3( 0.0 ) );
 			if ( shMode ) {
 				// the bounce keeps its cosine in the radiance (= the irradiance convention of the direct term); only its
 				// DIRECTION feeds SH1, so the apply's bump RATIO re-resolves the whole irradiance against the full-res normal

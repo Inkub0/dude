@@ -64,10 +64,14 @@ bool diSurfaceAt( vec2 sfrag, bool applyMode, bool pbr, out DiSurface s, out flo
 		float rough = clamp( mt.r, 0.03, 1.0 );
 		s.metal  = mt.g;
 		s.kd     = u_diffuseModifier.x;
-		// specReshade (u_shadowFalloffS.z == 2): the buffer is DIFFUSE-ONLY, so demodulate by the diffuse share alone -
-		// the apply rebuilds the specular at full res. Else the combined diffuse+specular demod (the plain path).
+		// specReshade (u_shadowFalloffS.z == 2): the buffer is DIFFUSE-ONLY IRRADIANCE. The gather shades no albedo at all
+		// (diMaterialResponse = 1) and the apply multiplies the denoised irradiance by the diffuse share D = albedo *
+		// ( 1 - metal * kd ) exactly, so there is nothing to divide out: B = 1. It used to shade E * D and divide by
+		// max( D, 0.02 ), which is E only where D >= 0.02 - a black-albedo mirror (no diffuse stage) or a near-black texel
+		// channel stored ~0, and ReLAX spread that hole over the coplanar wall around it as a dark veil (issue #2) and
+		// around dark texture detail as soft dark halos. Else the combined diffuse+specular demod (the plain path).
 		s.B      = ( u_shadowFalloffS.z > 1.5 )
-		         ? max( s.albedo * ( 1.0 - s.metal * s.kd ), vec3( 0.02 ) )
+		         ? vec3( 1.0 )
 		         : diDemodFactor( s.albedo, s.metal, mt.b, s.kd, u_diffuseModifier.y );
 		s.Vw     = normalize( u_modelViewMatrix[3].xyz - s.Pw );				// camera (inverse view translation) -> surface
 		s.NdotV  = max( dot( s.Nw, s.Vw ), 1e-4 );
@@ -94,7 +98,7 @@ bool diSurfaceAt( vec2 sfrag, bool applyMode, bool pbr, out DiSurface s, out flo
 vec3 diMaterialResponse( in DiSurface s, vec3 ldir, float ndl ) {
 	vec3 f;
 	if ( u_shadowFalloffS.z > 1.5 ) {
-		f = s.albedo * ( 1.0 - s.metal * s.kd );	// specReshade: DIFFUSE only; the apply rebuilds the GGX specular at full res
+		f = vec3( 1.0 );	// specReshade: albedo-free diffuse IRRADIANCE (B = 1); the apply applies D and rebuilds the GGX specular
 	} else if ( s.pbr ) {
 		vec3  H     = normalize( ldir + s.Vw );
 		float NdotH = max( dot( s.Nw, H ), 0.0 );
