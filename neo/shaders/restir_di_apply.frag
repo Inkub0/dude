@@ -3,7 +3,9 @@
 // interaction draws are skipped for the lights DI covers (RB_RHI_DrawWorld), so this is what lights them.
 //
 // The DI buffer holds the gather's DEMODULATED shade: rad(y)·W·vis / B, where B = diDemodFactor( albedo, metal,
-// specMask ) (restir_di_common.glsl). Remultiply by the SAME B from the full-res G-buffer, then by the forward
+// specMask ) (restir_di_common.glsl) - or, with r_rtReStirDISpecReshade (default), the albedo-free diffuse
+// IRRADIANCE (B = 1), remultiplied by the exact diffuse share D. Remultiply by the SAME factor from the full-res
+// G-buffer, then by the forward
 // path's light scale (backEnd.lightScale = r_lightScale: the gather's light colours are the raw stage colours)
 // and the AO-on-direct-light term interaction.frag applies (mix( floor, 1, ao ) blended by r_ssaoDirectLight).
 // Upscale as restir_di_debug.frag does (bilinear, or joint-bilateral when reduced-res). Additive ONE|ONE into
@@ -177,12 +179,12 @@ void main() {
 			}
 		}
 		if ( specReshade ) {
-			// The DI buffer is DIFFUSE-ONLY here (the gather shaded albedo-only, demodulated by the diffuse share), and now
+			// The DI buffer is DIFFUSE-ONLY here (the gather shaded no albedo: B = 1, restir_di_shade.glsl), and now
 			// di = the full IRRADIANCE at the reduced-res normal. di*cosTermV (the bump ratio) re-resolves it to the full-res
 			// normal's irradiance. Rebuild the specular at FULL res from the SH direction + the full-res bump normal +
 			// material - a GGX lobe exactly as interaction.frag's / the gather's - instead of the flat diffuse term the plain
 			// SH path applies to a baked, reduced-res, denoised highlight. This is the sharp glint on pores / wet / metal.
-			vec3 Bdiff   = max( albedo * ( 1.0 - mt.g * u_diffuseModifier.x ), vec3( 0.02 ) );	// diffuse share (matches the gather's demod)
+			vec3 Bdiff   = albedo * ( 1.0 - mt.g * u_diffuseModifier.x );	// diffuse share D, exact: the gather stored albedo-free irradiance
 			vec3 diffuse = di * Bdiff * cosTermV;
 			vec3 spec    = vec3( 0.0 );
 			if ( haveDir && mt.b > 0.0 ) {								// mt.b = spec-map luminance: no spec stage -> no highlight
