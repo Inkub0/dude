@@ -9040,7 +9040,8 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 				}
 				gp.parallaxParms[0] = (float)stratum;	gp.parallaxParms[1] = (float)rw;	gp.parallaxParms[2] = (float)rh;
 				gp.parallaxParms[3] = r_rtReStirDIGradientStatic.GetFloat();		// static threshold, full-res pixels
-				gp.parallaxParms2[2] = r_rtReStirDIGradientShadow.GetBool() ? 1.0f : 0.0f;	// shadow-aware pick + camera-only static test
+				gp.parallaxParms2[2] = r_rtReStirDIGradientShadow.GetBool() ? 1.0f : 0.0f;	// shadow edges: darkest-previous judgement + camera-only static test
+				gp.tessParms[2] = r_rtReStirDIGradientBias.GetFloat();			// weighs the two judgements as the confidence pass will
 				memcpy( gp.prevMvpMatrix, rhiReStirDIPrevView, sizeof( gp.prevMvpMatrix ) );	// last frame's world -> view
 				float prevInvView[16];
 				if ( !RB_RHI_InvertMatrix( rhiReStirDIPrevView, prevInvView ) ) { memcpy( prevInvView, invView, sizeof( prevInvView ) ); }
