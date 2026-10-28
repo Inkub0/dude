@@ -506,6 +506,31 @@ CERAMIC_WORDS = ("tile", "tiles", "tiled", "ceramic", "porcelain")
 GEAR_WORDS = {"helmet", "helmets", "visor", "mask", "goggles", "goggle", "hat", "cap", "armor",
               "armour", "headset", "gasmask"}
 
+# marine kit Raven declared flesh so blood decals land on it (no hit maps on any
+# marine body): the fatigues are cloth; the outfit sheets (armour plates over the
+# uniform), the first-person arms and the medic/tech helmets are armor - Raven's
+# own helmet materials (helmet, helmet2, helmet_mp) are declared armor. Wounded
+# bodies (hurtbody*), the stroggified arms and the tube marines stay flesh.
+MARINE_GEAR_SCOPE = ("models/characters/marine/", "models/characters/marine_officer/")
+MARINE_GEAR = (
+    (re.compile(r"^fatigues"), "cloth", "marine uniform"),
+    (re.compile(r"(^|_)helmet$"), "armor", "marine helmet"),
+    (re.compile(r"^(body|bodymarine|medic|tech|officer\d*|inview_arms)(_|$)(?!.*strogg)"), "armor",
+     "marine outfit"),
+)
+
+
+def marine_gear(name):
+    """(class, why) for a marine kit material, or None"""
+    if not name.startswith(MARINE_GEAR_SCOPE):
+        return None
+    leaf = name.rpartition("/")[2]
+    for pat, cls, why in MARINE_GEAR:
+        if pat.search(leaf):
+            return cls, why
+    return None
+
+
 # flesh named head*/face* is a face here (head02, half_head, tm_head_base);
 # not on the monsters, whose heads are flesh-and-metal Strogg sheets
 SKIN_TOKEN_SCOPE = ("models/characters/", "models/tube_marine/")
@@ -615,31 +640,33 @@ DECAL_CLASSES = {"flesh", "glass", "water", "gelatinousfluid", "oil", "concrete"
                  "electronics"}
 
 # path prefix -> class prior, used when no declared type, hit map, texture
-# share, variant or token decides. Longest prefix wins. The world-texture
-# priors follow the majority of Raven's own materialType / hit-map labels in
-# the same directory (counts from the retail data in the comments): Quake 4
-# labels walls, trims, doors, lights and machines solidmetal far more often
-# than hollowmetal - unlike Doom 3, where the painted station panelling was
-# routed to the painted class.
+# share, variant or token decides. Longest prefix wins. Raven labels walls,
+# trims, doors, lights and machines solidmetal more often than hollowmetal
+# (its labels, counted in the comments, pick impact sounds), but the walls it
+# left UNLABELLED - wall, trim and floor panelling of the station / Strogg base
+# sets - default to hollowmetal: thin plate, Raven's own definition, and the
+# class Doom 3's station panelling has (2026-10-28 reclassification; a declared
+# label, a hit map or a metal token in the name still decides first). Light
+# fixtures and the structural misc set stay solidmetal.
 DIR_PRIORS = {
     # textures/
-    "textures/terminal/":         "solidmetal",   # Raven: solid 19, hollow 15
-    "textures/command_ship/":     "solidmetal",   # solid 21, hollow 3
-    "textures/prison/":           "solidmetal",   # solid 26, hollow 13
-    "textures/common_walls/":     "solidmetal",   # solid 37, hollow 4
-    "textures/common_trims/":     "solidmetal",   # solid 6, hollow 4
+    "textures/terminal/":         "hollowmetal",  # Raven: solid 19, hollow 15
+    "textures/command_ship/":     "hollowmetal",  # solid 21, hollow 3
+    "textures/prison/":           "hollowmetal",  # solid 26, hollow 13
+    "textures/common_walls/":     "hollowmetal",  # solid 37, hollow 4
+    "textures/common_trims/":     "hollowmetal",  # solid 6, hollow 4
     "textures/common_lights/":    "solidmetal",   # solid 21 (light fixtures)
     "textures/common_misc/":      "solidmetal",   # railings, pipes, beams, supports
     "textures/common_floors/":    "hollowmetal",  # hollow 6, solid 4 (deck plating)
     "textures/medlabs/":          "hollowmetal",  # hollow 2 (its only declared ones)
-    "textures/canyon/":           "solidmetal",   # solid 13, hollow 2
-    "textures/tram/":             "solidmetal",   # solid 7, hollow 4
-    "textures/stroyent/":         "solidmetal",   # tunnels/steel; gore + concrete by token
-    "textures/core/":             "solidmetal",   # no labels; Strogg base set like hub
-    "textures/hub/":              "solidmetal",   # no labels; Strogg base set like core
-    "textures/mptextures/":       "solidmetal",   # no labels; MP station set
-    "textures/q4x_":              "solidmetal",   # expansion-pack sets (q4x_cryo, _mp, ...)
-    "textures/q4cmp":             "solidmetal",
+    "textures/canyon/":           "hollowmetal",  # solid 13, hollow 2
+    "textures/tram/":             "hollowmetal",  # solid 7, hollow 4
+    "textures/stroyent/":         "hollowmetal",  # tunnels/steel; gore + concrete by token
+    "textures/core/":             "hollowmetal",  # no labels; Strogg base set like hub
+    "textures/hub/":              "hollowmetal",  # no labels; Strogg base set like core
+    "textures/mptextures/":       "hollowmetal",  # no labels; MP station set
+    "textures/q4x_":              "hollowmetal",  # expansion-pack sets (q4x_cryo, _mp, ...)
+    "textures/q4cmp":             "hollowmetal",
     "textures/consoles/":         "electronics",  # electronics 39, glass 5
     "textures/glass/":            "glass",
     "textures/rock/":             "rock",         # rock 33 (incl. its sand blends)
@@ -949,6 +976,9 @@ class Classifier:
             eye = sorted(w for w in hay if is_eye_word(w))
             if eye:
                 return "eyes", signal, prov + " -> eyes: token " + eye[0]
+        gear = marine_gear(name) if cls == "flesh" else None
+        if gear:
+            return gear[0], signal, prov + " -> %s: %s" % gear
         head = self.head_of(m)
         if cls == "flesh" and head and not hay & GEAR_WORDS:
             return "skin", signal, prov + " -> skin: head mesh " + head
@@ -1072,9 +1102,12 @@ HEADER = """\
 # material guides expanded, a later pk4 wins per file, the first definition of a
 # material name wins like the engine's decl manager). Regenerate with
 #   python3 tools/pbr_classify_q4.py [--q4dir "/path/to/Quake 4"]
-# which rewrites this whole file (deterministic). Tune in-game with the material
-# editor (editPbrMaterial): edits land in the dude folder's pbr/pbr_overrides.cfg,
-# which loads on top of this table; fold them in with tools/pbr_bake_inplace.py.
+# which rewrites this whole file (deterministic) but KEEPS its hand tuning: the
+# @cat preset rows and every row tagged "baked from live overrides". Tune in-game
+# with the material editor (editPbrMaterial): edits land in the dude folder's
+# pbr/pbr_overrides.cfg, which loads on top of this table; fold them in with
+#   python3 tools/pbr_bake_inplace.py --table q4base/pbr/pbr_materials.cfg \
+#       --overrides ~/.local/share/dude/q4base/pbr/pbr_overrides.cfg --reset
 #
 # Columns: <material> <metalness> <roughness> <category> <wetness> <env>
 # '*' = inherit: a category-tagged row tracks its live @cat preset row below
@@ -1117,22 +1150,58 @@ def unclassified_row(m):
     return "# %-53s *    *  %-14s *  *   # UNCLASSIFIED (%s)" % (m.name, "???", note)
 
 
-def write_table(path, clf, classes, stats_line):
+BAKED_TAG = "baked from live overrides"
+
+
+def read_tuning(path):
+    """The hand tuning an existing table carries, which a regeneration keeps:
+    its @cat preset rows ({class: (m, r, w, e)}) and the rows tools/pbr_bake_inplace.py
+    baked in from the in-game editor ({name: (class, line)}, tagged BAKED_TAG)."""
+    import pbr_classes
+    cats, baked = {}, {}
+    if not os.path.isfile(path):
+        return cats, baked
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            body, _, comment = line.partition("#")
+            toks = body.split()
+            if len(toks) == 6 and toks[0].lower() == "@cat":
+                try:
+                    vals = tuple(float(t) for t in toks[2:6])
+                except ValueError:
+                    continue
+                names = pbr_classes.STONE_SPLIT if toks[1].lower() == "stone" else (pbr_classes.canonical(toks[1]),)
+                for n in names:
+                    if n != "none":
+                        cats[n] = vals
+            elif len(toks) >= 3 and BAKED_TAG in comment:
+                cls = pbr_classes.canonical(toks[3] if len(toks) > 3 else "none")
+                baked[toks[0].lower()] = (cls, line.rstrip("\n"))
+    return cats, baked
+
+
+def write_table(path, clf, classes, stats_line, tuning=({}, {})):
+    cats, baked = tuning
     lines = [HEADER.rstrip("\n"), "#", "# " + stats_line, "",
              "# ---- category defaults ----"]
-    lines += ["@cat %s %.3f %.3f %.3f %.3f" % p for p in CAT_PRESETS]
+    lines += ["@cat %s %.3f %.3f %.3f %.3f" % ((p[0],) + cats.get(p[0], p[1:])) for p in CAT_PRESETS]
     by_class = {}
     for name, (cls, _sig, prov) in clf.results.items():
-        by_class.setdefault(cls, []).append((name, prov))
-    for cls in classes:
+        if name not in baked:
+            by_class.setdefault(cls, []).append((name, row(name, cls, prov)))
+    for name, (cls, line) in baked.items():     # hand-tuned rows win over the classifier's
+        by_class.setdefault(cls, []).append((name, line))
+    for cls in tuple(classes) + ("none",):
         rows = sorted(by_class.get(cls, []))
         if rows:
             lines += ["", "# ---- %s ----" % cls]
-            lines += [row(name, cls, prov) for name, prov in rows]
+            lines += [text for _name, text in rows]
     if clf.unclassified:
         lines += ["", "# ---- UNCLASSIFIED: lit, no signal - fill in the class and uncomment ----"]
         groups = {}
         for name, m in clf.unclassified.items():
+            if name in baked:
+                continue
             groups.setdefault(name.rpartition("/")[0], []).append(m)
         for d in sorted(groups):
             lines.append("# -- %s/ (%d) --" % (d, len(groups[d])))
@@ -1173,7 +1242,8 @@ def main():
     in_scope = len(clf.results) + len(clf.unclassified)
     stats = "%d materials, %d lit, %d in scope: %d classified, %d unclassified" % (
         len(mats), lit, in_scope, len(clf.results), len(clf.unclassified))
-    write_table(args.out, clf, pbr_classes.CLASSES, stats)
+    tuning = read_tuning(args.out)      # keep the table's @cat presets + baked editor rows
+    write_table(args.out, clf, pbr_classes.CLASSES, stats, tuning)
 
     print("wrote %s" % args.out)
     print("  " + stats)
