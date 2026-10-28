@@ -2108,7 +2108,7 @@ RB_RHI_AmbientFloorSource
 
 r_rtgiAmbient 1/3 (the FLOOR): the ray-traced lighting the ambient lights are measured against this view, as an
 albedo-free irradiance-like buffer the ambient draw samples at its pixel. At the Path Tracing tier (ReSTIR DI lighting
-the scene, r_rtReStirDICombineGI) it is the DI buffer - direct + the one bounce, demodulated, already at scene scale;
+the scene, the bounce folded into its gather) it is the DI buffer - direct + the one bounce, demodulated, already at scene scale;
 otherwise the RTGI gather (the bounce alone), which RB_RHI_RtgiApply scales by r_rtgiIntensity. Both sit in a shader-
 read layout for the open HDR scene pass (their applies sample them there too). 0 = none this view. VK only.
 ===================
@@ -8848,12 +8848,13 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	parms.shadowFalloffS[2] = specReshade ? 2.0f : ( shMode ? 1.0f : 0.0f );
 	parms.shadowFalloffS[3] = relaxMode ? 1.0f : 0.0f;					// R2: linear + raw hitDist out (ReLAX input)
 
-	// r_rtReStirDICombineGI: fold the RTGI one-bounce into this gather (rtgi_bounce.glsl) so ONE NRD denoise and
-	// ONE apply serve direct + indirect. RB_RHI_RtgiPass already stands down while DI is on (the shared NRD slot),
-	// so with r_rtgi on this is the ONLY place the bounce is produced. Uniforms mirror RB_RHI_RtgiPass's packing
+	// With r_rtgi on, the RTGI one-bounce is folded into this gather (rtgi_bounce.glsl) so ONE NRD denoise and ONE
+	// apply serve direct + indirect. RB_RHI_RtgiPass stands down while DI is on (the shared NRD slot), so this is the
+	// ONLY place the bounce is produced under DI - r_rtgi alone switches it (the separate r_rtReStirDICombineGI knob is
+	// retired: its 0 meant "no GI" while r_rtgi still stood RTAO down and the ambient reconcile still assumed GI). Uniforms mirror RB_RHI_RtgiPass's packing
 	// (radius / emissive / clamp / light scale / shadow ray / eye pullback / the CPU-hoisted IGN rotation) plus
 	// rtgi_apply's intensity and fog fade, so the bounce comes out as RTGI's own pass + apply would have made it.
-	const bool combineGI = r_rtgi.GetBool() && r_rtReStirDICombineGI.GetBool() && tlas != 0 && geoTable != 0;
+	const bool combineGI = r_rtgi.GetBool() && tlas != 0 && geoTable != 0;
 	parms.specularParms[0] = combineGI ? 1.0f : 0.0f;
 	if ( combineGI ) {
 		RB_RHI_RtgiFogCoefs( viewDef, parms.specularParms[1], parms.specularParms[2] );
@@ -9881,7 +9882,7 @@ void RB_RHI_RtaoDebugOverlay( rhi::RHI *r, const viewDef_t *viewDef ) {
 
 // Fog-aware GI (r_rtgiFogAttenuate): the strength + exp() coefficient the GI fade uses, from the view's primary
 // fog light; both 0 when attenuation is off or the view has no fog. Shared by RB_RHI_RtgiApply (rtgi_apply.frag)
-// and the ReSTIR DI combined gather (restir_di.frag, r_rtReStirDICombineGI).
+// and the ReSTIR DI combined gather (restir_di.frag, the bounce folded in while r_rtgi is on).
 static void RB_RHI_RtgiFogCoefs( const viewDef_t *viewDef, float &strength, float &coef ) {
 	strength = 0.0f;
 	coef = 0.0f;

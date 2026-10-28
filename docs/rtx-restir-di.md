@@ -211,8 +211,9 @@ RT targets add `CreateRenderTarget*` + handle/size/ready statics + a context-los
   spec map, baked occlusion map).
 - Fast-changing lights stay forward (`r_rtReStirDIDynamicForward`): weapon lights, moved, recoloured (20 %) or
   re-appeared, 16-frame hysteresis; DUDE's fill lights exempt; the combined bounce skips them too.
-- Combined DI + GI in one buffer, one NRD denoise (`r_rtReStirDICombineGI`, the "path 2" decision) via the shared
-  `rtgi_bounce.glsl`; RTGI's own pass stands down under DI.
+- Combined DI + GI in one buffer, one NRD denoise (the "path 2" decision; always on with `r_rtgi` since the
+  `r_rtReStirDICombineGI` knob was retired 2026-10-28) via the shared `rtgi_bounce.glsl`; RTGI's own pass stands
+  down under DI.
 - Debug: `r_rtReStirDIDebug` 0/1/2 (off / raw / denoised) + ImGui dropdown; `r_shadowMapDebug 1` prints
   "N of M lit lights DI-covered".
 - Preset: `dude_rtx 2` applies/detects it; both menus offer "Ultra Nightmare".
@@ -414,9 +415,10 @@ at zero lag. Known seam: a light that stops changing hands over to DI after the 
 starts empty, so it ramps in over the NRD history length (the confidence pass shortens that); a light that
 never settles (a strobe) simply stays forward.
 
-**Combined DI + GI in one buffer (2026-10-08, user chose "path 2"):** with `r_rtgi` on, `r_rtReStirDICombineGI`
-(default 1) has the DI gather also trace the one-bounce GI ray at the same pixel through the new shared include
-`rtgi_bounce.glsl` (the bounce lifted verbatim out of `rtgi_ray.frag`, which now calls the same function - its
+**Combined DI + GI in one buffer (2026-10-08, user chose "path 2"):** with `r_rtgi` on, the DI gather also traces
+the one-bounce GI ray at the same pixel (originally behind `r_rtReStirDICombineGI`, default 1 - RETIRED 2026-10-28: its
+0 just meant "no GI under DI", which `r_rtgi 0` already says, while leaving RTAO stood down and the ambient reconcile
+assuming GI) through the new shared include `rtgi_bounce.glsl` (the bounce lifted verbatim out of `rtgi_ray.frag`, which now calls the same function - its
 output is unchanged). The bounce is finished as `rtgi_apply.frag` would (receiver albedo × `r_rtgiIntensity` ×
 the fog fade from the shared `RB_RHI_RtgiFogCoefs`), demodulated by the same material factor as the direct term
 and summed into the DI radiance, so ONE NRD denoise and ONE apply serve direct + indirect at about the cost of

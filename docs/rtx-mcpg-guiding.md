@@ -10,7 +10,7 @@ the experimental emissive lighting mode (docs/rtx-experimental-lighting.md).
 ## Where it lands, and why that covers both tiers
 
 The one place both tiers trace a hemisphere ray is `rtgiTraceBounce` (rtgi_bounce.glsl), called from the DI gather
-(`restir_di.frag`, `r_rtReStirDICombineGI`: direct + indirect in one buffer) and from `rtgi_ray.frag`. Guiding
+(`restir_di.frag`, with `r_rtgi` on: direct + indirect in one buffer) and from `rtgi_ray.frag`. Guiding
 replaces the bounce's cosine direction there, so the current tier gets it with no change to its direct term. The
 direct term stays explicit light sampling (RIS over the light buffer today, NEE over the emissive table in the
 E-mode): the paper itself ranks ReSTIR above guiding wherever many explicit lights exist (Sec. 7, Fig. 8 right,
