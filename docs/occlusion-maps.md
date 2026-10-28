@@ -94,7 +94,10 @@ the same `exp_barrel_s0.tga`. `-skin skins/name` is therefore rarely needed; it 
 which material's bump map feeds the detail cavity (useful if a skin swaps the normal map). The
 lazy auto-bake passes the drawing entity's skin for that reason.
 
-- Writes one grayscale TGA per drawn surface to **`generated/aomaps/<model>_s<N>.tga`** (N =
+- Writes one **8-bit grayscale** TGA (type 3, `R_WriteGrayTGA`) per drawn surface to
+  **`generated/aomaps/<model>_s<N>.tga`** — a quarter of an RGBA map, and identical once loaded
+  (the shaders read only `.r`; the loader expands gray to R = G = B, A = 255), so no post-bake
+  conversion is needed before packing. (N =
   surface index; collision/nodraw surfaces are skipped).
 - `-size 0` = auto (default): each surface is baked at its own texture resolution (diffuse, else
   bump, else any stage image), so every map is **1:1 with the shipped art** and never larger than

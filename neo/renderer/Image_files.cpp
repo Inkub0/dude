@@ -83,6 +83,34 @@ void R_WriteTGA( const char *filename, const byte *data, int width, int height, 
 	Mem_Free (buffer);
 }
 
+/*
+================
+R_WriteGrayTGA
+
+DUDE: single-channel output for maps whose shaders read one channel (the baked AO maps): a
+quarter of the RGBA size, and loads back identical to an R = G = B, A = 255 RGBA write.
+================
+*/
+void R_WriteGrayTGA( const char *filename, const byte *data, int width, int height, bool flipVertical ) {
+	const int bufferSize = width * height + 18;
+	byte *buffer = (byte *)Mem_Alloc( bufferSize );
+	memset( buffer, 0, 18 );
+	buffer[2] = 3;		// uncompressed grayscale
+	buffer[12] = width&255;
+	buffer[13] = width>>8;
+	buffer[14] = height&255;
+	buffer[15] = height>>8;
+	buffer[16] = 8;		// pixel size
+	if ( !flipVertical ) {
+		buffer[17] = (1<<5);	// flip bit, for normal top to bottom raster order
+	}
+	memcpy( buffer + 18, data, width * height );
+
+	fileSystem->WriteFile( filename, buffer, bufferSize );
+
+	Mem_Free( buffer );
+}
+
 
 /*
 ================

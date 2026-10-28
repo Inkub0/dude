@@ -876,18 +876,9 @@ static bool AO_BakeSurface( const aoGrid_t &g, const srfTriangles_t *tri, const 
 
 	AO_Dilate( ao.Ptr(), covered.Ptr(), size, dilate );
 
-	// pack into RGBA (grayscale in RGB, opaque A) and write
-	idList<byte> rgba;
-	rgba.SetNum( size * size * 4 );
-	for ( int i = 0; i < size * size; i++ ) {
-		byte v = ao[i];
-		rgba[i * 4 + 0] = v;
-		rgba[i * 4 + 1] = v;
-		rgba[i * 4 + 2] = v;
-		rgba[i * 4 + 3] = 255;
-	}
-
-	R_WriteTGA( outPath, rgba.Ptr(), size, size, false );
+	// 8-bit grayscale: both shaders sample only .r, and the loader expands gray to R = G = B with
+	// opaque alpha, so this is lossless against the old RGBA write at a quarter of the size
+	R_WriteGrayTGA( outPath, ao.Ptr(), size, size, false );
 	common->Printf( "  wrote %s (%dx%d)\n", outPath, size, size );
 	return true;
 }
