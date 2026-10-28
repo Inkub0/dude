@@ -5366,7 +5366,7 @@ static void DrawDbgGroup_ReStirDI()
 		"confidence. Higher = a smaller change already rejects history. RTXDI / Remix 8. (r_rtReStirDIGradientPower)" );
 	CvarSliderF( "  Rise Smoothing", r_rtReStirDIGradientHistory, 0.0f, 32.0f, "%.0f", "Hold (frames): confidence drops at "
 		"once after a change and recovers over this many frames, so a spot a shadow just left keeps a short history while it "
-		"refills instead of snapping back to the stale one. Remix holds 8; default 9; 0 = none. (r_rtReStirDIGradientHistory)" );
+		"refills instead of snapping back to the stale one. Remix holds 8; default 14; 0 = none. (r_rtReStirDIGradientHistory)" );
 	CvarSliderF( "  Floor", r_rtReStirDIGradientFloor, 0.0f, 1.0f, "%.2f", "Minimum confidence (ReLAX applies it directly). "
 		"Remix 0.1. (r_rtReStirDIGradientFloor)" );
 	CvarSliderF( "  Darkness Bias", r_rtReStirDIGradientBias, 0.0f, 1.0f, "%.3f", "Darkness bias added to the change's "
