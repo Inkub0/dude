@@ -94,6 +94,50 @@ void Sys_VPrintf(const char *msg, va_list arg);
   #undef snprintf
 #endif
 
+// DUDE: Sys_RequestRelaunch - main's arguments and the ones to add
+static int			mainArgc = 0;
+static char **		mainArgv = NULL;
+static idStrList	relaunchArgs;
+static bool			relaunchRequested = false;
+
+void Posix_SetArgs( int argc, char **argv ) {
+	mainArgc = argc;
+	mainArgv = argv;
+}
+
+void Sys_RequestRelaunch( int numArgs, const char * const *args ) {
+	relaunchArgs.Clear();
+	for ( int i = 0; i < numArgs; i++ ) {
+		relaunchArgs.Append( args[i] );
+	}
+	relaunchRequested = true;
+}
+
+// replace this process with a new one of the same executable: main's command line plus
+// relaunchArgs. Only returns if exec fails.
+static void Posix_Relaunch( void ) {
+	const char *exe = Posix_GetExePath();
+	if ( exe == NULL || exe[0] == '\0' ) {
+		exe = ( mainArgc > 0 ) ? mainArgv[0] : NULL;
+	}
+	if ( exe == NULL ) {
+		Sys_Printf( "relaunch: don't know this executable's path - start DUDE again yourself\n" );
+		return;
+	}
+	idList<char *> argv;
+	argv.Append( mainArgc > 0 ? mainArgv[0] : (char *)exe );
+	for ( int i = 1; i < mainArgc; i++ ) {
+		argv.Append( mainArgv[i] );
+	}
+	for ( int i = 0; i < relaunchArgs.Num(); i++ ) {
+		argv.Append( (char *)relaunchArgs[i].c_str() );
+	}
+	argv.Append( NULL );
+	fflush( NULL );
+	execv( exe, argv.Ptr() );
+	Sys_Printf( "relaunch: exec %s failed: %s - start DUDE again yourself\n", exe, strerror( errno ) );
+}
+
 /*
 ================
 Posix_Exit
@@ -115,6 +159,13 @@ void Posix_Exit(int ret) {
 	if(consoleLog != NULL) {
 		fclose(consoleLog);
 		consoleLog = NULL;
+	}
+
+	// DUDE: a renderer change restarts the game (Sys_RequestRelaunch), after everything
+	// above has shut down
+	if ( relaunchRequested && ret == EXIT_SUCCESS && !set_exit ) {
+		relaunchRequested = false;
+		Posix_Relaunch();
 	}
 
 	// in case of signal, handler tries a common->Quit

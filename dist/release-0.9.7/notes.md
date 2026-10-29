@@ -48,6 +48,7 @@ Many of those fixes were found the same way: by running a second idTech4 game (Q
 - **Classic 62.5 Hz game tics** (*Options → Game*, off by default): Doom 3 originally ran its game at 16 ms tics, not dhewm3's 60 Hz. Applies at the next map load; recorded demos keep it.
 - **Extra lights** (`g_extraLights`, F10 *Graphics → New Light Effects*, off by default): a fire light on the Lost Soul, and the projectile lights id wrote but commented out (Doom 3, RoE, Lost Mission).
 - **Adaptive Shadow Resolution** (*System → Advanced*, off by default): when the point lights in view don't fit the shadow budget, the farthest ones get smaller shadow maps instead of being re-rendered every frame. Softer distant shadows — opt-in.
+- **Changing the renderer restarts DUDE** (settings are saved first; save your game before switching mid-level). Switching backends inside the running game left state behind and could crash or lose the menu — a fresh start can't.
 - **Monitor picker works**: the window opens on the monitor chosen in the settings, not the one the mouse happens to be on (the mouse decides only when none is chosen or it isn't connected).
 - **Settings menu (F10) reorganised**: the Graphics tab is regrouped (GPU and monitor pickers, a restart bar), Debugging is split into four sub-tabs with a search box, and every slider has a reset button plus *Restore defaults* per group.
 - `ctrl+v` pastes in the console again.
@@ -96,7 +97,6 @@ You need your own retail Quake 4 (no game data is included). The game library is
 ## Known limitations
 
 - **Emissive Mode is still experimental and ships off**, as in 0.9.6 (it got faster this release: fewer samples by default and a cheaper emitter target).
-- Switching from OpenGL 3 to Vulkan inside the menu can still lose the 2D GUI — restart the game after changing the renderer.
 
 ## Setup (same as 0.9.6)
 

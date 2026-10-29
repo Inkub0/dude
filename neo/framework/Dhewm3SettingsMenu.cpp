@@ -2844,8 +2844,9 @@ static void InitGraphicsMenu()
 // on every backend and is how you switch backends to unlock the enhancement settings below.
 static void DrawRendererBackend()
 {
-	// Renderer backend selection (DUDE). Changing this only takes effect after a
-	// renderer restart. "opengl" is the legacy, vanilla-faithful ARB2 path; "opengl3"
+	// Renderer backend selection (DUDE). Changing this takes effect when DUDE restarts:
+	// vid_restart relaunches the game for a different backend (R_VidRestart_f), since a
+	// backend switch inside one process left state behind. "opengl" is the legacy, vanilla-faithful ARB2 path; "opengl3"
 	// is the GL 3.3 core backend and "vulkan" is the Vulkan backend — both route through
 	// the RHI and enable the Graphics tab (Vulkan additionally unlocks Vulkan-only
 	// features like GPU tessellation).
@@ -2889,15 +2890,12 @@ static void DrawRendererBackend()
 		const int runningSel = !glConfig.rhiBackend ? 0 : ( glConfig.coreProfile ? 1 : 2 );
 		if ( backendSel != runningSel ) {
 			ImGui::TextColored( ImVec4( 1.0f, 0.8f, 0.2f, 1.0f ),
-				"Backend change pending - restart the renderer to apply it." );
-			if ( ImGui::Button( "Apply Backend (restart renderer)" ) ) {
+				"Backend change pending - DUDE restarts to apply it." );
+			if ( ImGui::Button( "Apply Backend (restart DUDE)" ) ) {
 				cmdSystem->BufferCommandText( CMD_EXEC_APPEND, "vid_restart\n" );
 			}
-			AddTooltip( "Runs 'vid_restart' to recreate the renderer with the selected backend." );
-			if ( backendSel == 2 || runningSel == 2 ) {
-				ImGui::TextDisabled( "Switching to/from Vulkan: if the UI or cursor vanishes after Apply, fully "
-					"quit and relaunch (the setting is saved)." );
-			}
+			AddTooltip( "Saves your settings, closes DUDE and starts it again with the selected backend. "
+				"Unsaved game progress is lost - save first when you are in a level." );
 		}
 	}
 

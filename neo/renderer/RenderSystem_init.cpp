@@ -1361,6 +1361,21 @@ idStr R_GetVidModeValsString(bool addCustom)
 // DG end
 
 
+// DUDE: the r_graphicsAPI value the running renderer was started with (R_InitOpenGL)
+static idStr r_initGraphicsAPI;
+
+// the backend an r_graphicsAPI value asks for: 0 legacy OpenGL (also unknown values), 1 GL 3.3
+// core, 2 Vulkan ("vulkan" and "vulkan-rt" are the same backend)
+static int R_GraphicsAPIKind( const char *api ) {
+	if ( idStr::Icmp( api, "opengl3" ) == 0 ) {
+		return 1;
+	}
+	if ( idStr::Icmp( api, "vulkan" ) == 0 || idStr::Icmp( api, "vulkan-rt" ) == 0 ) {
+		return 2;
+	}
+	return 0;
+}
+
 /*
 ==================
 R_InitOpenGL
@@ -1398,6 +1413,12 @@ void R_InitOpenGL( void ) {
 	bool vulkanMode = false;
 	glConfig.coreProfile = false;
 	glConfig.rhiBackend = false;
+	// only the legacy extension probe sets these; a backend started after a legacy session in
+	// the same process must not inherit them (R_LoadARBProgram would hand ARB programs to GL
+	// entry points that don't exist under Vulkan - the crash a legacy -> Vulkan switch hit)
+	glConfig.ARBVertexProgramAvailable = false;
+	glConfig.ARBFragmentProgramAvailable = false;
+	r_initGraphicsAPI = r_graphicsAPI.GetString();
 	if ( idStr::Icmp( r_graphicsAPI.GetString(), "opengl3" ) == 0 ) {
 		glConfig.coreProfile = true;
 		glConfig.rhiBackend = true;
@@ -3167,6 +3188,23 @@ void R_VidRestart_f( const idCmdArgs &args ) {
 
 	// if OpenGL isn't started, do nothing
 	if ( !glConfig.isInitialized ) {
+		return;
+	}
+
+	// DUDE: a different backend restarts the whole game instead of the renderer. Switching
+	// backends inside one process kept running into state the previous backend left behind
+	// (legacy -> Vulkan crashed loading the first map, GL3 -> Vulkan lost the 2D GUI or the
+	// device); a fresh process has none. Compared with the value the renderer was started
+	// with, not the backend that came up, so a Vulkan request that fell back to OpenGL never
+	// relaunches in a loop. The new value goes on the command line too, so a launcher's own
+	// "+set r_graphicsAPI" can't undo the menu's choice.
+	if ( R_GraphicsAPIKind( r_graphicsAPI.GetString() ) != R_GraphicsAPIKind( r_initGraphicsAPI.c_str() ) ) {
+		common->Printf( "vid_restart: r_graphicsAPI %s -> %s - restarting DUDE with the new renderer\n",
+			r_initGraphicsAPI.c_str(), r_graphicsAPI.GetString() );
+		common->WriteConfigToFile( CONFIG_FILE );
+		const char *relaunchArgs[] = { "+set", "r_graphicsAPI", r_graphicsAPI.GetString() };
+		Sys_RequestRelaunch( 3, relaunchArgs );
+		cmdSystem->BufferCommandText( CMD_EXEC_APPEND, "quit\n" );
 		return;
 	}
 

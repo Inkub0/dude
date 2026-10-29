@@ -36,6 +36,7 @@ If you have questions concerning this license or the applicable additional terms
 const char*	Posix_Cwd( void );
 
 const char* Posix_GetExePath();
+void		Posix_SetArgs( int argc, char **argv );	// main's arguments, for Sys_RequestRelaunch
 const char* Posix_GetSavePath();
 
 void		Posix_Exit( int ret );
