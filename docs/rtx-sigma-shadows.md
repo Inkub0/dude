@@ -1,8 +1,8 @@
 # RT shadows with NRD SIGMA - research and plan
 
 **Status: PLAN, 2026-10-29. No code.** Branch `feat/rtx-sigma-plan` (docs + bench tool). B1 chosen, then **put on
-hold the same day.** The M1 visual check found the 0.9.6 boost knobs acceptable, so the regression's fix may simply be
-the knob revert, and B1 becomes a pure quality option (see M1 under section 7).
+hold the same day.** M1 (visual + timedemo) found the 0.9.6 boost knobs fine and 1.94 ms GPU cheaper, so the regression's fix is
+the knob revert, and B1 becomes a pure quality option (see M1 under section 7). Recommendation: shelve B1.
 Goal: more stable, better-looking ray-traced shadows for the same or less GPU time than DUDE 0.9.7.
 Prior attempt: H3 soft shadows (commits `2ab43dbc` code, `80a8d764` docs/rtx-soft-shadows.md, both off master),
 abandoned 2026-09-18 for stagger and an 11.4 ms toll in light-dense rooms, not for SIGMA's quality.
@@ -489,6 +489,17 @@ benchmark. Not recommended first: it adds a fixed cost, and it does not use SIGM
     - Shipping note: both cvars are CVAR_ARCHIVE, and every 0.9.7 config already holds 4 / 0.3, so a default change
       alone does not reach existing users. It needs a preset-owned value or a one-off migration (not a schema bump;
       see the schema rule).
+    - **D CONFIRMED 2026-10-29.** The user found both reverted fine. Timedemo `VARIANTS="A D"` (warm-up + 3 rounds,
+      results `~/.local/share/dude/bench/20261029-163651-m1`):
+
+      | | fps | 1% low | GPU ms | frame ms | restir.di.boost |
+      |---|---|---|---|---|---|
+      | A (0.9.7: 4 / 0.3) | 65.3 ±0.6 | 30.9 | 13.97 | 15.12 | 2.835 |
+      | D (0.9.6: 2 / 0) | **75.9 ±0.9** | **35.7** | **12.02** | **13.02** | **1.036** |
+
+      - GPU -1.94 ms (+16 % fps), of which the boost accounts for -1.80; every other scope moved <= 0.06 ms.
+      - Clocks ran ~1.04-1.11 GHz with limit reasons active ~80 % in every run of both variants (D about 3 % higher on
+        average; run-06-A flagged at 94 % of the best). The non-boost scopes did not move, so the delta is the boost.
     - **Consequence for B1:** if D passes, the 0.9.7 regression is fixed without SIGMA (about -1.9 ms). B1 would then
       cost about +0.6 ms per lane on top of that cheaper baseline, still under 0.9.7's 14.02 ms. It is worth building
       only if a visible shadow problem remains at D.
