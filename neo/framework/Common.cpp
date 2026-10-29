@@ -115,8 +115,8 @@ idCVar dude_preset( "dude_preset", "-1", CVAR_INTEGER | CVAR_ARCHIVE | CVAR_SYST
 idCVar dude_rtx( "dude_rtx", "0", CVAR_INTEGER | CVAR_ARCHIVE | CVAR_SYSTEM, "DUDE ray-tracing axis: 0 = off, 1 = on (hybrid RT, Vulkan + RT hardware), 2 = Ultra Nightmare (full RT: ReSTIR direct lighting lights the scene, GI bounce in the same denoise), layered on top of the dude_preset raster tier", 0, 2 );
 // DUDE: the config-schema version the saved settings were last written against. Compared to
 // DUDE_CONFIG_SCHEMA (Licensee.h) at launch; a lower value triggers a one-time reset of the
-// graphics/enhancement cvars to their defaults (see idCommonLocal::CheckConfigSchema). Never
-// edit by hand - it is stamped automatically once the reset has run.
+// graphics/enhancement cvars to their defaults, or from schema 3 on a targeted one-time step
+// (see idCommonLocal::CheckConfigSchema). Never edit by hand - it is stamped automatically.
 idCVar dude_cfgSchema( "dude_cfgSchema", "0", CVAR_INTEGER | CVAR_ARCHIVE | CVAR_SYSTEM, "internal: config-schema version the saved DUDE settings were written against", 0, 1000000 );
 // DUDE: menu bridge for the RHI antialiasing selector (choiceDef in mainmenu.gui binds to
 // this on the opengl3/Vulkan backends; legacy keeps the MSAA r_multisamples row). NOT
@@ -1491,6 +1491,11 @@ vsync, MSAA, monitor choice) - these are not part of the enhancement schema and 
 them would only confuse the user at launch. Everything else flagged CVAR_RENDERER, plus the
 non-renderer preset selectors, goes back to its registered default.
 
+From schema 3 on, a bump can instead be a TARGETED step: one retuned default moved, every
+other setting kept. Every archived cvar is written to the config (default or not), so a changed
+default never reaches an existing config by itself; a step moves the value only where it still
+holds the previous default.
+
 Runs after the config exec AND after the init-time ClearModifiedFlags, so the reset leaves the
 CVAR_ARCHIVE modified flag set and WriteConfiguration persists the new schema + defaults on
 shutdown (otherwise the stamp would never reach disk and the wipe would re-fire every launch).
@@ -1502,6 +1507,21 @@ void idCommonLocal::CheckConfigSchema( void ) {
 	}
 
 	const int from = dude_cfgSchema.GetInteger();
+
+	if ( from >= 3 ) {
+		// 3 -> 4: 0.9.7 shipped r_rtReStirDIBoostHistory 4, ~1.9 ms per frame at Path Tracing for no visible gain once
+		// the 2026-10-28 gradient shadow-edge fix had stopped the shadow smear (docs/rtx-sigma-shadows.md, M1). The
+		// default is 2 again (0.9.6's); move a config still on the old default, keep a deliberate other value.
+		if ( from < 4 ) {
+			idCVar *boostHistory = cvarSystem->Find( "r_rtReStirDIBoostHistory" );	// absent without the renderer
+			if ( boostHistory != NULL && boostHistory->GetFloat() == 4.0f ) {
+				cvarSystem->SetCVarFloat( "r_rtReStirDIBoostHistory", 2.0f );
+			}
+		}
+		dude_cfgSchema.SetInteger( DUDE_CONFIG_SCHEMA );
+		common->Printf( "DUDE: config schema %d -> %d - retuned defaults moved, other settings kept.\n", from, DUDE_CONFIG_SCHEMA );
+		return;
+	}
 
 	// Display / output cvars are CVAR_RENDERER too but are NOT part of the enhancement
 	// schema - snapshot them, reset the renderer group, then restore them. That includes the
