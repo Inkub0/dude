@@ -3556,7 +3556,7 @@ static void ApplyEnhancementPreset( int idx, int rtMode )
 	// them (1.0) for their brighter, GI-lit scenes while the raster tiers keep gamma 1.20 and the
 	// exposure default (1.3). Live shader uniforms, show immediately; inert on Potato/Low (no curve).
 	cvarSystem->SetCVarFloat( "r_hdrGamma", p.hdrGamma );
-	r_hdrExposure.SetFloat( r_hdrExposure.GetResetFloat() );
+	NamedCvar( "r_hdrExposure" ).SetFloat( NamedCvar( "r_hdrExposure" ).GetResetFloat() );
 	r_pbr.SetBool( p.pbr );
 	// Screen-space SSR is turned OFF at any tier that enables RT reflections (only Path Tracing): RT owns
 	// every reflective pixel and the SSR march is skipped under it (2026-09-23), so leaving r_ssr on would be
@@ -3728,7 +3728,7 @@ static void ApplyEnhancementPreset( int idx, int rtMode )
 			cvarSystem->SetCVarFloat( "r_hdrGamma", a.hdrGamma );
 		}
 		if ( a.hdrExposure >= 0.0f ) {
-			r_hdrExposure.SetFloat( a.hdrExposure );
+			NamedCvar( "r_hdrExposure" ).SetFloat( a.hdrExposure );
 		}
 		// The tier's default FSR2 upscaling (Nightmare+RTX = 75%). Inert where the tier's r_fsr is off
 		// (Medium/High/Ultra+RTX). Not in Detect, so the Upscaling menu can still override it freely
@@ -3826,7 +3826,7 @@ static int DetectEnhancementPreset( int* outRtMode = NULL )
 				idMath::Fabs( r_rtReflResScale.GetFloat() - 1.0f ) < 0.01f &&
 				r_motionVectors.GetBool()          == p.motionVectors &&
 				idMath::Fabs( cvarSystem->GetCVarFloat( "r_hdrGamma" ) - p.hdrGamma ) < 0.01f &&
-				idMath::Fabs( r_hdrExposure.GetFloat() - r_hdrExposure.GetResetFloat() ) < 0.01f &&
+				idMath::Fabs( NamedCvar( "r_hdrExposure" ).GetFloat() - NamedCvar( "r_hdrExposure" ).GetResetFloat() ) < 0.01f &&
 				idMath::Fabs( r_parallaxShadow.GetFloat() - p.parallaxShadow ) < 0.01f;
 		} else {
 			// RTX on: the RT cvars must match this tier's augment, and the overridden look cvars
@@ -3836,7 +3836,7 @@ static int DetectEnhancementPreset( int* outRtMode = NULL )
 			const bool  expMv    = a.needVelocity ? true : p.motionVectors;
 			const float expParlx = ( a.parallaxShadow >= 0.0f ) ? a.parallaxShadow : p.parallaxShadow;
 			const float expGamma = ( a.hdrGamma      >= 0.0f ) ? a.hdrGamma      : p.hdrGamma;
-			const float expExpo  = ( a.hdrExposure   >= 0.0f ) ? a.hdrExposure   : r_hdrExposure.GetResetFloat();
+			const float expExpo  = ( a.hdrExposure   >= 0.0f ) ? a.hdrExposure   : NamedCvar( "r_hdrExposure" ).GetResetFloat();
 			overlayMatch =
 				r_rtSunShadows.GetBool()           == a.rtSunShadows &&
 				r_rtMovingLights.GetBool()         == a.rtMovingLights &&
@@ -3858,7 +3858,7 @@ static int DetectEnhancementPreset( int* outRtMode = NULL )
 				idMath::Fabs( r_ssrIntensity.GetFloat() - ( expSsr ? 0.8f : 0.5f ) ) < 0.01f &&
 				r_motionVectors.GetBool()          == expMv &&
 				idMath::Fabs( cvarSystem->GetCVarFloat( "r_hdrGamma" ) - expGamma ) < 0.01f &&
-				idMath::Fabs( r_hdrExposure.GetFloat() - expExpo ) < 0.01f &&
+				idMath::Fabs( NamedCvar( "r_hdrExposure" ).GetFloat() - expExpo ) < 0.01f &&
 				idMath::Fabs( r_parallaxShadow.GetFloat() - expParlx ) < 0.01f;
 		}
 
