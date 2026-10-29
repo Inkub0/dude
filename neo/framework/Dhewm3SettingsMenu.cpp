@@ -3453,7 +3453,7 @@ static const EnhancementPreset enhancementPresets[PRESET_COUNT] = {
 // Ray-tracing augmentation layered on top of a raster tier when RTX is on and the device is
 // RT-capable (Vulkan + ray-query). Indexed by raster tier. Everything here is VK + RT only;
 // with RTX off, or on GL3 / a non-RT GPU, none of it is applied and the raster tier stands as
-// the full picture. parallaxShadow / hdrGamma use -1 = "leave the raster tier's value". The
+// the full picture. parallaxShadow / hdrGamma / hdrExposure use -1 = "leave the raster tier's value". The
 // Nightmare row carries the retired "Path Tracing" RT feature set.
 struct RtAugment {
 	bool  rtSunShadows;
@@ -3471,6 +3471,7 @@ struct RtAugment {
 	bool  needVelocity;		// force r_motionVectors on so the NRD denoiser has motion vectors
 	float parallaxShadow;	// RT-driven override of the raster value (-1 = keep raster)
 	float hdrGamma;			// RT-driven override of the raster value (-1 = keep raster)
+	float hdrExposure;		// RT-driven override of r_hdrExposure (-1 = keep the raster value, the cvar default)
 	float fsrScale;			// r_fsrScale when RTX on (the tier's default upscaling; 1 = Native-AA). A free
 							// override - the Upscaling menu can still change it without reading "Custom"
 	float blurMinPenumbra;	// r_rtShadowBlurMinPenumbra when rtShadowBlur on: skip the blur for lights whose
@@ -3485,13 +3486,15 @@ struct RtAugment {
 // at FULL rate (no stagger) + volumetrics. needVelocity is on wherever a denoised RT effect runs
 // (RTAO or RTGI) so NRD gets motion vectors.
 static const RtAugment rtAugment[PRESET_COUNT] = {
-//                  sun    mov    refl   rtao   aoRes  rtgi   giRes  blur   all    stag   vol    volL  vel    parlxSh hdrGam fsrScale penumbra
-/* Potato    */   { false, false, false, false, 1.0f,  false, 0.75f, false, false, false, false, 0,    false, -1.0f, -1.0f, 1.0f,  1.0f },
-/* Low       */   { false, false, false, false, 1.0f,  false, 0.75f, false, false, false, false, 0,    false, -1.0f, -1.0f, 1.0f,  1.0f },
-/* Medium    */   { true,  true,  false, true,  0.75f, false, 0.75f, false, false, false, false, 0,    true,  -1.0f, -1.0f, 1.0f,  1.0f },
-/* High      */   { true,  true,  false, true,  0.8f,  false, 0.75f, true,  false, false, false, 0,    true,  -1.0f, -1.0f, 1.0f,  1.0f },
-/* Ultra     */   { true,  true,  true,  false, 1.0f,  true,  0.667f,true,  true,  true,  false, 0,    true,  0.5f,  -1.0f, 1.0f,  4.0f },
-/* Nightmare */   { true,  true,  true,  false, 0.75f, true,  0.75f, true,  true,  false, true,  2,    true,  0.5f,  1.0f,  0.75f, 2.0f },
+// Ultra and Nightmare (RTX and Path Tracing alike) run the HDR look neutral - exposure 1.0, gamma
+// 1.0 - for their GI-lit scenes (user, 2026-10-29); Medium / High keep the raster tier's.
+//                  sun    mov    refl   rtao   aoRes  rtgi   giRes  blur   all    stag   vol    volL  vel    parlxSh hdrGam hdrExp fsrScale penumbra
+/* Potato    */   { false, false, false, false, 1.0f,  false, 0.75f, false, false, false, false, 0,    false, -1.0f, -1.0f, -1.0f, 1.0f,  1.0f },
+/* Low       */   { false, false, false, false, 1.0f,  false, 0.75f, false, false, false, false, 0,    false, -1.0f, -1.0f, -1.0f, 1.0f,  1.0f },
+/* Medium    */   { true,  true,  false, true,  0.75f, false, 0.75f, false, false, false, false, 0,    true,  -1.0f, -1.0f, -1.0f, 1.0f,  1.0f },
+/* High      */   { true,  true,  false, true,  0.8f,  false, 0.75f, true,  false, false, false, 0,    true,  -1.0f, -1.0f, -1.0f, 1.0f,  1.0f },
+/* Ultra     */   { true,  true,  true,  false, 1.0f,  true,  0.667f,true,  true,  true,  false, 0,    true,  0.5f,  1.0f,  1.0f,  1.0f,  4.0f },
+/* Nightmare */   { true,  true,  true,  false, 0.75f, true,  0.75f, true,  true,  false, true,  2,    true,  0.5f,  1.0f,  1.0f,  0.75f, 2.0f },
 };
 
 
@@ -3549,10 +3552,11 @@ static void ApplyEnhancementPreset( int idx, int rtMode )
 	// the faithful floor (Potato/Low, HDR off) stays on straight-resolve mode 0. Written
 	// explicitly so a hand-picked curve is reset to the tier's intent on preset switch.
 	cvarSystem->SetCVarInteger( "r_hdrTonemap", p.hdr ? 5 : 0 );
-	// HDR display gamma: preset-owned so Path Tracing can neutralize it (1.0) for its brighter,
-	// GI-lit scene while every other tier keeps 1.20. Live shader uniform, shows immediately; inert
-	// on Potato/Low (no curve). Exposure is a plain cvar default (1.3), not tiered.
+	// HDR display gamma and exposure: preset-owned so the RT Ultra / Nightmare tiers can neutralize
+	// them (1.0) for their brighter, GI-lit scenes while the raster tiers keep gamma 1.20 and the
+	// exposure default (1.3). Live shader uniforms, show immediately; inert on Potato/Low (no curve).
 	cvarSystem->SetCVarFloat( "r_hdrGamma", p.hdrGamma );
+	r_hdrExposure.SetFloat( r_hdrExposure.GetResetFloat() );
 	r_pbr.SetBool( p.pbr );
 	// Screen-space SSR is turned OFF at any tier that enables RT reflections (only Path Tracing): RT owns
 	// every reflective pixel and the SSR march is skipped under it (2026-09-23), so leaving r_ssr on would be
@@ -3723,6 +3727,9 @@ static void ApplyEnhancementPreset( int idx, int rtMode )
 		if ( a.hdrGamma >= 0.0f ) {
 			cvarSystem->SetCVarFloat( "r_hdrGamma", a.hdrGamma );
 		}
+		if ( a.hdrExposure >= 0.0f ) {
+			r_hdrExposure.SetFloat( a.hdrExposure );
+		}
 		// The tier's default FSR2 upscaling (Nightmare+RTX = 75%). Inert where the tier's r_fsr is off
 		// (Medium/High/Ultra+RTX). Not in Detect, so the Upscaling menu can still override it freely
 		// without the preset reading "Custom".
@@ -3819,6 +3826,7 @@ static int DetectEnhancementPreset( int* outRtMode = NULL )
 				idMath::Fabs( r_rtReflResScale.GetFloat() - 1.0f ) < 0.01f &&
 				r_motionVectors.GetBool()          == p.motionVectors &&
 				idMath::Fabs( cvarSystem->GetCVarFloat( "r_hdrGamma" ) - p.hdrGamma ) < 0.01f &&
+				idMath::Fabs( r_hdrExposure.GetFloat() - r_hdrExposure.GetResetFloat() ) < 0.01f &&
 				idMath::Fabs( r_parallaxShadow.GetFloat() - p.parallaxShadow ) < 0.01f;
 		} else {
 			// RTX on: the RT cvars must match this tier's augment, and the overridden look cvars
@@ -3828,6 +3836,7 @@ static int DetectEnhancementPreset( int* outRtMode = NULL )
 			const bool  expMv    = a.needVelocity ? true : p.motionVectors;
 			const float expParlx = ( a.parallaxShadow >= 0.0f ) ? a.parallaxShadow : p.parallaxShadow;
 			const float expGamma = ( a.hdrGamma      >= 0.0f ) ? a.hdrGamma      : p.hdrGamma;
+			const float expExpo  = ( a.hdrExposure   >= 0.0f ) ? a.hdrExposure   : r_hdrExposure.GetResetFloat();
 			overlayMatch =
 				r_rtSunShadows.GetBool()           == a.rtSunShadows &&
 				r_rtMovingLights.GetBool()         == a.rtMovingLights &&
@@ -3849,6 +3858,7 @@ static int DetectEnhancementPreset( int* outRtMode = NULL )
 				idMath::Fabs( r_ssrIntensity.GetFloat() - ( expSsr ? 0.8f : 0.5f ) ) < 0.01f &&
 				r_motionVectors.GetBool()          == expMv &&
 				idMath::Fabs( cvarSystem->GetCVarFloat( "r_hdrGamma" ) - expGamma ) < 0.01f &&
+				idMath::Fabs( r_hdrExposure.GetFloat() - expExpo ) < 0.01f &&
 				idMath::Fabs( r_parallaxShadow.GetFloat() - expParlx ) < 0.01f;
 		}
 
