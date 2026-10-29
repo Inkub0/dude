@@ -2879,7 +2879,7 @@ static idList<float>			s_rtEmissiveLightAnimAvg;
 // A light origin up to this far BEHIND an emitting triangle's plane still counts as on its emitting side: mappers sit a
 // fixture's light at or just inside its glow (a tube's housing), which must keep pairing with it
 static const float				RT_EMIT_FRONT_SLACK = 4.0f;
-struct rtEmissiveLightDbg_t { idVec3 origin; int kind; int light; };	// kind: 0 fixtured (dropped in the mode), 1 ambience (kept), 2 parallel, 3 fog/blend
+struct rtEmissiveLightDbg_t { idVec3 origin; int kind; int light; bool noHeir; };	// noHeir: fixtured, but no emitter row inherits it - kept	// kind: 0 fixtured (dropped in the mode), 1 ambience (kept), 2 parallel, 3 fog/blend
 static idList<rtEmissiveLightDbg_t>	s_rtEmissiveLightDbg;
 static rhi::BufferHandle		s_rtEmissiveLightDbgVB = 0, s_rtEmissiveLightDbgIB = 0;
 static int						s_rtEmissiveLightDbgIndexes = 0;
@@ -4519,7 +4519,7 @@ static void R_RtEmissiveLightCensus( const idRenderWorldLocal *world, rhi::RHI *
 			continue;
 		}
 		total++;
-		rtEmissiveLightDbg_t dbg; dbg.origin = ld->globalLightOrigin; dbg.kind = 1; dbg.light = i;
+		rtEmissiveLightDbg_t dbg; dbg.origin = ld->globalLightOrigin; dbg.kind = 1; dbg.light = i; dbg.noHeir = false;
 		if ( ld->parms.parallel ) { parallel++; dbg.kind = 2; s_rtEmissiveLightDbg.Append( dbg ); continue; }
 		// DUDE's own fill lights (GUI screens' r_emissiveSurfaces, item glow) are KEPT: a GUI screen is not in the table
 		// (its content is a live render), so dropping its fill light would leave the monitors lighting nothing (mode 5
@@ -4634,7 +4634,7 @@ static void R_RtEmissiveKeepUninheritedLights( void ) {
 	}
 	for ( int k = 0; k < s_rtEmissiveLightDbg.Num(); k++ ) {
 		rtEmissiveLightDbg_t &dbg = s_rtEmissiveLightDbg[k];
-		if ( dbg.kind == 0 && dbg.light >= 0 && dbg.light < inherited.Num() && !inherited[ dbg.light ] ) { dbg.kind = 1; }	// overlay mode 5: green, kept
+		if ( dbg.kind == 0 && dbg.light >= 0 && dbg.light < inherited.Num() && !inherited[ dbg.light ] ) { dbg.kind = 1; dbg.noHeir = true; }	// overlay mode 5: green, kept
 	}
 	R_RtEmissiveReport( "r_rtEmissiveTable: %d fixtured placed lights KEPT - no emitter row inherits them (another light near the same emitter took the row, or the emitter is an indicator / dark)\n", kept );
 }
@@ -5020,6 +5020,56 @@ static const char *R_RtBlendName( int bits ) {
 	if ( src == GLS_SRCBLEND_ZERO && dst == GLS_DSTBLEND_SRC_COLOR ) { return "filter (zero, srcColor)"; }
 	if ( src == GLS_SRCBLEND_SRC_ALPHA && dst == GLS_DSTBLEND_ONE ) { return "add-alpha (srcAlpha, one)"; }
 	return va( "custom (src 0x%x, dst 0x%x)", src, dst );
+}
+
+// rtEmissiveLights [radius]: the census around the eye in one dump - every placed light within radius (default 320) with
+// its verdict (DROPPED + the rows that inherit it / fixtured but KEPT, no heir / ambience / parallel / fog), then every
+// emitter row in that radius with the light it inherits, its reach and size. 2026-10-29: "tons of lights won't work" -
+// one probe showed a ceiling decal inheriting its 32-unit halo light (reach 72) and fading out above the floor; the room
+// needs the whole picture, not one fixture at a time. Diagnostic: remove once emissive mode settles.
+void R_RtEmissiveLights_f( const idCmdArgs &args ) {
+	idRenderWorldLocal *world = tr.primaryWorld;
+	if ( world == NULL || s_rtEmissiveBuf == 0 ) {
+		common->Printf( "rtEmissiveLights: no emissive table (r_rtEmissiveTable / r_rtEmissiveLighting off, or no map)\n" );
+		return;
+	}
+	const float radius = ( args.Argc() > 1 ) ? Max( (float)atof( args.Argv( 1 ) ), 16.0f ) : 320.0f;
+	const idVec3 eye = tr.primaryRenderView.vieworg;
+	const float sc = Max( idMath::ClampFloat( 0.0f, 64.0f, r_rtEmissiveScale.GetFloat() ), 1e-3f );
+	common->Printf( "rtEmissiveLights: within %.0f of %.0f %.0f %.0f (emissive lighting %s)\n", radius, eye.x, eye.y, eye.z, r_rtEmissiveLighting.GetBool() ? "ON" : "off" );
+	int nl = 0;
+	for ( int k = 0; k < s_rtEmissiveLightDbg.Num(); k++ ) {
+		const rtEmissiveLightDbg_t &dbg = s_rtEmissiveLightDbg[k];
+		const int i = dbg.light;
+		if ( i < 0 || i >= world->lightDefs.Num() || world->lightDefs[i] == NULL ) { continue; }
+		const idRenderLightLocal *ld = world->lightDefs[i];
+		if ( ( ld->globalLightOrigin - eye ).LengthSqr() > radius * radius ) { continue; }
+		nl++;
+		const char *verdict = ( dbg.kind == 0 ) ? "DROPPED" : ( dbg.kind == 2 ) ? "parallel (kept)" : ( dbg.kind == 3 ) ? "fog / blend (kept)"
+			: dbg.noHeir ? "fixtured, KEPT (no row inherits it)" : "ambience (kept)";
+		const bool stale = dbg.kind == 0 && !R_RtEmissiveLightDropped( i, ld->dudeSerial ) && r_rtEmissiveLighting.GetBool();
+		common->Printf( "  light %d at %.0f %.0f %.0f  radius %.0f %.0f %.0f  '%s'%s%s  -> %s%s\n", i,
+			ld->globalLightOrigin.x, ld->globalLightOrigin.y, ld->globalLightOrigin.z,
+			ld->parms.lightRadius.x, ld->parms.lightRadius.y, ld->parms.lightRadius.z, ld->lightShader->GetName(),
+			ld->parms.noShadows ? " noshadows" : "", ld->parms.pointLight ? "" : " (projected)", verdict,
+			stale ? "  BUT updated since the census (new serial): lighting again" : "" );
+		for ( int ri = 0; ri < s_rtEmissiveRows.Num(); ri++ ) {
+			const rtEmissiveRow_t &row = s_rtEmissiveRows[ri];
+			if ( row.lightIndex != i ) { continue; }
+			common->Printf( "      inherited by ROW %d '%s': %d tris, effective %.0f, reach %.0f, centroid %.0f %.0f %.0f (%.0f from the light)%s%s\n",
+				ri, row.mat ? row.mat->GetName() : "?", row.numTris, row.flux / sc, row.reach, row.centroid.x, row.centroid.y, row.centroid.z,
+				( row.centroid - ld->globalLightOrigin ).Length(), row.indicator ? " INDICATOR (not a light)" : "", row.dark ? " DARK" : "" );
+		}
+	}
+	common->Printf( "  %d placed lights; emitter rows within %.0f:\n", nl, radius );
+	for ( int ri = 0; ri < s_rtEmissiveRows.Num(); ri++ ) {
+		const rtEmissiveRow_t &row = s_rtEmissiveRows[ri];
+		if ( ( row.centroid - eye ).LengthSqr() > radius * radius ) { continue; }
+		common->Printf( "    ROW %d '%s' at %.0f %.0f %.0f: %d tris, effective %.0f (min %.0f), reach %.0f, inherits light %d%s%s%s\n",
+			ri, row.mat ? row.mat->GetName() : "?", row.centroid.x, row.centroid.y, row.centroid.z, row.numTris, row.flux / sc,
+			r_rtEmissiveFixtureMinArea.GetFloat(), row.reach, row.lightIndex, row.hasLight ? "" : " (none: default reach)",
+			row.indicator ? " INDICATOR" : "", row.dark ? " DARK" : "" );
+	}
 }
 
 void R_RtEmissiveProbe_f( const idCmdArgs &args ) {

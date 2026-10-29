@@ -1222,6 +1222,7 @@ void R_RtEmissiveProjectLabels( const struct viewDef_s *viewDef );
 bool R_RtEmissiveLabelsWanted( void );
 int  R_RtEmissiveGetScreenLabels( const rtEmissiveScreenLabel_t **out );
 void R_RtEmissiveProbe_f( const idCmdArgs &args );		// console: name the surface under the crosshair + the table's verdict on it
+void R_RtEmissiveLights_f( const idCmdArgs &args );		// console: the emissive census around the eye (placed lights + emitter rows)
 bool R_RtEmissiveHideEntity( int entityIndex );	// emitter mode (r_rtEmissiveHideFlares): this entity is a fixture's flare sprite - skip its draw surfaces
 bool R_RtEmissiveIsFlareMaterial( const idMaterial *mat );	// a flare / sprite-deformed additive material (the surface the hide skips)
 extern idCVar r_rtPerforatedShadows;		// alpha-tested grate/fence casters in the RT shadow rays
