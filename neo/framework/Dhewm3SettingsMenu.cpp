@@ -2675,6 +2675,7 @@ static int initialUsePrecomprTextures = 0;
 static int initialUseCompression = 0;
 static int initialUseNormalCompr = 0;
 static int initialFullscreenDisplay = -1;
+static idStr initialFullscreenDisplayName;
 static int initialVkDevice = -1;
 
 static void CaptureGraphicsBaseline()
@@ -2701,6 +2702,7 @@ static void CaptureGraphicsBaseline()
 	initialUseNormalCompr = globalImages->image_useNormalCompression.GetInteger();
 
 	initialFullscreenDisplay = r_fullscreenDisplay.GetInteger();
+	initialFullscreenDisplayName = r_fullscreenDisplayName.GetString();
 	initialVkDevice = NamedCvar( "r_vkDevice" ).GetInteger();
 }
 
@@ -2731,7 +2733,7 @@ static bool GraphicsHasResettableChanges()
 	if ( initialUseNormalCompr != globalImages->image_useNormalCompression.GetInteger() ) {
 		return true;
 	}
-	if ( initialFullscreenDisplay != r_fullscreenDisplay.GetInteger() || initialVkDevice != NamedCvar( "r_vkDevice" ).GetInteger() ) {
+	if ( ( initialFullscreenDisplay != r_fullscreenDisplay.GetInteger() || initialFullscreenDisplayName != r_fullscreenDisplayName.GetString() ) || initialVkDevice != NamedCvar( "r_vkDevice" ).GetInteger() ) {
 		return true;
 	}
 
@@ -2766,7 +2768,7 @@ static bool GraphicsHasApplyableChanges()
 		return true;
 	}
 	// the monitor and the GPU are picked when the window / device is created
-	if ( initialFullscreenDisplay != r_fullscreenDisplay.GetInteger() || initialVkDevice != NamedCvar( "r_vkDevice" ).GetInteger() ) {
+	if ( ( initialFullscreenDisplay != r_fullscreenDisplay.GetInteger() || initialFullscreenDisplayName != r_fullscreenDisplayName.GetString() ) || initialVkDevice != NamedCvar( "r_vkDevice" ).GetInteger() ) {
 		return true;
 	}
 
@@ -2780,7 +2782,7 @@ static void ApplyGraphicsSettings()
 	if ( initialUsePrecomprTextures != globalImages->image_usePrecompressedTextures.GetInteger()
 	    || initialUseNormalCompr != globalImages->image_useNormalCompression.GetInteger()
 	    || initialUseCompression != globalImages->image_useCompression.GetInteger()
-	    || initialFullscreenDisplay != r_fullscreenDisplay.GetInteger()
+	    || ( initialFullscreenDisplay != r_fullscreenDisplay.GetInteger() || initialFullscreenDisplayName != r_fullscreenDisplayName.GetString() )
 	    || initialVkDevice != NamedCvar( "r_vkDevice" ).GetInteger() )
 	{
 		// these need a full restart (=> textures must be reloaded; the window / Vulkan device is recreated)
@@ -2803,6 +2805,7 @@ static void GraphicsResetChanges()
 	globalImages->image_useCompression.SetInteger( initialUseCompression );
 	globalImages->image_useNormalCompression.SetInteger( initialUseNormalCompr );
 	r_fullscreenDisplay.SetInteger( initialFullscreenDisplay );
+	r_fullscreenDisplayName.SetString( initialFullscreenDisplayName );
 	NamedCvar( "r_vkDevice" ).SetInteger( initialVkDevice );
 }
 
@@ -3004,14 +3007,16 @@ static void DrawDisplaySettings()
 	AddTooltip( "r_fullscreen" );
 	RestartMark();
 
-	// Monitor (r_fullscreenDisplay): which display the window opens on; shown with 2+ displays (or a pinned one)
+	// Monitor (r_fullscreenDisplay + r_fullscreenDisplayName): which display the window opens on;
+	// shown with 2+ displays (or a pinned one)
 	{
-		idStrList displays;
+		idStrList displays, names;
 #if SDL_VERSION_ATLEAST(3, 0, 0)
 		int numDisplays = 0;
 		SDL_DisplayID *ids = SDL_GetDisplays( &numDisplays );
 		for ( int i = 0; i < numDisplays && ids != NULL; i++ ) {
 			const char *n = SDL_GetDisplayName( ids[i] );
+			names.Append( n ? n : "" );
 			displays.Append( va( "%d: %s", i, n ? n : "display" ) );
 		}
 		SDL_free( ids );
@@ -3019,20 +3024,39 @@ static void DrawDisplaySettings()
 		const int numDisplays = SDL_GetNumVideoDisplays();
 		for ( int i = 0; i < numDisplays; i++ ) {
 			const char *n = SDL_GetDisplayName( i );
+			names.Append( n ? n : "" );
 			displays.Append( va( "%d: %s", i, n ? n : "display" ) );
 		}
 #endif
 		const int cur = r_fullscreenDisplay.GetInteger();
+		const idStr curName = r_fullscreenDisplayName.GetString();
+		// the picked monitor as the window code finds it (GLimp_PinnedDisplay): by name, since
+		// the display order can change; by index for a pick made before the name was stored
+		int pinned = -1;
+		if ( cur >= 0 ) {
+			if ( curName.IsEmpty() || ( cur < names.Num() && names[cur] == curName ) ) {
+				pinned = ( cur < names.Num() ) ? cur : -1;
+			} else {
+				for ( int i = 0; i < names.Num() && pinned < 0; i++ ) {
+					if ( names[i] == curName ) {
+						pinned = i;
+					}
+				}
+			}
+		}
 		if ( displays.Num() >= 2 || cur >= 0 ) {
-			const char *preview = ( cur >= 0 && cur < displays.Num() ) ? displays[cur].c_str()
-				: ( cur >= 0 ? va( "%d (not connected)", cur ) : "Auto (the display the mouse is on)" );
+			const char *preview = ( pinned >= 0 ) ? displays[pinned].c_str()
+				: ( cur >= 0 ? va( "%s (not connected)", curName.IsEmpty() ? va( "%d", cur ) : curName.c_str() )
+				             : "Auto (the display the mouse is on)" );
 			if ( ImGui::BeginCombo( "Monitor", preview ) ) {
 				if ( ImGui::Selectable( "Auto (the display the mouse is on)", cur < 0 ) ) {
 					r_fullscreenDisplay.SetInteger( -1 );
+					r_fullscreenDisplayName.SetString( "" );
 				}
 				for ( int i = 0; i < displays.Num(); i++ ) {
-					if ( ImGui::Selectable( displays[i].c_str(), cur == i ) ) {
+					if ( ImGui::Selectable( displays[i].c_str(), pinned == i ) ) {
 						r_fullscreenDisplay.SetInteger( i );
+						r_fullscreenDisplayName.SetString( names[i] );
 					}
 				}
 				ImGui::EndCombo();

@@ -292,6 +292,47 @@ GLimp_Init
 // gates the GL-only paths below (swap, gamma ramp, swap interval, ImGui-on-GL)
 static bool windowIsVulkan = false;
 
+/*
+===================
+GLimp_PinnedDisplay
+
+The display index of the monitor picked in the settings (r_fullscreenDisplay), or -1 = none:
+auto, or the picked monitor is not connected. r_fullscreenDisplayName finds the monitor again
+when the display order changed; a monitor that is not connected leaves both cvars alone, so it
+wins again once it is back.
+===================
+*/
+static int GLimp_PinnedDisplay( const idStrList& displayNames ) {
+	const int want = r_fullscreenDisplay.GetInteger();
+	if ( want < 0 ) {
+		return -1;
+	}
+	const idStr name = r_fullscreenDisplayName.GetString();
+	if ( name.IsEmpty() ) {
+		// picked before the name was stored: the index alone, and remember whose it is
+		if ( want < displayNames.Num() ) {
+			r_fullscreenDisplayName.SetString( displayNames[want] );
+			return want;
+		}
+		common->Warning( "r_fullscreenDisplay %d is not connected (%d displays); using the mouse cursor's display\n",
+		                 want, displayNames.Num() );
+		return -1;
+	}
+	if ( want < displayNames.Num() && displayNames[want] == name ) {
+		return want;
+	}
+	for ( int j = 0; j < displayNames.Num(); j++ ) {
+		if ( displayNames[j] == name ) {
+			common->Printf( "Monitor \"%s\" is display %d now (was %d)\n", name.c_str(), j, want );
+			r_fullscreenDisplay.SetInteger( j );
+			return j;
+		}
+	}
+	common->Warning( "Monitor \"%s\" (r_fullscreenDisplay %d) is not connected; using the mouse cursor's display\n",
+	                 name.c_str(), want );
+	return -1;
+}
+
 bool GLimp_Init(glimpParms_t parms) {
 	common->Printf("Initializing OpenGL subsystem\n");
 
@@ -475,9 +516,12 @@ try_again:
 		}
 
 		Uint32 selectedDisplay = 0;
+		bool displayPinned = false;
 	#if SDL_VERSION_ATLEAST(2, 0, 4)
-		// try to put the window on the display the mousecursor currently is on
+		// put the window on the monitor picked in the settings, else on the display the
+		// mousecursor currently is on
 		{
+			idStrList displayNames;
 		#if SDL_VERSION_ATLEAST(3, 0, 0)
 			float x, y;
 			int numDisplays = 0;
@@ -495,6 +539,12 @@ try_again:
 				SDL_Rect rect;
 		#if SDL_VERSION_ATLEAST(3, 0, 0)
 				SDL_DisplayID displayId_x = displayIDs[j];
+				const char* displayName = SDL_GetDisplayName( displayId_x );
+		#else
+				const char* displayName = SDL_GetDisplayName( j );
+		#endif
+				displayNames.Append( displayName ? displayName : "" );
+		#if SDL_VERSION_ATLEAST(3, 0, 0)
 				int numModes = 0;
 				SDL_DisplayMode** modes = SDL_GetFullscreenDisplayModes(displayId_x, &numModes);
 				common->Printf( " Display %d (ID %u) has the following modes:\n", j, displayId_x );
@@ -524,39 +574,43 @@ try_again:
 					}
 				}
 			}
-			// explicit monitor override (r_fullscreenDisplay): pin the window to a chosen
-			// display index regardless of where the mouse is, so a mixed-refrsh multi-monitor
-			// user can force their high-refresh panel instead of a 60 Hz primary display.
-			const int wantDisplay = r_fullscreenDisplay.GetInteger();
-			if ( wantDisplay >= 0 ) {
-				if ( wantDisplay < numDisplays ) {
-					selectedDisplay = wantDisplay;
-				} else {
-					common->Warning("r_fullscreenDisplay %d is out of range (%d displays); using auto-selected %u\n",
-					                wantDisplay, numDisplays, selectedDisplay);
-				}
+			// explicit monitor (r_fullscreenDisplay + r_fullscreenDisplayName, the settings'
+			// Monitor picker): the window opens there wherever the mouse is, so a mixed-refresh
+			// multi-monitor user can force their high-refresh panel instead of a 60 Hz primary
+			// display. The mouse cursor's display is only used when no monitor is picked or
+			// the picked one is not connected.
+			const int pinned = GLimp_PinnedDisplay( displayNames );
+			if ( pinned >= 0 ) {
+				selectedDisplay = pinned;
+				displayPinned = true;
 			}
 
 		#if SDL_VERSION_ATLEAST(3, 0, 0)
 			if(displayIDs != NULL) {
 				SDL_DisplayID displayID = displayIDs[selectedDisplay];
 				common->Printf("Will use display %u (%u)%s.\n", selectedDisplay, displayID,
-				               wantDisplay >= 0 ? " (forced by r_fullscreenDisplay)" : " (mouse cursor's display)");
+				               displayPinned ? " (forced by r_fullscreenDisplay)" : " (mouse cursor's display)");
 				selectedDisplay = displayID;
 				SDL_free(displayIDs);
 			}
 		#else // SDL2
 			common->Printf("Will use display %u%s.\n", selectedDisplay,
-			               wantDisplay >= 0 ? " (forced by r_fullscreenDisplay)" : " (mouse cursor's display)");
+			               displayPinned ? " (forced by r_fullscreenDisplay)" : " (mouse cursor's display)");
 		#endif
 		}
 	#endif // SDL_VERSION_ATLEAST(2, 0, 4)
 
+		// a picked monitor gets an explicit position: with an "undefined" one SDL leaves the
+		// placement to the window manager, which (xfwm, KWin, ...) opens new windows on the
+		// monitor the mouse is on - and a fullscreen window goes fullscreen where it was placed
+		const int windowPos = displayPinned ? SDL_WINDOWPOS_CENTERED_DISPLAY(selectedDisplay)
+		                                    : SDL_WINDOWPOS_UNDEFINED_DISPLAY(selectedDisplay);
+
 	#if SDL_VERSION_ATLEAST(3, 0, 0)
 		SDL_PropertiesID props = SDL_CreateProperties();
 		SDL_SetStringProperty(props, SDL_PROP_WINDOW_CREATE_TITLE_STRING, ENGINE_VERSION);
-		SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_X_NUMBER, SDL_WINDOWPOS_UNDEFINED_DISPLAY(selectedDisplay));
-		SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_Y_NUMBER, SDL_WINDOWPOS_UNDEFINED_DISPLAY(selectedDisplay));
+		SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_X_NUMBER, windowPos);
+		SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_Y_NUMBER, windowPos);
 		SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_WIDTH_NUMBER, parms.width);
 		SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_HEIGHT_NUMBER, parms.height);
 		SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_FLAGS_NUMBER, flags);
@@ -632,9 +686,7 @@ try_again:
 		}
 
 	#else // SDL2
-		window = SDL_CreateWindow(ENGINE_VERSION,
-									SDL_WINDOWPOS_UNDEFINED_DISPLAY(selectedDisplay),
-									SDL_WINDOWPOS_UNDEFINED_DISPLAY(selectedDisplay),
+		window = SDL_CreateWindow(ENGINE_VERSION, windowPos, windowPos,
 									parms.width, parms.height, flags);
 
 		if (!window) {
