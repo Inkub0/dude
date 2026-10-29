@@ -148,12 +148,15 @@ edges:
 
 ```
 git clone --branch v0.9.7 https://github.com/Inkub0/dude.git
-git clone https://github.com/Inkub0/dude-quake4-game.git ~/dude-quake4-game
+git clone --branch v0.9.7 https://github.com/Inkub0/dude-q4.git
 cd dude
-./build.sh --vulkan                # DUDE itself (dependencies: see README.md)
-tools/quake4/build-q4game.sh       # the Quake 4 game library -> build/q4base.so
-./run-q4.sh                        # finds a Steam / GOG install, or Q4DIR=/path/to/Quake\ 4 ./run-q4.sh
+./build.sh --vulkan                                   # DUDE itself (dependencies: see README.md)
+Q4GAME_DIR=../dude-q4 tools/quake4/build-q4game.sh    # the Quake 4 game library -> build/q4base.so
+./run-q4.sh                                           # finds a Steam / GOG install, or Q4DIR=/path/to/Quake\ 4 ./run-q4.sh
 ```
+
+Use the same tag for both repositories: each DUDE release has a matching
+[dude-q4](https://github.com/Inkub0/dude-q4) tag.
 
 You need your own retail Quake 4 (no game data is included). The game library is built from
 Raven's Quake 4 SDK and lives in its own repository because it is under the SDK's licence
