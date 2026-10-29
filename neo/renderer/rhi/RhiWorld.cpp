@@ -6599,9 +6599,9 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 	// what it actually delivers. The projection planes (unused by an emitter) carry: projS.w = intensity, projT.xy = the
 	// table's device address, projQ.x/y = first triangle / count (bits), projQ.z = the reach-boost knee (0 = off).
 	// pad0 = 0: not a lightDef (the gradient pass skips emissive rows outright); pad1 = row index + 1 (debugging).
-	// projF.x = 1 when pos is the replaced light's AUTHORED ORIGIN (else the centroid): a flush ceiling strip lights the wall
-	// under it at a grazing angle (the dark walls of 2026-10-20) where the mapper's light sat 20-40 units out in the room, so
-	// the receiver cosine and the SH direction come from that origin, the energy / solid angle / visibility from the surface.
+	// pos = the row's CENTROID: the light direction and the visibility ray aim at the fixture, the receiver cosine is per area
+	// sample (rt_emissive.glsl). The paired placed light lends only its reach and power (2026-10-29: aiming at its authored
+	// origin painted its hot spot on the wall behind it and blacked the emitter out wherever that origin was hidden).
 	// With emissive mode OFF and r_rtEmissiveBounce on, the rows are BOUNCEONLY: the DI gather skips them (the placed
 	// lights keep the direct term), the bounce lights its hits with them. Capped at r_rtEmissiveMaxRows per view by
 	// importance at the eye; a row whose reach cannot touch the view (centre farther than reach + REACH) is left out.
@@ -6677,9 +6677,7 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 				// the row occupies the VOLUME of the light it replaced: cut at ONE reach like a Doom light (the shade fades out
 				// over the last quarter). A 2 x reach sphere put eight times the volume - and several times the candidates - of
 				// the placed lights into every grid cell, which overflowed the cell's slots (the blocky shadows of 2026-10-20).
-				const idVec3 pos = row.hasLight ? row.lightOrigin : row.centroid;
-				L.pos[0] = pos.x; L.pos[1] = pos.y; L.pos[2] = pos.z;
-				L.proj[3][0] = row.hasLight ? 1.0f : 0.0f;
+				L.pos[0] = row.centroid.x; L.pos[1] = row.centroid.y; L.pos[2] = row.centroid.z;
 				// POWER MATCH (r_rtEmissivePowerMatch): the emitter inherits the POWER of the light it replaces. A Doom 3 light of
 				// colour C and radius R delivers C/2 at d = R/2; this row (reach boost 2 at that distance) delivers 8 L A / R^2,
 				// so the radiance that matches is L = C R^2 / (16 A): a tiny decal replacing a big light burns bright, a big

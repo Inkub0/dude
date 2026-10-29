@@ -5023,7 +5023,7 @@ void R_RtEmissiveProbe_f( const idCmdArgs &args ) {
 						const bool originFront = g * ( a - row.lightOrigin ) > 0.0f;
 						common->Printf( "    paired with a placed light: reach %.0f, colour lum %.2f, origin %.0f %.0f %.0f (%.0f units from the hit; on the EMITTING side: %s), noShadows %s\n",
 							row.reach, row.lightLum, row.lightOrigin.x, row.lightOrigin.y, row.lightOrigin.z, ( row.lightOrigin - mt.point ).Length(),
-							originFront ? "yes" : "NO - the receiver cosine is taken against an origin BEHIND the emitter", row.noShadows ? "yes (no visibility ray)" : "no" );
+							originFront ? "yes" : "NO - the row inherits the power and reach of a light BEHIND it", row.noShadows ? "yes (no visibility ray)" : "no" );
 					} else {
 						common->Printf( "    paired with NO placed light: default reach %.0f, matched to a light of its own colour\n", r_rtEmissiveReachDefault.GetFloat() );
 					}

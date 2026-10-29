@@ -249,10 +249,11 @@ bool rtEmissiveShadeRow( RtLights lights, uint li, vec3 P, vec3 N, uint seed, ui
 	bool  noFade    = lights.l[ li ].projQ.w > 0.5;		// physical rows: no reach fade
 	RtEmissiveTable t = rtEmissiveOpen( tAddr );
 	if ( !rtEmissivePresent( t ) || num == 0u || first >= t.count || num > t.count - first ) { return false; }
-	// the receiver cosine + the visibility ray: toward the replaced light's AUTHORED ORIGIN (projF.x: pos = that origin)
-	// when the census paired one - a flush ceiling strip lights the wall under it at a grazing angle, the mapper's light
-	// sat out in the room and lit that wall - else toward the emitter's centroid (pos). ONE direction for the ray and the
-	// SH, while the RADIANCE below is area-sampled; keeping them separate is what lets the apply's bump re-resolve cancel.
+	// the light direction (SH, the apply's bump re-resolve) and the visibility ray aim at the emitter's CENTROID (pos);
+	// the receiver cosine is taken per AREA SAMPLE below - a real area light. Until 2026-10-29 a paired row aimed at and
+	// cosined against the replaced light's AUTHORED ORIGIN (for walls under flush ceiling strips): that origin painted
+	// the old light's round hot spot on a wall right behind it, and wherever the receiver could not see it the whole
+	// emitter went dark (the Marine Command alcove neons).
 	vec3 cd = lights.l[ li ].pos - P;
 	dl   = length( cd );
 	if ( !( dl > 1e-3 ) ) { return false; }
@@ -288,11 +289,12 @@ bool rtEmissiveShadeRow( RtLights lights, uint li, vec3 P, vec3 N, uint seed, ui
 		float boost = ( knee > 0.0 ) ? max( sl / knee, 1.0 ) : 1.0;
 		float fade  = noFade ? 1.0 : 1.0 - smoothstep( 0.75 * radius, radius, sl );
 		vec3  L = rtEmissiveMeanRadiance( e ) * ( e.scale * intensity * boost * fade );
-		Lsum += L * ( emit / ( pIn * pdfw ) );									// one Arvo estimate of the outgoing radiance toward P
+		float cosR = max( dot( N, sd / sl ), 0.0 );								// this sample's own receiver cosine
+		Lsum += L * ( emit * cosR / ( pIn * pdfw ) );							// one Arvo estimate of the irradiance at P
 		got++;
 	}
 	if ( got == 0u ) { return false; }
-	contrib = ( Lsum * ( 1.0 / float( ns ) ) ) * ndl;							// averaged radiance x receiver cosine (centroid)
+	contrib = Lsum * ( 1.0 / float( ns ) );										// averaged over the area samples (cosine per sample)
 	return !( any( isnan( contrib ) ) );
 }
 
