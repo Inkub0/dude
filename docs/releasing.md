@@ -71,10 +71,14 @@ the working tree.
 `arbtool.exe`, `vulkan-1.dll` (ships with GPU drivers), the dev `base`/`d3xp` symlinks
 from `dist-win/`.
 
-**Separate optional asset — `dude-X.Y-baked-ao.zip`:** the generated AO packs
-(`base/z_baked_ao.pk4`, `_props`, `_weapons`, ~100 MB) attach to every release as their
-own download (the sanctioned release-attachment channel for generated assets — they
-never go in the repo or the platform archives). Same drop-in layout (`base/` folder).
+**Separate optional assets — the baked-AO zips:** the generated AO packs attach to every
+release as their own downloads (the sanctioned release-attachment channel for generated
+assets — they never go in the repo or the platform archives), one zip per game, same drop-in
+layout:
+- `dude-X.Y-baked-ao.zip` — `base/z_baked_ao.pk4`, `_props`, `_weapons`
+- `dude-X.Y-baked-ao-roe.zip` — `d3xp/z_baked_ao_roe.pk4`, `_props_roe`, `_weapons_roe` (since 0.9.7)
+- `dude-X.Y-baked-ao-lm.zip` — `d3le/z_baked_ao_lm.pk4` (since 0.9.7). Never merged into the
+  others: a `d3le/` folder holding a pk4 shows up as a mod for players without Lost Mission.
 
 ### zz_dude_menu.pk4 — rebuild from the repo every release
 

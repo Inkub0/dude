@@ -108,8 +108,14 @@ Renderer selection: `+set r_graphicsAPI opengl|opengl3|vulkan` or the in-game me
 
 If the **Vulkan renderer won't start** (the OpenGL renderers are unaffected), update or reinstall your GPU driver — the Vulkan driver (the ICD the loader dispatches to) ships with it, and no bundled loader can substitute for a missing or Vulkan-incapable one. On Windows, `vulkan-1.dll` comes from your GPU driver; DUDE deliberately does not ship it. On Linux a current loader is bundled in `lib/` as a fallback for old distro loaders, but it still needs your driver's ICD.
 
-## Optional download: baked ambient-occlusion pack
+## Optional downloads: baked ambient-occlusion packs
 
-Precomputed per-material AO maps for subtle contact shading on world surfaces, props and weapons. All packs were re-baked this release with the new GPU baker (its occlusion rays are traced with Vulkan ray queries) and are now stored as 8-bit grayscale maps — a quarter of the old file size, with no loss from the new format. Extract into your Doom 3 directory the same way. Entirely optional, and unused at the Path Tracing tier (ray-traced GI/AO replace it there).
+Precomputed per-material AO maps for subtle contact shading on world surfaces, props and weapons, one download per game — extract only the ones you own:
+
+- `dude-0.9.7-baked-ao.zip` — Doom 3 (`base/`)
+- `dude-0.9.7-baked-ao-roe.zip` — Resurrection of Evil (`d3xp/`), **new**
+- `dude-0.9.7-baked-ao-lm.zip` — The Lost Mission (`d3le/`), **new**
+
+All packs were re-baked this release with the new GPU baker (its occlusion rays are traced with Vulkan ray queries) and are now stored as 8-bit grayscale maps — a quarter of the old file size, with no loss from the new format. Extract into your Doom 3 directory the same way. Entirely optional, and unused at the Path Tracing tier (ray-traced GI/AO replace it there).
 
 DUDE is GPLv3 — source at https://github.com/Inkub0/dude.
