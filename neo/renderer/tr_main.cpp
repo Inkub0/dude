@@ -2876,6 +2876,13 @@ static idList<bool>				s_rtEmissiveTriLightFixture;	// ... and whether the trian
 // per lightDef: the TIME-AVERAGE luminance of its stage colours when its material animates over time (a flash / flicker
 // table: lights/square_flicker2), else 0. A dropped light's flicker reaches its emitter row as live / average (the gather)
 static idList<float>			s_rtEmissiveLightAnimAvg;
+// POWER SHARING (2026-10-29): per surface run (label), what it inherits from the DROPPED lights whose volume holds it -
+// reach = the largest of their reaches from it, equivLum = the summed shares as one light colour at that reach (so the
+// power match L = C R^2 / (16 A) gives the sum), light / noShadows / origin = the biggest contributor's. reach 0 = in no
+// dropped light: an uncovered emitter (default reach, its own colour).
+struct rtEmissiveLabelShare_t { float reach, equivLum; int light; bool noShadows; int count; idVec3 origin; };
+static idList<rtEmissiveLabelShare_t>	s_rtEmissiveLabelShare;
+static idList<int>				s_rtEmissiveLightSharers;		// per lightDef: how many emitter runs share its power (0 = not dropped / kept)
 // A light origin up to this far BEHIND an emitting triangle's plane still counts as on its emitting side: mappers sit a
 // fixture's light at or just inside its glow (a tube's housing), which must keep pairing with it
 static const float				RT_EMIT_FRONT_SLACK = 4.0f;
@@ -3739,6 +3746,8 @@ static void R_RtEmissiveFree( void ) {
 	s_rtEmissiveTriLightIndex.Clear();
 	s_rtEmissiveTriLightFixture.Clear();
 	s_rtEmissiveLightAnimAvg.Clear();
+	s_rtEmissiveLabelShare.Clear();
+	s_rtEmissiveLightSharers.Clear();
 	s_rtEmissiveLightDbg.Clear();
 	if ( r != NULL ) {
 		if ( s_rtEmissiveLightDbgVB != 0 ) { r->DestroyBuffer( s_rtEmissiveLightDbgVB ); }
@@ -4173,6 +4182,19 @@ static void R_RtEmissiveBuildRows( void ) {
 		row.lightOrigin = lightOrigin;
 		row.hasLight = reach > 0.0f && lightLum > 0.0f;
 		row.lightIndex = row.hasLight ? lightIndex : -1;
+		if ( i < s_rtEmissiveLabelShare.Num() ) {
+			// POWER SHARING (R_RtEmissiveSharePower): the dropped lights around this run, not the one light its triangles
+			// paired with. In none: uncovered (default reach, own colour) - no longer the power of a KEPT light (that light
+			// still shines; inheriting it lit the spot twice)
+			const rtEmissiveLabelShare_t &sh = s_rtEmissiveLabelShare[i];
+			const bool shared = sh.reach > 0.0f && sh.equivLum > 0.0f;
+			row.reach       = shared ? sh.reach : 0.0f;
+			row.lightLum    = shared ? sh.equivLum : 0.0f;
+			row.lightIndex  = shared ? sh.light : -1;
+			row.lightOrigin = shared ? sh.origin : row.lightOrigin;
+			row.hasLight    = shared;
+			noShadows       = shared && sh.noShadows;
+		}
 		row.fixtureId = R_RtEmissiveFixtureId( c );	// the emitter surface's own centroid (unique per fixture, unlike a shared light origin)
 		// an entry (material) OR a per-fixture override pins the radiance (baked into the triangles): skip the power match
 		row.tableEntry = ( R_RtEmissiveMatTableFind( l.mat ) != NULL ) || ( R_RtEmissiveLightTableFind( row.fixtureId ) != NULL );
@@ -4611,32 +4633,111 @@ static void R_RtEmissiveLightCensus( const idRenderWorldLocal *world, rhi::RHI *
 		total, fixtured, fixtureMinArea, fixturedAmbientMat, ambience, ambienceAmbientMat, parallel, fogBlend, trisInLight, n, indicatorsInLight, n - trisInLight );
 }
 
-// 2026-10-29 ("many lights still missing"): the census DROPS every light with a fixture-sized emitter at its origin, but
-// each emitter ROW inherits ONE light (its power, reach, flicker). Two lights at one fixture, or a light whose emitter
-// paired with another, were dropped with nothing inheriting them - their light just vanished. After the rows exist: a
-// fixtured light that no lighting row (not an indicator, not dark) inherits is KEPT. Once per build (the census).
-static void R_RtEmissiveKeepUninheritedLights( void ) {
-	static idList<bool> inherited;
-	inherited.SetNum( s_rtEmissiveLightFixturedSerial.Num(), false );
-	for ( int i = 0; i < inherited.Num(); i++ ) { inherited[i] = false; }
-	for ( int ri = 0; ri < s_rtEmissiveRows.Num(); ri++ ) {
-		const rtEmissiveRow_t &row = s_rtEmissiveRows[ri];
-		if ( row.hasLight && !row.indicator && !row.dark && row.lightIndex >= 0 && row.lightIndex < inherited.Num() ) {
-			inherited[ row.lightIndex ] = true;
+// POWER SHARING (2026-10-29, user: "build the power sharing"). A Doom WASH light (mars_city1 Marine Command Access: a
+// 250 x 200 x 120 box lighting the whole room evenly, no inverse square) stood for the combined output of every fixture
+// in it; the census handed it to ONE emitter row (a ceiling panel at one end, plus a kiosk screen 175 units away - twice)
+// and the round ceiling decals in the middle kept only their 32-unit halo lights: the room went dark between fixtures.
+// Now each DROPPED light's power is split across every LIGHTING emitter run (not an indicator, not dark) that has a
+// triangle inside its volume, weighted by effective area ^ r_rtEmissiveShareExponent (0 = equal shares - default:
+// effective areas span 72 .. 23000 in that room, partly from emitters.cfg scales; 1 = by area). A run sums its shares
+// (R_RtEmissiveBuildRows); a dropped light with no lighting run inside its volume is KEPT. Once per build, after the census.
+static void R_RtEmissiveSharePower( const idRenderWorldLocal *world ) {
+	const int nl = s_rtEmissiveLabels.Num();
+	const int nd = world->lightDefs.Num();
+	const float fluxScale = Max( idMath::ClampFloat( 0.0f, 64.0f, r_rtEmissiveScale.GetFloat() ), 1e-3f );
+	const float minArea   = Max( 0.0f, r_rtEmissiveFixtureMinArea.GetFloat() );
+	const float expo      = idMath::ClampFloat( 0.0f, 1.0f, r_rtEmissiveShareExponent.GetFloat() );
+	static idList<idVec3> cen;
+	static idList<float>  weight, powerSum, best;
+	static idList<bool>   lighting;
+	static idList<int>    inside;
+	cen.SetNum( nl, false ); weight.SetNum( nl, false ); powerSum.SetNum( nl, false ); best.SetNum( nl, false ); lighting.SetNum( nl, false );
+	s_rtEmissiveLabelShare.SetNum( nl, false );
+	s_rtEmissiveLightSharers.SetNum( nd, false );
+	for ( int i = 0; i < nd; i++ ) { s_rtEmissiveLightSharers[i] = 0; }
+	for ( int li = 0; li < nl; li++ ) {
+		const rtEmissiveLabel_t &l = s_rtEmissiveLabels[li];
+		rtEmissiveLabelShare_t &sh = s_rtEmissiveLabelShare[li];
+		sh.reach = 0.0f; sh.equivLum = 0.0f; sh.light = -1; sh.noShadows = false; sh.count = 0; sh.origin.Zero();
+		powerSum[li] = 0.0f; best[li] = 0.0f; lighting[li] = false; cen[li].Zero(); weight[li] = 0.0f;
+		if ( l.numTris <= 0 || l.firstTri < 0 || l.firstTri + l.numTris > s_rtEmissiveTris.Num() ) { continue; }
+		idVec3 c( 0.0f, 0.0f, 0.0f );
+		float eff = 0.0f;
+		for ( int t = 0; t < l.numTris; t++ ) {
+			const rtEmissiveTriGPU_t &e = s_rtEmissiveTris[ l.firstTri + t ];
+			c += idVec3( e.p0[0] + e.p1[0] + e.p2[0], e.p0[1] + e.p1[1] + e.p2[1], e.p0[2] + e.p1[2] + e.p2[2] );
+			eff += Max( e.flux, 0.0f ) / fluxScale;
 		}
+		cen[li] = c * ( 1.0f / ( 3.0f * l.numTris ) );
+		lighting[li] = eff > 0.0f && eff >= minArea && ( s_rtEmissiveTris[ l.firstTri ].emit & RT_EMIT_FLAG_INDICATOR ) == 0u;
+		weight[li] = ( expo > 0.0f ) ? idMath::Pow( Max( eff, 1e-3f ), expo ) : 1.0f;
 	}
-	int kept = 0;
-	for ( int i = 0; i < inherited.Num(); i++ ) {
-		if ( s_rtEmissiveLightFixturedSerial[i] != 0u && !inherited[i] ) {
-			s_rtEmissiveLightFixturedSerial[i] = 0u;
+	int sharedLights = 0, kept = 0;
+	for ( int i = 0; i < nd && i < s_rtEmissiveLightFixturedSerial.Num(); i++ ) {
+		if ( s_rtEmissiveLightFixturedSerial[i] == 0u ) { continue; }
+		const idRenderLightLocal *ld = world->lightDefs[i];
+		if ( ld == NULL ) { continue; }
+		const idBounds *lb = ( ld->frustumTris != NULL ) ? &ld->frustumTris->bounds : NULL;
+		inside.SetNum( 0, false );
+		float W = 0.0f;
+		for ( int li = 0; li < nl; li++ ) {
+			if ( !lighting[li] ) { continue; }
+			const rtEmissiveLabel_t &l = s_rtEmissiveLabels[li];
+			bool in = false;
+			for ( int t = 0; t < l.numTris && !in; t++ ) {				// any triangle of the run inside the light's volume
+				const rtEmissiveTriGPU_t &e = s_rtEmissiveTris[ l.firstTri + t ];
+				const idVec3 tc( ( e.p0[0] + e.p1[0] + e.p2[0] ) * ( 1.0f / 3.0f ), ( e.p0[1] + e.p1[1] + e.p2[1] ) * ( 1.0f / 3.0f ), ( e.p0[2] + e.p1[2] + e.p2[2] ) * ( 1.0f / 3.0f ) );
+				if ( lb != NULL && !lb->ContainsPoint( tc ) ) { continue; }
+				in = true;
+				for ( int k = 0; k < 6 && in; k++ ) { in = ld->frustum[k].Distance( tc ) <= 1.0f; }
+			}
+			if ( !in ) { continue; }
+			inside.Append( li );
+			W += weight[li];
+		}
+		if ( inside.Num() == 0 || !( W > 0.0f ) ) {
+			s_rtEmissiveLightFixturedSerial[i] = 0u;					// nothing inside it lights: the light stays
+			for ( int k = 0; k < s_rtEmissiveLightDbg.Num(); k++ ) {
+				if ( s_rtEmissiveLightDbg[k].light == i && s_rtEmissiveLightDbg[k].kind == 0 ) { s_rtEmissiveLightDbg[k].kind = 1; s_rtEmissiveLightDbg[k].noHeir = true; }
+			}
 			kept++;
+			continue;
+		}
+		sharedLights++;
+		s_rtEmissiveLightSharers[i] = inside.Num();
+		const float *sp = ld->parms.shaderParms;
+		float C = Max( sp[SHADERPARM_RED], 0.0f ) * 0.2126f + Max( sp[SHADERPARM_GREEN], 0.0f ) * 0.7152f + Max( sp[SHADERPARM_BLUE], 0.0f ) * 0.0722f;
+		if ( !( C > 0.001f ) ) { C = 1.0f; }
+		for ( int k = 0; k < inside.Num(); k++ ) {
+			const int li = inside[k];
+			// the light's reach from this run: the farthest corner of its volume (the census measures it the same way)
+			float R = 0.0f;
+			if ( lb != NULL ) {
+				for ( int q = 0; q < 8; q++ ) {
+					const idVec3 corner( ( q & 1 ) ? ( *lb )[1].x : ( *lb )[0].x, ( q & 2 ) ? ( *lb )[1].y : ( *lb )[0].y, ( q & 4 ) ? ( *lb )[1].z : ( *lb )[0].z );
+					R = Max( R, ( corner - cen[li] ).Length() );
+				}
+			} else {
+				R = ld->parms.lightRadius.Length();
+			}
+			const float contrib = ( weight[li] / W ) * C * R * R;
+			rtEmissiveLabelShare_t &sh = s_rtEmissiveLabelShare[li];
+			powerSum[li] += contrib;
+			sh.reach = Max( sh.reach, R );
+			sh.count++;
+			if ( contrib > best[li] ) {
+				best[li] = contrib;
+				sh.light = i;
+				sh.noShadows = ld->parms.noShadows;
+				sh.origin = ld->globalLightOrigin;
+			}
 		}
 	}
-	for ( int k = 0; k < s_rtEmissiveLightDbg.Num(); k++ ) {
-		rtEmissiveLightDbg_t &dbg = s_rtEmissiveLightDbg[k];
-		if ( dbg.kind == 0 && dbg.light >= 0 && dbg.light < inherited.Num() && !inherited[ dbg.light ] ) { dbg.kind = 1; dbg.noHeir = true; }	// overlay mode 5: green, kept
+	for ( int li = 0; li < nl; li++ ) {
+		rtEmissiveLabelShare_t &sh = s_rtEmissiveLabelShare[li];
+		sh.equivLum = ( sh.reach > 0.0f ) ? powerSum[li] / ( sh.reach * sh.reach ) : 0.0f;
 	}
-	R_RtEmissiveReport( "r_rtEmissiveTable: %d fixtured placed lights KEPT - no emitter row inherits them (another light near the same emitter took the row, or the emitter is an indicator / dark)\n", kept );
+	R_RtEmissiveReport( "r_rtEmissiveTable: power sharing (exponent %.2f): %d dropped lights split across the emitter runs in their volume; %d fixtured lights KEPT - no lighting emitter inside their volume\n", expo, sharedLights, kept );
 }
 
 // A group whose entity is gone: its slot was freed, or now holds another model (R_RtEmissiveRefreshMovers darkened it).
@@ -4736,7 +4837,7 @@ static void R_RtEmissiveUpdate( const idRenderWorldLocal *world, rhi::RHI *r ) {
 		return;
 	}
 	const bool stale = s_rtEmissiveMap.Icmp( world->mapName ) != 0 || r_rtEmissiveTable.IsModified() || r_rtEmissiveLighting.IsModified() || r_rtEmissiveScale.IsModified()
-		|| r_rtEmissiveFixtureMinArea.IsModified();		// the census pairing changed: rebuild (cheap enough; the table is small)
+		|| r_rtEmissiveFixtureMinArea.IsModified() || r_rtEmissiveShareExponent.IsModified();		// the census pairing changed: rebuild (cheap enough; the table is small)
 	if ( !stale ) {
 		R_RtEmissiveRefreshMovers( world, r );	// E1e: moved doors / lifts / platforms re-bake their slice
 		if ( r_rtEmissiveTableDebug.GetInteger() > 0 && r_rtEmissiveTableDebug.GetInteger() != 5 ) {
@@ -4769,7 +4870,8 @@ static void R_RtEmissiveUpdate( const idRenderWorldLocal *world, rhi::RHI *r ) {
 	// (a fixture changed which surfaces glow, a new emissive entity, a glow image now resident) prints one line
 	s_rtEmissiveReport = s_rtEmissiveReportedMap.Icmp( world->mapName ) != 0 || r_rtEmissiveTable.IsModified()
 		|| r_rtEmissiveLighting.IsModified() || r_rtEmissiveScale.IsModified() || r_rtEmissiveFixtureMinArea.IsModified()
-		|| r_rtEmissiveTableDebug.GetInteger() > 0;
+		|| r_rtEmissiveShareExponent.IsModified() || r_rtEmissiveTableDebug.GetInteger() > 0;
+	r_rtEmissiveShareExponent.ClearModified();
 	r_rtEmissiveTable.ClearModified();
 	r_rtEmissiveLighting.ClearModified();
 	r_rtEmissiveScale.ClearModified();
@@ -4780,8 +4882,8 @@ static void R_RtEmissiveUpdate( const idRenderWorldLocal *world, rhi::RHI *r ) {
 	R_RtEmissiveBuild( world, r );
 	if ( s_rtEmissiveBuf != 0 ) {
 		R_RtEmissiveLightCensus( world, r );	// E5 prep: fixtured vs ambience placed lights
+		R_RtEmissiveSharePower( world );		// each dropped light's power split across the emitters in its volume (or kept)
 		R_RtEmissiveBuildRows();				// E2 v3: the emitter rows the scene-light gather appends
-		R_RtEmissiveKeepUninheritedLights();	// a dropped light must be inherited by a row, else it stays
 	}
 	if ( !s_rtEmissiveReport ) {
 		common->Printf( "r_rtEmissiveTable: rebuilt in %.1f ms (%d emissive triangles)\n", Sys_MillisecondsPrecise() - buildStart, s_rtEmissiveTris.Num() );
@@ -5053,22 +5155,20 @@ void R_RtEmissiveLights_f( const idCmdArgs &args ) {
 			ld->parms.lightRadius.x, ld->parms.lightRadius.y, ld->parms.lightRadius.z, ld->lightShader->GetName(),
 			ld->parms.noShadows ? " noshadows" : "", ld->parms.pointLight ? "" : " (projected)", verdict,
 			stale ? "  BUT updated since the census (new serial): lighting again" : "" );
-		for ( int ri = 0; ri < s_rtEmissiveRows.Num(); ri++ ) {
-			const rtEmissiveRow_t &row = s_rtEmissiveRows[ri];
-			if ( row.lightIndex != i ) { continue; }
-			common->Printf( "      inherited by ROW %d '%s': %d tris, effective %.0f, reach %.0f, centroid %.0f %.0f %.0f (%.0f from the light)%s%s\n",
-				ri, row.mat ? row.mat->GetName() : "?", row.numTris, row.flux / sc, row.reach, row.centroid.x, row.centroid.y, row.centroid.z,
-				( row.centroid - ld->globalLightOrigin ).Length(), row.indicator ? " INDICATOR (not a light)" : "", row.dark ? " DARK" : "" );
+		if ( i < s_rtEmissiveLightSharers.Num() && s_rtEmissiveLightSharers[i] > 0 ) {
+			common->Printf( "      its power is shared by %d emitter runs in its volume; the main share of:", s_rtEmissiveLightSharers[i] );
+			for ( int ri = 0; ri < s_rtEmissiveRows.Num(); ri++ ) { if ( s_rtEmissiveRows[ri].lightIndex == i ) { common->Printf( " ROW %d", ri ); } }
+			common->Printf( "\n" );
 		}
 	}
 	common->Printf( "  %d placed lights; emitter rows within %.0f:\n", nl, radius );
 	for ( int ri = 0; ri < s_rtEmissiveRows.Num(); ri++ ) {
 		const rtEmissiveRow_t &row = s_rtEmissiveRows[ri];
 		if ( ( row.centroid - eye ).LengthSqr() > radius * radius ) { continue; }
-		common->Printf( "    ROW %d '%s' at %.0f %.0f %.0f: %d tris, effective %.0f (min %.0f), reach %.0f, inherits light %d%s%s%s\n",
+		common->Printf( "    ROW %d '%s' at %.0f %.0f %.0f: %d tris, effective %.0f (min %.0f), reach %.0f, equivalent lum %.2f, main light %d, radiance x %.2f%s%s%s\n",
 			ri, row.mat ? row.mat->GetName() : "?", row.centroid.x, row.centroid.y, row.centroid.z, row.numTris, row.flux / sc,
-			r_rtEmissiveFixtureMinArea.GetFloat(), row.reach, row.lightIndex, row.hasLight ? "" : " (none: default reach)",
-			row.indicator ? " INDICATOR" : "", row.dark ? " DARK" : "" );
+			r_rtEmissiveFixtureMinArea.GetFloat(), row.reach, row.lightLum, row.lightIndex, row.tableEntry ? 1.0f : R_RtEmissiveMatchedScale( row ),
+			row.hasLight ? "" : " (in no dropped light: default reach)", row.indicator ? " INDICATOR" : "", row.dark ? " DARK" : "" );
 	}
 }
 
@@ -5234,7 +5334,7 @@ void R_RtResetSceneState( void ) {
 	// E1 emissive table: handles are stale too; the CPU copy goes with them so the next RT frame rebuilds
 	s_rtEmissiveBuf = 0; s_rtEmissiveAddr = 0; s_rtEmissiveDbgVB = s_rtEmissiveDbgIB = 0; s_rtEmissiveDbgIndexes = 0;
 	s_rtEmissiveTris.Clear(); s_rtEmissiveTriSrc.Clear(); s_rtEmissiveGroups.Clear(); s_rtEmissiveLocalVerts.Clear(); s_rtEmissiveLabels.Clear(); s_rtEmissiveScreenLabels.Clear(); s_rtEmissiveMap.Clear(); s_rtEmissiveTotalFlux = 0.0f;
-	s_rtEmissiveRows.Clear(); s_rtEmissiveLightDbgVB = s_rtEmissiveLightDbgIB = 0; s_rtEmissiveLightDbgIndexes = 0; s_rtEmissiveLightFixturedSerial.Clear(); s_rtEmissiveTriLightOrigin.Clear(); s_rtEmissiveTriLightNoShadows.Clear(); s_rtEmissiveTriLightFront.Clear(); s_rtEmissiveTriLightIndex.Clear(); s_rtEmissiveTriLightFixture.Clear(); s_rtEmissiveLightAnimAvg.Clear(); s_rtEmissiveLightDbg.Clear();
+	s_rtEmissiveRows.Clear(); s_rtEmissiveLightDbgVB = s_rtEmissiveLightDbgIB = 0; s_rtEmissiveLightDbgIndexes = 0; s_rtEmissiveLightFixturedSerial.Clear(); s_rtEmissiveTriLightOrigin.Clear(); s_rtEmissiveTriLightNoShadows.Clear(); s_rtEmissiveTriLightFront.Clear(); s_rtEmissiveTriLightIndex.Clear(); s_rtEmissiveTriLightFixture.Clear(); s_rtEmissiveLightAnimAvg.Clear(); s_rtEmissiveLabelShare.Clear(); s_rtEmissiveLightSharers.Clear(); s_rtEmissiveLightDbg.Clear();
 }
 
 // DUDE: the six cvars that imply the persistent ray-query scene. r_rtWorld is the explicit
