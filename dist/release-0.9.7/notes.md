@@ -35,8 +35,6 @@ engine and chasing every difference back to its cause (see *Under the hood* belo
   default gamepad layout once (the same one *Reset Gamepad Bindings* uses). Existing bindings
   are never touched.
 
-If you reported one of these: please tell us whether 0.9.7 fixes it for you.
-
 ### Path Tracing tier: sharp shadows on moving characters
 
 - **No more shadow smear behind NPCs and monsters.** ReSTIR's change detection only noticed a
@@ -144,15 +142,34 @@ crop-HDR, soft-particle, motion-vector, interaction-table, widescreen-HUD and mo
 stability fixes above came out of that work. Everything Quake 4 needs is gated to Quake 4, so
 Doom 3 parses and plays exactly as before.
 
-Quake 4 support itself is early work and **not part of this release's downloads**.
+Quake 4 support itself is early work and **not part of this release's downloads**. If you own
+Quake 4 and want to try it, you can build it yourself on Linux — single player only, expect rough
+edges:
+
+```
+git clone --branch v0.9.7 https://github.com/Inkub0/dude.git
+git clone https://github.com/Inkub0/dude-quake4-game.git ~/dude-quake4-game
+cd dude
+./build.sh --vulkan                # DUDE itself (dependencies: see README.md)
+tools/quake4/build-q4game.sh       # the Quake 4 game library -> build/q4base.so
+./run-q4.sh                        # finds a Steam / GOG install, or Q4DIR=/path/to/Quake\ 4 ./run-q4.sh
+```
+
+You need your own retail Quake 4 (no game data is included). The game library is built from
+Raven's Quake 4 SDK and lives in its own repository because it is under the SDK's licence
+(non-commercial use only), not the GPL. Saves and settings go to `~/.local/share/dude/q4base`
+and `~/.config/dude/q4base`, apart from Doom 3's.
+
+## Upgrading from 0.9.6
+
+- **Your graphics settings are reset once** on the first start, so the retuned defaults reach
+  existing installs too. Key bindings, audio, resolution and display mode, monitor, renderer and
+  GPU are kept; **pick your quality preset and ray-tracing level again** afterwards.
+- **New savegames carry a DUDE revision**: an older DUDE build restarts the map with your
+  persistent player data instead of loading them. 0.9.7 loads all your older saves.
 
 ## Known limitations
 
-- **Existing configs keep their old values** for the retuned ReSTIR / denoiser defaults: use
-  *Restore defaults* in the F10 Debugging tab, or reset your graphics settings, to pick them up.
-  Fresh installs start from the new values; new settings (`r_rtgiAmbient`) apply everywhere.
-- **New savegames carry a DUDE revision**: an older DUDE build restarts the map with your
-  persistent player data instead of loading them.
 - **Emissive Mode is still experimental and ships off**, as in 0.9.6 (it got faster this release:
   fewer samples by default and a cheaper emitter target).
 - Switching from OpenGL 3 to Vulkan inside the menu can still lose the 2D GUI — restart the game
@@ -183,9 +200,9 @@ your driver's ICD.
 ## Optional download: baked ambient-occlusion pack
 
 `dude-0.9.7-baked-ao.zip`: precomputed per-material AO maps for subtle contact shading on world
-surfaces, props and weapons. TODO(release): say whether the packs were re-baked this release (the
-AO baker now traces on the GPU and writes 8-bit grayscale maps) or are unchanged from 0.9.6.
-Extract into your Doom 3 directory the same way. Entirely optional, and unused at the Path Tracing
+surfaces, props and weapons. All packs were re-baked this release with the new GPU baker (its
+occlusion rays are traced with Vulkan ray queries) and are now stored as 8-bit grayscale maps — a
+quarter of the old file size, with no loss from the new format. Extract into your Doom 3 directory the same way. Entirely optional, and unused at the Path Tracing
 tier (ray-traced GI/AO replace it there).
 
 DUDE is GPLv3 — source at https://github.com/Inkub0/dude.
