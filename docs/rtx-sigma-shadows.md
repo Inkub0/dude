@@ -490,10 +490,12 @@ benchmark. Not recommended first: it adds a fixed cost, and it does not use SIGM
 6. **S6 (optional) `feat/rtx-sigma-rtx-tier`:** Option A-spatial for the top-K blurred lights, on request only.
 7. **S7:** trim losers and diagnostic cvars; refresh this doc and the cvar tables.
 
-## 8. Decisions for the user
+## 8. Decisions
 
-1. **Track:** B1 lanes (recommended), C (non-SIGMA ReLAX split), or both, measured against each other?
-2. **Run M1 + M2 first** (no code; they decide whether any of this can pay)?
-3. **Lane penumbra:** near-hard (recommended first), RTX-blur-matched soft, or physical area?
-4. **Option A:** park (recommended) or build S6 as an opt-in quality option?
-5. **Emissive lanes:** after the emissive bug fixes (recommended), or earlier on a test map?
+User, 2026-10-29:
+1. **Track: B1** (dominant-light lanes). C stays a reference only.
+2. **M2 first** (debug-8 screenshots of named spots, normal mode), **then M1** as an automated timedemo A/B.
+3. **Lane penumbra: near-hard**, to be judged visually when S2/S3 run.
+4. **Option A: parked** ("thesis corroborated by data").
+5. Emissive lanes (S5) stay after the emissive bug fixes ("some lights plain won't work", suspected emitters on
+   non-world geometry; tracked separately).
