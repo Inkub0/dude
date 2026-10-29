@@ -1504,15 +1504,20 @@ void idCommonLocal::CheckConfigSchema( void ) {
 	const int from = dude_cfgSchema.GetInteger();
 
 	// Display / output cvars are CVAR_RENDERER too but are NOT part of the enhancement
-	// schema - snapshot them, reset the renderer group, then restore them.
+	// schema - snapshot them, reset the renderer group, then restore them. That includes the
+	// renderer itself: r_graphicsAPI defaults to the legacy "opengl", and this runs before the
+	// renderer starts, so a reset without it brought every Vulkan user up on legacy OpenGL.
 	static const char * const keep[] = {
 		"r_mode", "r_fullscreen", "r_fullscreenDesktop", "r_fullscreenDisplay", "r_fullscreenDisplayName",
 		"r_customWidth", "r_customHeight", "r_swapInterval", "r_multiSamples",
 		"r_gamma", "r_brightness", "r_gammaInShader",
+		"r_graphicsAPI", "r_vkDevice", "r_vrr", "r_windowResizable",
 	};
 	const int keepCount = sizeof( keep ) / sizeof( keep[0] );
 	idStr saved[ sizeof( keep ) / sizeof( keep[0] ) ];
+	bool exists[ sizeof( keep ) / sizeof( keep[0] ) ];
 	for ( int i = 0; i < keepCount; i++ ) {
+		exists[i] = cvarSystem->Find( keep[i] ) != NULL;	// r_vkDevice: Vulkan builds only
 		saved[i] = cvarSystem->GetCVarString( keep[i] );
 	}
 
@@ -1521,7 +1526,9 @@ void idCommonLocal::CheckConfigSchema( void ) {
 
 	// restore the preserved display settings
 	for ( int i = 0; i < keepCount; i++ ) {
-		cvarSystem->SetCVarString( keep[i], saved[i] );
+		if ( exists[i] ) {
+			cvarSystem->SetCVarString( keep[i], saved[i] );
+		}
 	}
 
 	// preset selectors / interpolation live outside CVAR_RENDERER (CVAR_SYSTEM) - reset them too
@@ -1532,7 +1539,7 @@ void idCommonLocal::CheckConfigSchema( void ) {
 	dude_cfgSchema.SetInteger( DUDE_CONFIG_SCHEMA );
 
 	common->Printf( "DUDE: config schema %d -> %d - graphics/enhancement settings reset to "
-		"defaults (keybinds, audio and resolution kept).\n", from, DUDE_CONFIG_SCHEMA );
+		"defaults (keybinds, audio, resolution, renderer and GPU kept).\n", from, DUDE_CONFIG_SCHEMA );
 }
 
 /*

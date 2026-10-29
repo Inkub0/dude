@@ -52,7 +52,9 @@ If you have questions concerning this license or the applicable additional terms
 // releases - only when the settings schema itself changes. See idCommonLocal::CheckConfigSchema.
 // 2 (2026-10-12): the ReSTIR DI defaults moved under the user (ReLAX denoiser, the R3a boost on at K 2 with the history
 // trigger off, weapon-only forward rule) and archived values from the tuning sessions kept overriding them.
-#define DUDE_CONFIG_SCHEMA				2
+// 3 (2026-10-29, 0.9.7): the ReSTIR DI gradient / ReLAX / boost defaults were retuned (shadow smear fix) and
+// 0.9.6 configs archive the old values; the renderer, GPU and VRR choices are kept from now on.
+#define DUDE_CONFIG_SCHEMA				3
 
 #ifdef ID_REPRODUCIBLE_BUILD
 	// for reproducible builds we hardcode values that would otherwise come from __DATE__ and __TIME__
