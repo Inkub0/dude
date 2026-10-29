@@ -554,6 +554,7 @@ int main(int argc, char **argv) {
 	setenv("LC_ALL", "C", 1);
 
 	Posix_InitSignalHandlers();
+	Posix_SetArgs( argc, argv );
 
 	if ( argc > 1 ) {
 		common->Init( argc-1, &argv[1] );

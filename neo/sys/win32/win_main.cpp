@@ -188,6 +188,47 @@ void Sys_Error( const char *error, ... ) {
 	exit (1);
 }
 
+// DUDE: Sys_RequestRelaunch - the arguments to add to this process's command line
+static idStr	relaunchArgs;
+static bool		relaunchRequested = false;
+
+void Sys_RequestRelaunch( int numArgs, const char * const *args ) {
+	relaunchArgs.Clear();
+	for ( int i = 0; i < numArgs; i++ ) {
+		relaunchArgs += " \"";
+		relaunchArgs += args[i];
+		relaunchArgs += "\"";
+	}
+	relaunchRequested = true;
+}
+
+// start this executable again with the same command line plus relaunchArgs, once everything
+// has shut down (Sys_Quit ends this process right after)
+static void Win_Relaunch( void ) {
+	if ( !relaunchRequested ) {
+		return;
+	}
+	relaunchRequested = false;
+	const wchar_t *cmdLine = GetCommandLineW();
+	const int extraLen = MultiByteToWideChar( CP_UTF8, 0, relaunchArgs.c_str(), -1, NULL, 0 );
+	const size_t cmdLen = wcslen( cmdLine );
+	wchar_t *buf = (wchar_t *)malloc( ( cmdLen + extraLen + 1 ) * sizeof( wchar_t ) );
+	if ( buf == NULL ) {
+		return;
+	}
+	wcscpy( buf, cmdLine );
+	MultiByteToWideChar( CP_UTF8, 0, relaunchArgs.c_str(), -1, buf + cmdLen, extraLen );
+	STARTUPINFOW si;
+	PROCESS_INFORMATION pi;
+	ZeroMemory( &si, sizeof( si ) );
+	si.cb = sizeof( si );
+	if ( CreateProcessW( NULL, buf, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi ) ) {
+		CloseHandle( pi.hThread );
+		CloseHandle( pi.hProcess );
+	}
+	free( buf );
+}
+
 /*
 ==============
 Sys_Quit
@@ -205,6 +246,7 @@ void Sys_Quit( void ) {
 	timeEndPeriod( 1 );
 	Sys_ShutdownInput();
 	Sys_DestroyConsole();
+	Win_Relaunch();
 	ExitProcess( 0 );
 }
 
