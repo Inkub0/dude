@@ -19,7 +19,7 @@ Many of those fixes were found the same way: by running a second idTech4 game (Q
 ### Path Tracing tier: sharp shadows on moving characters
 
 - **Much less shadow smear behind NPCs and monsters.** ReSTIR's change detection only noticed a shadow *arriving* on a surface, not one *leaving* it, so the trailing edge of a moving character's shadow lingered. It now catches both, resets the denoiser's history where the light really changed, and gives low-confidence pixels a stronger fresh sample. Retuned defaults for all of it.
-- **Much less trails behind characters' details** (ears, noses, weapons) when a pose was reused between game tics: the reused frame reported zero animation velocity to the denoiser.
+- **Far fewer trails behind characters' details** (ears, noses, weapons) when a pose was reused between game tics: the reused frame reported zero animation velocity to the denoiser.
 - **Doom 3's ambient lights under RT GI** (`r_rtgiAmbient`, new, default *Floor + Fold*). With RT GI on, the designers' ambient fill lights used to be switched off entirely and left to the GI to replace — dark where few real lights bounce (Mars outdoors, RoE's Erebus). They now add only what the ray-traced lighting falls short of, and also feed the GI bounce.
 - **Faster execution:** the chosen light is shaded once instead of twice, last frame's side data is ping-ponged instead of copied, the light grid fills per 4×4×4 block (≈ 0.95 → 0.35 ms), and the per-frame light buffers live in VRAM.
 
@@ -81,7 +81,6 @@ cd dude
 ./build.sh --vulkan                                   # DUDE itself (dependencies: see README.md)
 Q4GAME_DIR=../dude-q4 tools/quake4/build-q4game.sh    # the Quake 4 game library -> build/q4base.so
 ./run-q4.sh                                           # finds a Steam / GOG install, or Q4DIR=/path/to/Quake\ 4 ./run-q4.sh
-
 ```
 
 Use the same tag for both repositories: each DUDE release has a matching
@@ -101,8 +100,7 @@ You need your own retail Quake 4 (no game data is included). The game library is
 
 ## Setup (same as 0.9.6)
 
-You need the original _DOOM 3_ / _Resurrection of Evil_ game data (`base/*.pk4`,`d3xp/*.pk4`) from your own copy (Steam/GOG classic, **not** the BFG Edition).
-
+You need the original _DOOM 3_ / _Resurrection of Evil_ game data (`base/*.pk4`, `d3xp/*.pk4`) from your own copy (Steam/GOG classic, **not** the BFG Edition).
 - **Windows (64-bit)**: unzip and copy the **contents** of `dude-0.9.7-win64` into your Doom 3 directory, next to `base/` (the included pk4/config files merge into `base/` and `d3xp/`). Or run from anywhere with `+set fs_basepath "C:\path\to\Doom 3"`.
 - **Linux (x86_64)**: untar and copy the contents into your Doom 3 directory the same way, run `./dude`.
 
