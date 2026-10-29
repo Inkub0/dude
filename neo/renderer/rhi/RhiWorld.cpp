@@ -6328,6 +6328,13 @@ static unsigned int RB_RHI_FloatToHalfBits( float f ) {
 }
 
 
+// Emissive mode: the LIVE colour luminance of each dropped (fixtured) placed light, evaluated by the loop below in this
+// call (stamp = the call's generation). Its emitter row lights at live / time-average (R_RtEmissiveLightFlicker): the
+// flash / flicker table of the light it replaced, which otherwise vanished with that light.
+static idList<float>		s_emDroppedLiveLum;
+static idList<unsigned int>	s_emDroppedLiveGen;
+static unsigned int			s_emLiveGen = 0;
+
 static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsigned long long *outAddr ) {
 	static int                 cacheCount = 0;
 	static unsigned long long  cacheAddr  = 0;
@@ -6367,6 +6374,7 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 	// strobing / fading light does the same in the reflection and in its volumetric shaft. Off-view lights
 	// have no registers this frame and fall back to their static colour below.
 	const int numDefs = rw->lightDefs.Num();
+	s_emLiveGen++;											// this call's stamp for the dropped lights' live brightness
 	if ( s_sceneLightCoveredGen.Num() < numDefs ) {
 		const int first = s_sceneLightCoveredGen.Num();
 		s_sceneLightCoveredGen.SetNum( numDefs );
@@ -6473,6 +6481,18 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 		} else {									// parametric (the usual case): the light's base RGB shader parms
 			col.Set( ld->parms.shaderParms[SHADERPARM_RED], ld->parms.shaderParms[SHADERPARM_GREEN], ld->parms.shaderParms[SHADERPARM_BLUE] );
 		}
+		// emissive mode: note a DROPPED light's live brightness before the dark test (an OFF phase must reach its row as 0)
+		const bool emDropped = R_RtEmissiveLightDropped( i, ld->dudeSerial );
+		if ( emDropped ) {
+			if ( s_emDroppedLiveLum.Num() < rw->lightDefs.Num() ) {
+				const int was = s_emDroppedLiveLum.Num();
+				s_emDroppedLiveLum.SetNum( rw->lightDefs.Num(), false );
+				s_emDroppedLiveGen.SetNum( rw->lightDefs.Num(), false );
+				for ( int k = was; k < s_emDroppedLiveLum.Num(); k++ ) { s_emDroppedLiveLum[k] = 0.0f; s_emDroppedLiveGen[k] = 0u; }
+			}
+			s_emDroppedLiveLum[ i ] = col[0] * 0.2126f + col[1] * 0.7152f + col[2] * 0.0722f;
+			s_emDroppedLiveGen[ i ] = s_emLiveGen;
+		}
 		if ( col[0] < 0.001f && col[1] < 0.001f && col[2] < 0.001f ) { if ( vl != NULL ) { s_diSkipDark++; } continue; }	// dark / off (the frontend's own threshold)
 		// order: projected/parallel (the authored feature lights) first, then nearest first - consumers that
 		// keep only a short candidate list per ray (volumetrics) must not lose a spot to a crowd of fill lights
@@ -6488,7 +6508,7 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 		// E5 (docs/rtx-experimental-lighting.md): emissive mode DROPS a fixtured placed light - its surface is the light now.
 		// Marked DI-covered so the forward path does not draw it either; it leaves every consumer of this buffer (DI, the
 		// bounce, volumetrics, reflections). Ambience washes, suns, weapon lights and lights born after the build stay.
-		if ( R_RtEmissiveLightDropped( i, ld->dudeSerial ) ) {
+		if ( emDropped ) {
 			s_sceneLightCoveredGen[ i ] = s_sceneLightGen;
 			s_diSkipEmissiveDrop++;
 			continue;
@@ -6708,7 +6728,15 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 				L.color[0] = row.meanRadiance.x * kc; L.color[1] = row.meanRadiance.y * kc; L.color[2] = row.meanRadiance.z * kc;
 				L.flags = 64u | ( r_rtEmissiveLighting.GetBool() ? 0u : 128u )		// bit6 = emissive row, bit7 = bounce-only (normal mode)
 				        | ( row.noShadows ? 4u : 0u );									// bit2 = the replaced light cast no shadows: no visibility ray (a tube behind its cover)
-				L.proj[0][3] = rowIntensity;
+				// the replaced light's live flicker (its flash table) - 1 when it does not animate or was not evaluated this call;
+				// projF.y carries it for the R1 gradient (an emitter's change is its factor's change, restir_di_gradient.frag)
+				float flicker = 1.0f;
+				if ( row.lightIndex >= 0 && row.lightIndex < s_emDroppedLiveGen.Num() && s_emDroppedLiveGen[ row.lightIndex ] == s_emLiveGen ) {
+					const float f = R_RtEmissiveLightFlicker( row.lightIndex, s_emDroppedLiveLum[ row.lightIndex ] );
+					if ( f >= 0.0f ) { flicker = f; }										// -1: the light does not animate
+				}
+				L.proj[0][3] = rowIntensity * flicker;
+				L.proj[3][1] = flicker;
 				memcpy( &L.proj[1][0], &tLo, sizeof( tLo ) );
 				memcpy( &L.proj[1][1], &tHi, sizeof( tHi ) );
 				const unsigned int first = (unsigned int)row.firstTri, num = (unsigned int)row.numTris;

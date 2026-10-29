@@ -2871,6 +2871,10 @@ static idList<unsigned int>		s_rtEmissiveLightFixturedSerial;
 static idList<idVec3>			s_rtEmissiveTriLightOrigin;		// E2 v3: per table triangle, the ORIGIN of the placed light it replaces (census; valid where lightLum > 0)
 static idList<bool>				s_rtEmissiveTriLightNoShadows;	// E2 v3: ... and whether that light cast NO shadows (the row inherits it: no visibility ray)
 static idList<bool>				s_rtEmissiveTriLightFront;		// ... and whether that light sits on the triangle's EMITTING side (the pairing prefers one that does)
+static idList<int>				s_rtEmissiveTriLightIndex;		// ... and that light's lightDef index (-1 = none): its live flicker drives the row
+// per lightDef: the TIME-AVERAGE luminance of its stage colours when its material animates over time (a flash / flicker
+// table: lights/square_flicker2), else 0. A dropped light's flicker reaches its emitter row as live / average (the gather)
+static idList<float>			s_rtEmissiveLightAnimAvg;
 // A light origin up to this far BEHIND an emitting triangle's plane still counts as on its emitting side: mappers sit a
 // fixture's light at or just inside its glow (a tube's housing), which must keep pairing with it
 static const float				RT_EMIT_FRONT_SLACK = 4.0f;
@@ -3731,6 +3735,8 @@ static void R_RtEmissiveFree( void ) {
 	s_rtEmissiveTriLightOrigin.Clear();
 	s_rtEmissiveTriLightNoShadows.Clear();
 	s_rtEmissiveTriLightFront.Clear();
+	s_rtEmissiveTriLightIndex.Clear();
+	s_rtEmissiveLightAnimAvg.Clear();
 	s_rtEmissiveLightDbg.Clear();
 	if ( r != NULL ) {
 		if ( s_rtEmissiveLightDbgVB != 0 ) { r->DestroyBuffer( s_rtEmissiveLightDbgVB ); }
@@ -4055,6 +4061,51 @@ static void R_RtEmissiveFillDebugVerts( int firstTri, int numTris, idDrawVert *v
 // in-place change (state: flux; movers: positions). A row is one WHOLE surface run: a cell's slots must hold DISTINCT
 // emitters (chunking a big tile into pieces let one tile fill every slot of the cells under it and starved every other
 // light there - the dark Marine HQ of 2026-10-20).
+// The TIME-AVERAGE luminance of a light material's live stage colours (summed like RB_RHI_GatherSceneLights does) with this
+// light's own parms, or 0 when it does not change over time. A flash / flicker / pulse table (lights/square_flicker2:
+// flashtable[Parm4 + time * .25 * Parm3] * Parm0..2) is sampled over 32 s; sound-driven colours read silence here (no
+// emitter) and count as steady. Emissive mode drops a fixtured light, so its flicker would be lost: the gather scales
+// the emitter row that replaced it by live / this average - same mean brightness, the light's own flicker back.
+static float R_RtEmissiveLightAnimatedAverage( const idRenderLightLocal *ld ) {
+	const idMaterial *ls = ld->lightShader;
+	const int numRegs = ( ls != NULL ) ? ls->GetNumRegisters() : 0;
+	if ( numRegs <= 0 || numRegs > 4096 ) {
+		return 0.0f;
+	}
+	float *regs = (float *)_alloca16( numRegs * (int)sizeof( float ) );
+	viewDef_t probeView;
+	memset( &probeView, 0, sizeof( probeView ) );
+	const int SAMPLES = 64;
+	float sum = 0.0f, lo = 1e30f, hi = 0.0f;
+	for ( int k = 0; k < SAMPLES; k++ ) {
+		probeView.floatTime = 0.11f + 0.5003f * (float)k;			// not a multiple of a table's period
+		ls->EvaluateRegisters( regs, ld->parms.shaderParms, &probeView, NULL );
+		float c[3] = { 0.0f, 0.0f, 0.0f };
+		for ( int st = 0; st < ls->GetNumStages(); st++ ) {
+			const shaderStage_t *stage = ls->GetStage( st );
+			if ( stage == NULL || regs[ stage->conditionRegister ] == 0.0f ) { continue; }
+			for ( int ch = 0; ch < 3; ch++ ) { c[ch] += Max( regs[ stage->color.registers[ch] ], 0.0f ); }
+		}
+		const float lum = c[0] * 0.2126f + c[1] * 0.7152f + c[2] * 0.0722f;
+		sum += lum;	lo = Min( lo, lum );	hi = Max( hi, lum );
+	}
+	const float avg = sum / (float)SAMPLES;
+	if ( !( avg > 1e-3f ) || hi - lo <= 0.02f * hi ) {
+		return 0.0f;													// dark under the probe (sound-driven) or steady
+	}
+	return avg;
+}
+
+// The live flicker multiplier of a placed light the emitter table dropped: live / time-average luminance, clamped to 0..4;
+// -1 = the light does not animate (or the index is stale). RB_RHI_GatherSceneLights passes the luminance it just evaluated.
+float R_RtEmissiveLightFlicker( int lightIndex, float liveLum ) {
+	if ( lightIndex < 0 || lightIndex >= s_rtEmissiveLightAnimAvg.Num() ) {
+		return -1.0f;
+	}
+	const float avg = s_rtEmissiveLightAnimAvg[ lightIndex ];
+	return ( avg > 0.0f ) ? idMath::ClampFloat( 0.0f, 4.0f, liveLum / avg ) : -1.0f;
+}
+
 static void R_RtEmissiveBuildRows( void ) {
 	s_rtEmissiveRowBuilds++;
 	s_rtEmissiveRows.SetNum( 0, false );
@@ -4072,6 +4123,7 @@ static void R_RtEmissiveBuildRows( void ) {
 		idVec3 lightOrigin( 0.0f, 0.0f, 0.0f );
 		bool noShadows = false;
 		bool lightFront = false;
+		int  lightIndex = -1;
 		bool dark = true;
 		for ( int t = 0; t < l.numTris; t++ ) {
 			const rtEmissiveTriGPU_t &e = s_rtEmissiveTris[ l.firstTri + t ];
@@ -4092,6 +4144,7 @@ static void R_RtEmissiveBuildRows( void ) {
 			// the light with the largest reach decides all three - preferring one on its triangle's emitting side (census)
 			if ( r > 0.0f && ( ( front && !lightFront ) || ( front == lightFront && r > reach ) ) ) {
 				lightFront = front;
+				lightIndex = ( l.firstTri + t < s_rtEmissiveTriLightIndex.Num() ) ? s_rtEmissiveTriLightIndex[ l.firstTri + t ] : -1;
 				reach = r; lightLum = ll;
 				lightOrigin = ( l.firstTri + t < s_rtEmissiveTriLightOrigin.Num() ) ? s_rtEmissiveTriLightOrigin[ l.firstTri + t ] : idVec3( 0.0f, 0.0f, 0.0f );
 				noShadows = ( l.firstTri + t < s_rtEmissiveTriLightNoShadows.Num() ) ? s_rtEmissiveTriLightNoShadows[ l.firstTri + t ] : false;
@@ -4113,6 +4166,7 @@ static void R_RtEmissiveBuildRows( void ) {
 		row.lightLum = lightLum;
 		row.lightOrigin = lightOrigin;
 		row.hasLight = reach > 0.0f && lightLum > 0.0f;
+		row.lightIndex = row.hasLight ? lightIndex : -1;
 		row.fixtureId = R_RtEmissiveFixtureId( c );	// the emitter surface's own centroid (unique per fixture, unlike a shared light origin)
 		// an entry (material) OR a per-fixture override pins the radiance (baked into the triangles): skip the power match
 		row.tableEntry = ( R_RtEmissiveMatTableFind( l.mat ) != NULL ) || ( R_RtEmissiveLightTableFind( row.fixtureId ) != NULL );
@@ -4425,7 +4479,8 @@ static void R_RtEmissiveLightCensus( const idRenderWorldLocal *world, rhi::RHI *
 	s_rtEmissiveTriLightOrigin.SetNum( n, false );
 	s_rtEmissiveTriLightNoShadows.SetNum( n, false );
 	s_rtEmissiveTriLightFront.SetNum( n, false );
-	for ( int t = 0; t < n; t++ ) { s_rtEmissiveTriLightOrigin[t].Zero(); s_rtEmissiveTriLightNoShadows[t] = false; s_rtEmissiveTriLightFront[t] = false; }
+	s_rtEmissiveTriLightIndex.SetNum( n, false );
+	for ( int t = 0; t < n; t++ ) { s_rtEmissiveTriLightOrigin[t].Zero(); s_rtEmissiveTriLightNoShadows[t] = false; s_rtEmissiveTriLightFront[t] = false; s_rtEmissiveTriLightIndex[t] = -1; }
 	// the EFFECTIVE emitting area of each triangle's whole surface run = its flux / the global scale = geometric area x the
 	// mean luminance of its glow texels x the stage colour: "lit area x brightness" (user, 2026-10-20). A FIXTURE has it
 	// (a tube, a tile, a white sterlight patch); an INDICATOR (a 2 x 2 red computer LED, the electric box's lamp on a big
@@ -4445,7 +4500,8 @@ static void R_RtEmissiveLightCensus( const idRenderWorldLocal *world, rhi::RHI *
 	const float fixtureMinArea = Max( 0.0f, r_rtEmissiveFixtureMinArea.GetFloat() );
 	int indicatorsInLight = 0;
 	s_rtEmissiveLightFixturedSerial.SetNum( world->lightDefs.Num(), false );
-	for ( int i = 0; i < world->lightDefs.Num(); i++ ) { s_rtEmissiveLightFixturedSerial[i] = 0u; }
+	s_rtEmissiveLightAnimAvg.SetNum( world->lightDefs.Num(), false );
+	for ( int i = 0; i < world->lightDefs.Num(); i++ ) { s_rtEmissiveLightFixturedSerial[i] = 0u; s_rtEmissiveLightAnimAvg[i] = 0.0f; }
 	s_rtEmissiveLightDbg.SetNum( 0, false );
 	if ( s_rtEmissiveLightDbgVB != 0 ) { r->DestroyBuffer( s_rtEmissiveLightDbgVB ); s_rtEmissiveLightDbgVB = 0; }
 	if ( s_rtEmissiveLightDbgIB != 0 ) { r->DestroyBuffer( s_rtEmissiveLightDbgIB ); s_rtEmissiveLightDbgIB = 0; }
@@ -4524,12 +4580,14 @@ static void R_RtEmissiveLightCensus( const idRenderWorldLocal *world, rhi::RHI *
 					s_rtEmissiveTriLightOrigin[t] = ld->globalLightOrigin;		// the mapper's light position: the receiver cosine + SH direction come from here
 					s_rtEmissiveTriLightNoShadows[t] = ld->parms.noShadows;		// a light the mapper flagged shadowless (a tube behind its cover): the row traces no visibility ray either
 					s_rtEmissiveTriLightFront[t] = front;
+					s_rtEmissiveTriLightIndex[t] = i;
 				}
 			}
 		}
 		const bool ambMat = ld->lightShader->IsAmbientLight();
 		if ( hit ) { fixtured++; if ( ambMat ) { fixturedAmbientMat++; } s_rtEmissiveLightFixturedSerial[i] = ld->dudeSerial; dbg.kind = 0; }
 		else       { ambience++; if ( ambMat ) { ambienceAmbientMat++; } }
+		s_rtEmissiveLightAnimAvg[i] = hit ? R_RtEmissiveLightAnimatedAverage( ld ) : 0.0f;	// a dropped light's flicker reaches its row
 		s_rtEmissiveLightDbg.Append( dbg );
 	}
 	for ( int t = 0; t < n; t++ ) { if ( s_rtEmissiveTris[t].emit & RT_EMIT_FLAG_INLIGHT ) { trisInLight++; } }
@@ -5084,7 +5142,7 @@ void R_RtResetSceneState( void ) {
 	// E1 emissive table: handles are stale too; the CPU copy goes with them so the next RT frame rebuilds
 	s_rtEmissiveBuf = 0; s_rtEmissiveAddr = 0; s_rtEmissiveDbgVB = s_rtEmissiveDbgIB = 0; s_rtEmissiveDbgIndexes = 0;
 	s_rtEmissiveTris.Clear(); s_rtEmissiveTriSrc.Clear(); s_rtEmissiveGroups.Clear(); s_rtEmissiveLocalVerts.Clear(); s_rtEmissiveLabels.Clear(); s_rtEmissiveScreenLabels.Clear(); s_rtEmissiveMap.Clear(); s_rtEmissiveTotalFlux = 0.0f;
-	s_rtEmissiveRows.Clear(); s_rtEmissiveLightDbgVB = s_rtEmissiveLightDbgIB = 0; s_rtEmissiveLightDbgIndexes = 0; s_rtEmissiveLightFixturedSerial.Clear(); s_rtEmissiveTriLightOrigin.Clear(); s_rtEmissiveTriLightNoShadows.Clear(); s_rtEmissiveTriLightFront.Clear(); s_rtEmissiveLightDbg.Clear();
+	s_rtEmissiveRows.Clear(); s_rtEmissiveLightDbgVB = s_rtEmissiveLightDbgIB = 0; s_rtEmissiveLightDbgIndexes = 0; s_rtEmissiveLightFixturedSerial.Clear(); s_rtEmissiveTriLightOrigin.Clear(); s_rtEmissiveTriLightNoShadows.Clear(); s_rtEmissiveTriLightFront.Clear(); s_rtEmissiveTriLightIndex.Clear(); s_rtEmissiveLightAnimAvg.Clear(); s_rtEmissiveLightDbg.Clear();
 }
 
 // DUDE: the six cvars that imply the persistent ray-query scene. r_rtWorld is the explicit

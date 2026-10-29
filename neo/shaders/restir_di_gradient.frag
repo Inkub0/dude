@@ -236,9 +236,25 @@ void main() {
 	if ( bestCurRow  != 0u && bestCurRow  > nLights )     { return; }
 	// E2 v3: an EMITTER row (DUDE_LIGHT_EMISSIVE) is never re-shaded here - its shade draws a fresh sample point every
 	// frame (rt_emissive.glsl), which would read as a lighting change and reset the history under every emitter. An
-	// emitter's state changes (a fixture switched off) reach the table, not the gradient: no evidence either way.
-	if ( ( bestCurRow != 0u && ( lights.l[ bestCurRow - 1u ].flags & DUDE_LIGHT_EMISSIVE ) != 0u )
-			|| ( bestPrevRow != 0u && ( prevLights.l[ bestPrevRow - 1u ].flags & DUDE_LIGHT_EMISSIVE ) != 0u ) ) { return; }
+	// emitter's state changes (a fixture switched off) reach the table, not the gradient: no evidence either way -
+	// EXCEPT its FLICKER (2026-10-29): a row that replaced a flickering light carries this frame's flash factor in projF.y
+	// (RB_RHI_GatherSceneLights; 1 = steady). The same fixture picked in both frames (pad1 = its row + 1) changed by the
+	// two factors alone, whatever the area sample: rescale the stored luminances to a common steady base and compare.
+	const bool curEm  = bestCurRow  != 0u && ( lights.l[ bestCurRow - 1u ].flags & DUDE_LIGHT_EMISSIVE ) != 0u;
+	const bool prevEm = bestPrevRow != 0u && ( prevLights.l[ bestPrevRow - 1u ].flags & DUDE_LIGHT_EMISSIVE ) != 0u;
+	if ( curEm || prevEm ) {
+		if ( curEm && prevEm && lights.l[ bestCurRow - 1u ].pad1 == prevLights.l[ bestPrevRow - 1u ].pad1 ) {
+			const float fNow  = lights.l[ bestCurRow - 1u ].projF.y;
+			const float fPrev = prevLights.l[ bestPrevRow - 1u ].projF.y;
+			if ( abs( fNow - fPrev ) > 1e-3 ) {
+				const float base = max( bestCurLum / max( fNow, 1e-3 ), bestPrevLum / max( fPrev, 1e-3 ) );	// the steady luminance
+				const float Ln = base * fNow, Lp = base * fPrev;
+				const float rel = abs( Lp - Ln ) / ( max( Lp, Ln ) + max( u_tessParms.z, 1e-4 ) );
+				fragColor = vec4( abs( Lp - Ln ), max( Lp, Ln ), rel, 1.0 );
+			}
+		}
+		return;
+	}
 
 	// the same light in both frames? (slot AND creation serial: a freed slot is reused at once)
 	bool sameLight = false;
