@@ -327,6 +327,9 @@ torch), applied per view.
 1. **Lane selection (CPU, per view, sticky):**
    - Rank covered lights by an on-screen contribution estimate, or better, by GPU feedback: the gather accumulates
      each row's sum of pHat over the frame into a 4096-entry buffer, read back FRAMES_IN_FLIGHT later.
+   - Weight the rank up for lights with a **moving caster** in their volume (M2: area alone picks the wrong second
+     light). Don't use the gradient for this: a lane removes its light's shadow motion from the gradient, so a
+     gradient-based rank would oscillate.
    - Hysteresis: an incumbent keeps its lane unless a challenger beats it by 1.5x for 0.5 s.
    - Key by `dudeSerial` (placed lights) or `fixtureId` (emitter rows); never by row or lightDef index.
 2. **Gather / boost / gradient:**
@@ -450,6 +453,15 @@ benchmark. Not recommended first: it adds a fixed cost, and it does not use SIGM
 6. A camera cut in a cinematic.
 7. Lane handover while walking between rooms (pops).
 
+**Tool:** `tools/bench/timedemo-ab.sh <set> [rounds]` follows this method.
+- Each run gets a fresh sandbox config (display settings copied from your dude.cfg). It runs a warm-up plus
+  alternating rounds and logs clocks with nvidia-smi.
+- `tools/bench/timedemo_ab_report.py` then summarises the runs: per-variant fps / frame / 1% low / GPU, the
+  r_vkGpuTime 3 scope table with deltas, and checks that every run had real-time playback, the variant's cvars
+  (read from the report's cvar dump) and no throttled clocks.
+- Results go to `~/.local/share/dude/bench/<date>-<set>/`.
+- Sets: `m1`. Later stages add theirs.
+
 ### Before any code
 
 - **M0 - RTX-tier re-baseline** (for A only, skip if A stays parked): Ultra + RTX and Nightmare + RTX demo1, scopes
@@ -463,6 +475,19 @@ benchmark. Not recommended first: it adds a fixed cost, and it does not use SIGM
   - `r_rtReStirDIDebug 8` (chosen light per pixel) screenshots in 4-5 typical rooms + the smear spots.
   - Is one light most of the pixels where the smear shows? Two? Many comparable lights?
   - Decides the lane count, or kills B1 if the answer is "many comparable".
+  - **Result 2026-10-29 (mars_city1, Marine Command, `setviewpos -3135.88 -3319.75 252.25 43`, a soldier walking
+    away; 1 normal + 4 debug-8 shots, `r_fsr 0`):**
+    - Three lights cover most of the view: the left room's light (most of the room's walls and floor), the right
+      corridor's light, and a third on the column, door frame and near floor. One light dominates each surface region.
+    - The exception is the floor between the soldier and the column, where the first and third lights speckle
+      together at comparable weight. The soldier's floor shadow lies in that mixed zone.
+    - So one lane (the room light) takes the larger share of his shadow, but the third light's share would keep
+      ReLAX's lag. This spot needs **2 lanes**.
+    - Ranking by screen area alone would likely give lane 2 to the corridor light (large area, nothing moving in
+      it). **Lanes must favour lights with a moving caster in their volume** (S3 ranking: on-screen contribution
+      x a boost when a dynamic entity, i.e. an NPC, monster or mover, has interactions with the light; the frontend
+      knows this per light).
+    - This spot becomes visual check 1 for S2-S4.
 
 ### Build stages (each its own branch, default-off cvar, Vulkan only, GL3 untouched)
 
