@@ -42,7 +42,7 @@ If you have questions concerning this license or the applicable additional terms
 #endif
 
 // DUDE - Doom3 Unified Development Engine (fork of dhewm3 1.5.5)
-#define ENGINE_VERSION					"DUDE 0.9.6"	// printed in console, used for window title
+#define ENGINE_VERSION					"DUDE 0.9.7"	// printed in console, used for window title
 
 // DUDE config-schema version. Bump this ONLY when a change makes the saved graphics /
 // enhancement settings incompatible (e.g. a preset-table restructure, a renamed/retyped

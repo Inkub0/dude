@@ -53,11 +53,19 @@ Staging layout (`dist/release-X.Y/`), one folder per platform, then zip/tar it:
 | **`d3xp/zz_dude_roe_menu.pk4`** — the RoE menu, see below | ✓ | ✓ |
 | `base/gamepad.cfg`, `base/gamepad-d3xp.cfg`, `base/mods-cvar-translation.cfg` | ✓ | ✓ |
 | `base/pbr/pbr_materials.cfg`, `base/pbr/pbr_overrides.cfg` (else PBR classifies nothing) | ✓ | ✓ |
+| `base/def/*.def`, `d3xp/def/*.def`, `d3le/def/*.def` — the `g_extraLights` def overrides (since 0.9.7), **loose** (see below) | ✓ | ✓ |
 | `COPYING.txt`, `README.md` | ✓ | ✓ |
 
 Shaders (GLSL + SPIR-V) are **embedded in the binary** since 0.9.1
 (`shaders/embed_shaders.py`, loaders fall back VFS → dev tree → embedded) — no
 shader pk4 exists and none must be added.
+
+**Def overrides (since 0.9.7):** the tracked `base/def`, `d3xp/def` and `d3le/def` files are
+full copies of stock defs with the `g_extraLights` tags. They ship **loose**: a game folder's
+loose files outrank its own paks, so they win without a `zz_` pk4 - and a `d3le/` folder must
+never get a pk4 from us, or it shows up in the Mods menu for players without Lost Mission
+(`ListMods` lists any folder holding a pk4). Take them from git (`git ls-files <dir>/def`), not
+the working tree.
 
 **Never include in the platform archives:** game pk4s (`pak000`–`pak008`, `game0x`),
 `arbtool.exe`, `vulkan-1.dll` (ships with GPU drivers), the dev `base`/`d3xp` symlinks
