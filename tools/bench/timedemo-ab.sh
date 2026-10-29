@@ -11,7 +11,8 @@
 # It LAUNCHES THE GAME fullscreen, ~1.5 min per run. Close DUDE first.
 #
 # Usage: tools/bench/timedemo-ab.sh <set> [rounds]
-#   set m1 : ReSTIR DI boost knob split at Path Tracing Nightmare (4 variants)
+#   set m1     : ReSTIR DI boost knob split at Path Tracing Nightmare (4 variants)
+#   set serial : the light-serial fix, two BINARIES at Path Tracing Nightmare - A = build/dude-noserialfix, B = build/dude
 #   rounds : alternating rounds after the warm-up (default 3)
 # Env: DUDE_BIN  binary (default <repo>/build/dude)
 #      DUDE_CFG  your config, source of the display settings (default ~/.config/dude/base/dude.cfg)
@@ -31,7 +32,7 @@ SET="${1:-}"
 ROUNDS="${2:-3}"
 
 declare -a NAMES
-declare -A DESC ARGS
+declare -A DESC ARGS BINV		# BINV: a variant's own binary (default: \$BIN) - for A/B of two builds
 case "$SET" in
 	m1)
 		# Path Tracing Nightmare (dude_rtx 2, preset 5); 0.9.6 had BoostHistory 2 / BoostConfidence 0
@@ -45,6 +46,18 @@ case "$SET" in
 		ARGS[C]="+set r_rtReStirDIBoostHistory 4 +set r_rtReStirDIBoostConfidence 0"
 		DESC[D]="0.9.6 values: BoostHistory 2, BoostConfidence 0"
 		ARGS[D]="+set r_rtReStirDIBoostHistory 2 +set r_rtReStirDIBoostConfidence 0"
+		;;
+	serial)
+		# 2026-10-29: dudeSerial was reassigned on EVERY UpdateLightDef - a light moved / re-parmed each frame reset the
+		# ReSTIR DI gradient's history on its footprint. Copy the build without the fix to build/dude-noserialfix first.
+		PRESET=5; RTX=2
+		NAMES=( A B )
+		DESC[A]="without the light serial fix"
+		BINV[A]="$REPO/build/dude-noserialfix"
+		ARGS[A]=""
+		DESC[B]="with the light serial fix"
+		BINV[B]="$BIN"
+		ARGS[B]=""
 		;;
 	*)
 		sed -n '2,24p' "$0"
@@ -61,7 +74,10 @@ if [ -n "${VARIANTS:-}" ]; then
 fi
 
 if [ "${DRYRUN:-0}" != 1 ]; then
-	[ -x "$BIN" ] || { echo "no binary at $BIN (build first, or set DUDE_BIN)" >&2; exit 1; }
+	for v in "${NAMES[@]}"; do
+		b="${BINV[$v]:-$BIN}"
+		[ -x "$b" ] || { echo "no binary at $b for variant $v (build first, or set DUDE_BIN)" >&2; exit 1; }
+	done
 	if pgrep -x dude > /dev/null; then
 		echo "DUDE is running - close it first (two instances would share the GPU)" >&2
 		exit 1
@@ -79,6 +95,9 @@ mkdir -p "$OUT"
 	echo "display settings from $DUDE_CFG:"
 	grep -E '^seta (r_mode|r_fullscreen|r_fullscreenDesktop|r_fullscreenDisplay|r_fullscreenDisplayName|r_customWidth|r_customHeight|r_displayRefresh) ' "$DUDE_CFG" || true
 	for v in "${NAMES[@]}"; do echo "variant $v: ${DESC[$v]}  [${ARGS[$v]}]"; done
+	for v in "${NAMES[@]}"; do
+		if [ -n "${BINV[$v]:-}" ]; then echo "binary $v: ${BINV[$v]} ($( stat -c '%y' "${BINV[$v]}" 2> /dev/null || echo '?' ))"; fi
+	done
 } > "$OUT/meta.txt"
 cat "$OUT/meta.txt"
 
@@ -119,14 +138,14 @@ for item in "${order[@]}"; do
 		+timeDemoQuit "$DEMO" )
 	echo "[$n/${#order[@]}] round $round variant $v: ${DESC[$v]}"
 	if [ "${DRYRUN:-0}" = 1 ]; then
-		echo "  $BIN ${args[*]}"
+		echo "  ${BINV[$v]:-$BIN} ${args[*]}"
 		continue
 	fi
 	nvidia-smi --query-gpu=timestamp,clocks.gr,clocks.mem,temperature.gpu,power.draw,clocks_event_reasons.active \
 		--format=csv,noheader -lms 1000 > "$RUN/clocks.csv" 2> /dev/null &
 	smi=$!
 	set +e
-	timeout 900 "$BIN" "${args[@]}" > "$RUN/stdout.log" 2>&1
+	timeout 900 "${BINV[$v]:-$BIN}" "${args[@]}" > "$RUN/stdout.log" 2>&1
 	rc=$?
 	set -e
 	kill "$smi" 2> /dev/null || true
