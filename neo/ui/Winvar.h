@@ -34,6 +34,16 @@ If you have questions concerning this license or the applicable additional terms
 
 extern const char *VAR_GUIPREFIX;
 
+// DUDE: savegame GUI state checks (UserInterface.cpp). While a GUI's saved state is read, a
+// mismatch with the GUI file (a name, a count, a length) stops the read: GuiRestore_Failed turns
+// true and the readers return, so idUserInterfaceLocal::ReadFromSaveGame can rewind instead of
+// reading on out of step. Outside a GUI restore they check counts for sign only.
+bool GuiRestore_Failed( void );
+bool GuiRestore_Fail( const char *fmt, ... ) id_attribute((format(printf,1,2)));	// returns false
+bool GuiRestore_Count( idFile *savefile, int num, int minBytesEach );			// a saved count or length fits what's left
+bool GuiRestore_ReadString( idFile *savefile, idStr &string );					// int length + chars
+int GuiRestore_PointerSize( void );		// sizeof( void * ) of the engine that wrote the state (32- or 64-bit)
+
 class idWindow;
 class idWinVar {
 public:
@@ -239,6 +249,9 @@ public:
 
 		int len;
 		savefile->Read( &len, sizeof( len ) );
+		if ( !GuiRestore_Count( savefile, len, 1 ) ) {
+			return;
+		}
 		if ( len > 0 ) {
 			data.Fill( ' ', len );
 			savefile->Read( &data[0], len );
@@ -859,6 +872,9 @@ public:
 
 		int len;
 		savefile->Read( &len, sizeof( len ) );
+		if ( !GuiRestore_Count( savefile, len, 1 ) ) {
+			return;
+		}
 		if ( len > 0 ) {
 			data.Fill( ' ', len );
 			savefile->Read( &data[0], len );

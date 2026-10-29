@@ -99,6 +99,7 @@ public:
 	void				WriteToDemoFile( idDemoFile *f );
 	void				WriteToSaveGame( idFile *savefile );
 	void				ReadFromSaveGame( idFile *savefile );
+	void				ReadSavedRegister( idFile *savefile );	// DUDE: see ReadFromSaveGame
 
 private:
 	idList<idRegister*>	regs;

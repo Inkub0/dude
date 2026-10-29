@@ -273,6 +273,9 @@ idGameBearShootWindow::ReadFromSaveGame
 */
 void idGameBearShootWindow::ReadFromSaveGame( idFile *savefile ) {
 	idWindow::ReadFromSaveGame( savefile );
+	if ( GuiRestore_Failed() ) {	// DUDE: see GuiRestore_Failed
+		return;
+	}
 
 	// Remove all existing entities
 	entities.DeleteContents(true);
@@ -303,6 +306,9 @@ void idGameBearShootWindow::ReadFromSaveGame( idFile *savefile ) {
 
 	int numberOfEnts;
 	savefile->Read( &numberOfEnts, sizeof(numberOfEnts) );
+	if ( !GuiRestore_Count( savefile, numberOfEnts, sizeof( int ) ) ) {
+		return;
+	}
 
 	for ( int i=0; i<numberOfEnts; i++ ) {
 		BSEntity *ent;
@@ -312,19 +318,17 @@ void idGameBearShootWindow::ReadFromSaveGame( idFile *savefile ) {
 		entities.Append( ent );
 	}
 
-	int index;
-	savefile->Read( &index, sizeof(index) );
-	turret = entities[index];
-	savefile->Read( &index, sizeof(index) );
-	bear = entities[index];
-	savefile->Read( &index, sizeof(index) );
-	helicopter = entities[index];
-	savefile->Read( &index, sizeof(index) );
-	goal = entities[index];
-	savefile->Read( &index, sizeof(index) );
-	wind = entities[index];
-	savefile->Read( &index, sizeof(index) );
-	gunblast = entities[index];
+	// DUDE: indices checked (see GuiRestore_Failed)
+	BSEntity **named[] = { &turret, &bear, &helicopter, &goal, &wind, &gunblast };
+	for ( int i = 0; i < (int)( sizeof( named ) / sizeof( named[0] ) ); i++ ) {
+		int index;
+		savefile->Read( &index, sizeof(index) );
+		if ( index < 0 || index >= entities.Num() ) {
+			GuiRestore_Fail( "entity %d of %d", index, entities.Num() );
+			return;
+		}
+		*named[i] = entities[index];
+	}
 }
 
 /*

@@ -504,6 +504,9 @@ idGameBustOutWindow::ReadFromSaveGame
 */
 void idGameBustOutWindow::ReadFromSaveGame( idFile *savefile ) {
 	idWindow::ReadFromSaveGame( savefile );
+	if ( GuiRestore_Failed() ) {	// DUDE: see GuiRestore_Failed
+		return;
+	}
 
 	// Clear out existing paddle and entities from GUI load
 	delete paddle;
@@ -541,6 +544,9 @@ void idGameBustOutWindow::ReadFromSaveGame( idFile *savefile ) {
 
 	// Read entities
 	savefile->Read( &numberOfEnts, sizeof(numberOfEnts) );
+	if ( !GuiRestore_Count( savefile, numberOfEnts, sizeof( int ) ) ) {
+		return;
+	}
 	for ( i=0; i<numberOfEnts; i++ ) {
 		BOEntity *ent;
 
@@ -551,17 +557,31 @@ void idGameBustOutWindow::ReadFromSaveGame( idFile *savefile ) {
 
 	// Read balls
 	savefile->Read( &numberOfEnts, sizeof(numberOfEnts) );
+	if ( !GuiRestore_Count( savefile, numberOfEnts, sizeof( int ) ) ) {
+		return;
+	}
 	for ( i=0; i<numberOfEnts; i++ ) {
 		int ballIndex;
 		savefile->Read( &ballIndex, sizeof(ballIndex) );
+		if ( ballIndex < 0 || ballIndex >= entities.Num() ) {
+			GuiRestore_Fail( "ball %d of %d entities", ballIndex, entities.Num() );
+			return;
+		}
 		balls.Append( entities[ballIndex] );
 	}
 
 	// Read powerups
 	savefile->Read( &numberOfEnts, sizeof(numberOfEnts) );
+	if ( !GuiRestore_Count( savefile, numberOfEnts, sizeof( int ) ) ) {
+		return;
+	}
 	for ( i=0; i<numberOfEnts; i++ ) {
 		int powerIndex;
 		savefile->Read( &powerIndex, sizeof(powerIndex) );
+		if ( powerIndex < 0 || powerIndex >= entities.Num() ) {
+			GuiRestore_Fail( "powerup %d of %d entities", powerIndex, entities.Num() );
+			return;
+		}
 		balls.Append( entities[powerIndex] );
 	}
 
@@ -573,6 +593,9 @@ void idGameBustOutWindow::ReadFromSaveGame( idFile *savefile ) {
 	int row;
 	for ( row=0; row<BOARD_ROWS; row++ ) {
 		savefile->Read( &numberOfEnts, sizeof(numberOfEnts) );
+		if ( !GuiRestore_Count( savefile, numberOfEnts, sizeof( int ) ) ) {
+			return;
+		}
 		for ( i=0; i<numberOfEnts; i++ ) {
 			BOBrick *brick = new BOBrick();
 			brick->ReadFromSaveGame( savefile, this );

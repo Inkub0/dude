@@ -2579,8 +2579,8 @@ bool idSessionLocal::SaveGame( const char *saveName, bool autosave, const char* 
 	const char *gamename = GAME_NAME;
 	fileOut->WriteString( gamename );
 
-	// version
-	fileOut->WriteInt( SAVEGAME_VERSION );
+	// version (DUDE: our own revision above dhewm3's number, see DUDE_SAVEGAME_REVISION)
+	fileOut->WriteInt( SAVEGAME_VERSION | ( DUDE_SAVEGAME_REVISION << DUDE_SAVEGAME_REVISION_SHIFT ) );
 
 	// map
 	mapName = mapSpawnData.serverInfo.GetString( "si_map" );
@@ -2706,7 +2706,9 @@ bool idSessionLocal::LoadGame( const char *saveName ) {
 	savegameFile->ReadString( gamename );
 
 	// if this isn't a savegame for the correct game, abort loadgame
-	if ( ! (gamename == GAME_NAME || gamename == "DOOM 3") ) {
+	// DUDE: the header names the engine that wrote it - retail Doom 3 and RoE ("DOOM 3"),
+	// dhewm3 ("dhewm 3", "ADoom3" on AROS) and DUDE; the game state after it is the same format
+	if ( ! ( gamename == GAME_NAME || gamename == "DUDE" || gamename == "DOOM 3" || gamename == "dhewm 3" || gamename == "ADoom3" ) ) {
 		common->Warning( "Attempted to load an invalid savegame: %s", in.c_str() );
 
 		loadingSaveGame = false;
@@ -2717,6 +2719,11 @@ bool idSessionLocal::LoadGame( const char *saveName ) {
 
 	// version
 	savegameFile->ReadInt( savegameVersion );
+
+	// DUDE: our own revision rides above dhewm3's number (0 for every other engine's savegames);
+	// the rest of the engine sees dhewm3's version, so its >= 17 / >= 18 checks hold
+	const int dudeRevision = savegameVersion >> DUDE_SAVEGAME_REVISION_SHIFT;
+	savegameVersion &= ( 1 << DUDE_SAVEGAME_REVISION_SHIFT ) - 1;
 
 	// map
 	savegameFile->ReadString( saveMap );
@@ -2744,14 +2751,14 @@ bool idSessionLocal::LoadGame( const char *saveName ) {
 	// check the version, if it doesn't match, cancel the loadgame,
 	// but still load the map with the persistant playerInfo from the header
 	// so that the player doesn't lose too much progress.
-	if ( savegameVersion < 16 || savegameVersion > SAVEGAME_VERSION ) { // DUDE supports savegames with v16 - v18
+	if ( savegameVersion < 16 || savegameVersion > SAVEGAME_VERSION || dudeRevision < 0 || dudeRevision > DUDE_SAVEGAME_REVISION ) { // DUDE supports savegames with v16 - v18
 		common->Warning( "Savegame Version mismatch: aborting loadgame and starting level with persistent data" );
 		loadingSaveGame = false;
 		fileSystem->CloseFile( savegameFile );
 		savegameFile = NULL;
 	}
 
-	common->DPrintf( "loading a v%d savegame\n", savegameVersion );
+	common->Printf( "loading a v%d savegame written by %s (DUDE revision %d)\n", savegameVersion, gamename.c_str(), dudeRevision );
 
 	if ( saveMap.Length() > 0 ) {
 

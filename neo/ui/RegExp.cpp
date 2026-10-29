@@ -391,20 +391,86 @@ void idRegisterList::WriteToSaveGame( idFile *savefile ) {
 /*
 ====================
 idRegisterList::ReadFromSaveGame
+
+DUDE: matched by name. A register's expression registers (regs, regCount) and type are what the
+GUI file parsed to, so they stay as parsed; whether it is enabled (a script's `set` turns it off)
+and its variable's value are the state. A register the file doesn't have now - a widescreen pack's
+anchors (cstAnchor ...) on a window the stock file leaves bare - is read past, its value's size
+known from its type; one only the file has keeps its parsed state. A saved register must name a
+register variable with its type (idWindow::RegisterVars), or be a float or vec4 the file defines,
+or the state is out of step with the file (see GuiRestore_Failed).
 ====================
 */
 void idRegisterList::ReadFromSaveGame( idFile *savefile ) {
 	int i, num;
 
+	if ( GuiRestore_Failed() ) {
+		return;
+	}
 	savefile->Read( &num, sizeof( num ) );
-	// DUDE: a GUI's saved state follows the file it was saved with, window by window; read
-	// against another version of that file (a GUI mod installed or removed since) it is out of
-	// step - this count is where that shows. Stop the load instead of reading past the list.
-	if ( num != regs.Num() ) {
-		common->Error( "The savegame's GUI state does not match the GUI files now installed (%d registers saved, %d now): "
-			"was a GUI mod (a widescreen pack, a HUD) added or removed since the game was saved?", num, regs.Num() );
+	if ( !GuiRestore_Count( savefile, num, sizeof( bool ) + sizeof( short ) + sizeof( int ) + 4 * sizeof( unsigned short ) + sizeof( int ) + 1 ) ) {
+		return;
 	}
-	for ( i = 0; i < num; i++ ) {
-		regs[i]->ReadFromSaveGame( savefile );
+	for ( i = 0; i < num && !GuiRestore_Failed(); i++ ) {
+		ReadSavedRegister( savefile );
 	}
+}
+
+/*
+====================
+idRegisterList::ReadSavedRegister
+
+One register as idRegister::WriteToSaveGame wrote it, into the one of this list it names. See
+ReadFromSaveGame.
+====================
+*/
+void idRegisterList::ReadSavedRegister( idFile *savefile ) {
+	bool enabled;
+	short type;
+	int regCount;
+	unsigned short regs[4];
+	idStr name;
+
+	savefile->Read( &enabled, sizeof( enabled ) );
+	savefile->Read( &type, sizeof( type ) );
+	savefile->Read( &regCount, sizeof( regCount ) );
+	savefile->Read( &regs[0], sizeof( regs ) );
+	if ( !GuiRestore_ReadString( savefile, name ) ) {
+		return;
+	}
+
+	// a register variable (idWindow::RegisterVars), or a float or vec4 the file defines
+	bool known = false;
+	for ( int i = 0; i < idWindow::NumRegisterVars && !known; i++ ) {
+		known = name.Icmp( idWindow::RegisterVars[i].name ) == 0 && type == idWindow::RegisterVars[i].type;
+	}
+	if ( !known && ( type == idRegister::FLOAT || type == idRegister::VEC4 ) && name.Length() > 0 && name.Length() < MAX_STRING_CHARS ) {
+		known = true;
+		for ( int i = 0; i < name.Length() && known; i++ ) {
+			known = name[i] > ' ' && name[i] < 127;
+		}
+	}
+	if ( !known ) {
+		GuiRestore_Fail( "register \"%s\" of type %d saved", name.c_str(), (int)type );
+		return;
+	}
+
+	idRegister *reg = FindReg( name );
+	if ( reg != NULL && reg->type == type && reg->var != NULL ) {
+		reg->enabled = enabled;
+		reg->var->ReadFromSaveGame( savefile );
+		return;
+	}
+
+	// not in the file now: its value read past, as the variable of its type reads it
+	idWinVec4 vec4;
+	idWinFloat f;
+	idWinBool b;
+	idWinInt n;
+	idWinStr str;
+	idWinVec2 vec2;
+	idWinVec3 vec3;
+	idWinRectangle rect;
+	idWinVar *skip[idRegister::NUMTYPES] = { &vec4, &f, &b, &n, &str, &vec2, &vec3, &rect };
+	skip[type]->ReadFromSaveGame( savefile );
 }
