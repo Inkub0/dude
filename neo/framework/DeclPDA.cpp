@@ -547,11 +547,13 @@ idDeclVideo::DefaultDefinition
 ===================
 */
 const char *idDeclVideo::DefaultDefinition( void ) const {
+	// DUDE: id's text was "{ { name 5Default Video } }": Parse matches keywords without case,
+	// so the word Video read as the "video" keyword and took the closing brace for its
+	// material - every purge of a video decl at a map change looked up a material named "}"
+	// ("Couldn't load image: }"). The name is quoted now, as idDeclPDA's default does.
 	return
 		"{\n"
-		"\t"	"{\n"
-		"\t\t"		"name\t5Default Video\n"
-		"\t"	"}\n"
+		"\t"	"name\t\"Default Video\"\n"
 		"}";
 }
 
@@ -654,11 +656,12 @@ idDeclAudio::DefaultDefinition
 ===================
 */
 const char *idDeclAudio::DefaultDefinition( void ) const {
+	// DUDE: id's text was "{ { name 5Default Audio } }" - the same slip as idDeclVideo's: the
+	// word Audio read as the "audio" keyword, so every purge of an audio decl at a map change
+	// looked up a sound shader named "}". The name is quoted now.
 	return
 		"{\n"
-		"\t"	"{\n"
-		"\t\t"		"name\t5Default Audio\n"
-		"\t"	"}\n"
+		"\t"	"name\t\"Default Audio\"\n"
 		"}";
 }
 
