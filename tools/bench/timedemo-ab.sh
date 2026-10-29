@@ -18,6 +18,7 @@
 #      DEMO      demo name (default demo1)
 #      COOLDOWN  seconds idle between runs (default 10)
 #      OUT       result directory (default ~/.local/share/dude/bench/<date>-<set>)
+#      VARIANTS  run only these variants of the set, in this order (e.g. VARIANTS="A D")
 #      DRYRUN=1  print the command lines, launch nothing
 set -euo pipefail
 
@@ -46,10 +47,18 @@ case "$SET" in
 		ARGS[D]="+set r_rtReStirDIBoostHistory 2 +set r_rtReStirDIBoostConfidence 0"
 		;;
 	*)
-		sed -n '2,23p' "$0"
+		sed -n '2,24p' "$0"
 		exit 1
 		;;
 esac
+if [ -n "${VARIANTS:-}" ]; then
+	# shellcheck disable=SC2206
+	pick=( $VARIANTS )
+	for v in "${pick[@]}"; do
+		[ -n "${ARGS[$v]+x}" ] || { echo "set $SET has no variant '$v' (has: ${NAMES[*]})" >&2; exit 1; }
+	done
+	NAMES=( "${pick[@]}" )
+fi
 
 if [ "${DRYRUN:-0}" != 1 ]; then
 	[ -x "$BIN" ] || { echo "no binary at $BIN (build first, or set DUDE_BIN)" >&2; exit 1; }

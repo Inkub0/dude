@@ -1,6 +1,8 @@
 # RT shadows with NRD SIGMA - research and plan
 
-**Status: PLAN, 2026-10-29. No code.** Branch `feat/rtx-sigma-plan` (docs only). Decision pending (user).
+**Status: PLAN, 2026-10-29. No code.** Branch `feat/rtx-sigma-plan` (docs + bench tool). B1 chosen, then **put on
+hold the same day.** The M1 visual check found the 0.9.6 boost knobs acceptable, so the regression's fix may simply be
+the knob revert, and B1 becomes a pure quality option (see M1 under section 7).
 Goal: more stable, better-looking ray-traced shadows for the same or less GPU time than DUDE 0.9.7.
 Prior attempt: H3 soft shadows (commits `2ab43dbc` code, `80a8d764` docs/rtx-soft-shadows.md, both off master),
 abandoned 2026-09-18 for stagger and an 11.4 ms toll in light-dense rooms, not for SIGMA's quality.
@@ -471,6 +473,25 @@ benchmark. Not recommended first: it adds a fixed cost, and it does not use SIGM
   - Visual: check 1 per variant.
   - Answers how many of the 1.92 ms each knob costs, and which one the smear needs. That is the ceiling of what B1
     (or C) can win back.
+  - **Visual result 2026-10-29 (user, M2 spot, live cvars):** `r_rtReStirDIBoostHistory 2` acceptable;
+    `r_rtReStirDIBoostConfidence 0` acceptable.
+    - Hypothesis: the 2026-10-28 gradient shadow-edge fix (`cf6957bb`) is what removed the smear. It re-shades
+      exactly at the previous point and forces ReLAX history resets where a shadow moved.
+    - The boost bump in `5400aba0` (BoostHistory 4 + BoostConfidence 0.3) mostly cleans the refill after those
+      resets. It was tuned while the user's config still pinned Reset / HistoryMs / FastMs to 0, which was the real
+      cause of the "returning trail" then (see bug-triage notes), so it may have been tuned against a trail it never
+      caused.
+    - Still to confirm before reverting the defaults:
+      1. both knobs reverted **together** (variant D);
+      2. D beyond this spot: strafing past columns and door frames (disocclusion refill), flickering-light rooms,
+         a fight with fireballs (moving light + moving caster), the "odd trail every few seconds";
+      3. the cost: `VARIANTS="A D" tools/bench/timedemo-ab.sh m1`, 7 runs, about 11 minutes.
+    - Shipping note: both cvars are CVAR_ARCHIVE, and every 0.9.7 config already holds 4 / 0.3, so a default change
+      alone does not reach existing users. It needs a preset-owned value or a one-off migration (not a schema bump;
+      see the schema rule).
+    - **Consequence for B1:** if D passes, the 0.9.7 regression is fixed without SIGMA (about -1.9 ms). B1 would then
+      cost about +0.6 ms per lane on top of that cheaper baseline, still under 0.9.7's 14.02 ms. It is worth building
+      only if a visible shadow problem remains at D.
 - **M2 - who dominates:**
   - `r_rtReStirDIDebug 8` (chosen light per pixel) screenshots in 4-5 typical rooms + the smear spots.
   - Is one light most of the pixels where the smear shows? Two? Many comparable lights?
