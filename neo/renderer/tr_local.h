@@ -1135,7 +1135,6 @@ extern idCVar r_rtEmissiveLighting;		// EMISSIVE MODE master switch (D6): emitte
 extern idCVar r_rtEmissiveIntensity;		// emissive mode: radiance multiplier of every emitter
 extern idCVar r_rtEmissiveMaxRows;
 extern idCVar r_rtEmissiveCheapTarget;	// emissive mode: analytic RIS target for emitter candidates (only the winner is area-sampled)
-extern idCVar r_rtEmissiveAreaCosine;	// emissive mode A/B: per-sample receiver cosine + aim at the fixture (1) vs the replaced light's origin (0)
 extern idCVar r_rtEmissiveSamples;		// emissive mode: area-light samples averaged per emitter shade (far-field representation)
 extern idCVar r_rtEmissiveGridSlots;		// emissive mode: light-grid candidates per cell (the larger of this and r_rtLightGridSlots)		// emissive mode: emitter rows (surfaces) a view's scene-light buffer may carry
 extern idCVar r_rtEmissivePowerMatch;

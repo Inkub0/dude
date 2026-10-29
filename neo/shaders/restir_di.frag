@@ -389,11 +389,9 @@ void main() {
 	// E2 v3: an EMITTER row's SH direction points at the emitter's CENTRE (the row's pos), not at the sampled point: the
 	// sampled point differs per pixel, NRD aggregates those directions into a short vector and the apply's specular
 	// re-shade reads a short vector as "no concentrated highlight" - the glossy floor went flat under the tiles
-	// (user, 2026-10-20). The centre keeps the vector long and puts the highlight at the tile's mirror point.
-	// (only when the row's pos is that authored origin, projF.x; an uncovered emitter keeps the sampled point - a long
-	// tube's centre can sit in the wall's own plane and would kill the apply's cosine re-resolve there)
-	vec3 shDirChosen = ( ( flagsChosen & DUDE_LIGHT_EMISSIVE ) != 0u && lights.l[ rowChosen - 1u ].projF.x > 0.5 ) ? normalize( lights.l[ rowChosen - 1u ].pos - Pw ) : ldirChosen;
-	vec3 shDirect = shDirChosen * dot( outRad, vec3( 0.2126, 0.7152, 0.0722 ) );
+	// (user, 2026-10-20). The centre keeps the vector long and puts the highlight at the tile's mirror point. The shade
+	// already returns that direction (rtEmissiveShadeRow aims at pos = the centroid).
+	vec3 shDirect = ldirChosen * dot( outRad, vec3( 0.2126, 0.7152, 0.0722 ) );
 #if DI_BOOST
 	if ( K > 1 ) {
 		vec3 sumRad = outRad;
@@ -422,8 +420,7 @@ void main() {
 			float visK = ( ( flagsK & DUDE_LIGHT_NOSHADOWS ) != 0u ) ? 1.0 : traceVisibility( Pw, Nw, ld, dl, diLightBlurScale( flagsK ), od );
 			rk = max( rk * ( Wk * visK * u_shadowFalloffS.x ), vec3( 0.0 ) );
 			sumRad += rk;
-			vec3 shK = ( ( flagsK & DUDE_LIGHT_EMISSIVE ) != 0u && lights.l[ lk ].projF.x > 0.5 ) ? normalize( lights.l[ lk ].pos - Pw ) : ld;	// an emitter: its authored origin (as above)
-			sumSh  += shK * dot( rk, vec3( 0.2126, 0.7152, 0.0722 ) );
+			sumSh  += ld * dot( rk, vec3( 0.2126, 0.7152, 0.0722 ) );
 		}
 		outRad   = sumRad / float( K );
 		shDirect = sumSh / float( K );

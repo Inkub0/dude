@@ -421,6 +421,12 @@ shaders receive is the count WRITTEN this frame; r_rtEmissiveMaxRows joins Compu
   (the forward path's geometry), while the sampled surface point still drives the energy, the solid angle and the
   visibility ray. Uncovered rows keep the sampled point for both (the "centre" direction of v3's first build was wrong
   for long tubes: in the wall's plane, it zeroed the apply's cosine re-resolve).
+  **REPLACED 2026-10-29 (user A/B, then "make it permanent"):** the origin painted the replaced light's round hot spot on
+  a wall right behind it, and wherever a receiver could not see that origin (a pillar between them) its single visibility
+  ray failed and the WHOLE emitter went dark (the Marine Command alcove neons). Now every row aims at its CENTROID (pos)
+  and rtEmissiveShadeRow takes the receiver cosine per area sample - a real area light; walls under flush strips still
+  read fine. The paired light lends only reach + power; projF.x is no longer set. Same day: the census pairs a triangle
+  with a light on its EMITTING side and entity glow is split per fixture (the COMBAT PREP door frame).
 - ROUND 2 of v3 (2026-10-20, Marine Command Access at intensity 1): the room reads like normal mode again. Console:
   "267 fixtured dropped, 89 placed kept, 255 emitter rows added (of 306; cap 255)"; GPU 1080p: gather 7.85 ms, fill 1.05,
   grad 1.1, denoise 2.9 (19.4 ms frame). Fixes: (1) the row cap is now dynamic, 511 - placed - fog (r_rtEmissiveMaxRows
