@@ -473,6 +473,11 @@ idSimpleWindow::ReadFromSaveGame
 */
 void idSimpleWindow::ReadFromSaveGame( idFile *savefile ) {
 
+	// DUDE: stop at the first mismatch with the GUI file (see GuiRestore_Failed)
+	if ( GuiRestore_Failed() ) {
+		return;
+	}
+
 	savefile->Read( &flags, sizeof( flags ) );
 	savefile->Read( &drawRect, sizeof( drawRect ) );
 	savefile->Read( &clientRect, sizeof( clientRect ) );
@@ -498,6 +503,9 @@ void idSimpleWindow::ReadFromSaveGame( idFile *savefile ) {
 	rotate.ReadFromSaveGame( savefile );
 	shear.ReadFromSaveGame( savefile );
 	backGroundName.ReadFromSaveGame( savefile );
+	if ( GuiRestore_Failed() ) {
+		return;
+	}
 
 	//#modified-fva; BEGIN
 	// TODO: why does this have to be read from the savegame anyway, does it change?
@@ -512,6 +520,9 @@ void idSimpleWindow::ReadFromSaveGame( idFile *savefile ) {
 	int stringLen;
 
 	savefile->Read( &stringLen, sizeof( stringLen ) );
+	if ( !GuiRestore_Count( savefile, stringLen, 1 ) ) {
+		return;
+	}
 	if ( stringLen > 0 ) {
 		idStr backName;
 

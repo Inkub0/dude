@@ -3736,6 +3736,9 @@ void idWindow::ReadSaveGameTransition( idTransitionData &trans, idFile *savefile
 	if ( offset != -1 ) {
 		idStr winName;
 		ReadSaveGameString( winName, savefile );
+		if ( GuiRestore_Failed() ) {
+			return;
+		}
 		savefile->Read( &trans.interp, sizeof( trans.interp ) );
 		trans.data = NULL;
 		trans.offset = offset;
@@ -3886,15 +3889,10 @@ idWindow::ReadSaveGameString
 ===============
 */
 void idWindow::ReadSaveGameString( idStr &string, idFile *savefile ) {
-	int len;
-
-	savefile->Read( &len, sizeof( len ) );
-	if ( len < 0 ) {
-		common->Warning( "idWindow::ReadSaveGameString: invalid length" );
+	// DUDE: checked against what's left of the GUI's state (GuiRestore_Count)
+	if ( !GuiRestore_ReadString( savefile, string ) ) {
+		common->DPrintf( "idWindow::ReadSaveGameString: invalid length\n" );
 	}
-
-	string.Fill( ' ', len );
-	savefile->Read( &string[0], len );
 }
 
 /*
@@ -3904,6 +3902,11 @@ idWindow::ReadFromSaveGame
 */
 void idWindow::ReadFromSaveGame( idFile *savefile ) {
 	int i;
+
+	// DUDE: stop at the first mismatch with the GUI file (see GuiRestore_Failed)
+	if ( GuiRestore_Failed() ) {
+		return;
+	}
 
 	transitions.Clear();
 
@@ -3933,7 +3936,16 @@ void idWindow::ReadFromSaveGame( idFile *savefile ) {
 	savefile->Read( &textShadow, sizeof( textShadow ) );
 	savefile->Read( &shear, sizeof( shear ) );
 
-	ReadSaveGameString( name, savefile );
+	// DUDE: the window this state was saved from - the strongest sign of the file it was written with
+	idStr savedName;
+	ReadSaveGameString( savedName, savefile );
+	if ( GuiRestore_Failed() ) {
+		return;
+	}
+	if ( savedName.Icmp( name ) != 0 ) {
+		GuiRestore_Fail( "window \"%s\" saved where the file has \"%s\"", savedName.c_str(), name.c_str() );
+		return;
+	}
 	ReadSaveGameString( comment, savefile );
 
 	// WinVars
@@ -3971,6 +3983,9 @@ void idWindow::ReadFromSaveGame( idFile *savefile ) {
 	for ( i = 0; i < definedVars.Num(); i++ ) {
 		definedVars[i]->ReadFromSaveGame( savefile );
 	}
+	if ( GuiRestore_Failed() ) {
+		return;
+	}
 
 	savefile->Read( &textRect, sizeof( textRect ) );
 
@@ -4002,6 +4017,9 @@ void idWindow::ReadFromSaveGame( idFile *savefile ) {
 			scripts[i]->ReadFromSaveGame( savefile );
 		}
 	}
+	if ( GuiRestore_Failed() ) {
+		return;
+	}
 
 	// TimeLine Events
 	for ( i = 0; i < timeLineEvents.Num(); i++ ) {
@@ -4013,15 +4031,24 @@ void idWindow::ReadFromSaveGame( idFile *savefile ) {
 			}
 		}
 	}
+	if ( GuiRestore_Failed() ) {
+		return;
+	}
 
 
 	// Transitions
 	int num;
 	savefile->Read( &num, sizeof( num ) );
+	if ( !GuiRestore_Count( savefile, num, sizeof( int ) ) ) {
+		return;
+	}
 	for ( i = 0; i < num; i++ ) {
 		idTransitionData trans;
 		trans.data = NULL;
 		ReadSaveGameTransition( trans, savefile );
+		if ( GuiRestore_Failed() ) {
+			return;
+		}
 		if ( trans.data ) {
 			transitions.Append( trans );
 		}
@@ -4031,7 +4058,17 @@ void idWindow::ReadFromSaveGame( idFile *savefile ) {
 	// Named Events
 	for ( i = 0; i < namedEvents.Num(); i++ ) {
 		if ( namedEvents[i] ) {
-			ReadSaveGameString( namedEvents[i]->mName, savefile );
+			// DUDE: the event's name is fixed by the file: a different one is a different file
+			idStr savedName;
+			ReadSaveGameString( savedName, savefile );
+			if ( GuiRestore_Failed() ) {
+				return;
+			}
+			if ( savedName.Icmp( namedEvents[i]->mName ) != 0 ) {
+				GuiRestore_Fail( "named event \"%s\" saved where window \"%s\" has \"%s\"", savedName.c_str(), name.c_str(), namedEvents[i]->mName.c_str() );
+				return;
+			}
+			namedEvents[i]->mName = savedName;
 			if ( namedEvents[i]->mEvent ) {
 				namedEvents[i]->mEvent->ReadFromSaveGame( savefile );
 			}
@@ -4045,11 +4082,17 @@ void idWindow::ReadFromSaveGame( idFile *savefile ) {
 	for ( i = 0; i < drawWindows.Num(); i++ ) {
 		drawWin_t	window = drawWindows[i];
 
+		if ( GuiRestore_Failed() ) {
+			return;
+		}
 		if ( window.simp ) {
 			window.simp->ReadFromSaveGame( savefile );
 		} else if ( window.win ) {
 			window.win->ReadFromSaveGame( savefile );
 		}
+	}
+	if ( GuiRestore_Failed() ) {
+		return;
 	}
 
 	if ( flags & WIN_DESKTOP ) {

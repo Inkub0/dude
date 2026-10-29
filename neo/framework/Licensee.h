@@ -110,6 +110,15 @@ If you have questions concerning this license or the applicable additional terms
 // 18: dhewm3 with CstDoom3 anchored window support - can still read v16 and v17, unless gamedata changed
 #define SAVEGAME_VERSION				18
 
+// DUDE's own savegame revision, kept apart from dhewm3's numbering above: DUDE writes it in the
+// header's version int above bit 16 (SAVEGAME_VERSION in the low 16 bits), so the two never
+// collide when dhewm3 bumps its version, and older engines (dhewm3, DUDE before revision 1) see a
+// version they don't know and fall back to restarting the map with the persistent player data
+// instead of misreading the file. Savegames from retail Doom 3, dhewm3 and older DUDE carry 0.
+// 1 (2026-10-28): each GUI's saved state is length-prefixed (idUserInterfaceLocal::WriteToSaveGame)
+#define DUDE_SAVEGAME_REVISION			1
+#define DUDE_SAVEGAME_REVISION_SHIFT	16
+
 // <= Doom v1.1: 1. no DS_VERSION token ( default )
 // Doom v1.2: 2
 #define RENDERDEMO_VERSION				2

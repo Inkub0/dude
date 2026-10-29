@@ -475,6 +475,9 @@ idGuiScript::ReadFromSaveGame
 void idGuiScript::ReadFromSaveGame( idFile *savefile ) {
 	int i;
 
+	if ( GuiRestore_Failed() ) {	// DUDE: see GuiRestore_Failed
+		return;
+	}
 	if ( ifList ) {
 		ifList->ReadFromSaveGame( savefile );
 	}

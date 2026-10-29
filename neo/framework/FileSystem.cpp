@@ -368,6 +368,9 @@ public:
 	virtual void			RemoveFile( const char *relativePath );
 	virtual idFile *		OpenFileReadFlags( const char *relativePath, int searchFlags, pack_t **foundInPak = NULL, bool allowCopyFiles = true, const char* gamedir = NULL );
 	idFile *				OpenFileReadFlagsRaw( const char *relativePath, int searchFlags, pack_t **foundInPak, bool allowCopyFiles, const char* gamedir );
+	int						ReadFileVersions( const char *relativePath, idStrList &texts, idStrList &origins );	// DUDE: see FS_ReadFileVersions
+	bool					ReadFromContainer( pack_t *pak, const directory_t *dir, const char *relativePath, idStr &text );
+	void					InlineContainerIncludes( pack_t *pak, const directory_t *dir, idStr &text, int depth );
 	virtual idFile *		OpenFileRead( const char *relativePath, bool allowCopyFiles = true, const char* gamedir = NULL );
 	virtual idFile *		OpenFileWrite( const char *relativePath, const char *basePath = "fs_savepath" );
 	virtual idFile *		OpenFileAppend( const char *relativePath, bool sync = false, const char *basePath = "fs_basepath"   );
@@ -3576,6 +3579,202 @@ idFile *idFileSystemLocal::OpenFileReadFlagsRaw( const char *relativePath, int s
 	}
 
 	return NULL;
+}
+
+/*
+===========
+idFileSystemLocal::ReadFromContainer
+
+DUDE: relativePath from that one pak or loose folder only (ReadFileVersions)
+===========
+*/
+bool idFileSystemLocal::ReadFromContainer( pack_t *pak, const directory_t *dir, const char *relativePath, idStr &text ) {
+	if ( dir ) {
+		idStr netpath = BuildOSPath( dir->path, dir->gamedir, relativePath );
+		FILE *fp = OpenOSFileCorrectName( netpath, "rb" );
+		if ( !fp ) {
+			return false;
+		}
+		const int len = DirectFileLength( fp );
+		text.Fill( ' ', Max( len, 0 ) );
+		const bool ok = len >= 0 && (int)fread( len ? &text[0] : NULL, 1, len, fp ) == len;
+		fclose( fp );
+		return ok;
+	}
+	if ( !pak ) {
+		return false;
+	}
+	for ( fileInPack_t *pakFile = pak->hashTable[HashFileName( relativePath )]; pakFile; pakFile = pakFile->next ) {
+		if ( FilenameCompare( pakFile->name, relativePath ) ) {
+			continue;
+		}
+		idFile_InZip *file = ReadFileFromZip( pak, pakFile, relativePath );
+		if ( !file ) {
+			return false;
+		}
+		const int len = file->Length();
+		text.Fill( ' ', Max( len, 0 ) );
+		const bool ok = len >= 0 && file->Read( len ? &text[0] : NULL, len ) == len;
+		CloseFile( file );
+		return ok;
+	}
+	return false;
+}
+
+/*
+===========
+idFileSystemLocal::InlineContainerIncludes
+
+DUDE: each #include "file" line of text whose file the same pak or loose folder holds, replaced by that
+file, so a copy reads as it did beside its own includes (a mod's GUI with the mod's .pd, the stock one
+with the stock .pd the mod now shadows). Others stay, for the search path.
+===========
+*/
+void idFileSystemLocal::InlineContainerIncludes( pack_t *pak, const directory_t *dir, idStr &text, int depth ) {
+	if ( depth > 4 || text.Find( "#include" ) < 0 ) {
+		return;
+	}
+	idStr result;
+	int lineStart = 0;
+	while ( lineStart < text.Length() ) {
+		int lineEnd = text.Find( '\n', lineStart );
+		if ( lineEnd < 0 ) {
+			lineEnd = text.Length();
+		}
+		const idStr line = text.Mid( lineStart, lineEnd - lineStart );
+		idStr included;
+		int i = 0;
+		while ( i < line.Length() && ( line[i] == ' ' || line[i] == '\t' ) ) {
+			i++;
+		}
+		bool replaced = false;
+		if ( idStr::Cmpn( line.c_str() + i, "#include", 8 ) == 0 ) {
+			const int open = line.Find( '"', i + 8 );
+			const int close = ( open >= 0 ) ? line.Find( '"', open + 1 ) : -1;
+			if ( close > open + 1 && ReadFromContainer( pak, dir, line.Mid( open + 1, close - open - 1 ), included ) ) {
+				InlineContainerIncludes( pak, dir, included, depth + 1 );
+				result += included;
+				result += "\n";
+				replaced = true;
+			}
+		}
+		if ( !replaced ) {
+			result += line;
+			if ( lineEnd < text.Length() ) {
+				result += "\n";
+			}
+		}
+		lineStart = lineEnd + 1;
+	}
+	text = result;
+}
+
+/*
+===========
+idFileSystemLocal::ReadFileVersions
+
+DUDE: the contents of every copy of a file the search path holds, in search order - the copy
+OpenFileRead picks, then the ones it shadows (a mod's GUI over the stock one in pak000) - and
+then the copies in the paks of the savegames folders, which are not in the search path. Each with
+its includes from beside it (InlineContainerIncludes); identical copies are listed once. Searches
+the loose folders and paks as OpenFileRead does, under the same pure-server restrictions; not the
+addon paks.
+===========
+*/
+int idFileSystemLocal::ReadFileVersions( const char *relativePath, idStrList &texts, idStrList &origins ) {
+	texts.Clear();
+	origins.Clear();
+
+	if ( !searchPaths || !relativePath || !relativePath[0] ) {
+		return 0;
+	}
+	if ( relativePath[0] == '/' || relativePath[0] == '\\' ) {
+		relativePath++;
+	}
+	if ( strstr( relativePath, ".." ) || strstr( relativePath, "::" ) ) {
+		return 0;
+	}
+
+	for ( searchpath_t *search = searchPaths; search; search = search->next ) {
+		idStr text, origin;
+		if ( search->dir ) {
+			if ( ( fs_restrict.GetBool() || serverPaks.Num() ) && !FileAllowedFromDir( relativePath ) ) {
+				continue;
+			}
+			if ( !ReadFromContainer( NULL, search->dir, relativePath, text ) ) {
+				continue;
+			}
+			origin = BuildOSPath( search->dir->path, search->dir->gamedir, relativePath );
+		} else if ( search->pack ) {
+			if ( serverPaks.Num() ) {
+				GetPackStatus( search->pack );
+				if ( search->pack->pureStatus != PURE_NEVER && !serverPaks.Find( search->pack ) ) {
+					continue;
+				}
+			}
+			if ( !ReadFromContainer( search->pack, NULL, relativePath, text ) ) {
+				continue;
+			}
+			origin = search->pack->pakFilename;
+		} else {
+			continue;
+		}
+		InlineContainerIncludes( search->pack, search->dir, text, 0 );
+		if ( texts.FindIndex( text ) < 0 ) {
+			texts.Append( text );
+			origins.Append( origin );
+		}
+	}
+
+	// then the paks in the savegames folders: a GUI mod's pak kept there is read for old
+	// savegames written with it, and for nothing else (the folder is not in the search path)
+	if ( serverPaks.Num() ) {
+		return texts.Num();
+	}
+	idStrList savegameDirs;
+	for ( searchpath_t *search = searchPaths; search; search = search->next ) {
+		if ( search->dir ) {
+			const idStr dir = BuildOSPath( search->dir->path, search->dir->gamedir, "savegames" );
+			if ( savegameDirs.FindIndex( dir ) < 0 ) {
+				savegameDirs.Append( dir );
+			}
+		}
+	}
+	for ( int i = 0; i < savegameDirs.Num(); i++ ) {
+		idStrList pk4s;
+		if ( ListOSFiles( savegameDirs[i], ".pk4", pk4s ) <= 0 ) {
+			continue;
+		}
+		pk4s.Sort();
+		for ( int j = 0; j < pk4s.Num(); j++ ) {
+			idStr pakPath = savegameDirs[i];
+			pakPath.AppendPath( pk4s[j] );
+			pack_t *pak = LoadZipFile( pakPath );
+			if ( !pak ) {
+				continue;
+			}
+			idStr text;
+			if ( ReadFromContainer( pak, NULL, relativePath, text ) ) {
+				InlineContainerIncludes( pak, NULL, text, 0 );
+				if ( texts.FindIndex( text ) < 0 ) {
+					texts.Append( text );
+					origins.Append( pakPath );
+				}
+			}
+			unzClose( pak->handle );
+			delete [] pak->buildBuffer;
+			if ( pak->addon_info ) {
+				pak->addon_info->mapDecls.DeleteContents( true );
+				delete pak->addon_info;
+			}
+			delete pak;
+		}
+	}
+	return texts.Num();
+}
+
+int FS_ReadFileVersions( const char *relativePath, idStrList &texts, idStrList &origins ) {
+	return fileSystemLocal.ReadFileVersions( relativePath, texts, origins );
 }
 
 /*

@@ -306,4 +306,10 @@ extern idFileSystem *		fileSystem;
 // (not a virtual) to keep the game-visible idFileSystem ABI unchanged.
 void						FS_SetThreadReadSafe( bool enable );
 
+// DUDE: the contents of every copy of a file in the search path, the one OpenFileRead picks
+// first, then the ones it shadows, then those in paks in the savegames folders (identical copies
+// once); returns how many. Engine only, like FS_SetThreadReadSafe: a savegame's GUI state may
+// have been written against a shadowed copy, or a GUI mod's since removed (kept in savegames/).
+int							FS_ReadFileVersions( const char *relativePath, idStrList &texts, idStrList &origins );
+
 #endif /* !__FILESYSTEM_H__ */

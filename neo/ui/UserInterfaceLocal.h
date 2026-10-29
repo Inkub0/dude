@@ -103,6 +103,16 @@ public:
 	virtual bool				GetMaxTextIndex( const char *windowName, const char *text, wrapInfo_t &wrapInfo ) const;
 
 private:
+	// DUDE: InitFromFile's parse; savegame state of another version of the GUI file (UserInterface.cpp)
+	bool						ParseDesktop( idParser &src, const char *qpath, bool rebuild );
+	void						WriteStateToSaveGame( idFile *savefile ) const;
+	void						ReadValuesFromSaveGame( idFile *savefile );
+	bool						RestoreState( idFile *savefile, int end, int pointerSize, idStr *reason, bool *pointerSized );
+	void						RestoreValuesOnly( idFile *savefile, int start, int end );
+	static bool					RestoreWithCopies( idFile *savefile, const char *qpath, int start, int fileEnd,
+									int &stateEnd, int &pointerSize, idStr &origin, bool &installedCopy );
+	int							FindFollowingGuiState( idFile *savefile, int start, int fileEnd, const char *nextGui );
+
 	bool						active;
 	bool						loading;
 	bool						interactive;

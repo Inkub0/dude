@@ -416,6 +416,9 @@ static void AnchorHud( idWindow *desktop, const char *qpath, int kind ) {
 	}
 }
 
+// how GUI files are parsed (InitFromFile, and a shadowed copy for a savegame's state)
+static const int GUI_PARSER_FLAGS = LEXFL_NOFATALERRORS | LEXFL_NOSTRINGCONCAT | LEXFL_ALLOWMULTICHARLITERALS | LEXFL_ALLOWBACKSLASHSTRINGCONCAT;
+
 bool idUserInterfaceLocal::InitFromFile( const char *qpath, bool rebuild, bool cache ) {
 
 	if ( !( qpath && *qpath ) ) {
@@ -425,22 +428,46 @@ bool idUserInterfaceLocal::InitFromFile( const char *qpath, bool rebuild, bool c
 
 	loading = true;
 
+	idParser src( GUI_PARSER_FLAGS );
+
+	//Load the timestamp so reload guis will work correctly
+	fileSystem->ReadFile(qpath, NULL, &timeStamp);
+
+	src.LoadFile( qpath );
+
+	if ( !ParseDesktop( src, qpath, rebuild ) ) {
+		loading = false;
+		return false;
+	}
+
+	if ( uiManagerLocal.guis.Find( this ) == NULL ) {
+		uiManagerLocal.guis.Append( this );
+	}
+
+	loading = false;
+
+	return true;
+}
+
+/*
+================
+idUserInterfaceLocal::ParseDesktop
+
+InitFromFile's parse of the loaded source (DUDE: also a shadowed copy of the file, for a savegame's state)
+================
+*/
+bool idUserInterfaceLocal::ParseDesktop( idParser &src, const char *qpath, bool rebuild ) {
+
 	if ( rebuild ) {
 		delete desktop;
 		desktop = new idWindow( this );
+		bindHandler = NULL;		// DUDE: one of the windows just deleted
 	} else if ( desktop == NULL ) {
 		desktop = new idWindow( this );
 	}
 
 	source = qpath;
 	state.Set( "text", "Test Text!" );
-
-	idParser src( LEXFL_NOFATALERRORS | LEXFL_NOSTRINGCONCAT | LEXFL_ALLOWMULTICHARLITERALS | LEXFL_ALLOWBACKSLASHSTRINGCONCAT );
-
-	//Load the timestamp so reload guis will work correctly
-	fileSystem->ReadFile(qpath, NULL, &timeStamp);
-
-	src.LoadFile( qpath );
 
 	if ( src.IsLoaded() ) {
 		idToken token;
@@ -470,17 +497,10 @@ bool idUserInterfaceLocal::InitFromFile( const char *qpath, bool rebuild, bool c
 		desktop->backColor = idVec4( 0.0f, 0.0f, 0.0f, 1.0f );
 		desktop->SetupFromState();
 		common->Warning( "Couldn't load gui: '%s'", qpath );
-		loading = false;
 		return false;
 	}
 
 	interactive = desktop->Interactive();
-
-	if ( uiManagerLocal.guis.Find( this ) == NULL ) {
-		uiManagerLocal.guis.Append( this );
-	}
-
-	loading = false;
 
 	return true;
 }
@@ -865,7 +885,113 @@ void idUserInterfaceLocal::WriteToDemoFile( class idDemoFile *f ) {
 	f->WriteFloat( cursorY );
 }
 
+/*
+===============================================================================
+
+	DUDE: savegame GUI state
+
+	A GUI's saved state is its state dict and a few values, then every window's variables, scripts,
+	registers and transitions in the order its GUI file declares them; nothing in it says how long
+	it is or which version of the file wrote it. Read against another version of the file - a
+	widescreen or HUD mod installed or removed since the game was saved, a retail or dhewm3 save
+	under such a mod - it falls out of step, which used to crash the load or stop it. The readers
+	check what the stream lets them (window and register names, counts, lengths) and stop at the
+	first mismatch (GuiRestore_Failed); ReadFromSaveGame then rewinds, finds the copy of the file
+	the state was written with among the copies in the search path (the stock one a mod shadows),
+	and keeps the saved state dict over the GUI laid out by the current file.
+
+	One window type wrote a struct holding a pointer as it lay in memory (idGameSSDWindow, RoE's
+	arcade on phobos2), so its state also depends on whether a 32-bit engine (retail Doom 3, 32-bit
+	dhewm3) or a 64-bit one wrote it; a GUI that holds one is tried both ways.
+
+	DUDE writes the state length-prefixed (DUDE_SAVEGAME_REVISION 1), so its own savegames skip a
+	GUI that changed since without needing the old file.
+
+===============================================================================
+*/
+
+static const int GUI_SAVE_MAGIC		= (int)0xD0DE6015;	// negative: an older save starts with the state dict's count here
+static const int GUI_SAVE_VERSION	= 1;
+
+static struct {
+	bool		active;
+	bool		failed;
+	int			end;			// where this GUI's state ends in the file (or the file does)
+	int			pointerSize;	// sizeof( void * ) of the engine that wrote it, as assumed
+	bool		pointerSized;	// something read depended on that
+	idStr		reason;
+} guiRestore;
+
+bool GuiRestore_Failed( void ) {
+	return guiRestore.active && guiRestore.failed;
+}
+
+int GuiRestore_PointerSize( void ) {
+	if ( !guiRestore.active ) {
+		return sizeof( void * );
+	}
+	guiRestore.pointerSized = true;
+	return guiRestore.pointerSize;
+}
+
+bool GuiRestore_Fail( const char *fmt, ... ) {
+	if ( guiRestore.active && !guiRestore.failed ) {
+		char text[MAX_STRING_CHARS];
+		va_list argptr;
+		va_start( argptr, fmt );
+		idStr::vsnPrintf( text, sizeof( text ), fmt, argptr );
+		va_end( argptr );
+		guiRestore.failed = true;
+		guiRestore.reason = text;
+	}
+	return false;
+}
+
+bool GuiRestore_Count( idFile *savefile, int num, int minBytesEach ) {
+	if ( num < 0 ) {
+		return GuiRestore_Fail( "a negative count (%d)", num );
+	}
+	if ( guiRestore.active && (long long)num * minBytesEach > (long long)( guiRestore.end - savefile->Tell() ) ) {
+		return GuiRestore_Fail( "a count (%d) running past the end of the state", num );
+	}
+	return true;
+}
+
+bool GuiRestore_ReadString( idFile *savefile, idStr &string ) {
+	int len = 0;
+	savefile->Read( &len, sizeof( len ) );
+	if ( !GuiRestore_Count( savefile, len, 1 ) ) {
+		return false;
+	}
+	string.Fill( ' ', len );
+	if ( len > 0 ) {
+		savefile->Read( &string[0], len );
+	}
+	return true;
+}
+
+/*
+================
+idUserInterfaceLocal::WriteToSaveGame
+================
+*/
 bool idUserInterfaceLocal::WriteToSaveGame( idFile *savefile ) const {
+	// DUDE: the state as before, prefixed with its length (see above)
+	idFile_Memory stateFile( "guiSaveState" );
+	WriteStateToSaveGame( &stateFile );
+
+	const int magic = GUI_SAVE_MAGIC;
+	const int version = GUI_SAVE_VERSION;
+	const int length = stateFile.Length();
+	savefile->Write( &magic, sizeof( magic ) );
+	savefile->Write( &version, sizeof( version ) );
+	savefile->Write( &length, sizeof( length ) );
+	savefile->Write( stateFile.GetDataPtr(), length );
+
+	return true;
+}
+
+void idUserInterfaceLocal::WriteStateToSaveGame( idFile *savefile ) const {
 	int len;
 	const idKeyValue *kv;
 	const char *string;
@@ -904,30 +1030,30 @@ bool idUserInterfaceLocal::WriteToSaveGame( idFile *savefile ) const {
 	savefile->Write( &cursorY, sizeof( cursorY ) );
 
 	desktop->WriteToSaveGame( savefile );
-
-	return true;
 }
 
-bool idUserInterfaceLocal::ReadFromSaveGame( idFile *savefile ) {
-	int num;
-	int i, len;
+/*
+================
+idUserInterfaceLocal::ReadValuesFromSaveGame
+
+The part of the state that doesn't depend on the GUI file: the state dict and the GUI's own values
+================
+*/
+void idUserInterfaceLocal::ReadValuesFromSaveGame( idFile *savefile ) {
+	int num = 0;
 	idStr key;
 	idStr value;
 
-	initScriptsRun = true;	// DUDE: the saved state already includes what onInit set up
-
 	savefile->Read( &num, sizeof( num ) );
+	if ( !GuiRestore_Count( savefile, num, 2 * sizeof( int ) ) ) {
+		return;
+	}
 
 	state.Clear();
-	for( i = 0; i < num; i++ ) {
-		savefile->Read( &len, sizeof( len ) );
-		key.Fill( ' ', len );
-		savefile->Read( &key[0], len );
-
-		savefile->Read( &len, sizeof( len ) );
-		value.Fill( ' ', len );
-		savefile->Read( &value[0], len );
-
+	for( int i = 0; i < num; i++ ) {
+		if ( !GuiRestore_ReadString( savefile, key ) || !GuiRestore_ReadString( savefile, value ) ) {
+			return;
+		}
 		state.Set( key, value );
 	}
 
@@ -936,26 +1062,270 @@ bool idUserInterfaceLocal::ReadFromSaveGame( idFile *savefile ) {
 	savefile->Read( &uniqued, sizeof( uniqued ) );
 	savefile->Read( &time, sizeof( time ) );
 
-	savefile->Read( &len, sizeof( len ) );
-	activateStr.Fill( ' ', len );
-	savefile->Read( &activateStr[0], len );
-	savefile->Read( &len, sizeof( len ) );
-	pendingCmd.Fill( ' ', len );
-	savefile->Read( &pendingCmd[0], len );
-	savefile->Read( &len, sizeof( len ) );
-	returnCmd.Fill( ' ', len );
-	savefile->Read( &returnCmd[0], len );
+	if ( !GuiRestore_ReadString( savefile, activateStr ) || !GuiRestore_ReadString( savefile, pendingCmd ) || !GuiRestore_ReadString( savefile, returnCmd ) ) {
+		return;
+	}
 
 	savefile->Read( &cursorX, sizeof( cursorX ) );
 	savefile->Read( &cursorY, sizeof( cursorY ) );
+}
 
-	desktop->ReadFromSaveGame( savefile );
+/*
+================
+idUserInterfaceLocal::RestoreState
 
-	// DUDE: the anchors come from the layout, not the game's state - a save made before
-	// the HUD had them holds none
-	AnchorHud( desktop, source, hudAnchors );
+The state as written by an engine of the given pointer size, read against this GUI's file up to
+end; false at the first mismatch. pointerSized: whether the pointer size mattered.
+================
+*/
+bool idUserInterfaceLocal::RestoreState( idFile *savefile, int end, int pointerSize, idStr *reason, bool *pointerSized ) {
+	guiRestore.active = true;
+	guiRestore.failed = false;
+	guiRestore.end = end;
+	guiRestore.pointerSize = pointerSize;
+	guiRestore.pointerSized = false;
+	guiRestore.reason.Clear();
 
-	return true;
+	ReadValuesFromSaveGame( savefile );
+	if ( !guiRestore.failed ) {
+		desktop->ReadFromSaveGame( savefile );
+	}
+	if ( !guiRestore.failed && savefile->Tell() > end ) {
+		GuiRestore_Fail( "the state ran %d bytes past its end", savefile->Tell() - end );
+	}
+
+	const bool ok = !guiRestore.failed;
+	if ( reason != NULL ) {
+		*reason = guiRestore.reason;
+	}
+	if ( pointerSized != NULL ) {
+		*pointerSized = guiRestore.pointerSized;
+	}
+	guiRestore.active = false;
+	guiRestore.failed = false;
+
+	if ( ok ) {
+		// DUDE: the anchors come from the layout, not the game's state - a save made before
+		// the HUD had them holds none
+		AnchorHud( desktop, source, hudAnchors );
+	}
+	return ok;
+}
+
+/*
+================
+idUserInterfaceLocal::RestoreValuesOnly
+
+The state was written against another version of this GUI's file: the GUI is laid out anew from the
+current file, with the saved state dict and values over it. Reads the values at start, leaves the
+file at end.
+================
+*/
+void idUserInterfaceLocal::RestoreValuesOnly( idFile *savefile, int start, int end ) {
+	InitFromFile( source, true, false );
+
+	savefile->Seek( start, FS_SEEK_SET );
+	guiRestore.active = true;
+	guiRestore.failed = false;
+	guiRestore.end = end;
+	ReadValuesFromSaveGame( savefile );
+	guiRestore.active = false;
+	guiRestore.failed = false;
+
+	savefile->Seek( end, FS_SEEK_SET );
+}
+
+/*
+================
+idUserInterfaceLocal::ReadFromSaveGame
+================
+*/
+bool idUserInterfaceLocal::ReadFromSaveGame( idFile *savefile ) {
+	initScriptsRun = true;	// DUDE: the saved state already includes what onInit set up
+
+	const int start = savefile->Tell();
+	const int fileEnd = savefile->Length();
+	idStr reason;
+
+	// DUDE: a length-prefixed state (DUDE_SAVEGAME_REVISION 1 on)
+	int magic = 0;
+	savefile->Read( &magic, sizeof( magic ) );
+	if ( magic == GUI_SAVE_MAGIC ) {
+		int version = 0, length = -1;
+		savefile->Read( &version, sizeof( version ) );
+		savefile->Read( &length, sizeof( length ) );
+		const int stateStart = savefile->Tell();
+		if ( length < 0 || length > fileEnd - stateStart ) {
+			common->Warning( "Savegame: the saved state of GUI %s is damaged (%d bytes); the savegame can't be read past it", source.c_str(), length );
+			return false;
+		}
+		const int stateEnd = stateStart + length;
+		if ( version != GUI_SAVE_VERSION ) {
+			// from a later DUDE: skipped whole, the GUI as its file sets it up
+			common->Printf( "Savegame: GUI %s was saved in a newer format (%d), reset to its start\n", source.c_str(), version );
+			InitFromFile( source, true, false );
+			savefile->Seek( stateEnd, FS_SEEK_SET );
+			return true;
+		}
+		if ( !RestoreState( savefile, stateEnd, sizeof( void * ), &reason, NULL ) || savefile->Tell() != stateEnd ) {
+			if ( reason.IsEmpty() ) {
+				reason = va( "%d bytes of it left unread", stateEnd - savefile->Tell() );
+			}
+			common->Printf( "Savegame: GUI %s changed since the game was saved (%s): its state values kept, its layout from the current file\n", source.c_str(), reason.c_str() );
+			RestoreValuesOnly( savefile, stateStart, stateEnd );
+		}
+		savefile->Seek( stateEnd, FS_SEEK_SET );
+		return true;
+	}
+
+	// a savegame from retail Doom 3, dhewm3 or DUDE before revision 1: nothing says where the state
+	// ends but the GUI file it was written with
+	const int nativePointerSize = sizeof( void * );
+	savefile->Seek( start, FS_SEEK_SET );
+	if ( RestoreState( savefile, fileEnd, nativePointerSize, &reason, NULL ) ) {
+		return true;
+	}
+
+	// written with another copy of the file (the stock one a mod now shadows, the mod's one that now
+	// shadows the stock file, one kept in savegames/), or by an engine of the other pointer size
+	int stateEnd = -1, matchPointerSize = 0;
+	idStr origin;
+	bool installedCopy = false;
+	if ( RestoreWithCopies( savefile, source, start, fileEnd, stateEnd, matchPointerSize, origin, installedCopy ) ) {
+		if ( installedCopy && matchPointerSize != nativePointerSize ) {
+			// the file as installed, written by a 32-bit (64-bit) engine: restored whole
+			InitFromFile( source, true, false );
+			savefile->Seek( start, FS_SEEK_SET );
+			if ( RestoreState( savefile, fileEnd, matchPointerSize, NULL, NULL ) && savefile->Tell() == stateEnd ) {
+				common->Printf( "Savegame: GUI %s was saved by a %d-bit engine\n", source.c_str(), matchPointerSize * 8 );
+				return true;
+			}
+		}
+		common->Printf( "Savegame: GUI %s was saved with the copy in %s (%s): its state values kept, its layout from the current file\n",
+			source.c_str(), origin.c_str(), reason.c_str() );
+		RestoreValuesOnly( savefile, start, stateEnd );
+		return true;
+	}
+
+	// no copy of the file reads it, but where it ends can still be told for the player's HUD:
+	// Doom 3's player saves its PDA right after it (idPlayer::Save)
+	if ( GameTitle::Get().title != GAME_TITLE_QUAKE4 && idStr::Icmp( source, "guis/hud.gui" ) == 0 ) {
+		stateEnd = FindFollowingGuiState( savefile, start, fileEnd, "guis/pda.gui" );
+		if ( stateEnd >= 0 ) {
+			common->Printf( "Savegame: GUI %s was saved with a version of the file no longer installed (%s): its state values kept, its layout from the current file\n",
+				source.c_str(), reason.c_str() );
+			RestoreValuesOnly( savefile, start, stateEnd );
+			return true;
+		}
+	}
+
+	common->Error( "The savegame's state of GUI %s matches no version of that file now installed (%s): "
+		"was a GUI mod (a widescreen pack, a HUD) removed since the game was saved? Putting that mod's .pk4 "
+		"in the savegames folder lets this savegame load (it is read there for old savegames only).",
+		source.c_str(), reason.c_str() );
+	return false;
+}
+
+/*
+================
+idUserInterfaceLocal::RestoreWithCopies
+
+Reads the state at start with each copy of the GUI file qpath (FS_ReadFileVersions) as written by a
+64- and a 32-bit engine, in trial GUIs, until one reads it whole. stateEnd: where it ends;
+installedCopy: it was the copy the game loads.
+================
+*/
+bool idUserInterfaceLocal::RestoreWithCopies( idFile *savefile, const char *qpath, int start, int fileEnd,
+		int &stateEnd, int &pointerSize, idStr &origin, bool &installedCopy ) {
+	const int nativePointerSize = sizeof( void * );
+	idStrList texts, origins;
+
+	FS_ReadFileVersions( qpath, texts, origins );
+	for ( int i = 0; i < texts.Num(); i++ ) {
+		for ( int j = 0; j < 2; j++ ) {
+			const int trialPointerSize = ( j == 0 ) ? nativePointerSize : 12 - nativePointerSize;	// 4 <-> 8
+			idUserInterfaceLocal *trial = new idUserInterfaceLocal();
+			idParser src( GUI_PARSER_FLAGS );
+			src.LoadMemory( texts[i].c_str(), texts[i].Length(), qpath );
+			trial->loading = true;
+			const bool parsed = trial->ParseDesktop( src, qpath, true );
+			trial->loading = false;
+			bool pointerSized = false;
+			savefile->Seek( start, FS_SEEK_SET );
+			const bool ok = parsed && trial->RestoreState( savefile, fileEnd, trialPointerSize, NULL, &pointerSized );
+			delete trial;
+			if ( ok ) {
+				stateEnd = savefile->Tell();
+				pointerSize = trialPointerSize;
+				origin = origins[i];
+				installedCopy = ( i == 0 );
+				return true;
+			}
+			if ( !pointerSized ) {
+				break;		// the other pointer size reads it no differently
+			}
+		}
+	}
+	return false;
+}
+
+/*
+================
+idUserInterfaceLocal::FindFollowingGuiState
+
+Where a GUI's state at start ends when no copy of its file can read it, the game having saved the GUI
+nextGui right after it: at that GUI's record (its name, its unique flag), taken only when nextGui's
+state reads whole from there. -1 when not found.
+================
+*/
+int idUserInterfaceLocal::FindFollowingGuiState( idFile *savefile, int start, int fileEnd, const char *nextGui ) {
+	static const int SEARCH_LIMIT = 1 << 20;	// a HUD's state is about 150 KB
+
+	// the values ahead of the windows don't depend on the file: past them at least
+	savefile->Seek( start, FS_SEEK_SET );
+	guiRestore.active = true;
+	guiRestore.failed = false;
+	guiRestore.end = fileEnd;
+	ReadValuesFromSaveGame( savefile );
+	const bool valuesRead = !guiRestore.failed;
+	guiRestore.active = false;
+	guiRestore.failed = false;
+	if ( !valuesRead ) {
+		return -1;
+	}
+
+	const int from = savefile->Tell();
+	const int length = Min( fileEnd - from, SEARCH_LIMIT );
+	const int nameLength = idStr::Length( nextGui );
+	if ( length < (int)sizeof( int ) + nameLength + 1 ) {
+		return -1;
+	}
+	idList<byte> data;
+	data.SetNum( length );
+	if ( savefile->Read( data.Ptr(), length ) != length ) {
+		return -1;
+	}
+
+	for ( int p = 0; p + (int)sizeof( int ) + nameLength + 1 <= length; p++ ) {
+		int len;
+		memcpy( &len, &data[p], sizeof( len ) );
+		len = LittleInt( len );
+		if ( len != nameLength || idStr::Icmpn( (const char *)&data[p + sizeof( int )], nextGui, nameLength ) != 0 ) {
+			continue;
+		}
+		const byte unique = data[p + sizeof( int ) + nameLength];
+		if ( unique > 1 ) {
+			continue;
+		}
+		int nextEnd, pointerSize;
+		idStr origin;
+		bool installedCopy;
+		const int nextStart = from + p + (int)sizeof( int ) + nameLength + 1;
+		if ( RestoreWithCopies( savefile, nextGui, nextStart, fileEnd, nextEnd, pointerSize, origin, installedCopy ) ) {
+			return from + p;
+		}
+	}
+	return -1;
 }
 
 size_t idUserInterfaceLocal::Size() {

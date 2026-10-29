@@ -473,9 +473,16 @@ void SSDAsteroid::ReadAsteroids(idFile* savefile, idGameSSDWindow* _game) {
 
 	int count;
 	savefile->Read(&count, sizeof(count));
-	for(int i = 0; i < count; i++) {
+	if ( !GuiRestore_Count( savefile, count, sizeof( int ) ) ) {	// DUDE: see GuiRestore_Failed
+		return;
+	}
+	for(int i = 0; i < count && !GuiRestore_Failed(); i++) {
 		int id;
 		savefile->Read(&id, sizeof(id));
+		if ( id < 0 || id >= MAX_ASTEROIDS ) {
+			GuiRestore_Fail( "Asteroid %d of %d", id, MAX_ASTEROIDS );
+			return;
+		}
 		SSDAsteroid* ent = GetSpecificAsteroid(id);
 		ent->ReadFromSaveGame(savefile, _game);
 	}
@@ -564,9 +571,16 @@ void SSDAstronaut::ReadAstronauts(idFile* savefile, idGameSSDWindow* _game) {
 
 	int count;
 	savefile->Read(&count, sizeof(count));
-	for(int i = 0; i < count; i++) {
+	if ( !GuiRestore_Count( savefile, count, sizeof( int ) ) ) {	// DUDE: see GuiRestore_Failed
+		return;
+	}
+	for(int i = 0; i < count && !GuiRestore_Failed(); i++) {
 		int id;
 		savefile->Read(&id, sizeof(id));
+		if ( id < 0 || id >= MAX_ASTRONAUT ) {
+			GuiRestore_Fail( "Astronaut %d of %d", id, MAX_ASTRONAUT );
+			return;
+		}
 		SSDAstronaut* ent = GetSpecificAstronaut(id);
 		ent->ReadFromSaveGame(savefile, _game);
 	}
@@ -630,6 +644,9 @@ void SSDExplosion::ReadFromSaveGame( idFile *savefile,  idGameSSDWindow* _game  
 
 	//Get a pointer to my buddy
 	buddy = _game->GetSpecificEntity(type, id);
+	if ( buddy == NULL ) {
+		GuiRestore_Fail( "explosion buddy %d of type %d", id, type );	// DUDE: see GuiRestore_Failed
+	}
 
 	savefile->Read(&killBuddy, sizeof(killBuddy));
 	savefile->Read(&followBuddy, sizeof(followBuddy));
@@ -726,9 +743,16 @@ void SSDExplosion::ReadExplosions(idFile* savefile, idGameSSDWindow* _game) {
 
 	int count;
 	savefile->Read(&count, sizeof(count));
-	for(int i = 0; i < count; i++) {
+	if ( !GuiRestore_Count( savefile, count, sizeof( int ) ) ) {	// DUDE: see GuiRestore_Failed
+		return;
+	}
+	for(int i = 0; i < count && !GuiRestore_Failed(); i++) {
 		int id;
 		savefile->Read(&id, sizeof(id));
+		if ( id < 0 || id >= MAX_EXPLOSIONS ) {
+			GuiRestore_Fail( "Explosion %d of %d", id, MAX_EXPLOSIONS );
+			return;
+		}
 		SSDExplosion* ent = GetSpecificExplosion(id);
 		ent->ReadFromSaveGame(savefile, _game);
 	}
@@ -873,9 +897,16 @@ void SSDPoints::ReadPoints(idFile* savefile, idGameSSDWindow* _game) {
 
 	int count;
 	savefile->Read(&count, sizeof(count));
-	for(int i = 0; i < count; i++) {
+	if ( !GuiRestore_Count( savefile, count, sizeof( int ) ) ) {	// DUDE: see GuiRestore_Failed
+		return;
+	}
+	for(int i = 0; i < count && !GuiRestore_Failed(); i++) {
 		int id;
 		savefile->Read(&id, sizeof(id));
+		if ( id < 0 || id >= MAX_POINTS ) {
+			GuiRestore_Fail( "Points %d of %d", id, MAX_POINTS );
+			return;
+		}
 		SSDPoints* ent = GetSpecificPoints(id);
 		ent->ReadFromSaveGame(savefile, _game);
 	}
@@ -990,9 +1021,16 @@ void SSDProjectile::ReadProjectiles(idFile* savefile, idGameSSDWindow* _game) {
 
 	int count;
 	savefile->Read(&count, sizeof(count));
-	for(int i = 0; i < count; i++) {
+	if ( !GuiRestore_Count( savefile, count, sizeof( int ) ) ) {	// DUDE: see GuiRestore_Failed
+		return;
+	}
+	for(int i = 0; i < count && !GuiRestore_Failed(); i++) {
 		int id;
 		savefile->Read(&id, sizeof(id));
+		if ( id < 0 || id >= MAX_PROJECTILES ) {
+			GuiRestore_Fail( "Projectile %d of %d", id, MAX_PROJECTILES );
+			return;
+		}
 		SSDProjectile* ent = GetSpecificProjectile(id);
 		ent->ReadFromSaveGame(savefile, _game);
 	}
@@ -1182,9 +1220,16 @@ void SSDPowerup::ReadPowerups(idFile* savefile, idGameSSDWindow* _game) {
 
 	int count;
 	savefile->Read(&count, sizeof(count));
-	for(int i = 0; i < count; i++) {
+	if ( !GuiRestore_Count( savefile, count, sizeof( int ) ) ) {	// DUDE: see GuiRestore_Failed
+		return;
+	}
+	for(int i = 0; i < count && !GuiRestore_Failed(); i++) {
 		int id;
 		savefile->Read(&id, sizeof(id));
+		if ( id < 0 || id >= MAX_POWERUPS ) {
+			GuiRestore_Fail( "Powerup %d of %d", id, MAX_POWERUPS );
+			return;
+		}
 		SSDPowerup* ent = GetSpecificPowerup(id);
 		ent->ReadFromSaveGame(savefile, _game);
 	}
@@ -1258,8 +1303,52 @@ void idGameSSDWindow::WriteToSaveGame( idFile *savefile ) {
 	}
 }
 
+/*
+================
+ReadGameStats
+
+DUDE: SSDGameStats_t was saved as it lay in memory, and it ends in a pointer: 64 bytes from a 32-bit
+engine (retail Doom 3, 32-bit dhewm3), 72 from a 64-bit one, with levelStats 4 bytes further on.
+Read in the layout of the engine that wrote it (GuiRestore_PointerSize).
+================
+*/
+static_assert( sizeof( SSDGameStats_t ) == ( sizeof( void * ) == 8 ? 72 : 64 ), "SSDGameStats_t: not the layout savegames hold" );
+static_assert( offsetof( SSDGameStats_t, levelStats ) == ( sizeof( void * ) == 8 ? 32 : 28 ), "SSDGameStats_t: not the layout savegames hold" );
+
+static void ReadGameStats( idFile *savefile, SSDGameStats_t &stats ) {
+	const int pointerSize = GuiRestore_PointerSize();
+	const int levelOffset = ( pointerSize == 8 ) ? 32 : 28;
+	const int size = ( pointerSize == 8 ) ? 72 : 64;
+	byte buffer[72];
+
+	savefile->Read( buffer, size );
+
+	memset( &stats, 0, sizeof( stats ) );
+	stats.gameRunning = buffer[0] != 0;
+	memcpy( &stats.score,			buffer + 4,  sizeof( int ) );
+	memcpy( &stats.prebonusscore,	buffer + 8,  sizeof( int ) );
+	memcpy( &stats.health,			buffer + 12, sizeof( int ) );
+	memcpy( &stats.currentWeapon,	buffer + 16, sizeof( int ) );
+	memcpy( &stats.currentLevel,	buffer + 20, sizeof( int ) );
+	memcpy( &stats.nextLevel,		buffer + 24, sizeof( int ) );
+
+	SSDLevelStats_t &level = stats.levelStats;
+	memcpy( &level.shotCount,				buffer + levelOffset + 0,  sizeof( int ) );
+	memcpy( &level.hitCount,				buffer + levelOffset + 4,  sizeof( int ) );
+	memcpy( &level.destroyedAsteroids,		buffer + levelOffset + 8,  sizeof( int ) );
+	memcpy( &level.nextAsteroidSpawnTime,	buffer + levelOffset + 12, sizeof( int ) );
+	memcpy( &level.killedAstronauts,		buffer + levelOffset + 16, sizeof( int ) );
+	memcpy( &level.savedAstronauts,			buffer + levelOffset + 20, sizeof( int ) );
+	memcpy( &level.nextAstronautSpawnTime,	buffer + levelOffset + 24, sizeof( int ) );
+	memcpy( &level.nextPowerupSpawnTime,	buffer + levelOffset + 28, sizeof( int ) );
+	level.targetEnt = NULL;
+}
+
 void idGameSSDWindow::ReadFromSaveGame( idFile *savefile ) {
 	idWindow::ReadFromSaveGame(savefile);
+	if ( GuiRestore_Failed() ) {	// DUDE: see GuiRestore_Failed
+		return;
+	}
 
 
 	savefile->Read(&ssdTime, sizeof(ssdTime));
@@ -1273,6 +1362,9 @@ void idGameSSDWindow::ReadFromSaveGame( idFile *savefile ) {
 	savefile->Read(&screenBounds, sizeof(screenBounds));
 
 	savefile->Read(&levelCount, sizeof(levelCount));
+	if ( !GuiRestore_Count( savefile, levelCount, sizeof( SSDLevelData_t ) ) ) {
+		return;
+	}
 	for(int i = 0; i < levelCount; i++) {
 		SSDLevelData_t newLevel;
 		savefile->Read(&newLevel, sizeof(SSDLevelData_t));
@@ -1292,6 +1384,9 @@ void idGameSSDWindow::ReadFromSaveGame( idFile *savefile ) {
 	}
 
 	savefile->Read(&weaponCount, sizeof(weaponCount));
+	if ( !GuiRestore_Count( savefile, weaponCount, sizeof( SSDWeaponData_t ) ) ) {
+		return;
+	}
 	for(int i = 0; i < weaponCount; i++) {
 		SSDWeaponData_t newWeapon;
 		savefile->Read(&newWeapon, sizeof(SSDWeaponData_t));
@@ -1300,7 +1395,7 @@ void idGameSSDWindow::ReadFromSaveGame( idFile *savefile ) {
 
 	savefile->Read(&superBlasterTimeout, sizeof(superBlasterTimeout));
 
-	savefile->Read(&gameStats, sizeof(SSDGameStats_t));
+	ReadGameStats( savefile, gameStats );	// DUDE: was a raw read (see ReadGameStats)
 	//Reset this because it is no longer valid
 	gameStats.levelStats.targetEnt = NULL;
 
@@ -1313,6 +1408,9 @@ void idGameSSDWindow::ReadFromSaveGame( idFile *savefile ) {
 
 	int entCount;
 	savefile->Read(&entCount, sizeof(entCount));
+	if ( !GuiRestore_Count( savefile, entCount, 2 * sizeof( int ) ) ) {
+		return;
+	}
 
 	for(int i = 0; i < entCount; i++) {
 		int type, id;
@@ -2260,24 +2358,28 @@ void idGameSSDWindow::StopSuperBlaster() {
 
 SSDEntity* idGameSSDWindow::GetSpecificEntity(int type, int id) {
 	SSDEntity* ent = NULL;
+	// DUDE: ids come from savegames: NULL past a pool's end
+	if ( id < 0 ) {
+		return NULL;
+	}
 	switch(type) {
 			case SSD_ENTITY_ASTEROID:
-				ent = SSDAsteroid::GetSpecificAsteroid(id);
+				ent = ( id < MAX_ASTEROIDS ) ? SSDAsteroid::GetSpecificAsteroid(id) : NULL;
 				break;
 			case SSD_ENTITY_ASTRONAUT:
-				ent = SSDAstronaut::GetSpecificAstronaut(id);
+				ent = ( id < MAX_ASTRONAUT ) ? SSDAstronaut::GetSpecificAstronaut(id) : NULL;
 				break;
 			case SSD_ENTITY_EXPLOSION:
-				ent = SSDExplosion::GetSpecificExplosion(id);
+				ent = ( id < MAX_EXPLOSIONS ) ? SSDExplosion::GetSpecificExplosion(id) : NULL;
 				break;
 			case SSD_ENTITY_POINTS:
-				ent = SSDPoints::GetSpecificPoints(id);
+				ent = ( id < MAX_POINTS ) ? SSDPoints::GetSpecificPoints(id) : NULL;
 				break;
 			case SSD_ENTITY_PROJECTILE:
-				ent = SSDProjectile::GetSpecificProjectile(id);
+				ent = ( id < MAX_PROJECTILES ) ? SSDProjectile::GetSpecificProjectile(id) : NULL;
 				break;
 			case SSD_ENTITY_POWERUP:
-				ent = SSDPowerup::GetSpecificPowerup(id);
+				ent = ( id < MAX_POWERUPS ) ? SSDPowerup::GetSpecificPowerup(id) : NULL;
 				break;
 	}
 	return ent;
