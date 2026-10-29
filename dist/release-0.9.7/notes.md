@@ -21,6 +21,7 @@ Many of those fixes were found the same way: by running a second idTech4 game (Q
 - **Much less shadow smear behind NPCs and monsters.** ReSTIR's change detection only noticed a shadow *arriving* on a surface, not one *leaving* it, so the trailing edge of a moving character's shadow lingered. It now catches both, resets the denoiser's history where the light really changed, and gives low-confidence pixels a stronger fresh sample. Retuned defaults for all of it.
 - **Far fewer trails behind characters' details** (ears, noses, weapons) when a pose was reused between game tics: the reused frame reported zero animation velocity to the denoiser.
 - **Doom 3's ambient lights under RT GI** (`r_rtgiAmbient`, new, default *Floor + Fold*). With RT GI on, the designers' ambient fill lights used to be switched off entirely and left to the GI to replace — dark where few real lights bounce (Mars outdoors, RoE's Erebus). They now add only what the ray-traced lighting falls short of, and also feed the GI bounce.
+- **Neutral HDR look at the top RT presets:** RTX and Path Tracing at Ultra and Nightmare now use HDR exposure and gamma of 1.0 for their GI-lit scenes; the raster presets keep exposure 1.3 and gamma 1.20, and picking a preset now sets the exposure too.
 - **Faster execution:** the chosen light is shaded once instead of twice, last frame's side data is ping-ponged instead of copied, the light grid fills per 4×4×4 block (≈ 0.95 → 0.35 ms), and the per-frame light buffers live in VRAM.
 
 ### Doom 3, the way id made it
