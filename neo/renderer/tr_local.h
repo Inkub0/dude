@@ -1595,6 +1595,10 @@ bool		R_SupportsRayTracing();		// active backend is Vulkan with ray-query hardwa
 bool		R_HdrOverbrightEnabled();	// HDR tonemap curve on AND r_hdrOverbright > 1 (impl RenderSystem_init.cpp)
 
 bool		GLimp_Init( glimpParms_t parms );
+
+// a monitor's name as r_fullscreenDisplayName stores it: SDL's display name without the '"'
+// (X11 appends the size in inches, 'S2719DGF 27"', which the config file could not quote)
+idStr		GLimp_DisplayKey( const char *sdlDisplayName );
 #ifdef DHEWM3_VULKAN
 // Phase 4 (docs/vulkan-backend.md): prove SDL can create a Vulkan-capable
 // window and list instance extensions, without touching the GL path. Logs

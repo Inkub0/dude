@@ -3016,7 +3016,7 @@ static void DrawDisplaySettings()
 		SDL_DisplayID *ids = SDL_GetDisplays( &numDisplays );
 		for ( int i = 0; i < numDisplays && ids != NULL; i++ ) {
 			const char *n = SDL_GetDisplayName( ids[i] );
-			names.Append( n ? n : "" );
+			names.Append( GLimp_DisplayKey( n ) );
 			displays.Append( va( "%d: %s", i, n ? n : "display" ) );
 		}
 		SDL_free( ids );
@@ -3024,12 +3024,12 @@ static void DrawDisplaySettings()
 		const int numDisplays = SDL_GetNumVideoDisplays();
 		for ( int i = 0; i < numDisplays; i++ ) {
 			const char *n = SDL_GetDisplayName( i );
-			names.Append( n ? n : "" );
+			names.Append( GLimp_DisplayKey( n ) );
 			displays.Append( va( "%d: %s", i, n ? n : "display" ) );
 		}
 #endif
 		const int cur = r_fullscreenDisplay.GetInteger();
-		const idStr curName = r_fullscreenDisplayName.GetString();
+		const idStr curName = GLimp_DisplayKey( r_fullscreenDisplayName.GetString() );
 		// the picked monitor as the window code finds it (GLimp_PinnedDisplay): by name, since
 		// the display order can change; by index for a pick made before the name was stored
 		int pinned = -1;

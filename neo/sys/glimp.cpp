@@ -294,9 +294,27 @@ static bool windowIsVulkan = false;
 
 /*
 ===================
+GLimp_DisplayKey
+===================
+*/
+idStr GLimp_DisplayKey( const char *sdlDisplayName ) {
+	idStr key;
+	for ( const char *c = sdlDisplayName ? sdlDisplayName : ""; *c; c++ ) {
+		if ( *c != '"' ) {
+			key += *c;
+		}
+	}
+	key.StripLeading( ' ' );
+	key.StripTrailingWhitespace();
+	return key;
+}
+
+/*
+===================
 GLimp_PinnedDisplay
 
 The display index of the monitor picked in the settings (r_fullscreenDisplay), or -1 = none:
+(displayNames: GLimp_DisplayKey of each display)
 auto, or the picked monitor is not connected. r_fullscreenDisplayName finds the monitor again
 when the display order changed; a monitor that is not connected leaves both cvars alone, so it
 wins again once it is back.
@@ -307,7 +325,7 @@ static int GLimp_PinnedDisplay( const idStrList& displayNames ) {
 	if ( want < 0 ) {
 		return -1;
 	}
-	const idStr name = r_fullscreenDisplayName.GetString();
+	const idStr name = GLimp_DisplayKey( r_fullscreenDisplayName.GetString() );
 	if ( name.IsEmpty() ) {
 		// picked before the name was stored: the index alone, and remember whose it is
 		if ( want < displayNames.Num() ) {
@@ -543,7 +561,7 @@ try_again:
 		#else
 				const char* displayName = SDL_GetDisplayName( j );
 		#endif
-				displayNames.Append( displayName ? displayName : "" );
+				displayNames.Append( GLimp_DisplayKey( displayName ) );
 		#if SDL_VERSION_ATLEAST(3, 0, 0)
 				int numModes = 0;
 				SDL_DisplayMode** modes = SDL_GetFullscreenDisplayModes(displayId_x, &numModes);
