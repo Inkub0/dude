@@ -6677,9 +6677,13 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 				// the row occupies the VOLUME of the light it replaced: cut at ONE reach like a Doom light (the shade fades out
 				// over the last quarter). A 2 x reach sphere put eight times the volume - and several times the candidates - of
 				// the placed lights into every grid cell, which overflowed the cell's slots (the blocky shadows of 2026-10-20).
-				const idVec3 pos = row.hasLight ? row.lightOrigin : row.centroid;
+				// r_rtEmissiveAreaCosine: aim at the fixture itself and take the receiver cosine per area sample (projF.y)
+				const bool areaCos = r_rtEmissiveAreaCosine.GetBool();
+				const bool authored = row.hasLight && !areaCos;
+				const idVec3 pos = authored ? row.lightOrigin : row.centroid;
 				L.pos[0] = pos.x; L.pos[1] = pos.y; L.pos[2] = pos.z;
-				L.proj[3][0] = row.hasLight ? 1.0f : 0.0f;
+				L.proj[3][0] = authored ? 1.0f : 0.0f;
+				L.proj[3][1] = areaCos ? 1.0f : 0.0f;
 				// POWER MATCH (r_rtEmissivePowerMatch): the emitter inherits the POWER of the light it replaces. A Doom 3 light of
 				// colour C and radius R delivers C/2 at d = R/2; this row (reach boost 2 at that distance) delivers 8 L A / R^2,
 				// so the radiance that matches is L = C R^2 / (16 A): a tiny decal replacing a big light burns bright, a big

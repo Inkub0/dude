@@ -259,6 +259,9 @@ bool rtEmissiveShadeRow( RtLights lights, uint li, vec3 P, vec3 N, uint seed, ui
 	ldir = cd / dl;
 	ndl  = max( dot( N, ldir ), 0.0 );
 	if ( !( ndl > 0.0 ) ) { return false; }
+	// r_rtEmissiveAreaCosine (projF.y): the receiver cosine per AREA SAMPLE - a real area light, no hot spot where a wall
+	// faces one point - instead of one cosine toward pos (the replaced light's authored origin)
+	const bool areaCos = lights.l[ li ].projF.y > 0.5;
 	// AVERAGE the emitter's outgoing radiance toward P over `samples` area samples (Arvo). A single sample of a small or
 	// distant emitter is too noisy - it is rarely the reservoir winner and the denoiser clamps the sparse spikes, so the
 	// fixture reads far dimmer than the placed light it replaced (user, 2026-10-21, grid ruled out). N samples smooth the
@@ -288,11 +291,12 @@ bool rtEmissiveShadeRow( RtLights lights, uint li, vec3 P, vec3 N, uint seed, ui
 		float boost = ( knee > 0.0 ) ? max( sl / knee, 1.0 ) : 1.0;
 		float fade  = noFade ? 1.0 : 1.0 - smoothstep( 0.75 * radius, radius, sl );
 		vec3  L = rtEmissiveMeanRadiance( e ) * ( e.scale * intensity * boost * fade );
-		Lsum += L * ( emit / ( pIn * pdfw ) );									// one Arvo estimate of the outgoing radiance toward P
+		float cosR = areaCos ? max( dot( N, sd / sl ), 0.0 ) : 1.0;			// area cosine: this sample's own receiver cosine
+		Lsum += L * ( emit * cosR / ( pIn * pdfw ) );							// one Arvo estimate of the outgoing radiance toward P
 		got++;
 	}
 	if ( got == 0u ) { return false; }
-	contrib = ( Lsum * ( 1.0 / float( ns ) ) ) * ndl;							// averaged radiance x receiver cosine (centroid)
+	contrib = ( Lsum * ( 1.0 / float( ns ) ) ) * ( areaCos ? 1.0 : ndl );		// averaged radiance x receiver cosine (per sample, or toward pos)
 	return !( any( isnan( contrib ) ) );
 }
 
