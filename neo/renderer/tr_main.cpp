@@ -2773,6 +2773,10 @@ static int							s_rtEmissiveMovedGroups = 0;	// movers re-baked since the build
 // E1d labels: one anchor per emissive SURFACE (a run of table triangles of one material), named in the overlay
 struct rtEmissiveLabel_t { const idMaterial *mat; int firstTri, numTris; };
 static idList<rtEmissiveLabel_t>		s_rtEmissiveLabels;
+// per table triangle: its index in GATHER order. The fixture split reorders an entity's slice so each fixture is
+// contiguous; the state re-gather rebuilds the slice in gather order and maps it back through this (world triangles
+// are never re-gathered: identity)
+static idList<int>						s_rtEmissiveTriSrc;
 static idList<rtEmissiveScreenLabel_t>	s_rtEmissiveScreenLabels;		// this frame's projected, culled labels
 
 // IEEE half, round-toward-zero (the same conversion RhiWorld.cpp's light buffer uses); packHalf2x16 layout
@@ -2866,6 +2870,10 @@ static void R_RtEmissiveReport( const char *fmt, ... ) {
 static idList<unsigned int>		s_rtEmissiveLightFixturedSerial;
 static idList<idVec3>			s_rtEmissiveTriLightOrigin;		// E2 v3: per table triangle, the ORIGIN of the placed light it replaces (census; valid where lightLum > 0)
 static idList<bool>				s_rtEmissiveTriLightNoShadows;	// E2 v3: ... and whether that light cast NO shadows (the row inherits it: no visibility ray)
+static idList<bool>				s_rtEmissiveTriLightFront;		// ... and whether that light sits on the triangle's EMITTING side (the pairing prefers one that does)
+// A light origin up to this far BEHIND an emitting triangle's plane still counts as on its emitting side: mappers sit a
+// fixture's light at or just inside its glow (a tube's housing), which must keep pairing with it
+static const float				RT_EMIT_FRONT_SLACK = 4.0f;
 struct rtEmissiveLightDbg_t { idVec3 origin; int kind; };	// kind: 0 fixtured (dropped in the mode), 1 ambience (kept), 2 parallel, 3 fog/blend
 static idList<rtEmissiveLightDbg_t>	s_rtEmissiveLightDbg;
 static rhi::BufferHandle		s_rtEmissiveLightDbgVB = 0, s_rtEmissiveLightDbgIB = 0;
@@ -3712,6 +3720,7 @@ static void R_RtEmissiveFree( void ) {
 	s_rtEmissiveRows.Clear();
 	s_rtEmissiveDbgVB = s_rtEmissiveDbgIB = 0;	s_rtEmissiveDbgIndexes = 0;
 	s_rtEmissiveTris.Clear();
+	s_rtEmissiveTriSrc.Clear();
 	s_rtEmissiveGroups.Clear();
 	s_rtEmissiveLocalVerts.Clear();
 	s_rtEmissiveLabels.Clear();
@@ -3721,6 +3730,7 @@ static void R_RtEmissiveFree( void ) {
 	s_rtEmissiveLightFixturedSerial.Clear();
 	s_rtEmissiveTriLightOrigin.Clear();
 	s_rtEmissiveTriLightNoShadows.Clear();
+	s_rtEmissiveTriLightFront.Clear();
 	s_rtEmissiveLightDbg.Clear();
 	if ( r != NULL ) {
 		if ( s_rtEmissiveLightDbgVB != 0 ) { r->DestroyBuffer( s_rtEmissiveLightDbgVB ); }
@@ -3744,19 +3754,23 @@ static int R_RtCmpEmissiveCensus( const void *pa, const void *pb ) {
 // power divided over all of them, the floor under any one panel got a sliver (mcitya12_2, 288 triangles). Split each
 // world run into spatially CONNECTED clusters of triangles (bounding boxes touching within 2 units, found through a
 // 16-unit spatial hash + union-find), reorder the run so every cluster is contiguous (the GPU samples a row by its
-// contiguous range) and give each cluster its own label = its own row, pairing and power. World runs only: an entity's
-// slice is rewritten in gather order by the mover / state re-gather, which a permutation would break (a prop is one
-// fixture anyway). Called right after the world gather, before the entities, the census and the upload.
-static int R_RtEmissiveSplitWorldRuns( int firstLabel ) {
+// contiguous range) and give each cluster its own label = its own row, pairing and power. Called right after the world
+// gather, and for each entity right after its surfaces (2026-10-29): a prop is NOT one fixture - the COMBAT PREP door
+// frame (mars_city1) carries a strip on each side of its door, one row paired with the light BEHIND the door left this
+// side dark. An entity's model-space verts (3 per triangle, read by the mover re-bake) are permuted with its triangles
+// (groupFirstTri / groupFirstLocal >= 0) and the source index (s_rtEmissiveTriSrc) rides along for the re-gather.
+static void R_RtEmissiveSplitRuns( int firstLabel, int groupFirstTri, int groupFirstLocal, int &runsSplit, int &fixtures ) {
 	struct key_t { unsigned long long key; int tri; };
 	struct cmp_t { static int Cmp( const key_t *a, const key_t *b ) { return ( a->key < b->key ) ? -1 : ( a->key > b->key ) ? 1 : 0; } };
 	static idList<key_t>  keys;
 	static idList<int>    parent, order;
 	static idList<idBounds> boxes;
 	static idList<rtEmissiveTriGPU_t> scratch;
+	static idList<int> scratchSrc;
+	static idList<idVec3> scratchLocal;
 	const float cell = 16.0f, margin = 2.0f;
 	const int nOrig = s_rtEmissiveLabels.Num();
-	int fixtures = 0, runsSplit = 0;
+	while ( s_rtEmissiveTriSrc.Num() < s_rtEmissiveTris.Num() ) { s_rtEmissiveTriSrc.Append( s_rtEmissiveTriSrc.Num() ); }	// new triangles: gather order
 	auto find = [&]( int i ) { while ( parent[i] != i ) { parent[i] = parent[ parent[i] ]; i = parent[i]; } return i; };
 	auto cellKey = [&]( const idVec3 &c ) {
 		const long long ix = (long long)idMath::Floor( c.x / cell ) + 0x100000, iy = (long long)idMath::Floor( c.y / cell ) + 0x100000, iz = (long long)idMath::Floor( c.z / cell ) + 0x100000;
@@ -3811,8 +3825,15 @@ static int R_RtEmissiveSplitWorldRuns( int firstLabel ) {
 		for ( int k = 0; k < clusters; k++ ) { start[k + 1] += start[k]; fill[k] = start[k]; }
 		for ( int t = 0; t < n; t++ ) { order[ fill[ rootId[ find( t ) ] ]++ ] = t; }
 		scratch.SetNum( n, false );
-		for ( int t = 0; t < n; t++ ) { scratch[t] = s_rtEmissiveTris[ first + order[t] ]; }
-		for ( int t = 0; t < n; t++ ) { s_rtEmissiveTris[ first + t ] = scratch[t]; }
+		scratchSrc.SetNum( n, false );
+		for ( int t = 0; t < n; t++ ) { scratch[t] = s_rtEmissiveTris[ first + order[t] ]; scratchSrc[t] = s_rtEmissiveTriSrc[ first + order[t] ]; }
+		for ( int t = 0; t < n; t++ ) { s_rtEmissiveTris[ first + t ] = scratch[t]; s_rtEmissiveTriSrc[ first + t ] = scratchSrc[t]; }
+		if ( groupFirstTri >= 0 ) {
+			const int localFirst = groupFirstLocal + 3 * ( first - groupFirstTri );
+			scratchLocal.SetNum( 3 * n, false );
+			for ( int t = 0; t < n; t++ ) { for ( int k = 0; k < 3; k++ ) { scratchLocal[ 3 * t + k ] = s_rtEmissiveLocalVerts[ localFirst + 3 * order[t] + k ]; } }
+			for ( int v = 0; v < 3 * n; v++ ) { s_rtEmissiveLocalVerts[ localFirst + v ] = scratchLocal[v]; }
+		}
 		// the first cluster keeps this label, the others get their own (same material: the overlay name is unchanged)
 		const idMaterial *mat = l.mat;
 		l.numTris = start[1] - start[0];
@@ -3823,10 +3844,6 @@ static int R_RtEmissiveSplitWorldRuns( int firstLabel ) {
 		fixtures += clusters;
 		runsSplit++;
 	}
-	if ( runsSplit > 0 ) {
-		R_RtEmissiveReport( "r_rtEmissiveTable: %d world material runs split into separate fixtures: %d emitters from %d runs\n", runsSplit, fixtures, nOrig - firstLabel );
-	}
-	return fixtures;
 }
 
 static void R_RtEmissiveBuild( const idRenderWorldLocal *world, rhi::RHI *r ) {
@@ -3867,9 +3884,13 @@ static void R_RtEmissiveBuild( const idRenderWorldLocal *world, rhi::RHI *r ) {
 			if ( s_rtEmissiveTris.Num() > before ) { rtEmissiveLabel_t l; l.mat = surf->shader; l.firstTri = before; l.numTris = s_rtEmissiveTris.Num() - before; s_rtEmissiveLabels.Append( l ); }
 		}
 	}
-	// E2 v3: one row per FIXTURE, not per material run - split the world runs into connected clusters (before the
-	// entities, whose slices must keep their gather order)
-	R_RtEmissiveSplitWorldRuns( 0 );
+	// E2 v3: one row per FIXTURE, not per material run - split the world runs into connected clusters
+	int worldRunsSplit = 0, worldFixtures = 0, entityRunsSplit = 0, entityFixtures = 0;
+	const int worldRuns = s_rtEmissiveLabels.Num();
+	R_RtEmissiveSplitRuns( 0, -1, -1, worldRunsSplit, worldFixtures );
+	if ( worldRunsSplit > 0 ) {
+		R_RtEmissiveReport( "r_rtEmissiveTable: %d world material runs split into separate fixtures: %d emitters from %d runs\n", worldRunsSplit, worldFixtures, worldRuns );
+	}
 	// static entities (func_statics, inline brush models, movers at their load pose): model space x the entity
 	// matrix, the SKIN-REMAPPED material (a fixture's on/off state is a skin), the entity's shaderParms (its _color)
 	s_rtEmissiveSeenModel.SetNum( world->entityDefs.Num(), false );
@@ -3883,7 +3904,7 @@ static void R_RtEmissiveBuild( const idRenderWorldLocal *world, rhi::RHI *r ) {
 		float modelMatrix[16];
 		R_AxisToModelMatrix( def->parms.axis, def->parms.origin, modelMatrix );
 		bool any = false;
-		const int groupFirstTri = s_rtEmissiveTris.Num(), groupFirstLocal = s_rtEmissiveLocalVerts.Num();
+		const int groupFirstTri = s_rtEmissiveTris.Num(), groupFirstLocal = s_rtEmissiveLocalVerts.Num(), groupFirstLabel = s_rtEmissiveLabels.Num();
 		for ( int s = 0; s < model->NumSurfaces(); s++ ) {
 			const modelSurface_t *surf = model->Surface( s );
 			if ( surf->geometry == NULL || surf->geometry->verts == NULL || surf->geometry->indexes == NULL ) {
@@ -3907,6 +3928,7 @@ static void R_RtEmissiveBuild( const idRenderWorldLocal *world, rhi::RHI *r ) {
 		}
 		if ( any ) {
 			entities++;
+			R_RtEmissiveSplitRuns( groupFirstLabel, groupFirstTri, groupFirstLocal, entityRunsSplit, entityFixtures );	// one row per fixture of the prop
 			rtEmissiveGroup_t &g = s_rtEmissiveGroups.Alloc();
 			g.entityIndex = i;
 			g.model = model;
@@ -3921,6 +3943,9 @@ static void R_RtEmissiveBuild( const idRenderWorldLocal *world, rhi::RHI *r ) {
 			g.dark = false;
 			g.regather = false;
 		}
+	}
+	if ( entityRunsSplit > 0 ) {
+		R_RtEmissiveReport( "r_rtEmissiveTable: %d entity material runs split into separate fixtures: %d emitters\n", entityRunsSplit, entityFixtures );
 	}
 
 	if ( r_rtEmissiveFlareInfer.GetBool() ) { R_RtEmissiveReport( "r_rtEmissiveTable: flare inference:\n" ); }
@@ -3956,6 +3981,7 @@ static void R_RtEmissiveBuild( const idRenderWorldLocal *world, rhi::RHI *r ) {
 		common->Warning( "r_rtEmissiveTable: the table buffer (%d KB) could not be created", bytes >> 10 );
 		if ( s_rtEmissiveBuf != 0 ) { r->DestroyBuffer( s_rtEmissiveBuf ); s_rtEmissiveBuf = 0; }
 		s_rtEmissiveTris.Clear();
+		s_rtEmissiveTriSrc.Clear();
 		return;
 	}
 
@@ -4045,6 +4071,7 @@ static void R_RtEmissiveBuildRows( void ) {
 		float flux = 0.0f, area = 0.0f, reach = 0.0f, lightLum = 0.0f;
 		idVec3 lightOrigin( 0.0f, 0.0f, 0.0f );
 		bool noShadows = false;
+		bool lightFront = false;
 		bool dark = true;
 		for ( int t = 0; t < l.numTris; t++ ) {
 			const rtEmissiveTriGPU_t &e = s_rtEmissiveTris[ l.firstTri + t ];
@@ -4061,7 +4088,10 @@ static void R_RtEmissiveBuildRows( void ) {
 			}
 			float r; memcpy( &r, &e.reach, sizeof( r ) );
 			float ll; memcpy( &ll, &e.lightLum, sizeof( ll ) );
-			if ( r > reach ) {										// the light with the largest reach decides all three
+			const bool front = ( l.firstTri + t < s_rtEmissiveTriLightFront.Num() ) && s_rtEmissiveTriLightFront[ l.firstTri + t ];
+			// the light with the largest reach decides all three - preferring one on its triangle's emitting side (census)
+			if ( r > 0.0f && ( ( front && !lightFront ) || ( front == lightFront && r > reach ) ) ) {
+				lightFront = front;
 				reach = r; lightLum = ll;
 				lightOrigin = ( l.firstTri + t < s_rtEmissiveTriLightOrigin.Num() ) ? s_rtEmissiveTriLightOrigin[ l.firstTri + t ] : idVec3( 0.0f, 0.0f, 0.0f );
 				noShadows = ( l.firstTri + t < s_rtEmissiveTriLightNoShadows.Num() ) ? s_rtEmissiveTriLightNoShadows[ l.firstTri + t ] : false;
@@ -4183,17 +4213,22 @@ static bool R_RtEmissiveRegatherGroup( rtEmissiveGroup_t &g, const idRenderEntit
 		}
 		return false;
 	}
+	// the scratch is in GATHER order, the slice in the fixture split's order (R_RtEmissiveSplitRuns): map each slot
+	// through its source index (out of range = identity: a slice the split never touched)
 	for ( int t = 0; t < g.numTris; t++ ) {
-		const unsigned int inLight = s_rtEmissiveTris[ g.firstTri + t ].emit & RT_EMIT_FLAG_INLIGHT;	// the census flag + reach survive
-		const unsigned int reach = s_rtEmissiveTris[ g.firstTri + t ].reach;
-		const unsigned int lightLum = s_rtEmissiveTris[ g.firstTri + t ].lightLum;
-		s_rtEmissiveTris[ g.firstTri + t ] = scratch[t];
-		s_rtEmissiveTris[ g.firstTri + t ].emit |= inLight;
-		s_rtEmissiveTris[ g.firstTri + t ].reach = reach;
-		s_rtEmissiveTris[ g.firstTri + t ].lightLum = lightLum;
-	}
-	for ( int v = 0; v < g.numTris * 3; v++ ) {
-		s_rtEmissiveLocalVerts[ g.firstLocalVert + v ] = scratchLocal[v];
+		const int at = g.firstTri + t;
+		int src = ( at < s_rtEmissiveTriSrc.Num() ) ? s_rtEmissiveTriSrc[ at ] - g.firstTri : t;
+		if ( src < 0 || src >= g.numTris ) { src = t; }
+		const unsigned int inLight = s_rtEmissiveTris[ at ].emit & RT_EMIT_FLAG_INLIGHT;	// the census flag + reach survive
+		const unsigned int reach = s_rtEmissiveTris[ at ].reach;
+		const unsigned int lightLum = s_rtEmissiveTris[ at ].lightLum;
+		s_rtEmissiveTris[ at ] = scratch[ src ];
+		s_rtEmissiveTris[ at ].emit |= inLight;
+		s_rtEmissiveTris[ at ].reach = reach;
+		s_rtEmissiveTris[ at ].lightLum = lightLum;
+		for ( int k = 0; k < 3; k++ ) {
+			s_rtEmissiveLocalVerts[ g.firstLocalVert + 3 * t + k ] = scratchLocal[ 3 * src + k ];
+		}
 	}
 	if ( g.dark ) {
 		if ( r_rtEmissiveTableDebug.GetInteger() > 0 ) {	// DUDE: the overlay's companion; a conveyor would print every cycle
@@ -4389,7 +4424,8 @@ static void R_RtEmissiveLightCensus( const idRenderWorldLocal *world, rhi::RHI *
 	for ( int t = 0; t < n; t++ ) { s_rtEmissiveTris[t].emit &= ~RT_EMIT_FLAG_INLIGHT; s_rtEmissiveTris[t].reach = 0u; s_rtEmissiveTris[t].lightLum = 0u; }
 	s_rtEmissiveTriLightOrigin.SetNum( n, false );
 	s_rtEmissiveTriLightNoShadows.SetNum( n, false );
-	for ( int t = 0; t < n; t++ ) { s_rtEmissiveTriLightOrigin[t].Zero(); s_rtEmissiveTriLightNoShadows[t] = false; }
+	s_rtEmissiveTriLightFront.SetNum( n, false );
+	for ( int t = 0; t < n; t++ ) { s_rtEmissiveTriLightOrigin[t].Zero(); s_rtEmissiveTriLightNoShadows[t] = false; s_rtEmissiveTriLightFront[t] = false; }
 	// the EFFECTIVE emitting area of each triangle's whole surface run = its flux / the global scale = geometric area x the
 	// mean luminance of its glow texels x the stage colour: "lit area x brightness" (user, 2026-10-20). A FIXTURE has it
 	// (a tube, a tile, a white sterlight patch); an INDICATOR (a 2 x 2 red computer LED, the electric box's lamp on a big
@@ -4466,8 +4502,18 @@ static void R_RtEmissiveLightCensus( const idRenderWorldLocal *world, rhi::RHI *
 				} else if ( ld->parms.pointLight ) {
 					radius = ld->parms.lightRadius.Length();
 				}
+				// ... and ON THE SIDE IT EMITS TOWARD (2026-10-29): the row's receiver cosine and visibility ray aim at the paired
+				// light's origin, so a light behind the glow lights nothing. The COMBAT PREP door frame (mars_city1) has a strip
+				// facing each side of its door and a light on each side; this side's strip took the light BEHIND the door (the
+				// larger reach) and the door went dark. A light on the emitting side beats one behind it; same side: the larger
+				// reach, as before. Two-sided materials emit both ways (their reversed twin is in the table): either side.
+				const idVec3 g = ( b - a ).Cross( cc - a );
+				const float gl = g.Length();
+				const bool front = ( e.emit & RT_EMIT_FLAG_TWOSIDED ) != 0u || !( gl > 0.0f )
+					|| g * ( a - ld->globalLightOrigin ) > -RT_EMIT_FRONT_SLACK * gl;
 				float cur; memcpy( &cur, &e.reach, sizeof( cur ) );
-				if ( radius > cur ) {
+				const bool curFront = s_rtEmissiveTriLightFront[t];
+				if ( ( front && !curFront ) || ( front == curFront && radius > cur ) ) {
 					memcpy( &e.reach, &radius, sizeof( radius ) );
 					// E2 v3 power match: the light's colour luminance (its parametric RGB; a light coloured by its material's
 					// stages reads 1) - the row inherits the POWER of the light it replaces, not only its radius
@@ -4477,6 +4523,7 @@ static void R_RtEmissiveLightCensus( const idRenderWorldLocal *world, rhi::RHI *
 					memcpy( &e.lightLum, &lum, sizeof( lum ) );
 					s_rtEmissiveTriLightOrigin[t] = ld->globalLightOrigin;		// the mapper's light position: the receiver cosine + SH direction come from here
 					s_rtEmissiveTriLightNoShadows[t] = ld->parms.noShadows;		// a light the mapper flagged shadowless (a tube behind its cover): the row traces no visibility ray either
+					s_rtEmissiveTriLightFront[t] = front;
 				}
 			}
 		}
@@ -5036,8 +5083,8 @@ void R_RtResetSceneState( void ) {
 	s_rtWorldFailedMap = "";
 	// E1 emissive table: handles are stale too; the CPU copy goes with them so the next RT frame rebuilds
 	s_rtEmissiveBuf = 0; s_rtEmissiveAddr = 0; s_rtEmissiveDbgVB = s_rtEmissiveDbgIB = 0; s_rtEmissiveDbgIndexes = 0;
-	s_rtEmissiveTris.Clear(); s_rtEmissiveGroups.Clear(); s_rtEmissiveLocalVerts.Clear(); s_rtEmissiveLabels.Clear(); s_rtEmissiveScreenLabels.Clear(); s_rtEmissiveMap.Clear(); s_rtEmissiveTotalFlux = 0.0f;
-	s_rtEmissiveRows.Clear(); s_rtEmissiveLightDbgVB = s_rtEmissiveLightDbgIB = 0; s_rtEmissiveLightDbgIndexes = 0; s_rtEmissiveLightFixturedSerial.Clear(); s_rtEmissiveTriLightOrigin.Clear(); s_rtEmissiveTriLightNoShadows.Clear(); s_rtEmissiveLightDbg.Clear();
+	s_rtEmissiveTris.Clear(); s_rtEmissiveTriSrc.Clear(); s_rtEmissiveGroups.Clear(); s_rtEmissiveLocalVerts.Clear(); s_rtEmissiveLabels.Clear(); s_rtEmissiveScreenLabels.Clear(); s_rtEmissiveMap.Clear(); s_rtEmissiveTotalFlux = 0.0f;
+	s_rtEmissiveRows.Clear(); s_rtEmissiveLightDbgVB = s_rtEmissiveLightDbgIB = 0; s_rtEmissiveLightDbgIndexes = 0; s_rtEmissiveLightFixturedSerial.Clear(); s_rtEmissiveTriLightOrigin.Clear(); s_rtEmissiveTriLightNoShadows.Clear(); s_rtEmissiveTriLightFront.Clear(); s_rtEmissiveLightDbg.Clear();
 }
 
 // DUDE: the six cvars that imply the persistent ray-query scene. r_rtWorld is the explicit
