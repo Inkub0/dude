@@ -1506,7 +1506,7 @@ void idCommonLocal::CheckConfigSchema( void ) {
 	// Display / output cvars are CVAR_RENDERER too but are NOT part of the enhancement
 	// schema - snapshot them, reset the renderer group, then restore them.
 	static const char * const keep[] = {
-		"r_mode", "r_fullscreen", "r_fullscreenDesktop", "r_fullscreenDisplay",
+		"r_mode", "r_fullscreen", "r_fullscreenDesktop", "r_fullscreenDisplay", "r_fullscreenDisplayName",
 		"r_customWidth", "r_customHeight", "r_swapInterval", "r_multiSamples",
 		"r_gamma", "r_brightness", "r_gammaInShader",
 	};
