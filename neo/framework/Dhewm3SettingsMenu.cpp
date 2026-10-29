@@ -5703,10 +5703,6 @@ static void DrawDbgGroup_DIDenoiser()
 		"pixel ALSO gets the boosted picks; held until 2x this. 0 = history trigger OFF (only true disocclusions + pixels "
 		"entering the screen are boosted - boosting the short-history footprints of flickering lights cost ~1.4 ms standing "
 		"still). (r_rtReStirDIBoostHistory)" );
-	CvarSliderF( "Boost Low Confidence", r_rtReStirDIBoostConfidence, 0.0f, 1.0f, "%.2f", "ALSO boost pixels whose gradient "
-		"confidence was below this last frame: where the gradient dropped or reset history (a moving or idling NPC's shadow "
-		"edge) the denoiser shows the fresh 1-spp signal, so the extra picks turn raw noise into a clean edge in a frame or "
-		"two. Costs rays only where confidence is low (more under flickering lights). 0 = off. (r_rtReStirDIBoostConfidence)" );
 
 	// ===== Anti-lag & Gradient Confidence: the two INTERLOCKED lag-mitigation mechanisms (one replaces the other) =====
 	// collapsed by default: 14 interlocked knobs (flat while searching)

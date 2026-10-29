@@ -54,7 +54,9 @@ If you have questions concerning this license or the applicable additional terms
 // trigger off, weapon-only forward rule) and archived values from the tuning sessions kept overriding them.
 // 3 (2026-10-29, 0.9.7): the ReSTIR DI gradient / ReLAX / boost defaults were retuned (shadow smear fix) and
 // 0.9.6 configs archive the old values; the renderer, GPU and VRR choices are kept from now on.
-#define DUDE_CONFIG_SCHEMA				3
+// 4 (2026-10-29): TARGETED step, no reset - r_rtReStirDIBoostHistory 4 -> 2 where a config still holds 0.9.7's default
+// (~1.9 ms at Path Tracing for no visible gain). From 3 on, a bump may be such a step (CheckConfigSchema, from >= 3).
+#define DUDE_CONFIG_SCHEMA				4
 
 #ifdef ID_REPRODUCIBLE_BUILD
 	// for reproducible builds we hardcode values that would otherwise come from __DATE__ and __TIME__

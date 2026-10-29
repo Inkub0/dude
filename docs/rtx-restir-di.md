@@ -161,7 +161,7 @@ exclusive until DI gets its own NRD instance (fine while DI is debug-only).
 | `r_rtReStirDIGradientFilterPasses` | 1 | **R1** A-trous passes over the gradient (RTXDI 4); 1 hugs a change tightest (user-tuned). |
 | `r_rtReStirDIRelaxFast` / `RelaxPrepass` / `RelaxPhi` / `RelaxAtrous` / `RelaxVarianceHist` / `RelaxConfRelax` / `RelaxFirefly` | 3 / 18 / 0.7 / 3 / 2 / 0.75 / 1 | **R2** ReLAX settings (user-tuned 2026-10-13; started from the Remix direct-light preset + RTXDI sample). ReLAX is the only DI denoiser since R6. |
 | `r_rtReStirDIBoost` | 2 | **R3a** K picks + K rays on clustered YOUNG pixels (revealed from behind an occluder / entered the screen / held a few frames); 0 or 1 = off, 2..4 = K. Default 2 since 2026-10-12 (user decision). |
-| `r_rtReStirDIBoostHistory` | 0 | **R3a** NRD-history trigger: frames below which a pixel is boosted (stays until 2x, capped at `r_rtReStirDIHistory`); 0 = off, only true disocclusion + screen entry (held 4 frames). |
+| `r_rtReStirDIBoostHistory` | 2 | **R3a** NRD-history trigger: frames below which a pixel is boosted (stays until 2x, capped at `r_rtReStirDIHistory`); 0 = off, only true disocclusion + screen entry (held 4 frames). 0.9.7 shipped 4 (with `r_rtReStirDIBoostConfidence` 0.3, a low-confidence trigger) for the shadow-smear fix: +1.9 ms at Path Tracing for no visible gain once the gradient fix had stopped the smear. Back to 2 on 2026-10-29, the confidence trigger removed, configs on 4 migrated by config schema 4 (docs/rtx-sigma-shadows.md, M1). |
 
 Defaults are the user-tuned compromise (ReLAX / denoiser knobs re-tuned 2026-10-13; see the ReLAX row + History
 16 / HistoryMs 666 / HistoryFix 0 / EdgeStop 4 / Checkerboard 1). All `CVAR_ARCHIVE`, so a user's own values
