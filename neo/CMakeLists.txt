@@ -825,6 +825,7 @@ set(src_renderer
 	renderer/tr_light.cpp
 	renderer/tr_lightrun.cpp
 	renderer/tr_main.cpp
+	renderer/RtEmissiveAuthor.cpp
 	renderer/tr_orderIndexes.cpp
 	renderer/tr_polytope.cpp
 	renderer/tr_render.cpp

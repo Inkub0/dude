@@ -340,6 +340,43 @@ static void SCR_DrawEmissiveLabels( void ) {
 
 /*
 ==================
+SCR_DrawEmAuthHover
+
+DUDE Light Editor look mode (editLights, docs/rtx-light-editor.md L2): one line under the crosshair naming the light or
+glowing surface it highlights, with its authored state. Same 2D debug pass as the labels above (screenshots show it).
+==================
+*/
+static void SCR_DrawEmAuthHover( void ) {
+	const char *text = R_EmAuthHoverText();
+	if ( text == NULL ) {
+		return;
+	}
+	static const idVec4 cyan( 0.55f, 0.95f, 1.0f, 1.0f );
+	idDeviceContext *dc = NULL;
+	int font = -1;
+	if ( Con_GetDebugFont( &dc, &font ) ) {
+		dc->SetFont( font );
+		const float scale = 0.12f;
+		const int h = dc->MaxCharHeight( scale ) + 4;
+		const idRectangle rc( 0.0f, 262.0f, 640.0f, (float)h );
+		static const float ox[4] = { -1.0f, 1.0f, 0.0f, 0.0f }, oy[4] = { 0.0f, 0.0f, -1.0f, 1.0f };
+		for ( int k = 0; k < 4; k++ ) {
+			dc->DrawText( text, scale, idDeviceContext::ALIGN_CENTER, colorBlack, idRectangle( rc.x + ox[k], rc.y + oy[k], rc.w, rc.h ), false );
+		}
+		dc->DrawText( text, scale, idDeviceContext::ALIGN_CENTER, cyan, rc, false );
+	} else {
+		const int w = (int)strlen( text ) * SMALLCHAR_WIDTH;
+		const int x = 320 - w / 2, y = 262;
+		renderSystem->DrawSmallStringExt( x - 1, y, text, colorBlack, true, localConsole.charSetShader );
+		renderSystem->DrawSmallStringExt( x + 1, y, text, colorBlack, true, localConsole.charSetShader );
+		renderSystem->DrawSmallStringExt( x, y - 1, text, colorBlack, true, localConsole.charSetShader );
+		renderSystem->DrawSmallStringExt( x, y + 1, text, colorBlack, true, localConsole.charSetShader );
+		renderSystem->DrawSmallStringExt( x, y, text, cyan, true, localConsole.charSetShader );
+	}
+}
+
+/*
+==================
 SCR_DrawMemoryUsage
 ==================
 */
@@ -1341,6 +1378,7 @@ void	idConsoleLocal::Draw( bool forceFullScreen ) {
 	}
 
 	SCR_DrawEmissiveLabels();		// DUDE: RT emissive overlay material names (no-op unless r_rtEmissiveTableDebug)
+	SCR_DrawEmAuthHover();			// DUDE: Light Editor look mode, the highlighted light / surface (no-op unless editLights)
 
 	if ( com_showMemoryUsage.GetBool() ) {
 		y = SCR_DrawMemoryUsage( y );

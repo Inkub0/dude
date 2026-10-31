@@ -7,10 +7,10 @@
 //       blue = 1/16 of the mean or fainter, green = the mean, red = 4x, white = 16x and above;
 //   3 = EMITTED COLOUR: the emitter's MEAN radiance (glow average x stage colour x scale, flat - what E2 lights with); a
 //       flare-inferred patch shows its diffuse through the threshold instead.
-//   4 = LIGHT COVERAGE (the E5 hybrid question): green = the triangle sits inside a placed light's volume (that light is
-//       "fixtured" and would be dropped when the emitters light the scene), red = no placed light covers it (this
-//       emitter would be the only light there).
-// Opaque, into the pre-tonemap HDR scene.
+//   6 / 7 = the Light Editor's look mode (editLights, docs/rtx-light-editor.md L2): 6 = light spheres + the highlighted
+//       volume (vertex colour; normal.y = x-ray: drawn faint where the scene hides it), 7 = a surface tint (u_localParam1).
+// Opaque (modes 1-3) / alpha-blended (6, 7), into the pre-tonemap HDR scene. (4 = light coverage and 5 = the placed lights
+// by census class went with the census, 2026-10-31: look mode shows the lights.)
 //
 // Uniform packing (RB_RHI_RtEmissiveDebugOverlay): u_mvpMatrix = world -> clip (vertex stage); u_localParam0 =
 // ( mode, 1/meanFlux, -, - ); u_depthTexRecip.xy = 1 / depth upload size; unit 0 = sealed scene depth (POT);
@@ -40,11 +40,22 @@ void main() {
 	// hand depth test against the sealed scene depth (the overlay runs after the scene, with no depth attachment)
 	ivec2 dsz = textureSize( u_currentDepth, 0 );
 	float raw = texelFetch( u_currentDepth, clamp( ivec2( floor( gl_FragCoord.xy * u_depthTexRecip.xy * vec2( dsz ) ) ), ivec2( 0 ), dsz - 1 ), 0 ).x;
-	if ( gl_FragCoord.z > raw + 2e-5 ) { discard; }
+	int  mode  = int( u_localParam0.x + 0.5 );
+	bool hidden = gl_FragCoord.z > raw + 2e-5;
+	if ( mode == 6 ) {
+		// L2 look mode gizmos (light spheres, the highlighted volume): vertex colour; x-ray (normal.y) = faint where hidden
+		if ( hidden && var_FluxScaleIndex.y < 0.5 ) { discard; }
+		fragColor = vec4( var_Tint.rgb, var_Tint.a * ( hidden ? 0.3 : 0.9 ) );
+		return;
+	}
+	if ( hidden ) { discard; }
+	if ( mode == 7 ) {
+		fragColor = u_localParam1;												// L2 look mode surface tint (its authored state; dark fixtures included)
+		return;
+	}
 
 	if ( var_FluxScaleIndex.x <= 0.0 ) { discard; }							// a fixture switched OFF (RT_EMIT_DARK): not an emitter right now
 
-	int  mode  = int( u_localParam0.x + 0.5 );
 	uint slot  = uint( var_SlotFlags.x + 0.5 );
 	uint flags = uint( var_SlotFlags.y + 0.5 ) << 16;
 	if ( mode == 1 ) {
@@ -59,10 +70,6 @@ void main() {
 		          : ( t < 0.75 ) ? mix( vec3( 0.0, 1.0, 0.0 ), vec3( 1.0, 0.0, 0.0 ), ( t - 0.5 ) * 4.0 )
 		          : mix( vec3( 1.0, 0.0, 0.0 ), vec3( 1.0 ), ( t - 0.75 ) * 4.0 );
 		fragColor = vec4( c, 1.0 );
-	} else if ( mode == 4 ) {
-		fragColor = ( ( flags & ( 1u << 19 ) ) != 0u ) ? vec4( 0.1, 0.9, 0.2, 1.0 ) : vec4( 0.95, 0.15, 0.1, 1.0 );
-	} else if ( mode == 5 ) {
-		fragColor = vec4( var_Tint.rgb, 1.0 );											// the placed lights as census-coloured spheres
 	} else {
 		fragColor = vec4( var_Tint.rgb * var_FluxScaleIndex.y, 1.0 );				// the MEAN radiance E2 lights with (flat; the vertex colour carries it; every entry is uniform now)
 	}

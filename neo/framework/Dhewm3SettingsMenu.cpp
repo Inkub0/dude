@@ -34,11 +34,6 @@ extern idCVar com_interpolate;
 
 extern bool R_GetModeInfo( int *width, int *height, int mode );
 
-// the Emissive Lights group (inside the anonymous namespace below) opens the standalone emitter editor window
-// (Com_OpenEmitterEditor / Com_DrawEmitterEditor, defined after the namespace). Global linkage: the editEmitter command.
-class idMaterial;
-void Com_OpenEmitterEditor( const idMaterial *mat );
-
 namespace {
 
 const char* GetLocalizedString( const char* id, const char* fallback )
@@ -5348,7 +5343,7 @@ static void DrawDbgGroup_RTEmitters()
 
 	// ===== Mode =====
 	SettingsHeading( "Mode" );
-	SettingsNoteDisabled( "The header switch is Emissive Mode: emitters replace the placed lights whose fixture they are." );
+	SettingsNoteDisabled( "The header switch is Emissive Mode: the surfaces the map's Light Editor setup makes emit light the scene, and the lights it deletes go." );
 	CvarCheckbox( "Emitters at the GI Bounce", r_rtEmissiveBounce, "The emitting surfaces light the GI bounce's hit points like "
 		"any light. Works in BOTH modes: with Emissive Mode off the placed lights keep the direct term and the emitters only add "
 		"to the GI (needs the Emitter Table on); with it on, walls lit only by emitters bounce. (r_rtEmissiveBounce)" );
@@ -5356,32 +5351,17 @@ static void DrawDbgGroup_RTEmitters()
 
 	// ===== Brightness =====
 	SettingsHeading( "Brightness" );
-	CvarSliderF( "Emitter Intensity", r_rtEmissiveIntensity, 0.0f, 8.0f, "%.2f", "A trim on every emitter's radiance. With "
-		"the power match below on, 1 reproduces the placed lights' level; without it this scales the authored glow brightness. "
-		"(r_rtEmissiveIntensity)" );
-	CvarCheckbox( "Inherit the replaced light's power", r_rtEmissivePowerMatch, "Each fixture's radiance is set from the colour "
-		"and radius of the placed light it replaces and its own area, so a small fixture lights its room as its light did and a "
-		"big panel glows softly. An emitter in no placed light is matched to a light of its own colour at the default reach. "
-		"Off = authored glow brightness x intensity (small fixtures go dark). (r_rtEmissivePowerMatch)" );
-	ImGui::BeginDisabled( !r_rtEmissivePowerMatch.GetBool() );
-	CvarSliderF( "Fixture Min Effective Area", r_rtEmissiveFixtureMinArea, 0.0f, 128.0f, "%.0f", "The EFFECTIVE emitting area "
-		"(lit texels x their brightness x the stage colour, in units^2) a surface needs to count as a light FIXTURE at all: a "
-		"fixture drops the placed light it sits in and inherits (part of) its power; a smaller glow (a computer LED, the "
-		"electric box's red lamp) is an indicator - it never drops a light and lights at its authored brightness only. "
-		"Rebuilds the census. (r_rtEmissiveFixtureMinArea)" );
-	CvarSliderF( "Fixture Full-power Area", r_rtEmissiveFixtureFullArea, 1.0f, 512.0f, "%.0f", "The effective emitting area at "
-		"which an emitter inherits its light's FULL power (a white 8 x 8 patch, a tube). Between the minimum and this the "
-		"inherited share ramps up, so a dim or tiny glow stands in for only a fraction of its light. (r_rtEmissiveFixtureFullArea)" );
+	CvarSliderF( "Emitter Intensity", r_rtEmissiveIntensity, 0.0f, 8.0f, "%.2f", "A trim on every emitter's radiance; 1 = as "
+		"authored in the Light Editor. (r_rtEmissiveIntensity)" );
 	CvarSliderF( "Max Matched Radiance", r_rtEmissiveMaxRadiance, 1.0f, 512.0f, "%.0f", "The brightest radiance the power match "
-		"may give one emitter (a small patch replacing a big light would otherwise blaze). (r_rtEmissiveMaxRadiance)" );
-	ImGui::EndDisabled();	// r_rtEmissivePowerMatch
+		"may give a surface without an authored radiance (a small patch matched to a big light would otherwise blaze). "
+		"(r_rtEmissiveMaxRadiance)" );
 
 	// ===== Physical =====
 	SettingsHeading( "Physical" );
 	CvarCheckbox( "Physical Emitters", r_rtEmissivePhysical, "A fixture lights with its radiance and the inverse square only: no "
 		"reach, no boost, no fade at a radius - its row ends where its contribution drops below the cull threshold. The radiance "
-		"comes from the emitter table (emitters.cfg, the editor below; 'Bake defaults' seeds it from the power match) or, for a "
-		"material without an entry, from the power match. Off = the compatibility layer below (the placed lights' look). "
+		"comes from the map's authored setup (the Light Editor's Radiance) or, for a surface without one, from the power match. Off = the compatibility layer below (the placed lights' look). "
 		"(r_rtEmissivePhysical)" );
 	ImGui::BeginDisabled( !r_rtEmissivePhysical.GetBool() );
 	CvarSliderF( "Cull Irradiance", r_rtEmissiveCullIrradiance, 0.0005f, 0.05f, "%.4f", "The irradiance (radiance x area / "
@@ -5392,20 +5372,15 @@ static void DrawDbgGroup_RTEmitters()
 		"dynamic range than the placed lights the maps were lit for. (r_rtEmissiveAutoExposure)" );
 	ImGui::EndDisabled();	// physical
 
-	// ===== Emitter Editor (emitters.cfg) =====
-	SettingsHeading( "Emitter Editor" );
-	SettingsNoteDisabled( "%d material entries in emitters.cfg (save path)", R_RtEmissiveMatTableNum() );
+	// ===== Light Editor (emissive/<map>.cfg; replaced the Emitter Editor and emitters.cfg, 2026-10-31) =====
+	SettingsHeading( "Light Editor" );
 	if ( !s_rows.filtering ) {
-	if ( ImGui::Button( "Open Emitter Editor" ) ) {
-		Com_OpenEmitterEditor( NULL );
+	if ( ImGui::Button( "Enter look mode" ) ) {
+		cmdSystem->BufferCommandText( CMD_EXEC_APPEND, "editLights 1\n" );
 	}
-	AddTooltip( "A separate window to tune a material's emitter: radiance, tint, emission profile, two-sided, indicator - like the "
-		"PBR editor. Aim at a fixture first and it loads that material; or bind the key in-game (e.g. `bind m editEmitter`) to open "
-		"it on whatever you are looking at." );
-	ImGui::SameLine();
-	if ( ImGui::Button( "Bake defaults##edBake" ) ) { cmdSystem->BufferCommandText( CMD_EXEC_APPEND, "rtEmissiveBakeTable\n" ); }
-	AddTooltip( "Add an entry for every emitting material of this map that has none, with the power match's multiplier - the "
-		"starting point for editing. Existing entries are kept. Writes emitters.cfg." );
+	AddTooltip( "The Light Editor (docs/rtx-light-editor.md): lights and glowing surfaces drawn by their authored state; right-click "
+		"what you point at for its menu - delete lights, make surfaces emit, radiance, tint, emission profile, two-sided, reach. "
+		"Per map, in emissive/<map>.cfg. Bind `editLights` to a key to toggle it in game." );
 	}
 
 	// ===== Reach =====
@@ -5469,18 +5444,16 @@ static void DrawDbgGroup_RTEmitters()
 	SettingsHeading( "Debug" );
 	{
 		if ( SettingsRow( "Table View", "r_rtEmissiveTableDebug" ) ) {
-		int dbg = idMath::ClampInt( 0, 5, r_rtEmissiveTableDebug.GetInteger() );
+		int dbg = idMath::ClampInt( 0, 3, r_rtEmissiveTableDebug.GetInteger() );
 		ImGui::SetNextItemWidth( 240.0f );
-		if ( ImGui::Combo( "Table View##rtEmissiveTableDebug", &dbg, "Off\0Emitters by texture\0Flux (vs mean)\0Emitted colour\0Light coverage (fixtured / alone)\0Placed lights (spheres)\0" ) ) {
+		if ( ImGui::Combo( "Table View##rtEmissiveTableDebug", &dbg, "Off\0Emitters by texture\0Flux (vs mean)\0Emitted colour\0" ) ) {
 			r_rtEmissiveTableDebug.SetInteger( dbg );
 		}
 		CvarTip( r_rtEmissiveTableDebug,  "Draw the table's triangles over the view, depth-tested against the scene, with their material names. "
 			"'Emitters by texture' tints each glow texture its own colour (striped = a pulsing stage colour, checkered = "
 			"flare-inferred); 'Flux' shows each triangle's power relative to the table's mean (blue faint, green average, red "
-			"4x, white 16x+); 'Emitted colour' is the flat mean radiance the mode lights with; 'Light coverage' green = the "
-			"emitter sits inside a placed light's volume, red = no placed light covers it; 'Placed lights' draws every placed "
-			"light as a sphere: red = fixtured (dropped while Emissive Mode is on), green = ambience (kept), yellow = parallel, "
-			"blue = fog / blend. (r_rtEmissiveTableDebug)" );
+			"4x, white 16x+); 'Emitted colour' is the flat mean radiance the mode lights with. The Light Editor's look mode "
+			"(editLights) shows the placed lights and each surface's authored state. (r_rtEmissiveTableDebug)" );
 		}
 	}
 	SettingsNoteDisabled( "Console: rtEmissiveProbe names the surface under the crosshair and the table's verdict on it." );
@@ -7645,158 +7618,6 @@ void Com_EditPbrMaterial_f( const idCmdArgs &args )
 	Com_OpenPbrMaterialEditor( m );
 }
 
-// ======================= Emitter editor (emitters.cfg, docs/rtx-experimental-lighting.md) =======================
-// A standalone ImGui window, like the PBR material editor: pick the emitting material under the crosshair (through flare
-// sprites), edit its radiance / tint / emission profile / two-sided / indicator, Apply live (rebuilds the table), Save /
-// Bake / Reload emitters.cfg. Bind `editEmitter` to a key to open it on whatever you are aiming at.
-static const idMaterial *	emEditMat = NULL;
-static float				emEditScale = 1.0f, emEditTint[3] = { 1.0f, 1.0f, 1.0f };
-static int					emEditProfile = 0;
-static bool					emEditTwoSided = false, emEditIndicator = false, emEditHasEntry = false;
-static int					emEditRows = 0, emEditFixtures = 0;
-static float				emEditMatched = 1.0f;
-static int					emEditScope = 0;			// 0 = this material (all its fixtures), 1 = THIS light (one fixture override)
-static unsigned long long	emEditFixtureId = 0;		// the picked fixture's stable id (0 = none: the light scope is unavailable)
-static idVec3				emEditFixturePos( 0.0f, 0.0f, 0.0f );
-
-// fill the sliders from the table for the current scope (material entry, or the light override; falling back to the
-// material entry, then the power match, so an override starts where the material left off)
-static void EmitterEditor_LoadScope( void )
-{
-	if ( emEditScope == 1 && emEditFixtureId != 0 ) {
-		emEditHasEntry = R_RtEmissiveLightTableGet( emEditFixtureId, &emEditScale, emEditTint, &emEditProfile, &emEditTwoSided, &emEditIndicator );
-		if ( emEditHasEntry ) { return; }
-	} else {
-		emEditHasEntry = ( emEditMat != NULL ) && R_RtEmissiveMatTableGet( emEditMat, &emEditScale, emEditTint, &emEditProfile, &emEditTwoSided, &emEditIndicator );
-		if ( emEditHasEntry ) { return; }
-	}
-	// no entry for this scope: inherit the material entry if there is one, else the power match
-	float ms; float mt[3]; int mp; bool mtw, mind;
-	if ( emEditMat != NULL && R_RtEmissiveMatTableGet( emEditMat, &ms, mt, &mp, &mtw, &mind ) ) {
-		emEditScale = ms; emEditTint[0] = mt[0]; emEditTint[1] = mt[1]; emEditTint[2] = mt[2]; emEditProfile = mp; emEditTwoSided = mtw; emEditIndicator = mind;
-	} else {
-		emEditScale = emEditMatched;
-		emEditTint[0] = emEditTint[1] = emEditTint[2] = 1.0f;
-		emEditProfile = 0;
-		emEditTwoSided = false;
-		emEditIndicator = ( emEditFixtures == 0 && emEditRows > 0 );
-	}
-	emEditHasEntry = false;
-}
-
-// Pick the emitter fixture under the crosshair in ONE trace: R_RtEmissivePickFixture returns the row's material AND its
-// stable fixture id (it reads the emitter table, so it is never fooled by a collision brush). Loads the sliders from the
-// current scope. Returns false when no emitter is under the crosshair.
-static bool EmitterEditor_Pick( void )
-{
-	const idMaterial *fm = NULL;
-	emEditFixturePos.Zero();
-	emEditFixtureId = R_RtEmissivePickFixture( &fm, &emEditFixturePos );
-	emEditMat = fm;
-	if ( fm == NULL ) {
-		return false;
-	}
-	emEditMatched = R_RtEmissiveMatMatchedScale( fm, &emEditRows, &emEditFixtures );
-	EmitterEditor_LoadScope();
-	return true;
-}
-
-// the editEmitter command / the launcher: pick under the crosshair (single trace) and open the window. The mat parameter
-// is legacy and ignored - the pick happens here so there is only one trace per open.
-void Com_OpenEmitterEditor( const idMaterial * )
-{
-	EmitterEditor_Pick();
-	D3::ImGuiHooks::OpenWindow( D3::ImGuiHooks::D3_ImGuiWin_EmitterEditor );
-}
-
-void Com_DrawEmitterEditor()
-{
-	bool show = true;
-	ImGui::SetNextWindowSize( ImVec2( 460.0f, 0.0f ), ImGuiCond_FirstUseEver );
-	if ( ImGui::Begin( "Emitter Editor", &show ) ) {
-		if ( !r_rtEmissiveTable.GetBool() ) {
-			ImGui::TextColored( ImVec4( 1.0f, 0.7f, 0.3f, 1.0f ), "r_rtEmissiveTable is 0 - enable the Emitter Table (Emissive Lights) to build the table." );
-		}
-		ImGui::TextDisabled( "%d material entries, %d light overrides in emitters.cfg (save path)", R_RtEmissiveMatTableNum(), R_RtEmissiveLightTableNum() );
-		ImGui::Separator();
-
-		if ( ImGui::Button( "Pick under crosshair" ) ) {
-			if ( !EmitterEditor_Pick() ) { D3::ImGuiHooks::ShowWarningOverlay( "No emitting surface under the crosshair" ); }
-		}
-		AddTooltip( "Aim at a fixture and press (or bind `editEmitter` to a key, e.g. `bind m editEmitter`). Flare sprites are looked through." );
-
-		if ( emEditMat == NULL ) {
-			ImGui::TextWrapped( "Aim at an emitting surface and press the button above, or bind \"editEmitter\" to a key (e.g. `bind m editEmitter`) to load the material under the crosshair." );
-		} else {
-			ImGui::TextColored( ImVec4( 0.6f, 0.8f, 1.0f, 1.0f ), "%s", emEditMat->GetName() );
-			ImGui::TextDisabled( "%d rows in this map, %d fixtures; power match would use x%.2f", emEditRows, emEditFixtures, emEditMatched );
-
-			// scope: tune the material (every fixture) or just this one light (an override on top), for a fixture reused as a
-			// floodlight here and a small ceiling light there
-			int prevScope = emEditScope;
-			ImGui::RadioButton( "This material (all)", &emEditScope, 0 );
-			ImGui::SameLine();
-			ImGui::BeginDisabled( emEditFixtureId == 0 );
-			ImGui::RadioButton( "This light (override)", &emEditScope, 1 );
-			ImGui::EndDisabled();
-			if ( emEditScope != prevScope ) { EmitterEditor_LoadScope(); }		// switching scope reloads the sliders from that table
-			if ( emEditScope == 1 ) {
-				ImGui::TextDisabled( "fixture %016llx at %.0f %.0f %.0f  %s", emEditFixtureId, emEditFixturePos.x, emEditFixturePos.y, emEditFixturePos.z, emEditHasEntry ? "HAS an override" : "no override (inheriting)" );
-			} else {
-				ImGui::TextDisabled( "%s", emEditHasEntry ? "HAS a material entry" : "no material entry (power match)" );
-			}
-			ImGui::Separator();
-
-			ImGui::SliderFloat( "Radiance x", &emEditScale, 0.0f, 64.0f, "%.2f", ImGuiSliderFlags_Logarithmic );
-			AddTooltip( "Multiplier on the glow texture's mean radiance (x the stage colour). 1 = the authored glow as painted." );
-			ImGui::ColorEdit3( "Tint", emEditTint, ImGuiColorEditFlags_Float );
-			ImGui::Combo( "Emission profile", &emEditProfile, "sqrt(cos) - a bare tube\0Lambert - a diffuser / panel\0uniform - a globe / bulb\0" );
-			ImGui::Checkbox( "Two-sided", &emEditTwoSided );
-			ImGui::SameLine();
-			ImGui::Checkbox( "Indicator (never a light)", &emEditIndicator );
-			AddTooltip( "An indicator (a LED, a button) is kept out of the light buffer whatever its area: it glows but lights nothing." );
-
-			ImGui::Separator();
-			if ( ImGui::Button( "Apply (live)" ) ) {
-				if ( emEditScope == 1 && emEditFixtureId != 0 ) {
-					R_RtEmissiveLightTableSet( emEditFixtureId, emEditScale, emEditTint, emEditProfile, emEditTwoSided, emEditIndicator );
-				} else {
-					R_RtEmissiveMatTableSet( emEditMat, emEditScale, emEditTint, emEditProfile, emEditTwoSided, emEditIndicator );
-				}
-				emEditHasEntry = true;
-			}
-			AddTooltip( "Write the entry into the in-memory table and rebuild the emitter table (live next frame). 'This light' overrides just the picked fixture; 'This material' moves every fixture of it. Save writes emitters.cfg." );
-			ImGui::SameLine();
-			if ( emEditHasEntry && ImGui::Button( "Remove entry" ) ) {
-				if ( emEditScope == 1 && emEditFixtureId != 0 ) { R_RtEmissiveLightTableRemove( emEditFixtureId ); }
-				else { R_RtEmissiveMatTableRemove( emEditMat ); }
-				EmitterEditor_LoadScope();
-			}
-			ImGui::SameLine();
-			if ( ImGui::Button( "Re-pick" ) ) {
-				if ( !EmitterEditor_Pick() ) { D3::ImGuiHooks::ShowWarningOverlay( "No emitting surface under the crosshair" ); }
-			}
-		}
-
-		ImGui::Separator();
-		if ( ImGui::Button( "Save emitters.cfg" ) ) { cmdSystem->BufferCommandText( CMD_EXEC_APPEND, "rtEmissiveSaveTable\n" ); }
-		ImGui::SameLine();
-		if ( ImGui::Button( "Bake defaults" ) ) { cmdSystem->BufferCommandText( CMD_EXEC_APPEND, "rtEmissiveBakeTable\n" ); }
-		AddTooltip( "Add an entry for every emitting material of this map that has none, with the power match's multiplier (the starting point). Existing entries are kept. Writes emitters.cfg." );
-		ImGui::SameLine();
-		if ( ImGui::Button( "Reload" ) ) { cmdSystem->BufferCommandText( CMD_EXEC_APPEND, "rtEmissiveReloadTable\n" ); }
-	}
-	ImGui::End();
-	if ( !show ) {
-		D3::ImGuiHooks::CloseWindow( D3::ImGuiHooks::D3_ImGuiWin_EmitterEditor );
-	}
-}
-
-void Com_EditEmitter_f( const idCmdArgs &args )
-{
-	Com_OpenEmitterEditor( NULL );	// opens the window and picks the crosshair fixture (one trace)
-}
-
 #else // IMGUI_DISABLE - just a stub function
 
 #include "Common.h"
@@ -7809,11 +7630,6 @@ void Com_Dhewm3Settings_f( const idCmdArgs &args )
 void Com_EditPbrMaterial_f( const idCmdArgs &args )
 {
 	common->Warning( "Dear ImGui is disabled in this build, so the PBR material editor is not available!" );
-}
-
-void Com_EditEmitter_f( const idCmdArgs &args )
-{
-	common->Warning( "Dear ImGui is disabled in this build, so the emitter editor is not available!" );
 }
 
 // DUDE: the enhancement presets live in the ImGui section; without it there is no

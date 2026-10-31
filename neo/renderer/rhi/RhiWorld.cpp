@@ -6328,6 +6328,13 @@ static unsigned int RB_RHI_FloatToHalfBits( float f ) {
 }
 
 
+// Emissive mode: the LIVE colour luminance of each placed light, evaluated by the loop below in this call (stamp = the
+// call's generation). An emitter that FOLLOWS a light (the Light Editor) lights at live / its time-average: that light's
+// flash / flicker table.
+static idList<float>		s_emDroppedLiveLum;
+static idList<unsigned int>	s_emDroppedLiveGen;
+static unsigned int			s_emLiveGen = 0;
+
 static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsigned long long *outAddr ) {
 	static int                 cacheCount = 0;
 	static unsigned long long  cacheAddr  = 0;
@@ -6367,6 +6374,7 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 	// strobing / fading light does the same in the reflection and in its volumetric shaft. Off-view lights
 	// have no registers this frame and fall back to their static colour below.
 	const int numDefs = rw->lightDefs.Num();
+	s_emLiveGen++;											// this call's stamp for the dropped lights' live brightness
 	if ( s_sceneLightCoveredGen.Num() < numDefs ) {
 		const int first = s_sceneLightCoveredGen.Num();
 		s_sceneLightCoveredGen.SetNum( numDefs );
@@ -6473,6 +6481,20 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 		} else {									// parametric (the usual case): the light's base RGB shader parms
 			col.Set( ld->parms.shaderParms[SHADERPARM_RED], ld->parms.shaderParms[SHADERPARM_GREEN], ld->parms.shaderParms[SHADERPARM_BLUE] );
 		}
+		// emissive mode: a light the map's authored setup DELETES (emissive/<map>.cfg, RtEmissiveAuthor.cpp - no heuristics).
+		// Every evaluated light's live brightness is noted before the dark test (an OFF phase must reach a follower as 0):
+		// an authored emitter may follow any of them, deleted or kept (the bounce-only rows of normal mode too)
+		const bool emDropped = R_EmAuthLightDeleted( rw, i );
+		if ( r_rtEmissiveLighting.GetBool() || r_rtEmissiveBounce.GetBool() ) {
+			if ( s_emDroppedLiveLum.Num() < rw->lightDefs.Num() ) {
+				const int was = s_emDroppedLiveLum.Num();
+				s_emDroppedLiveLum.SetNum( rw->lightDefs.Num(), false );
+				s_emDroppedLiveGen.SetNum( rw->lightDefs.Num(), false );
+				for ( int k = was; k < s_emDroppedLiveLum.Num(); k++ ) { s_emDroppedLiveLum[k] = 0.0f; s_emDroppedLiveGen[k] = 0u; }
+			}
+			s_emDroppedLiveLum[ i ] = col[0] * 0.2126f + col[1] * 0.7152f + col[2] * 0.0722f;
+			s_emDroppedLiveGen[ i ] = s_emLiveGen;
+		}
 		if ( col[0] < 0.001f && col[1] < 0.001f && col[2] < 0.001f ) { if ( vl != NULL ) { s_diSkipDark++; } continue; }	// dark / off (the frontend's own threshold)
 		// order: projected/parallel (the authored feature lights) first, then nearest first - consumers that
 		// keep only a short candidate list per ray (volumetrics) must not lose a spot to a crowd of fill lights
@@ -6488,7 +6510,7 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 		// E5 (docs/rtx-experimental-lighting.md): emissive mode DROPS a fixtured placed light - its surface is the light now.
 		// Marked DI-covered so the forward path does not draw it either; it leaves every consumer of this buffer (DI, the
 		// bounce, volumetrics, reflections). Ambience washes, suns, weapon lights and lights born after the build stay.
-		if ( R_RtEmissiveLightDropped( i, ld->dudeSerial ) ) {
+		if ( emDropped ) {
 			s_sceneLightCoveredGen[ i ] = s_sceneLightGen;
 			s_diSkipEmissiveDrop++;
 			continue;
@@ -6605,7 +6627,7 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 	// With emissive mode OFF and r_rtEmissiveBounce on, the rows are BOUNCEONLY: the DI gather skips them (the placed
 	// lights keep the direct term), the bounce lights its hits with them. Capped at r_rtEmissiveMaxRows per view by
 	// importance at the eye; a row whose reach cannot touch the view (centre farther than reach + REACH) is left out.
-	int nEm = 0, nEmTotal = 0, nEmIndicators = 0, nEmCandidates = 0;
+	int nEm = 0, nEmTotal = 0, nEmCandidates = 0;
 	if ( r_rtEmissiveLighting.GetBool() || r_rtEmissiveBounce.GetBool() ) {
 		const rtEmissiveRow_t *rows = NULL;
 		int emTris = 0; float emTotal = 0.0f, emMean = 0.0f;
@@ -6617,9 +6639,6 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 			const float reachMul  = idMath::ClampFloat( 0.0f, 8.0f, r_rtEmissiveReach.GetFloat() );
 			const float reachDef  = idMath::ClampFloat( 0.0f, 4096.0f, r_rtEmissiveReachDefault.GetFloat() );
 			const int   cap       = Min( idMath::ClampInt( 0, RT_EMIT_MAX_ROWS, r_rtEmissiveMaxRows.GetInteger() ), RT_SCENE_MAX_ROWS - n - nFog - nAmb );
-			const float minArea   = Max( 0.0f, r_rtEmissiveFixtureMinArea.GetFloat() );
-			const float fullArea  = Max( minArea + 1e-3f, r_rtEmissiveFixtureFullArea.GetFloat() );
-			const float fluxScale = Max( idMath::ClampFloat( 0.0f, 64.0f, r_rtEmissiveScale.GetFloat() ), 1e-3f );
 			const bool  physical  = r_rtEmissivePhysical.GetBool();
 			const float cullE     = Max( r_rtEmissiveCullIrradiance.GetFloat(), 1e-5f );
 			// how far a row may sit from the camera and still enter the buffer. A tight camera-distance cutoff switched
@@ -6634,21 +6653,33 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 			static int   pick[ RT_EMIT_MAX_ROWS ];
 			static float pickImp[ RT_EMIT_MAX_ROWS ];
 			int np = 0;
+			// The rows are the AUTHORED emitters (docs/rtx-light-editor.md): only fixtures the map's emissive/<map>.cfg makes emit
+			// enter the buffer (an unauthored map: none), in emissive mode and for normal mode's bounce-only rows
+			// (r_rtEmissiveBounce) alike - since the census went (2026-10-31) nothing else says which surfaces are lights.
+			// Brightness: the authored RADIANCE (physical: a multiplier on the glow's mean), else a light of the surface's own
+			// colour at the fixture's reach (the power match, standalone) - times the fixture's scale. The appearance (tint,
+			// emission profile, two-sided) rides on the row, so every edit is live.
+			auto authoredRowScale = [&]( const rtEmissiveRow_t &row, const rtEmAuthEmit_t &ap ) -> float {
+				if ( ap.radiance > 0.0f ) { return ap.radiance * ap.scale; }
+				return R_RtEmissiveMatchedScale( row, ap.reach, 0.0f ) * ap.scale;		// own colour; reach 0 = r_rtEmissiveReachDefault
+			};
+			auto tintLum = []( const rtEmAuthEmit_t &ap ) -> float { return ap.tint[0] * 0.2126f + ap.tint[1] * 0.7152f + ap.tint[2] * 0.0722f; };
 			for ( int i = 0; i < nRows && cap > 0; i++ ) {
 				const rtEmissiveRow_t &row = rows[i];
 				if ( row.dark || !( row.flux > 0.0f ) || row.numTris <= 0 || row.firstTri < 0 || row.firstTri + row.numTris > emTris ) { continue; }
 				// an INDICATOR (effective area below the fixture floor: a LED, a button) is not a light: it never enters the
 				// buffer. After the per-fixture split a map has hundreds of them and they crowded the 511-row ceiling out of
 				// the fixtures that light the far end of a corridor (Access Hall, 2026-10-20)
-				if ( row.indicator || ( !row.tableEntry && row.flux / fluxScale < minArea ) ) { nEmIndicators++; continue; }
-				float R = ( row.reach > 0.0f ) ? row.reach : reachDef;
+				rtEmAuthEmit_t ap;
+				if ( !R_EmAuthFixtureEmits( rw, row.fixtureId, row.mat, &ap ) ) { continue; }
+				float R = ( ap.reach > 0.0f ) ? ap.reach : reachDef;
 				if ( !( R > 0.0f ) ) { R = Max( row.boundRadius * 4.0f, 64.0f ); }
 				const float radius = R * ( ( reachMul > 0.0f ) ? reachMul : 1.0f );
 				const float dist   = Max( ( row.centroid - viewOrg ).Length() - row.boundRadius, 0.0f );
 				if ( dist > gridExtent + radius ) { continue; }							// beyond the light grid's reach: a far surface there lights exhaustively, not from a near cell
 				// the pick ranks on the placed lights' scale too (C x radius^2 / d^2): matched = the replaced light's luminance
 				const float meanLum = row.meanRadiance.x * 0.2126f + row.meanRadiance.y * 0.7152f + row.meanRadiance.z * 0.0722f;
-				const float LrowP = meanLum * ( row.tableEntry ? 1.0f : R_RtEmissiveMatchedScale( row ) ) * intensity;
+				const float LrowP = meanLum * authoredRowScale( row, ap ) * tintLum( ap ) * intensity;
 				const float imp = 16.0f * LrowP * row.area / Max( dist * dist, 64.0f * 64.0f );	// 16 L A / d^2: the placed lights' proxy scale
 				if ( !( imp > 0.0f ) ) { continue; }
 				nEmCandidates++;
@@ -6669,7 +6700,9 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 			const unsigned int tLo = (unsigned int)( tAddr & 0xFFFFFFFFull ), tHi = (unsigned int)( tAddr >> 32 );
 			for ( int k = 0; k < np; k++ ) {
 				const rtEmissiveRow_t &row = rows[ pick[k] ];
-				float R = ( row.reach > 0.0f ) ? row.reach : reachDef;
+				rtEmAuthEmit_t ap;
+				R_EmAuthFixtureEmits( rw, row.fixtureId, row.mat, &ap );
+				float R = ( ap.reach > 0.0f ) ? ap.reach : reachDef;
 				if ( !( R > 0.0f ) ) { R = Max( row.boundRadius * 4.0f, 64.0f ); }
 				const float radius = R * ( ( reachMul > 0.0f ) ? reachMul : 1.0f );
 				RtReflLightGPU &L = sorted[ n + nFog + nEm ];
@@ -6678,20 +6711,14 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 				// over the last quarter). A 2 x reach sphere put eight times the volume - and several times the candidates - of
 				// the placed lights into every grid cell, which overflowed the cell's slots (the blocky shadows of 2026-10-20).
 				L.pos[0] = row.centroid.x; L.pos[1] = row.centroid.y; L.pos[2] = row.centroid.z;
-				// POWER MATCH (r_rtEmissivePowerMatch): the emitter inherits the POWER of the light it replaces. A Doom 3 light of
-				// colour C and radius R delivers C/2 at d = R/2; this row (reach boost 2 at that distance) delivers 8 L A / R^2,
-				// so the radiance that matches is L = C R^2 / (16 A): a tiny decal replacing a big light burns bright, a big
-				// panel glows softly - the fixture's few square units can never stand in for its light at authored radiance
-				// (the "dead" sterlight fixtures of 2026-10-20). An emitter in NO light is matched to a light of its own colour
-				// (C = its mean luminance, <= 1) at the default reach. The row's intensity field = the global intensity x the
-				// match ratio (the shade multiplies the triangle's own mean radiance by it). Capped at 4096 x.
+				// The row's radiance multiplier on its glow mean (the row's intensity field = the global intensity x it; the shade
+				// multiplies the triangle's own mean radiance by it): the authored radiance (physical), else the POWER MATCH - a Doom 3
+				// light of colour C and radius R delivers C/2 at d = R/2, this row (reach boost 2 there) 8 L A / R^2, so L = C R^2 /
+				// (16 A) for a light of the surface's own colour at its reach (R_RtEmissiveMatchedScale)
 				const float meanLum = row.meanRadiance.x * 0.2126f + row.meanRadiance.y * 0.7152f + row.meanRadiance.z * 0.0722f;
-				// The row's radiance multiplier on its glow mean: an emitters.cfg entry = the AUTHORED radiance (its scale is
-				// already in the triangles' scale field), else the power match - how much of the replaced light's power the
-				// emitter inherits, ramped by its effective emitting area (R_RtEmissiveMatchedScale, shared with the bake)
-				const float rowScale    = row.tableEntry ? 1.0f : R_RtEmissiveMatchedScale( row );
+				const float rowScale    = authoredRowScale( row, ap );
 				const float rowIntensity = intensity * rowScale;
-				const float Lrow        = meanLum * rowScale * intensity;		// the row's luminance as lit
+				const float Lrow        = meanLum * rowScale * intensity * tintLum( ap );	// the row's luminance as lit (the tint included)
 				float Ceq;													// the row's colour on the PLACED lights' scale (the grid ranks by lum x radius^2 / d^2)
 				float radiusRow = radius, knee = ( reachMul > 0.0f ) ? 0.25f * radius : 0.0f;
 				bool  noFade = false;
@@ -6705,10 +6732,23 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 				L.cull[0] = row.centroid.x; L.cull[1] = row.centroid.y; L.cull[2] = row.centroid.z; L.cull[3] = row.boundRadius + radiusRow;
 				L.radius = radiusRow;
 				const float kc = ( meanLum > 1e-6f ) ? Ceq / meanLum : 0.0f;	// the emitter's own tint at that luminance
-				L.color[0] = row.meanRadiance.x * kc; L.color[1] = row.meanRadiance.y * kc; L.color[2] = row.meanRadiance.z * kc;
-				L.flags = 64u | ( r_rtEmissiveLighting.GetBool() ? 0u : 128u )		// bit6 = emissive row, bit7 = bounce-only (normal mode)
-				        | ( row.noShadows ? 4u : 0u );									// bit2 = the replaced light cast no shadows: no visibility ray (a tube behind its cover)
-				L.proj[0][3] = rowIntensity;
+				const float tl = Max( tintLum( ap ), 1e-4f );						// Ceq has the tint's luminance; the colour its hue
+				L.color[0] = row.meanRadiance.x * kc * ap.tint[0] / tl; L.color[1] = row.meanRadiance.y * kc * ap.tint[1] / tl; L.color[2] = row.meanRadiance.z * kc * ap.tint[2] / tl;
+				L.flags = 64u | ( r_rtEmissiveLighting.GetBool() ? 0u : 128u );	// bit6 = emissive row, bit7 = bounce-only (normal mode)
+				// the live flicker of the light the fixture FOLLOWS (emitFollow / the Light Editor), at live / its time-average -
+				// 1 when it follows none, does not animate or was not evaluated this call; projF.y carries it for the R1 gradient
+				// (an emitter's change is its factor's change, restir_di_gradient.frag)
+				float flicker = 1.0f;
+				const int fl = ap.followLight;
+				if ( fl >= 0 && fl < s_emDroppedLiveGen.Num() && s_emDroppedLiveGen[ fl ] == s_emLiveGen ) {
+					const float avg = R_EmAuthLightAnimAverage( rw, fl );
+					if ( avg > 0.0f ) { flicker = idMath::ClampFloat( 0.0f, 4.0f, s_emDroppedLiveLum[ fl ] / avg ); }
+				}
+				L.proj[0][0] = ap.tint[0]; L.proj[0][1] = ap.tint[1]; L.proj[0][2] = ap.tint[2];	// projS.xyz = the tint (rt_emissive.glsl)
+				L.proj[0][3] = rowIntensity * flicker;
+				L.proj[1][2] = (float)ap.profile;									// projT.z = the emission profile
+				L.proj[1][3] = ap.twoSided ? 1.0f : 0.0f;							// projT.w = both faces emit
+				L.proj[3][1] = flicker;
 				memcpy( &L.proj[1][0], &tLo, sizeof( tLo ) );
 				memcpy( &L.proj[1][1], &tHi, sizeof( tHi ) );
 				const unsigned int first = (unsigned int)row.firstTri, num = (unsigned int)row.numTris;
@@ -6728,14 +6768,16 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 		// spammed a line every time a light entered or left the view, 2026-10-20)
 		static bool lastMode = false;
 		static unsigned long long lastTable = 0;
+		static unsigned int lastGen = 0;
 		const bool mode = r_rtEmissiveLighting.GetBool();
 		const unsigned long long table = mode ? R_RtEmissiveTableAddress( NULL, NULL, NULL ) : 0;
-		if ( mode && ( !lastMode || table != lastTable ) && table != 0 ) {
-			common->Printf( "emissive mode: %d fixtured placed lights dropped in this view, %d placed lights kept, %d emitter rows added (%d fixtures in reach of the view, %d indicators left out, %d emitting surfaces in the map; cap %d)%s\n",
-				s_diSkipEmissiveDrop, n, nEm, nEmCandidates, nEmIndicators, nEmTotal, Min( r_rtEmissiveMaxRows.GetInteger(), RT_SCENE_MAX_ROWS - n - nFog ),
+		const unsigned int gen = R_EmAuthGeneration();
+		if ( mode && ( !lastMode || table != lastTable || gen != lastGen ) && table != 0 ) {
+			common->Printf( "emissive mode (authored): %d placed lights deleted in this view, %d kept; %d emitter rows (%d authored fixtures in reach of the view; %d glowing fixtures in the map; cap %d)%s\n",
+				s_diSkipEmissiveDrop, n, nEm, nEmCandidates, nEmTotal, Min( r_rtEmissiveMaxRows.GetInteger(), RT_SCENE_MAX_ROWS - n - nFog ),
 				( nEmCandidates > nEm ) ? " - CAP HIT: the weakest fixtures at the eye are missing" : "" );
 		}
-		lastMode = mode; lastTable = table;
+		lastMode = mode; lastTable = table; lastGen = gen;
 	}
 	// r_rtgiAmbient fold: the ambient rows go LAST, behind the emitter rows (the emitter cap above left them room)
 	nAmb = Min( nAmb, RT_SCENE_MAX_ROWS - n - nFog - nEm );
@@ -10387,19 +10429,27 @@ void RB_RHI_LightGridDebugOverlay( rhi::RHI *r, const viewDef_t *viewDef ) {
 // view as real world-space geometry (tr_main.cpp R_RtEmissiveDebugGeometry, built lazily from the table's CPU copy),
 // depth-tested in the fragment stage against the sealed scene depth. Validates the gather (which surfaces are
 // emitters, mode 1), the flux (mode 2) and the colour E2 would light with (mode 3) before anything consumes the table.
+static void RB_RHI_EmAuthLookOverlay( rhi::RHI *r, const viewDef_t *viewDef );
+static void RB_RHI_RtEmissiveTableDebugDraw( rhi::RHI *r, const viewDef_t *viewDef );
+
 void RB_RHI_RtEmissiveDebugOverlay( rhi::RHI *r, const viewDef_t *viewDef ) {
-	if ( r_rtEmissiveTableDebug.GetInteger() <= 0 || rhi::GetActiveBackendType() != rhi::BT_VULKAN
-			|| globalImages->currentDepthImage->uploadWidth <= 0 ) {
+	if ( rhi::GetActiveBackendType() != rhi::BT_VULKAN || globalImages->currentDepthImage->uploadWidth <= 0 ) {
 		return;
 	}
+	if ( r_rtEmissiveTableDebug.GetInteger() > 0 ) {
+		RB_RHI_RtEmissiveTableDebugDraw( r, viewDef );
+	}
+	RB_RHI_EmAuthLookOverlay( r, viewDef );			// L2 look mode (editLights), over the table overlay
+}
+
+static void RB_RHI_RtEmissiveTableDebugDraw( rhi::RHI *r, const viewDef_t *viewDef ) {
 	int numTris = 0; float totalFlux = 0.0f, meanFlux = 0.0f;
 	if ( R_RtEmissiveTableAddress( &numTris, &totalFlux, &meanFlux ) == 0 || numTris <= 0 ) {
 		return;
 	}
 	rhi::BufferHandle vb = 0, ib = 0;
 	int numIndexes = 0;
-	const bool lightSpheres = r_rtEmissiveTableDebug.GetInteger() == 5;		// mode 5: the placed lights, not the table
-	if ( lightSpheres ? !R_RtEmissiveLightDebugGeometry( &vb, &ib, &numIndexes ) : !R_RtEmissiveDebugGeometry( &vb, &ib, &numIndexes ) ) {
+	if ( !R_RtEmissiveDebugGeometry( &vb, &ib, &numIndexes ) ) {
 		return;
 	}
 	if ( numIndexes <= 0 ) {
@@ -10455,6 +10505,107 @@ void RB_RHI_RtEmissiveDebugOverlay( rhi::RHI *r, const viewDef_t *viewDef ) {
 	r->Draw( da );
 	r->GpuScopeEnd();
 	backEnd.pc.c_drawElements++;
+	RB_RHI_ForgetTexBinds();
+}
+
+// L2 look mode (docs/rtx-light-editor.md, RtEmissiveAuthor.cpp R_EmAuthLookFrame built it this frame): the glowing
+// surfaces tinted by their authored state (the table overlay's geometry, one draw per run of same-state rows, mode 7:
+// hard depth test, the colour in u_localParam1), then the light spheres and the highlighted volume (streamed
+// geometry, mode 6: x-ray - faint where the scene hides them). Alpha-blended over the pre-tonemap scene.
+static void RB_RHI_EmAuthLookOverlay( rhi::RHI *r, const viewDef_t *viewDef ) {
+	if ( !R_EmAuthLookMode() ) {
+		return;
+	}
+	const rtEmAuthTint_t *tints = NULL;
+	const int numTints = R_EmAuthLookTints( &tints );
+	const idDrawVert *verts = NULL; const glIndex_t *indexes = NULL;
+	int numVerts = 0, numIndexes = 0;
+	const bool geo = R_EmAuthLookGeometry( &verts, &numVerts, &indexes, &numIndexes );
+	rhi::BufferHandle tvb = 0, tib = 0;
+	int tableIndexes = 0;
+	const bool table = numTints > 0 && R_RtEmissiveDebugGeometry( &tvb, &tib, &tableIndexes ) && tableIndexes > 0;
+	if ( !table && !geo ) {
+		return;
+	}
+	rhi::ShaderHandle prog = r->LoadShader( "rt_emissive_debug" );
+	if ( !prog ) {
+		return;
+	}
+	const int w = viewDef->viewport.x2 - viewDef->viewport.x1 + 1;
+	const int h = viewDef->viewport.y2 - viewDef->viewport.y1 + 1;
+	rhi::RenderParams parms;
+	memset( &parms, 0, sizeof( parms ) );
+	RB_RHI_SpaceMvp( viewDef, &viewDef->worldSpace, parms.mvpMatrix );
+	parms.depthTexRecip[0] = 1.0f / globalImages->currentDepthImage->uploadWidth;
+	parms.depthTexRecip[1] = 1.0f / globalImages->currentDepthImage->uploadHeight;
+	parms.screenCorrection[0] = 1.0f / w;
+	parms.screenCorrection[1] = 1.0f / h;
+	rhi::FillDepthParms( parms, viewDef->projectionMatrix );
+
+	r->SetViewport( tr.viewportOffset[0] + viewDef->viewport.x1, tr.viewportOffset[1] + viewDef->viewport.y1, w, h );
+	r->SetScissor( tr.viewportOffset[0] + viewDef->viewport.x1, tr.viewportOffset[1] + viewDef->viewport.y1, w, h );
+	backEnd.currentScissor = viewDef->scissor;
+
+	rhi::PipelineDesc pd;
+	pd.stateBits = GLS_DEPTHFUNC_ALWAYS | GLS_DEPTHMASK | GLS_SRCBLEND_SRC_ALPHA | GLS_DSTBLEND_ONE_MINUS_SRC_ALPHA;
+	pd.shader = prog;
+	pd.vertexLayout = rhi::VL_DRAWVERT;
+	pd.cullType = CT_TWO_SIDED;
+	r->BindPipeline( pd );
+	RB_RHI_BindUnit( 0, globalImages->currentDepthImage );
+	r->GpuScopeBegin( "emissive.look" );
+
+	rhi::DrawArgs da;
+	memset( &da, 0, sizeof( da ) );
+	da.uniformSize = sizeof( parms );
+	if ( table ) {
+		// one uniform slice per distinct colour (a handful), shared by every run of that colour
+		struct slice_t { byte rgba[4]; rhi::BufferHandle ub; int ofs; };
+		slice_t slices[16];
+		int numSlices = 0;
+		parms.localParam0[0] = 7.0f;
+		da.vertexBuffer = tvb;
+		da.indexBuffer = tib;
+		for ( int i = 0; i < numTints; i++ ) {
+			const rtEmAuthTint_t &t = tints[i];
+			const int first = t.firstTri * 3, count = t.numTris * 3;
+			if ( t.firstTri < 0 || count <= 0 || first + count > tableIndexes ) {
+				continue;											// the table was rebuilt under the list: skip (next frame rebuilds it)
+			}
+			int sl = -1;
+			for ( int k = 0; k < numSlices; k++ ) { if ( memcmp( slices[k].rgba, t.rgba, 4 ) == 0 ) { sl = k; break; } }
+			if ( sl < 0 ) {
+				if ( numSlices == 16 ) { continue; }
+				sl = numSlices++;
+				memcpy( slices[sl].rgba, t.rgba, 4 );
+				for ( int k = 0; k < 4; k++ ) { parms.localParam1[k] = t.rgba[k] * ( 1.0f / 255.0f ); }
+				slices[sl].ofs = r->AllocUniforms( &parms, sizeof( parms ), &slices[sl].ub );
+			}
+			da.uniformBuffer = slices[sl].ub;
+			da.uniformOffset = slices[sl].ofs;
+			da.firstIndex = first;
+			da.indexCount = count;
+			RB_RHI_VkTextures( da );
+			r->Draw( da );
+			backEnd.pc.c_drawElements++;
+		}
+	}
+	if ( geo ) {
+		parms.localParam0[0] = 6.0f;
+		rhi::BufferHandle ub, vb, ib;
+		da.uniformOffset = r->AllocUniforms( &parms, sizeof( parms ), &ub );
+		da.uniformBuffer = ub;
+		da.vertexOffset = r->AllocVertices( verts, numVerts * (int)sizeof( idDrawVert ), &vb );
+		const int idxOfs = r->AllocIndices( indexes, numIndexes * (int)sizeof( glIndex_t ), &ib );
+		da.vertexBuffer = vb;
+		da.indexBuffer = ib;
+		da.firstIndex = idxOfs / (int)sizeof( glIndex_t );
+		da.indexCount = numIndexes;
+		RB_RHI_VkTextures( da );
+		r->Draw( da );
+		backEnd.pc.c_drawElements++;
+	}
+	r->GpuScopeEnd();
 	RB_RHI_ForgetTexBinds();
 }
 

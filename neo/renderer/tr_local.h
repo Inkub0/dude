@@ -223,6 +223,10 @@ public:
 													// lightDef INDEX is reused as soon as a def is freed (a weapon switch frees the old
 													// weapon light and allocates the flashlight into the same slot), so the ReSTIR DI
 													// gradient compares THIS to know it is re-shading the same light (Plan R1)
+	renderLight_t			dudePristine;			// DUDE Light Editor (L4): the parms exactly as the game last passed them; parms
+													// holds them with the map's authored colour / brightness / radius override applied
+													// (emissive mode only - RtEmissiveAuthor.cpp R_EmAuthOverrideLight)
+	bool					dudeOverridden;			// parms differ from dudePristine (an override is applied)
 
 	idVec3					globalLightOrigin;		// accounting for lightCenter and parallel
 
@@ -1137,12 +1141,9 @@ extern idCVar r_rtEmissiveMaxRows;
 extern idCVar r_rtEmissiveCheapTarget;	// emissive mode: analytic RIS target for emitter candidates (only the winner is area-sampled)
 extern idCVar r_rtEmissiveSamples;		// emissive mode: area-light samples averaged per emitter shade (far-field representation)
 extern idCVar r_rtEmissiveGridSlots;		// emissive mode: light-grid candidates per cell (the larger of this and r_rtLightGridSlots)		// emissive mode: emitter rows (surfaces) a view's scene-light buffer may carry
-extern idCVar r_rtEmissivePowerMatch;
 extern idCVar r_rtEmissivePhysical;		// emissive mode: physical emitters - inverse square, no reach, cull where the contribution is negligible
 extern idCVar r_rtEmissiveCullIrradiance;	// physical: the irradiance below which an emitter's row stops (its cull radius)
 extern idCVar r_rtEmissiveAutoExposure;	// physical: drive the HDR eye adaptation while emissive mode is on
-extern idCVar r_rtEmissiveFixtureMinArea;	// emissive mode: the EFFECTIVE emitting area (lit area x brightness) below which a surface is an indicator (LED), never a fixture
-extern idCVar r_rtEmissiveFixtureFullArea;	// emissive mode: the effective emitting area at which an emitter inherits its light's FULL power (ramps from the min)
 extern idCVar r_rtEmissiveMaxRadiance;	// emissive mode: cap on the radiance the power match may give one emitter	// emissive mode: an emitter inherits the POWER of the placed light it replaces (radiance from its radius / colour / area)
 extern idCVar r_rtEmissiveBounce;			// emitter rows ride the GI bounce in normal mode too (bounce-only rows)
 extern idCVar r_rtEmissiveReach;			// emissive mode: reach as a multiple of the replaced light's authored radius (0 = physical)
@@ -1188,30 +1189,45 @@ unsigned long long R_RtEmissiveTableAddress( int *numTris, float *totalFlux, flo
 // of the scene-light buffer (centroid, bounding radius, flux, flux-weighted mean linear radiance x material scale, total
 // area, the inherited reach of the placed light it replaces (0 = none), its triangle range in the table). dark = every
 // triangle at zero flux (switched off / gone): never a row.
-struct rtEmissiveRow_t { const idMaterial *mat; idVec3 centroid; float boundRadius; float flux; float area; idVec3 meanRadiance; float reach; float lightLum; idVec3 lightOrigin; unsigned long long fixtureId; bool hasLight; bool noShadows; bool tableEntry; bool indicator; int firstTri, numTris; bool dark; };
+struct rtEmissiveRow_t { const idMaterial *mat; idVec3 centroid; float boundRadius; float flux; float area; idVec3 meanRadiance; unsigned long long fixtureId; int firstTri, numTris; bool dark; };
 int R_RtEmissiveRows( const rtEmissiveRow_t **rows );		// the rows (0 = no table)
-float R_RtEmissiveMatchedScale( const rtEmissiveRow_t &row );
+float R_RtEmissiveLightAnimatedAverage( const idRenderLightLocal *ld );	// time-average luminance of a light's animated colour (0 = steady)
+// emissive mode AUTHORING (RtEmissiveAuthor.cpp, docs/rtx-light-editor.md): the per-map emissive/<map>.cfg decides which placed
+// lights are deleted and which glowing fixtures emit - no heuristics; a map without the file is unchanged
+bool R_EmAuthLightDeleted( const idRenderWorldLocal *world, int index );
+struct rtEmAuthEmit_t {			// a fixture's authored emission, resolved (its own fields, else its material's, else the defaults)
+	float scale, reach;			// brightness multiplier (1 = unset); reach (0 = r_rtEmissiveReachDefault)
+	int   followLight;			// the lightDef whose animation it follows (-1 = none)
+	float radiance;				// > 0 = PHYSICAL: this multiplier on the glow's mean radiance; 0 = power-matched to the reach
+	float tint[3];				// colour multiplier
+	int   profile;				// 0 sqrt(cos), 1 Lambert, 2 uniform
+	bool  twoSided;				// both faces emit (a material with back faces in its model does anyway)
+};
+bool R_EmAuthFixtureEmits( const idRenderWorldLocal *world, unsigned long long fixtureId, const idMaterial *mat, rtEmAuthEmit_t *out );
+float R_EmAuthLightAnimAverage( const idRenderWorldLocal *world, int index );
+unsigned int R_EmAuthGeneration( void );
+void R_EmAuthRegisterCommands( void );
+void R_EmAuthEnterEditMode( void );		// entering edit mode: the recovery-copy notice (once per map load)
+void R_EmAuthShutdown( void );			// quitting: unsaved edits go to the recovery copy
+// L2 look mode (editLights): the frontend builds the gizmos once per primary view, the backend overlay draws them
+struct rtEmAuthTint_t { int firstTri, numTris; byte rgba[4]; };	// a run of emitter-table triangles tinted by its authored state
+bool R_EmAuthLookMode( void );
+void R_EmAuthLookFrame( const idRenderWorldLocal *world, const struct viewDef_s *viewDef );
+int  R_EmAuthLookTints( const rtEmAuthTint_t **out );
+bool R_EmAuthLookGeometry( const idDrawVert **verts, int *numVerts, const glIndex_t **indexes, int *numIndexes );	// light spheres + the highlighted volume
+const char *R_EmAuthHoverText( void );	// the one-line label under the crosshair (NULL = nothing highlighted)
+bool R_EmAuthKey( int key, bool down );		// events.cpp, Del (1) / Ins (2) in game: true = look mode took it
+bool R_EmAuthWheel( int dir, bool material );	// events.cpp, a wheel step in game (Ctrl = the material): true = look mode took it
+// L4: the authored light overrides (emissive mode only) on a copy of the game's parms (UpdateLightDef), and the re-derive
+// of every affected light when the data or the mode changes (RenderScene)
+bool R_EmAuthOverrideLight( const idRenderWorldLocal *world, int index, const renderLight_t &in, renderLight_t *out );
+void R_EmAuthRefreshLightOverrides( idRenderWorldLocal *world );
+bool R_EmAuthMouseButton( int button, bool down );	// events.cpp, a mouse button in game (1 left, 2 right): true = the Light Editor took it (its menu)
+float R_RtEmissiveMatchedScale( const rtEmissiveRow_t &row, float reach, float lightLum );	// the power match: radiance multiplier for a light of luminance lightLum (0 = own colour) and radius reach (0 = default)
 // the HDR eye adaptation runs when the user asked for it OR physical emissive mode asks for it (r_rtEmissiveAutoExposure)
 bool R_HdrEyeAdaptationWanted( void );	// the power match's radiance multiplier on the row's mean (1 = authored)
-// emitters.cfg, the per-material emitter table (E2 physical; the editor's data)
-int  R_RtEmissiveMatTableNum( void );
-bool R_RtEmissiveMatTableGet( const idMaterial *mat, float *scale, float *tint, int *profile, bool *twoSided, bool *indicator );
-void R_RtEmissiveMatTableSet( const idMaterial *mat, float scale, const float *tint, int profile, bool twoSided, bool indicator );
-void R_RtEmissiveMatTableRemove( const idMaterial *mat );
-void R_RtEmissiveMatTableSave_f( const idCmdArgs &args );
-void R_RtEmissiveMatTableReload_f( const idCmdArgs &args );
-void R_RtEmissiveBakeTable_f( const idCmdArgs &args );
-const idMaterial *R_RtEmissivePickMaterial( void );		// the editor's pick: the material under the crosshair (through flares)
-float R_RtEmissiveMatMatchedScale( const idMaterial *mat, int *rowsOut, int *fixturesOut );	// the power match's multiplier for a material (area-weighted over its rows)
-// per-fixture (light id) overrides: the same material used two ways gets a per-instance tuning on top of its material entry
-int  R_RtEmissiveLightTableNum( void );
-bool R_RtEmissiveLightTableGet( unsigned long long id, float *scale, float *tint, int *profile, bool *twoSided, bool *indicator );
-void R_RtEmissiveLightTableSet( unsigned long long id, float scale, const float *tint, int profile, bool twoSided, bool indicator );
-void R_RtEmissiveLightTableRemove( unsigned long long id );
-unsigned long long R_RtEmissivePickFixture( const idMaterial **matOut, idVec3 *posOut );	// the editor's pick: the fixture id of the cluster under the crosshair
+unsigned long long R_RtEmissivePickFixture( const idMaterial **matOut, idVec3 *posOut, float *hitDistOut = NULL );	// the editor's pick: the fixture id of the cluster under the crosshair (+ the trace distance to it)
 bool R_RtEmissiveDebugGeometry( unsigned int *vb, unsigned int *ib, int *numIndexes );
-bool R_RtEmissiveLightDebugGeometry( unsigned int *vb, unsigned int *ib, int *numIndexes );	// overlay mode 5: the placed lights as census-coloured spheres
-bool R_RtEmissiveLightDropped( int lightIndex, unsigned int serial );	// E5: a fixtured placed light is dropped while emissive mode is on
 // E1d labels: the frontend projects one label per in-sight emissive SURFACE into the 2D VIRTUAL 640x480 space
 // (R_RtEmissiveProjectLabels, from R_RtEmissiveUpdate); the console's debug-text pass (Console.cpp
 // SCR_DrawEmissiveLabels) draws them every frame while the overlay is on - the FPS counter's 2D path, so screenshots

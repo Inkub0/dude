@@ -28,11 +28,9 @@ struct RtEmissiveTri {
 const uint RT_EMIT_ANIMATED = 1u << 16;		// stage colour is register-driven: the flux is a snapshot, read the live colour
 const uint RT_EMIT_ENTITY   = 1u << 17;		// from a static entity model (else worldspawn)
 const uint RT_EMIT_TWOSIDED = 1u << 18;		// the material creates back sides: its reversed twin is in the table too
-const uint RT_EMIT_INLIGHT  = 1u << 19;		// sits inside a placed light's volume (E5 census: that light is "fixtured")
 const uint RT_EMIT_DARK     = 1u << 20;		// the fixture is switched OFF in its current state (skin / parm): zero flux, kept in place
 const uint RT_EMIT_DIFFUSEGLOW = 1u << 21;	// the glow slot is the DIFFUSE map: texels brighter than the threshold (tint alpha) emit (flare-inferred)
-const uint RT_EMIT_PROFILE_SHIFT = 22u;		// bits 22-23 (emitters.cfg): the emission profile - 0 sqrt(cos) (Q2RTX), 1 Lambert cos, 2 uniform
-const uint RT_EMIT_INDICATOR   = 1u << 24;	// emitters.cfg: an indicator material (never a row; the CPU keeps it out)
+const uint RT_EMIT_PROFILE_SHIFT = 22u;		// bits 22-23: unused since emitters.cfg went (the profile is the ROW's, projT.z)
 
 // The MEAN radiance of a uniform emitter (E2 lights with this: a tile, a tube, an LED panel as a faint flat panel - the
 // texel pattern would only add variance to a 1-spp sample; the per-pixel glow seen on the surface itself is the forward draw)
@@ -215,7 +213,9 @@ vec2 rtEmissiveST( RtEmissiveTri e, vec3 bary ) {
 // RhiWorld.cpp RB_RHI_GatherSceneLights appends one DUDE_LIGHT_EMISSIVE row per emissive surface run: pos = centroid,
 // radius = REACH, cull = the bounding sphere + 2 x reach, colour = the irradiance proxy the light grid ranks by; the
 // projection planes carry projS.w = r_rtEmissiveIntensity, projT.xy = the table address, projQ.x/y = first triangle /
-// count (bits), projQ.z = the reach-boost knee (0 = pure inverse square). The row is self-describing: any consumer that
+// count (bits), projQ.z = the reach-boost knee (0 = pure inverse square), and the map's authored appearance (live, no table
+// rebuild - docs/rtx-light-editor.md): projS.xyz = the tint, projT.z = the emission profile (0 sqrt(cos), 1 Lambert,
+// 2 uniform), projT.w = both faces emit. The row is self-describing: any consumer that
 // has the light buffer can shade it with this one function and no further uniforms.
 
 // PCG, self-contained (the fill / grid have their own copies)
@@ -247,6 +247,9 @@ bool rtEmissiveShadeRow( RtLights lights, uint li, vec3 P, vec3 N, uint seed, ui
 	float intensity = lights.l[ li ].projS.w;
 	float radius    = lights.l[ li ].radius;
 	bool  noFade    = lights.l[ li ].projQ.w > 0.5;		// physical rows: no reach fade
+	vec3  tint      = lights.l[ li ].projS.xyz;			// the authored tint (1 1 1 = none)
+	uint  prof      = uint( clamp( lights.l[ li ].projT.z, 0.0, 2.0 ) + 0.5 );	// the authored emission profile
+	bool  twoSided  = lights.l[ li ].projT.w > 0.5;		// authored: both faces emit
 	RtEmissiveTable t = rtEmissiveOpen( tAddr );
 	if ( !rtEmissivePresent( t ) || num == 0u || first >= t.count || num > t.count - first ) { return false; }
 	// the light direction (SH, the apply's bump re-resolve) and the visibility ray aim at the emitter's CENTROID (pos);
@@ -278,17 +281,16 @@ bool rtEmissiveShadeRow( RtLights lights, uint li, vec3 P, vec3 N, uint seed, ui
 		vec3 Pe, nUnit; float pdfw; bool front;
 		vec2 xi = vec2( rtEmissiveRand( rng ), rtEmissiveRand( rng ) );
 		if ( !rtEmissiveSampleSolidAngle( e, P, xi, Pe, nUnit, pdfw, front ) ) { continue; }
-		if ( !front && ( e.emit & RT_EMIT_TWOSIDED ) == 0u ) { continue; }
+		if ( !front && !twoSided && ( e.emit & RT_EMIT_TWOSIDED ) == 0u ) { continue; }
 		vec3  sd = Pe - P;
 		float sl = length( sd );
 		if ( !( sl > 1e-3 ) || !( pdfw > 0.0 ) ) { continue; }
 		float cosL = max( -dot( nUnit, sd / sl ), 0.0 );						// nUnit points AT P (the sampler re-winds)
 		if ( !( cosL > 0.0 ) ) { continue; }
-		uint  prof = ( e.emit >> RT_EMIT_PROFILE_SHIFT ) & 3u;
-		float emit = ( prof == 1u ) ? cosL : ( prof == 2u ) ? 1.0 : sqrt( cosL );	// emission profile (emitters.cfg)
+		float emit = ( prof == 1u ) ? cosL : ( prof == 2u ) ? 1.0 : sqrt( cosL );	// emission profile (the row's)
 		float boost = ( knee > 0.0 ) ? max( sl / knee, 1.0 ) : 1.0;
 		float fade  = noFade ? 1.0 : 1.0 - smoothstep( 0.75 * radius, radius, sl );
-		vec3  L = rtEmissiveMeanRadiance( e ) * ( e.scale * intensity * boost * fade );
+		vec3  L = rtEmissiveMeanRadiance( e ) * tint * ( e.scale * intensity * boost * fade );
 		float cosR = max( dot( N, sd / sl ), 0.0 );								// this sample's own receiver cosine
 		Lsum += L * ( emit * cosR / ( pIn * pdfw ) );							// one Arvo estimate of the irradiance at P
 		got++;

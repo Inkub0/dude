@@ -462,6 +462,14 @@ void idRenderWorldLocal::UpdateLightDef( qhandle_t lightHandle, const renderLigh
 		ResizeInteractionTable();
 	}
 
+	// DUDE Light Editor (L4, docs/rtx-light-editor.md): the map's authored colour / brightness / radius override (emissive
+	// mode only) applies to a COPY; the game's own parms are kept as dudePristine, so an edit, a mode toggle or a reset
+	// re-derives from them (R_EmAuthRefreshLightOverrides). rlight may BE dudePristine (that re-derive): copy it first.
+	const renderLight_t pristine = *rlight;
+	renderLight_t overridden;
+	const bool isOverridden = R_EmAuthOverrideLight( this, lightHandle, pristine, &overridden );
+	rlight = isOverridden ? &overridden : &pristine;
+
 	bool justUpdate = false;
 	idRenderLightLocal *light = lightDefs[lightHandle];
 	if ( light ) {
@@ -497,6 +505,8 @@ void idRenderWorldLocal::UpdateLightDef( qhandle_t lightHandle, const renderLigh
 	}
 
 	light->parms = *rlight;
+	light->dudePristine = pristine;
+	light->dudeOverridden = isOverridden;
 	light->lastModifiedFrameNum = tr.frameCount;
 	if ( session->writeDemo && light->archived ) {
 		WriteFreeLight( lightHandle );
@@ -859,6 +869,8 @@ void idRenderWorldLocal::RenderScene( const renderView_t *renderView ) {
 	}
 
 	copy = *renderView;
+
+	R_EmAuthRefreshLightOverrides( this );	// DUDE Light Editor L4: lights whose authored override changed re-derive (no-op otherwise)
 
 	// skip front end rendering work, which will result
 	// in only gui drawing
