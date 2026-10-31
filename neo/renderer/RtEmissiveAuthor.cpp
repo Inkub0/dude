@@ -26,6 +26,11 @@ crosshair - lightPick / lightDelete / lightRestore (the light nearest the crossh
 emitOff / emitClear / emitMaterial / emitScale / emitReach / emitFollow (the fixture under the crosshair), emissiveSave,
 emissiveReload, emissiveInfo.
 
+RECOVERY COPY (user, 2026-10-31, after edits were lost by quitting before emissiveSave): unsaved edits are written to
+emissive/<map>.cfg.recovery when the map changes or the game quits; the next time you enter edit mode on that map (L1:
+your first authoring command; L2: look mode) a notice offers emissiveRecover (load them back) or emissiveDiscardRecovery.
+emissiveSave removes the copy (it is then out of date).
+
 ===========================================================================
 */
 
@@ -36,6 +41,7 @@ emissiveReload, emissiveInfo.
 #include "framework/DeclManager.h"
 #include "renderer/tr_local.h"
 #include "renderer/RenderWorld_local.h"
+#include "sys/sys_imgui.h"
 
 struct emAuthLight_t {
 	idStr	key;							// a .map name, or "@x,y,z"
@@ -68,6 +74,7 @@ static idList<emLightCache_t>		s_emLightCache;
 static idStr						s_emMap;			// world->mapName the data belongs to ("" = nothing loaded)
 static bool							s_emFileFound = false;
 static bool							s_emDirty = false;
+static bool							s_emRecoveryNoticed = false;	// the recovery notice was shown for this map load
 static unsigned int					s_emGen = 1;		// bumps on every change: per-light / per-fixture caches re-resolve
 
 // "maps/game/mars_city1" -> "emissive/game/mars_city1.cfg" (relative to the game dir; the save path wins on read)
@@ -173,21 +180,22 @@ static void EmAuth_NewFixture( emAuthFixture_t &f, unsigned long long id ) {
 	f.id = id; f.emit = 0; f.scale = 0.0f; f.reach = 0.0f; f.follow.Clear(); f.followIndex = -1; f.followGen = 0;
 }
 
-// Read the per-map file (replacing whatever is in memory). Unknown words are skipped with a warning.
-static void EmAuth_ReadFile( void ) {
+static idStr EmAuth_RecoveryPath( const char *mapName ) {
+	return EmAuth_FilePath( mapName ) + ".recovery";
+}
+
+// Read a per-map file (the map's own, or its recovery copy) into memory, replacing what is there. Unknown words are
+// skipped with a warning. false = no such file (memory is then empty).
+static bool EmAuth_ReadFileFrom( const idStr &path ) {
 	s_emLights.SetNum( 0, false );
 	s_emFixtures.SetNum( 0, false );
 	s_emMaterials.SetNum( 0, false );
-	s_emFileFound = false;
-	s_emDirty = false;
 	s_emGen++;
-	const idStr path = EmAuth_FilePath( s_emMap );
 	char *buf = NULL;
 	const int len = fileSystem->ReadFile( path, (void **)&buf );
 	if ( len < 0 || buf == NULL ) {
-		return;
+		return false;
 	}
-	s_emFileFound = true;
 	idStr text( buf );
 	fileSystem->FreeFile( buf );
 	idStrList w;
@@ -231,13 +239,38 @@ static void EmAuth_ReadFile( void ) {
 			common->Warning( "%s line %d: unknown entry '%s' (skipped)", path.c_str(), lineNo, w[0].c_str() );
 		}
 	}
+	return true;
+}
+
+// the map's own file (what emissiveSave wrote)
+static void EmAuth_ReadFile( void ) {
+	s_emFileFound = EmAuth_ReadFileFrom( EmAuth_FilePath( s_emMap ) );
+	s_emDirty = false;
+}
+
+static bool EmAuth_FileExists( const idStr &path ) {
+	return fileSystem->ReadFile( path, NULL, NULL ) >= 0;
+}
+
+static bool EmAuth_WriteFile( const idStr &path, const char *what );
+
+// Unsaved edits about to be lost (the map changes, the game quits): keep them in the recovery copy
+static void EmAuth_FlushRecovery( void ) {
+	if ( !s_emDirty || s_emMap.Length() == 0 ) { return; }
+	const idStr path = EmAuth_RecoveryPath( s_emMap );
+	if ( EmAuth_WriteFile( path, "RECOVERY COPY of unsaved edits (emissiveRecover loads it, emissiveDiscardRecovery deletes it)" ) ) {
+		common->Printf( "emissive authoring: unsaved edits for %s kept in %s (save path) - emissiveRecover brings them back\n", s_emMap.c_str(), path.c_str() );
+	}
+	s_emDirty = false;
 }
 
 // The data follows the map: a new map scans its .map names and reads its file
 static void EmAuth_Sync( const idRenderWorldLocal *world ) {
 	if ( world == NULL || world->mapName.Length() == 0 ) { return; }
 	if ( s_emMap.Icmp( world->mapName ) == 0 ) { return; }
+	EmAuth_FlushRecovery();									// the previous map's unsaved edits
 	s_emMap = world->mapName;
+	s_emRecoveryNoticed = false;
 	s_emLightCache.SetNum( 0, false );
 	EmAuth_ScanMapLights( s_emMap );
 	EmAuth_ReadFile();
@@ -370,6 +403,25 @@ Console commands (L1: edit by command on what is under the crosshair)
 ==============================================================================
 */
 
+/*
+===================
+R_EmAuthEnterEditMode
+
+Entering edit mode on this map (L1: the first authoring command after a load; L2: look mode): if a recovery copy of
+unsaved edits from an earlier session exists, say so once - on screen and in the console.
+===================
+*/
+void R_EmAuthEnterEditMode( void ) {
+	if ( s_emRecoveryNoticed || s_emMap.Length() == 0 ) { return; }
+	s_emRecoveryNoticed = true;
+	const idStr path = EmAuth_RecoveryPath( s_emMap );
+	if ( !EmAuth_FileExists( path ) ) { return; }
+	common->Printf( "emissive authoring: UNSAVED EDITS from an earlier session are in %s - emissiveRecover loads them (replacing "
+		"what is in memory now), emissiveDiscardRecovery deletes the copy\n", path.c_str() );
+	D3::ImGuiHooks::ShowWarningOverlay( "Unsaved emissive edits from your last session were kept.\n"
+		"emissiveRecover loads them, emissiveDiscardRecovery deletes them." );
+}
+
 static idRenderWorldLocal *EmAuth_CmdWorld( void ) {
 	idRenderWorldLocal *world = tr.primaryWorld;
 	if ( world == NULL || world->mapName.Length() == 0 ) {
@@ -377,6 +429,7 @@ static idRenderWorldLocal *EmAuth_CmdWorld( void ) {
 		return NULL;
 	}
 	EmAuth_Sync( world );
+	R_EmAuthEnterEditMode();
 	return world;
 }
 
@@ -532,12 +585,11 @@ static void EmAuth_EmitFollow_f( const idCmdArgs &args ) {
 	}
 }
 
-static void EmAuth_Save_f( const idCmdArgs &args ) {
-	if ( EmAuth_CmdWorld() == NULL ) { return; }
-	const idStr path = EmAuth_FilePath( s_emMap );
+static bool EmAuth_WriteFile( const idStr &path, const char *what ) {
 	idFile *f = fileSystem->OpenFileWrite( path, "fs_savepath" );
-	if ( f == NULL ) { common->Warning( "emissiveSave: could not write %s", path.c_str() ); return; }
+	if ( f == NULL ) { common->Warning( "emissive authoring: could not write %s", path.c_str() ); return false; }
 	f->Printf( "// DUDE emissive setup for %s (docs/rtx-light-editor.md). Emissive mode only - a map without this file is unchanged.\n", s_emMap.c_str() );
+	if ( what != NULL ) { f->Printf( "// %s\n", what ); }
 	f->Printf( "// light <\"name\" | @x,y,z> delete    material \"<name>\" emit    fixture <idhex> emit|off [scale <x>] [reach <units>] [follow \"<light>\"]\n" );
 	for ( int i = 0; i < s_emLights.Num(); i++ ) {
 		const emAuthLight_t &l = s_emLights[i];
@@ -561,9 +613,43 @@ static void EmAuth_Save_f( const idCmdArgs &args ) {
 		f->Printf( "\n" );
 	}
 	fileSystem->CloseFile( f );
+	return true;
+}
+
+static void EmAuth_Save_f( const idCmdArgs &args ) {
+	if ( EmAuth_CmdWorld() == NULL ) { return; }
+	const idStr path = EmAuth_FilePath( s_emMap );
+	if ( !EmAuth_WriteFile( path, NULL ) ) { return; }
 	s_emDirty = false;
 	s_emFileFound = true;
-	common->Printf( "emissiveSave: wrote %s (save path): %d lights, %d materials, %d fixtures\n", path.c_str(), s_emLights.Num(), s_emMaterials.Num(), s_emFixtures.Num() );
+	const idStr rec = EmAuth_RecoveryPath( s_emMap );
+	const bool hadRecovery = EmAuth_FileExists( rec );
+	if ( hadRecovery ) { fileSystem->RemoveFile( rec ); }
+	common->Printf( "emissiveSave: wrote %s (save path): %d lights, %d materials, %d fixtures%s\n", path.c_str(), s_emLights.Num(), s_emMaterials.Num(), s_emFixtures.Num(),
+		hadRecovery ? "; the recovery copy is out of date and was removed" : "" );
+}
+
+static void EmAuth_Recover_f( const idCmdArgs &args ) {
+	if ( EmAuth_CmdWorld() == NULL ) { return; }
+	const idStr rec = EmAuth_RecoveryPath( s_emMap );
+	if ( !EmAuth_FileExists( rec ) ) { common->Printf( "emissiveRecover: no recovery copy for %s (%s)\n", s_emMap.c_str(), rec.c_str() ); return; }
+	EmAuth_ReadFileFrom( rec );
+	s_emDirty = true;											// recovered, not saved: emissiveSave keeps them (and removes the copy)
+	common->Printf( "emissiveRecover: loaded %s - %d lights, %d materials, %d fixtures (UNSAVED: emissiveSave keeps them)\n", rec.c_str(),
+		s_emLights.Num(), s_emMaterials.Num(), s_emFixtures.Num() );
+}
+
+static void EmAuth_DiscardRecovery_f( const idCmdArgs &args ) {
+	if ( EmAuth_CmdWorld() == NULL ) { return; }
+	const idStr rec = EmAuth_RecoveryPath( s_emMap );
+	if ( !EmAuth_FileExists( rec ) ) { common->Printf( "emissiveDiscardRecovery: no recovery copy for %s\n", s_emMap.c_str() ); return; }
+	fileSystem->RemoveFile( rec );
+	common->Printf( "emissiveDiscardRecovery: deleted %s\n", rec.c_str() );
+}
+
+// the game quits (idRenderSystemLocal::Shutdown, before the file system goes): unsaved edits go to the recovery copy
+void R_EmAuthShutdown( void ) {
+	EmAuth_FlushRecovery();
 }
 
 static void EmAuth_Reload_f( const idCmdArgs &args ) {
@@ -607,4 +693,6 @@ void R_EmAuthRegisterCommands( void ) {
 	cmdSystem->AddCommand( "emissiveSave", EmAuth_Save_f, CMD_FL_RENDERER, "emissive authoring: write this map's emissive/<map>.cfg to the save path" );
 	cmdSystem->AddCommand( "emissiveReload", EmAuth_Reload_f, CMD_FL_RENDERER, "emissive authoring: re-read this map's emissive/<map>.cfg (unsaved edits are lost)" );
 	cmdSystem->AddCommand( "emissiveInfo", EmAuth_Info_f, CMD_FL_RENDERER, "emissive authoring: print this map's authored lights, materials and fixtures" );
+	cmdSystem->AddCommand( "emissiveRecover", EmAuth_Recover_f, CMD_FL_RENDERER, "emissive authoring: load the recovery copy of unsaved edits from an earlier session (then emissiveSave keeps them)" );
+	cmdSystem->AddCommand( "emissiveDiscardRecovery", EmAuth_DiscardRecovery_f, CMD_FL_RENDERER, "emissive authoring: delete the recovery copy of unsaved edits" );
 }

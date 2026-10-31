@@ -3551,6 +3551,8 @@ idRenderSystemLocal::Shutdown
 void idRenderSystemLocal::Shutdown( void ) {
 	common->Printf( "idRenderSystem::Shutdown()\n" );
 
+	R_EmAuthShutdown();		// emissive authoring: unsaved edits -> emissive/<map>.cfg.recovery (the file system is still up)
+
 	// Re-arm the once-cached backend GPU shaders/scene before the backend teardown below frees
 	// their modules: a mod switch (ReloadEngine) runs this full Shutdown then re-inits, and without
 	// the reset the stale handles would dispatch against destroyed pipelines so every MD5 model

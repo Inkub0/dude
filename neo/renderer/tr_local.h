@@ -1200,6 +1200,8 @@ bool R_EmAuthFixtureEmits( const idRenderWorldLocal *world, unsigned long long f
 float R_EmAuthLightAnimAverage( const idRenderWorldLocal *world, int index );
 unsigned int R_EmAuthGeneration( void );
 void R_EmAuthRegisterCommands( void );
+void R_EmAuthEnterEditMode( void );		// entering edit mode: the recovery-copy notice (once per map load)
+void R_EmAuthShutdown( void );			// quitting: unsaved edits go to the recovery copy
 float R_RtEmissiveMatchedScale( const rtEmissiveRow_t &row );
 // the HDR eye adaptation runs when the user asked for it OR physical emissive mode asks for it (r_rtEmissiveAutoExposure)
 bool R_HdrEyeAdaptationWanted( void );	// the power match's radiance multiplier on the row's mean (1 = authored)
