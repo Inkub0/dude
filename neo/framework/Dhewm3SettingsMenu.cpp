@@ -5343,7 +5343,7 @@ static void DrawDbgGroup_RTEmitters()
 
 	// ===== Mode =====
 	SettingsHeading( "Mode" );
-	SettingsNoteDisabled( "The header switch is Emissive Mode: emitters replace the placed lights whose fixture they are." );
+	SettingsNoteDisabled( "The header switch is Emissive Mode: the surfaces the map's Light Editor setup makes emit light the scene, and the lights it deletes go." );
 	CvarCheckbox( "Emitters at the GI Bounce", r_rtEmissiveBounce, "The emitting surfaces light the GI bounce's hit points like "
 		"any light. Works in BOTH modes: with Emissive Mode off the placed lights keep the direct term and the emitters only add "
 		"to the GI (needs the Emitter Table on); with it on, walls lit only by emitters bounce. (r_rtEmissiveBounce)" );
@@ -5351,25 +5351,11 @@ static void DrawDbgGroup_RTEmitters()
 
 	// ===== Brightness =====
 	SettingsHeading( "Brightness" );
-	CvarSliderF( "Emitter Intensity", r_rtEmissiveIntensity, 0.0f, 8.0f, "%.2f", "A trim on every emitter's radiance. With "
-		"the power match below on, 1 reproduces the placed lights' level; without it this scales the authored glow brightness. "
-		"(r_rtEmissiveIntensity)" );
-	CvarCheckbox( "Inherit the replaced light's power", r_rtEmissivePowerMatch, "Each fixture's radiance is set from the colour "
-		"and radius of the placed light it replaces and its own area, so a small fixture lights its room as its light did and a "
-		"big panel glows softly. An emitter in no placed light is matched to a light of its own colour at the default reach. "
-		"Off = authored glow brightness x intensity (small fixtures go dark). (r_rtEmissivePowerMatch)" );
-	ImGui::BeginDisabled( !r_rtEmissivePowerMatch.GetBool() );
-	CvarSliderF( "Fixture Min Effective Area", r_rtEmissiveFixtureMinArea, 0.0f, 128.0f, "%.0f", "The EFFECTIVE emitting area "
-		"(lit texels x their brightness x the stage colour, in units^2) a surface needs to count as a light FIXTURE at all: a "
-		"fixture drops the placed light it sits in and inherits (part of) its power; a smaller glow (a computer LED, the "
-		"electric box's red lamp) is an indicator - it never drops a light and lights at its authored brightness only. "
-		"Rebuilds the census. (r_rtEmissiveFixtureMinArea)" );
-	CvarSliderF( "Fixture Full-power Area", r_rtEmissiveFixtureFullArea, 1.0f, 512.0f, "%.0f", "The effective emitting area at "
-		"which an emitter inherits its light's FULL power (a white 8 x 8 patch, a tube). Between the minimum and this the "
-		"inherited share ramps up, so a dim or tiny glow stands in for only a fraction of its light. (r_rtEmissiveFixtureFullArea)" );
+	CvarSliderF( "Emitter Intensity", r_rtEmissiveIntensity, 0.0f, 8.0f, "%.2f", "A trim on every emitter's radiance; 1 = as "
+		"authored in the Light Editor. (r_rtEmissiveIntensity)" );
 	CvarSliderF( "Max Matched Radiance", r_rtEmissiveMaxRadiance, 1.0f, 512.0f, "%.0f", "The brightest radiance the power match "
-		"may give one emitter (a small patch replacing a big light would otherwise blaze). (r_rtEmissiveMaxRadiance)" );
-	ImGui::EndDisabled();	// r_rtEmissivePowerMatch
+		"may give a surface without an authored radiance (a small patch matched to a big light would otherwise blaze). "
+		"(r_rtEmissiveMaxRadiance)" );
 
 	// ===== Physical =====
 	SettingsHeading( "Physical" );
@@ -5458,18 +5444,16 @@ static void DrawDbgGroup_RTEmitters()
 	SettingsHeading( "Debug" );
 	{
 		if ( SettingsRow( "Table View", "r_rtEmissiveTableDebug" ) ) {
-		int dbg = idMath::ClampInt( 0, 5, r_rtEmissiveTableDebug.GetInteger() );
+		int dbg = idMath::ClampInt( 0, 3, r_rtEmissiveTableDebug.GetInteger() );
 		ImGui::SetNextItemWidth( 240.0f );
-		if ( ImGui::Combo( "Table View##rtEmissiveTableDebug", &dbg, "Off\0Emitters by texture\0Flux (vs mean)\0Emitted colour\0Light coverage (fixtured / alone)\0Placed lights (spheres)\0" ) ) {
+		if ( ImGui::Combo( "Table View##rtEmissiveTableDebug", &dbg, "Off\0Emitters by texture\0Flux (vs mean)\0Emitted colour\0" ) ) {
 			r_rtEmissiveTableDebug.SetInteger( dbg );
 		}
 		CvarTip( r_rtEmissiveTableDebug,  "Draw the table's triangles over the view, depth-tested against the scene, with their material names. "
 			"'Emitters by texture' tints each glow texture its own colour (striped = a pulsing stage colour, checkered = "
 			"flare-inferred); 'Flux' shows each triangle's power relative to the table's mean (blue faint, green average, red "
-			"4x, white 16x+); 'Emitted colour' is the flat mean radiance the mode lights with; 'Light coverage' green = the "
-			"emitter sits inside a placed light's volume, red = no placed light covers it; 'Placed lights' draws every placed "
-			"light as a sphere: red = fixtured (dropped while Emissive Mode is on), green = ambience (kept), yellow = parallel, "
-			"blue = fog / blend. (r_rtEmissiveTableDebug)" );
+			"4x, white 16x+); 'Emitted colour' is the flat mean radiance the mode lights with. The Light Editor's look mode "
+			"(editLights) shows the placed lights and each surface's authored state. (r_rtEmissiveTableDebug)" );
 		}
 	}
 	SettingsNoteDisabled( "Console: rtEmissiveProbe names the surface under the crosshair and the table's verdict on it." );

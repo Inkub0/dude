@@ -1138,16 +1138,12 @@ extern idCVar r_rtEmissiveScale;
 extern idCVar r_rtEmissiveLighting;		// EMISSIVE MODE master switch (D6): emitters light the scene (E2); implies the table, hides flares
 extern idCVar r_rtEmissiveIntensity;		// emissive mode: radiance multiplier of every emitter
 extern idCVar r_rtEmissiveMaxRows;
-extern idCVar r_rtEmissiveShareExponent;	// emissive mode: power sharing weight = effective area ^ this (0 = equal)
 extern idCVar r_rtEmissiveCheapTarget;	// emissive mode: analytic RIS target for emitter candidates (only the winner is area-sampled)
 extern idCVar r_rtEmissiveSamples;		// emissive mode: area-light samples averaged per emitter shade (far-field representation)
 extern idCVar r_rtEmissiveGridSlots;		// emissive mode: light-grid candidates per cell (the larger of this and r_rtLightGridSlots)		// emissive mode: emitter rows (surfaces) a view's scene-light buffer may carry
-extern idCVar r_rtEmissivePowerMatch;
 extern idCVar r_rtEmissivePhysical;		// emissive mode: physical emitters - inverse square, no reach, cull where the contribution is negligible
 extern idCVar r_rtEmissiveCullIrradiance;	// physical: the irradiance below which an emitter's row stops (its cull radius)
 extern idCVar r_rtEmissiveAutoExposure;	// physical: drive the HDR eye adaptation while emissive mode is on
-extern idCVar r_rtEmissiveFixtureMinArea;	// emissive mode: the EFFECTIVE emitting area (lit area x brightness) below which a surface is an indicator (LED), never a fixture
-extern idCVar r_rtEmissiveFixtureFullArea;	// emissive mode: the effective emitting area at which an emitter inherits its light's FULL power (ramps from the min)
 extern idCVar r_rtEmissiveMaxRadiance;	// emissive mode: cap on the radiance the power match may give one emitter	// emissive mode: an emitter inherits the POWER of the placed light it replaces (radiance from its radius / colour / area)
 extern idCVar r_rtEmissiveBounce;			// emitter rows ride the GI bounce in normal mode too (bounce-only rows)
 extern idCVar r_rtEmissiveReach;			// emissive mode: reach as a multiple of the replaced light's authored radius (0 = physical)
@@ -1193,9 +1189,8 @@ unsigned long long R_RtEmissiveTableAddress( int *numTris, float *totalFlux, flo
 // of the scene-light buffer (centroid, bounding radius, flux, flux-weighted mean linear radiance x material scale, total
 // area, the inherited reach of the placed light it replaces (0 = none), its triangle range in the table). dark = every
 // triangle at zero flux (switched off / gone): never a row.
-struct rtEmissiveRow_t { const idMaterial *mat; idVec3 centroid; float boundRadius; float flux; float area; idVec3 meanRadiance; float reach; float lightLum; idVec3 lightOrigin; int lightIndex; unsigned long long fixtureId; bool hasLight; bool noShadows; bool indicator; int firstTri, numTris; bool dark; };
+struct rtEmissiveRow_t { const idMaterial *mat; idVec3 centroid; float boundRadius; float flux; float area; idVec3 meanRadiance; unsigned long long fixtureId; int firstTri, numTris; bool dark; };
 int R_RtEmissiveRows( const rtEmissiveRow_t **rows );		// the rows (0 = no table)
-float R_RtEmissiveLightFlicker( int lightIndex, float liveLum );	// a dropped light's live / average luminance (-1 = it does not animate)
 float R_RtEmissiveLightAnimatedAverage( const idRenderLightLocal *ld );	// time-average luminance of a light's animated colour (0 = steady)
 // emissive mode AUTHORING (RtEmissiveAuthor.cpp, docs/rtx-light-editor.md): the per-map emissive/<map>.cfg decides which placed
 // lights are deleted and which glowing fixtures emit - no heuristics; a map without the file is unchanged
@@ -1228,13 +1223,11 @@ bool R_EmAuthWheel( int dir, bool material );	// events.cpp, a wheel step in gam
 bool R_EmAuthOverrideLight( const idRenderWorldLocal *world, int index, const renderLight_t &in, renderLight_t *out );
 void R_EmAuthRefreshLightOverrides( idRenderWorldLocal *world );
 bool R_EmAuthMouseButton( int button, bool down );	// events.cpp, a mouse button in game (1 left, 2 right): true = the Light Editor took it (its menu)
-float R_RtEmissiveMatchedScale( const rtEmissiveRow_t &row );
+float R_RtEmissiveMatchedScale( const rtEmissiveRow_t &row, float reach, float lightLum );	// the power match: radiance multiplier for a light of luminance lightLum (0 = own colour) and radius reach (0 = default)
 // the HDR eye adaptation runs when the user asked for it OR physical emissive mode asks for it (r_rtEmissiveAutoExposure)
 bool R_HdrEyeAdaptationWanted( void );	// the power match's radiance multiplier on the row's mean (1 = authored)
 unsigned long long R_RtEmissivePickFixture( const idMaterial **matOut, idVec3 *posOut, float *hitDistOut = NULL );	// the editor's pick: the fixture id of the cluster under the crosshair (+ the trace distance to it)
 bool R_RtEmissiveDebugGeometry( unsigned int *vb, unsigned int *ib, int *numIndexes );
-bool R_RtEmissiveLightDebugGeometry( unsigned int *vb, unsigned int *ib, int *numIndexes );	// overlay mode 5: the placed lights as census-coloured spheres
-bool R_RtEmissiveLightDropped( int lightIndex, unsigned int serial );	// E5: a fixtured placed light is dropped while emissive mode is on
 // E1d labels: the frontend projects one label per in-sight emissive SURFACE into the 2D VIRTUAL 640x480 space
 // (R_RtEmissiveProjectLabels, from R_RtEmissiveUpdate); the console's debug-text pass (Console.cpp
 // SCR_DrawEmissiveLabels) draws them every frame while the overlay is on - the FPS counter's 2D path, so screenshots
@@ -1244,7 +1237,6 @@ void R_RtEmissiveProjectLabels( const struct viewDef_s *viewDef );
 bool R_RtEmissiveLabelsWanted( void );
 int  R_RtEmissiveGetScreenLabels( const rtEmissiveScreenLabel_t **out );
 void R_RtEmissiveProbe_f( const idCmdArgs &args );		// console: name the surface under the crosshair + the table's verdict on it
-void R_RtEmissiveLights_f( const idCmdArgs &args );		// console: the emissive census around the eye (placed lights + emitter rows)
 bool R_RtEmissiveHideEntity( int entityIndex );	// emitter mode (r_rtEmissiveHideFlares): this entity is a fixture's flare sprite - skip its draw surfaces
 bool R_RtEmissiveIsFlareMaterial( const idMaterial *mat );	// a flare / sprite-deformed additive material (the surface the hide skips)
 extern idCVar r_rtPerforatedShadows;		// alpha-tested grate/fence casters in the RT shadow rays

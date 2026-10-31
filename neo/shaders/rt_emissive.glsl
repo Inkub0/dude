@@ -28,11 +28,9 @@ struct RtEmissiveTri {
 const uint RT_EMIT_ANIMATED = 1u << 16;		// stage colour is register-driven: the flux is a snapshot, read the live colour
 const uint RT_EMIT_ENTITY   = 1u << 17;		// from a static entity model (else worldspawn)
 const uint RT_EMIT_TWOSIDED = 1u << 18;		// the material creates back sides: its reversed twin is in the table too
-const uint RT_EMIT_INLIGHT  = 1u << 19;		// sits inside a placed light's volume (E5 census: that light is "fixtured")
 const uint RT_EMIT_DARK     = 1u << 20;		// the fixture is switched OFF in its current state (skin / parm): zero flux, kept in place
 const uint RT_EMIT_DIFFUSEGLOW = 1u << 21;	// the glow slot is the DIFFUSE map: texels brighter than the threshold (tint alpha) emit (flare-inferred)
 const uint RT_EMIT_PROFILE_SHIFT = 22u;		// bits 22-23: unused since emitters.cfg went (the profile is the ROW's, projT.z)
-const uint RT_EMIT_INDICATOR   = 1u << 24;	// emitters.cfg: an indicator material (never a row; the CPU keeps it out)
 
 // The MEAN radiance of a uniform emitter (E2 lights with this: a tile, a tube, an LED panel as a faint flat panel - the
 // texel pattern would only add variance to a 1-spp sample; the per-pixel glow seen on the surface itself is the forward draw)

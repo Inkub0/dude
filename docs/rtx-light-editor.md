@@ -198,6 +198,22 @@ returns you to look mode.
      unused), plus the `rtEmissiveLights` diagnostic;
    - migrate the `light <id>` lines of `emitters.cfg`;
    - docs.
+   Done on `feat/rtx-light-editor-cleanup` (2026-10-31):
+   - **Removed:** the light census (fixtured / ambience classification, per-triangle light pairing, the drop list),
+     power sharing, the paired-light power inheritance and its reach, the effective-area "indicator" rule and the
+     power match's area ramp, the `rtEmissiveLights` diagnostic, overlay modes 4 (light coverage) and 5 (placed lights
+     by census class - look mode shows the lights), the cvars `r_rtEmissiveShareExponent`, `r_rtEmissivePowerMatch`,
+     `r_rtEmissiveFixtureMinArea`, `r_rtEmissiveFixtureFullArea`, and the row fields they fed.
+   - **Kept:** the power match as a plain formula (`R_RtEmissiveMatchedScale( row, reach, lightLum )`: a surface
+     without a radiance, Match a light's power, the start of physical), `r_rtEmissiveMaxRadiance` (its cap),
+     `r_rtEmissiveReach` (the reach multiplier / knee) and `r_rtEmissiveReachDefault` (both used), flare inference
+     (`r_rtEmissiveFlareInfer`: it only makes flare-lit fixtures CANDIDATES the editor can switch on - it decides
+     nothing), flare hiding, the fixture split.
+   - **Behaviour:** normal mode's bounce-only rows (`r_rtEmissiveBounce`) now use the authored set too (an unauthored
+     map: none). A surface still power-matched (no radiance) that is small is no longer held at its painted glow by the
+     area ramp: it now matches like any other (capped by `r_rtEmissiveMaxRadiance`).
+   - The `light <id>` lines of `emitters.cfg` needed no migration: the user's file had none (folded and removed with
+     the file).
 6. **Merge:** the whole stack (flicker, today's fixes, the editor) after the user's play test.
 
 ## Risks

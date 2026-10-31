@@ -6328,9 +6328,9 @@ static unsigned int RB_RHI_FloatToHalfBits( float f ) {
 }
 
 
-// Emissive mode: the LIVE colour luminance of each dropped (fixtured) placed light, evaluated by the loop below in this
-// call (stamp = the call's generation). Its emitter row lights at live / time-average (R_RtEmissiveLightFlicker): the
-// flash / flicker table of the light it replaced, which otherwise vanished with that light.
+// Emissive mode: the LIVE colour luminance of each placed light, evaluated by the loop below in this call (stamp = the
+// call's generation). An emitter that FOLLOWS a light (the Light Editor) lights at live / its time-average: that light's
+// flash / flicker table.
 static idList<float>		s_emDroppedLiveLum;
 static idList<unsigned int>	s_emDroppedLiveGen;
 static unsigned int			s_emLiveGen = 0;
@@ -6481,12 +6481,11 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 		} else {									// parametric (the usual case): the light's base RGB shader parms
 			col.Set( ld->parms.shaderParms[SHADERPARM_RED], ld->parms.shaderParms[SHADERPARM_GREEN], ld->parms.shaderParms[SHADERPARM_BLUE] );
 		}
-		// emissive mode: note a DROPPED light's live brightness before the dark test (an OFF phase must reach its row as 0)
 		// emissive mode: a light the map's authored setup DELETES (emissive/<map>.cfg, RtEmissiveAuthor.cpp - no heuristics).
 		// Every evaluated light's live brightness is noted before the dark test (an OFF phase must reach a follower as 0):
-		// an authored emitter may follow any of them, deleted or kept
+		// an authored emitter may follow any of them, deleted or kept (the bounce-only rows of normal mode too)
 		const bool emDropped = R_EmAuthLightDeleted( rw, i );
-		if ( r_rtEmissiveLighting.GetBool() ) {
+		if ( r_rtEmissiveLighting.GetBool() || r_rtEmissiveBounce.GetBool() ) {
 			if ( s_emDroppedLiveLum.Num() < rw->lightDefs.Num() ) {
 				const int was = s_emDroppedLiveLum.Num();
 				s_emDroppedLiveLum.SetNum( rw->lightDefs.Num(), false );
@@ -6640,9 +6639,6 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 			const float reachMul  = idMath::ClampFloat( 0.0f, 8.0f, r_rtEmissiveReach.GetFloat() );
 			const float reachDef  = idMath::ClampFloat( 0.0f, 4096.0f, r_rtEmissiveReachDefault.GetFloat() );
 			const int   cap       = Min( idMath::ClampInt( 0, RT_EMIT_MAX_ROWS, r_rtEmissiveMaxRows.GetInteger() ), RT_SCENE_MAX_ROWS - n - nFog - nAmb );
-			const float minArea   = Max( 0.0f, r_rtEmissiveFixtureMinArea.GetFloat() );
-			const float fullArea  = Max( minArea + 1e-3f, r_rtEmissiveFixtureFullArea.GetFloat() );
-			const float fluxScale = Max( idMath::ClampFloat( 0.0f, 64.0f, r_rtEmissiveScale.GetFloat() ), 1e-3f );
 			const bool  physical  = r_rtEmissivePhysical.GetBool();
 			const float cullE     = Max( r_rtEmissiveCullIrradiance.GetFloat(), 1e-5f );
 			// how far a row may sit from the camera and still enter the buffer. A tight camera-distance cutoff switched
@@ -6657,19 +6653,15 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 			static int   pick[ RT_EMIT_MAX_ROWS ];
 			static float pickImp[ RT_EMIT_MAX_ROWS ];
 			int np = 0;
-			// EMISSIVE MODE = AUTHORED (docs/rtx-light-editor.md): only fixtures the map's emissive/<map>.cfg makes emit enter the
-			// buffer (an unauthored map: none - emissive mode changes nothing), at the authored reach, with no automatic indicator
-			// rule and no inherited light power. Brightness: the authored RADIANCE (physical: a multiplier on the glow's mean),
-			// else a light of the surface's own colour at the fixture's reach (the power-match formula, standalone) - times the
-			// fixture's scale. The appearance (tint, emission profile, two-sided) rides on the row, so every edit is live
-			// (2026-10-31: emitters.cfg, baked into the table, is gone). Normal mode's bounce-only rows (r_rtEmissiveBounce)
-			// keep the old path with the defaults.
-			const bool authoredMode = r_rtEmissiveLighting.GetBool();
+			// The rows are the AUTHORED emitters (docs/rtx-light-editor.md): only fixtures the map's emissive/<map>.cfg makes emit
+			// enter the buffer (an unauthored map: none), in emissive mode and for normal mode's bounce-only rows
+			// (r_rtEmissiveBounce) alike - since the census went (2026-10-31) nothing else says which surfaces are lights.
+			// Brightness: the authored RADIANCE (physical: a multiplier on the glow's mean), else a light of the surface's own
+			// colour at the fixture's reach (the power match, standalone) - times the fixture's scale. The appearance (tint,
+			// emission profile, two-sided) rides on the row, so every edit is live.
 			auto authoredRowScale = [&]( const rtEmissiveRow_t &row, const rtEmAuthEmit_t &ap ) -> float {
 				if ( ap.radiance > 0.0f ) { return ap.radiance * ap.scale; }
-				rtEmissiveRow_t m = row;
-				m.reach = ap.reach; m.lightLum = 0.0f; m.hasLight = false;		// own colour; reach 0 = r_rtEmissiveReachDefault
-				return R_RtEmissiveMatchedScale( m ) * ap.scale;
+				return R_RtEmissiveMatchedScale( row, ap.reach, 0.0f ) * ap.scale;		// own colour; reach 0 = r_rtEmissiveReachDefault
 			};
 			auto tintLum = []( const rtEmAuthEmit_t &ap ) -> float { return ap.tint[0] * 0.2126f + ap.tint[1] * 0.7152f + ap.tint[2] * 0.0722f; };
 			for ( int i = 0; i < nRows && cap > 0; i++ ) {
@@ -6679,17 +6671,15 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 				// buffer. After the per-fixture split a map has hundreds of them and they crowded the 511-row ceiling out of
 				// the fixtures that light the far end of a corridor (Access Hall, 2026-10-20)
 				rtEmAuthEmit_t ap;
-				if ( authoredMode ) {
-					if ( !R_EmAuthFixtureEmits( rw, row.fixtureId, row.mat, &ap ) ) { continue; }
-				} else if ( row.indicator || row.flux / fluxScale < minArea ) { continue; }
-				float R = authoredMode ? ( ( ap.reach > 0.0f ) ? ap.reach : reachDef ) : ( ( row.reach > 0.0f ) ? row.reach : reachDef );
+				if ( !R_EmAuthFixtureEmits( rw, row.fixtureId, row.mat, &ap ) ) { continue; }
+				float R = ( ap.reach > 0.0f ) ? ap.reach : reachDef;
 				if ( !( R > 0.0f ) ) { R = Max( row.boundRadius * 4.0f, 64.0f ); }
 				const float radius = R * ( ( reachMul > 0.0f ) ? reachMul : 1.0f );
 				const float dist   = Max( ( row.centroid - viewOrg ).Length() - row.boundRadius, 0.0f );
 				if ( dist > gridExtent + radius ) { continue; }							// beyond the light grid's reach: a far surface there lights exhaustively, not from a near cell
 				// the pick ranks on the placed lights' scale too (C x radius^2 / d^2): matched = the replaced light's luminance
 				const float meanLum = row.meanRadiance.x * 0.2126f + row.meanRadiance.y * 0.7152f + row.meanRadiance.z * 0.0722f;
-				const float LrowP = meanLum * ( authoredMode ? authoredRowScale( row, ap ) * tintLum( ap ) : R_RtEmissiveMatchedScale( row ) ) * intensity;
+				const float LrowP = meanLum * authoredRowScale( row, ap ) * tintLum( ap ) * intensity;
 				const float imp = 16.0f * LrowP * row.area / Max( dist * dist, 64.0f * 64.0f );	// 16 L A / d^2: the placed lights' proxy scale
 				if ( !( imp > 0.0f ) ) { continue; }
 				nEmCandidates++;
@@ -6711,10 +6701,8 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 			for ( int k = 0; k < np; k++ ) {
 				const rtEmissiveRow_t &row = rows[ pick[k] ];
 				rtEmAuthEmit_t ap;
-				ap.scale = 1.0f; ap.reach = 0.0f; ap.followLight = -1; ap.radiance = 0.0f;
-				ap.tint[0] = ap.tint[1] = ap.tint[2] = 1.0f; ap.profile = 0; ap.twoSided = false;	// normal mode: the defaults
-				if ( authoredMode ) { R_EmAuthFixtureEmits( rw, row.fixtureId, row.mat, &ap ); }
-				float R = authoredMode ? ( ( ap.reach > 0.0f ) ? ap.reach : reachDef ) : ( ( row.reach > 0.0f ) ? row.reach : reachDef );
+				R_EmAuthFixtureEmits( rw, row.fixtureId, row.mat, &ap );
+				float R = ( ap.reach > 0.0f ) ? ap.reach : reachDef;
 				if ( !( R > 0.0f ) ) { R = Max( row.boundRadius * 4.0f, 64.0f ); }
 				const float radius = R * ( ( reachMul > 0.0f ) ? reachMul : 1.0f );
 				RtReflLightGPU &L = sorted[ n + nFog + nEm ];
@@ -6723,17 +6711,12 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 				// over the last quarter). A 2 x reach sphere put eight times the volume - and several times the candidates - of
 				// the placed lights into every grid cell, which overflowed the cell's slots (the blocky shadows of 2026-10-20).
 				L.pos[0] = row.centroid.x; L.pos[1] = row.centroid.y; L.pos[2] = row.centroid.z;
-				// POWER MATCH (r_rtEmissivePowerMatch): the emitter inherits the POWER of the light it replaces. A Doom 3 light of
-				// colour C and radius R delivers C/2 at d = R/2; this row (reach boost 2 at that distance) delivers 8 L A / R^2,
-				// so the radiance that matches is L = C R^2 / (16 A): a tiny decal replacing a big light burns bright, a big
-				// panel glows softly - the fixture's few square units can never stand in for its light at authored radiance
-				// (the "dead" sterlight fixtures of 2026-10-20). An emitter in NO light is matched to a light of its own colour
-				// (C = its mean luminance, <= 1) at the default reach. The row's intensity field = the global intensity x the
-				// match ratio (the shade multiplies the triangle's own mean radiance by it). Capped at 4096 x.
+				// The row's radiance multiplier on its glow mean (the row's intensity field = the global intensity x it; the shade
+				// multiplies the triangle's own mean radiance by it): the authored radiance (physical), else the POWER MATCH - a Doom 3
+				// light of colour C and radius R delivers C/2 at d = R/2, this row (reach boost 2 there) 8 L A / R^2, so L = C R^2 /
+				// (16 A) for a light of the surface's own colour at its reach (R_RtEmissiveMatchedScale)
 				const float meanLum = row.meanRadiance.x * 0.2126f + row.meanRadiance.y * 0.7152f + row.meanRadiance.z * 0.0722f;
-				// The row's radiance multiplier on its glow mean: the authored radiance (physical), else the power match - how much
-				// of the replaced light's power the emitter inherits, ramped by its effective emitting area (R_RtEmissiveMatchedScale)
-				const float rowScale    = authoredMode ? authoredRowScale( row, ap ) : R_RtEmissiveMatchedScale( row );
+				const float rowScale    = authoredRowScale( row, ap );
 				const float rowIntensity = intensity * rowScale;
 				const float Lrow        = meanLum * rowScale * intensity * tintLum( ap );	// the row's luminance as lit (the tint included)
 				float Ceq;													// the row's colour on the PLACED lights' scale (the grid ranks by lum x radius^2 / d^2)
@@ -6751,21 +6734,15 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 				const float kc = ( meanLum > 1e-6f ) ? Ceq / meanLum : 0.0f;	// the emitter's own tint at that luminance
 				const float tl = Max( tintLum( ap ), 1e-4f );						// Ceq has the tint's luminance; the colour its hue
 				L.color[0] = row.meanRadiance.x * kc * ap.tint[0] / tl; L.color[1] = row.meanRadiance.y * kc * ap.tint[1] / tl; L.color[2] = row.meanRadiance.z * kc * ap.tint[2] / tl;
-				L.flags = 64u | ( r_rtEmissiveLighting.GetBool() ? 0u : 128u )		// bit6 = emissive row, bit7 = bounce-only (normal mode)
-				        | ( ( !authoredMode && row.noShadows ) ? 4u : 0u );				// bit2 = the replaced light cast no shadows: no visibility ray (a tube behind its cover)
-				// the replaced light's live flicker (its flash table) - 1 when it does not animate or was not evaluated this call;
-				// projF.y carries it for the R1 gradient (an emitter's change is its factor's change, restir_di_gradient.frag)
-				// authored mode: the light the fixture FOLLOWS (emitFollow), at live / its time-average
+				L.flags = 64u | ( r_rtEmissiveLighting.GetBool() ? 0u : 128u );	// bit6 = emissive row, bit7 = bounce-only (normal mode)
+				// the live flicker of the light the fixture FOLLOWS (emitFollow / the Light Editor), at live / its time-average -
+				// 1 when it follows none, does not animate or was not evaluated this call; projF.y carries it for the R1 gradient
+				// (an emitter's change is its factor's change, restir_di_gradient.frag)
 				float flicker = 1.0f;
-				const int fl = authoredMode ? ap.followLight : row.lightIndex;
+				const int fl = ap.followLight;
 				if ( fl >= 0 && fl < s_emDroppedLiveGen.Num() && s_emDroppedLiveGen[ fl ] == s_emLiveGen ) {
-					if ( authoredMode ) {
-						const float avg = R_EmAuthLightAnimAverage( rw, fl );
-						if ( avg > 0.0f ) { flicker = idMath::ClampFloat( 0.0f, 4.0f, s_emDroppedLiveLum[ fl ] / avg ); }
-					} else {
-						const float f = R_RtEmissiveLightFlicker( fl, s_emDroppedLiveLum[ fl ] );
-						if ( f >= 0.0f ) { flicker = f; }									// -1: the light does not animate
-					}
+					const float avg = R_EmAuthLightAnimAverage( rw, fl );
+					if ( avg > 0.0f ) { flicker = idMath::ClampFloat( 0.0f, 4.0f, s_emDroppedLiveLum[ fl ] / avg ); }
 				}
 				L.proj[0][0] = ap.tint[0]; L.proj[0][1] = ap.tint[1]; L.proj[0][2] = ap.tint[2];	// projS.xyz = the tint (rt_emissive.glsl)
 				L.proj[0][3] = rowIntensity * flicker;
@@ -10472,8 +10449,7 @@ static void RB_RHI_RtEmissiveTableDebugDraw( rhi::RHI *r, const viewDef_t *viewD
 	}
 	rhi::BufferHandle vb = 0, ib = 0;
 	int numIndexes = 0;
-	const bool lightSpheres = r_rtEmissiveTableDebug.GetInteger() == 5;		// mode 5: the placed lights, not the table
-	if ( lightSpheres ? !R_RtEmissiveLightDebugGeometry( &vb, &ib, &numIndexes ) : !R_RtEmissiveDebugGeometry( &vb, &ib, &numIndexes ) ) {
+	if ( !R_RtEmissiveDebugGeometry( &vb, &ib, &numIndexes ) ) {
 		return;
 	}
 	if ( numIndexes <= 0 ) {

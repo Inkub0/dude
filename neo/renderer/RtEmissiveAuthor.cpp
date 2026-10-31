@@ -1072,10 +1072,7 @@ static emAuthFixture_t &EmAuth_FixtureRef( unsigned long long id ) {
 // authored reach, its own colour, no inherited light - where a switch to physical radiance starts, so the look holds
 static float EmAuth_AuthoredMatched( const rtEmissiveRow_t &row ) {
 	const int fi = EmAuth_FindFixture( row.fixtureId );
-	rtEmissiveRow_t m = row;
-	m.reach = ( fi >= 0 && s_emFixtures[ fi ].reach > 0.0f ) ? s_emFixtures[ fi ].reach : 0.0f;
-	m.lightLum = 0.0f; m.hasLight = false;
-	return R_RtEmissiveMatchedScale( m );
+	return R_RtEmissiveMatchedScale( row, ( fi >= 0 && s_emFixtures[ fi ].reach > 0.0f ) ? s_emFixtures[ fi ].reach : 0.0f, 0.0f );
 }
 
 // the power match under the authored setup for one fixture (material = false) or the area-weighted one over a material's
@@ -1299,12 +1296,11 @@ static void EmAuth_MatchLightPower( idRenderWorldLocal *world, unsigned long lon
 	for ( int i = 0; i < n && row == NULL; i++ ) { if ( rows[i].fixtureId == fixture ) { row = &rows[i]; } }
 	const emLightCache_t *c = EmAuth_LightCache( world, light );
 	if ( row == NULL || !( R > 0.0f ) ) { common->Printf( "Light Editor: match power - no emitter row for that surface / no radius\n" ); return; }
-	rtEmissiveRow_t m = *row;
-	m.reach = R; m.lightLum = Max( EmAuth_LightLum( world, light ), 1e-3f ); m.hasLight = true;
+	const float radiance = Max( R_RtEmissiveMatchedScale( *row, R, Max( EmAuth_LightLum( world, light ), 1e-3f ) ), 0.01f );
 	emAuthFixture_t &f = EmAuth_FixtureRef( fixture );
 	f.reach = R;
 	f.scale = 0.0f;
-	f.look.radiance = Max( R_RtEmissiveMatchedScale( m ), 0.01f );
+	f.look.radiance = radiance;
 	EmAuth_Changed();
 	common->Printf( "Light Editor: fixture %016llx matched to light \"%s\": reach %.0f, radiance x%.2f\n", fixture, c ? c->key.c_str() : "?", R, f.look.radiance );
 }
