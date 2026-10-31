@@ -192,7 +192,14 @@ float diLightBlurScale( uint flags ) {
 float traceVisibility( vec3 Pw, vec3 Nw, vec3 ldir, float dl, float blurScale, out float occDist ) {
 	occDist = dl;
 	if ( u_rtParms.x == 0.0 && u_rtParms.y == 0.0 ) { return 1.0; }		// no RT scene
-	float tMax = min( dl - 1.0, u_rtParms.w );
+	// The ray starts u_rtParms.z off the surface along Nw, so the light point (Pw + ldir * dl) lies dl - z (Nw.ldir) from
+	// O along the ray, not dl. Measured from Pw (the old dl - 1, with z = 1), a receiver FACING the light ended its ray
+	// exactly AT the light point: harmless for a placed light in open air, but an emitter row's point is its centroid ON a
+	// surface (a ceiling panel), so every flat floor pixel under it hit that surface and went black while the tile grooves
+	// and the walls (tilted normals: the ray ended short) lit - "the bumpiness responds the opposite way" (2026-10-31).
+	// Stop a margin short of the point from where the ray really starts (1 unit, growing with distance for float precision).
+	float dO   = dl - u_rtParms.z * dot( Nw, ldir );
+	float tMax = min( dO - max( 1.0, 0.002 * dl ), u_rtParms.w );
 	if ( !( tMax > 0.0 ) ) { return 1.0; }
 	vec3  O = Pw + Nw * u_rtParms.z;
 	uvec2 geoAddr = uvec2( floatBitsToUint( u_particleRadius.x ), floatBitsToUint( u_particleRadius.y ) );
@@ -227,7 +234,7 @@ float traceVisibility( vec3 Pw, vec3 Nw, vec3 ldir, float dl, float blurScale, o
 		if ( perfVis > floorVis + 1e-4
 				&& rayQueryGetIntersectionTypeEXT( rq, false ) == gl_RayQueryCandidateIntersectionTriangleEXT ) {
 			float tc = rayQueryGetIntersectionTEXT( rq, false );
-			if ( tc < dl - DUDE_RT_PERF_NEAR ) {
+			if ( tc < dO - DUDE_RT_PERF_NEAR ) {
 				float foot = 0.0;
 				if ( soft ) {
 					float g = tc / max( dl - tc, 1e-3 );
