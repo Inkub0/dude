@@ -1513,7 +1513,7 @@ static void EmAuth_MenuFileButtons( void ) {
 
 // L4: the light's colour / brightness / radius in emissive mode (live: RenderScene re-derives it from the game's parms)
 static void EmAuth_MenuLightOverrides( idRenderWorldLocal *world, const idStr &key ) {
-	if ( !ImGui::CollapsingHeader( "Colour, brightness, radius (emissive mode)", ImGuiTreeNodeFlags_DefaultOpen ) ) { return; }
+	ImGui::SeparatorText( "Colour, brightness, radius (emissive mode)" );
 	const idRenderLightLocal *ld = world->lightDefs[ s_emMenu.light ];
 	const renderLight_t &p = ld->dudePristine;									// the game's own values
 	int a = EmAuth_FindLight( key );
@@ -1595,7 +1595,7 @@ static float EmAuth_MenuMatched( int scope ) {
 // this map) or this surface only (its own value wins over the material's). Live: each change is in the next frame's rows.
 static void EmAuth_MenuAppearance( void ) {
 	emMenu_t &m = s_emMenu;
-	if ( !ImGui::CollapsingHeader( "Appearance", ImGuiTreeNodeFlags_DefaultOpen ) ) { return; }
+	ImGui::SeparatorText( "Appearance" );
 	ImGui::RadioButton( "This material", &m.apScope, 0 );
 	ImGui::SameLine();
 	ImGui::RadioButton( "This surface only", &m.apScope, 1 );
