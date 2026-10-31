@@ -487,8 +487,11 @@ void idRenderWorldLocal::UpdateLightDef( qhandle_t lightHandle, const renderLigh
 
 		light->world = this;
 		light->index = lightHandle;
-	}
-	{	// DUDE: a fresh identity for every (re)allocation of a slot - the ReSTIR DI gradient keys "the same light" on it
+
+		// DUDE: a fresh identity for every (re)allocation of a slot - the ReSTIR DI gradient keys "the same light" on it.
+		// Only HERE: until 2026-10-29 this ran on every update, so a light the game moves or re-parms each frame (bound to a
+		// mover, a projectile, a scripted fade) was a NEW light every frame - the gradient reset ReLAX's history on its whole
+		// footprint each frame, and emissive mode's drop list (stamped with the serial) let such a light back in
 		static unsigned int s_dudeLightSerial = 0;
 		light->dudeSerial = ++s_dudeLightSerial;
 	}
