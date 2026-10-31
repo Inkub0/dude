@@ -1513,7 +1513,7 @@ static void EmAuth_MenuFileButtons( void ) {
 
 // L4: the light's colour / brightness / radius in emissive mode (live: RenderScene re-derives it from the game's parms)
 static void EmAuth_MenuLightOverrides( idRenderWorldLocal *world, const idStr &key ) {
-	if ( !ImGui::CollapsingHeader( "Colour, brightness, radius (emissive mode)" ) ) { return; }
+	if ( !ImGui::CollapsingHeader( "Colour, brightness, radius (emissive mode)", ImGuiTreeNodeFlags_DefaultOpen ) ) { return; }
 	const idRenderLightLocal *ld = world->lightDefs[ s_emMenu.light ];
 	const renderLight_t &p = ld->dudePristine;									// the game's own values
 	int a = EmAuth_FindLight( key );
@@ -1553,8 +1553,15 @@ static void EmAuth_MenuLight( idRenderWorldLocal *world ) {
 	ImGui::TextDisabled( "%s", ld->lightShader ? ld->lightShader->GetName() : "?" );
 	ImGui::TextDisabled( "at %.0f %.0f %.0f   %s", ld->dudePristine.origin.x, ld->dudePristine.origin.y, ld->dudePristine.origin.z,
 		ld->dudePristine.pointLight ? va( "radius %.0f %.0f %.0f", ld->dudePristine.lightRadius.x, ld->dudePristine.lightRadius.y, ld->dudePristine.lightRadius.z ) : "projected" );
-	ImGui::TextDisabled( "colour %.2f %.2f %.2f%s%s", ld->dudePristine.shaderParms[0], ld->dudePristine.shaderParms[1], ld->dudePristine.shaderParms[2],
+	ImGui::TextDisabled( "game colour %.2f %.2f %.2f%s%s", ld->dudePristine.shaderParms[0], ld->dudePristine.shaderParms[1], ld->dudePristine.shaderParms[2],
 		ld->parms.noShadows ? ", no shadows" : "", key[0] == '@' ? ", keyed by position (no .map name)" : "" );
+	if ( a != NULL && EmAuth_LightOverridden( *a ) ) {
+		idStr o;
+		if ( a->brightness > 0.0f ) { o += va( "brightness x%.2f  ", a->brightness ); }
+		if ( a->hasColor ) { o += va( "colour %.2f %.2f %.2f  ", a->color.x, a->color.y, a->color.z ); }
+		if ( a->hasRadius ) { o += va( "radius %.0f %.0f %.0f", a->radius.x, a->radius.y, a->radius.z ); }
+		ImGui::TextColored( ImVec4( 1.0f, 0.86f, 0.25f, 1.0f ), "Overridden: %s%s", o.c_str(), r_rtEmissiveLighting.GetBool() ? "" : " (emissive mode is off)" );
+	}
 	ImGui::Separator();
 	if ( deleted ) {
 		ImGui::TextColored( ImVec4( 1.0f, 0.35f, 0.3f, 1.0f ), "Deleted in emissive mode" );
@@ -1588,7 +1595,7 @@ static float EmAuth_MenuMatched( int scope ) {
 // this map) or this surface only (its own value wins over the material's). Live: each change is in the next frame's rows.
 static void EmAuth_MenuAppearance( void ) {
 	emMenu_t &m = s_emMenu;
-	if ( !ImGui::CollapsingHeader( "Appearance" ) ) { return; }
+	if ( !ImGui::CollapsingHeader( "Appearance", ImGuiTreeNodeFlags_DefaultOpen ) ) { return; }
 	ImGui::RadioButton( "This material", &m.apScope, 0 );
 	ImGui::SameLine();
 	ImGui::RadioButton( "This surface only", &m.apScope, 1 );
