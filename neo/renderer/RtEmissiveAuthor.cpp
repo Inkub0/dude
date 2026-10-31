@@ -12,14 +12,18 @@ map, in a per-map text file under the save path - emissive/<map>.cfg (e.g. base/
 	material "textures/base_light/striplight3" emit	every surface of the material emits...
 	fixture 3fb7735ee5af2439 off				...except this one
 	fixture 16e9a41f488c47e1 emit scale 2 reach 300 follow "light_4839"
+	material "textures/base_light/sterlightdecal" emit radiance 20 profile lambert		physical brightness, a panel
+	fixture 8b53a3ab858dba38 tint 1 0.8 0.6 twosided 1		its own appearance over the material's
 
 A map with no file is unchanged: no surface emits, no light is deleted. Light names come from the map's .map file
 (the renderer has no entity names and renderLight_t is frozen by the dhewm3 ABI): a light whose spawn origin matches a
 "light" entity there takes its name, any other is keyed by position. Surfaces are the emitter table's fixtures (the
-per-fixture split of each glow run; id = hash of the run's centroid) and their materials. Brightness: the emitters.cfg
-material library as before, else a standalone power match (a light of the surface's own colour at the fixture's reach,
-or r_rtEmissiveReachDefault), times the fixture's scale. "light ... color / brightness / radius" lines are kept but
-not applied yet (stage L4).
+per-fixture split of each glow run; id = hash of the run's centroid) and their materials. Brightness: the authored
+RADIANCE (physical: a multiplier on the glow's mean radiance), else a standalone power match (a light of the surface's
+own colour at the fixture's reach, or r_rtEmissiveReachDefault), times the fixture's scale. The APPEARANCE - radiance,
+tint, emission profile, two-sided - is a fixture's own value, else its material's, else the default, and rides on the
+emitter row: every edit is live. (It was emitters.cfg, a global file baked into the table; folded in here and removed
+2026-10-31.) "light ... color / brightness / radius" lines are kept but not applied yet (stage L4).
 
 LOOK MODE (L2): editLights toggles it (bind it to a key). Lights are spheres (white active, red deleted, yellow
 overridden), glowing surfaces tinted (green emits, grey can emit, orange off by exception); the one under the crosshair
@@ -59,6 +63,15 @@ struct emAuthLight_t {
 	float	brightness;						// L4 (0 = unset)
 	bool	hasRadius;	idVec3 radius;		// L4
 };
+// a surface's APPEARANCE (2026-10-31: folded in from emitters.cfg, applied live per emitter row - no table rebuild). Every
+// field is optional: a fixture's own value, else its material's, else the default.
+struct emAuthLook_t {
+	float	radiance;						// > 0: PHYSICAL - this multiplier on the glow's mean radiance; < 0: power-matched (overrides a
+											// physical material); 0 = unset (the default: power-matched to the reach)
+	bool	hasTint;	idVec3 tint;
+	int		profile;						// -1 unset; 0 sqrt(cos) (a bare tube), 1 Lambert (a diffuser), 2 uniform (a globe)
+	int		twoSided;						// -1 unset; 0 / 1 (a material with back faces in its model emits both ways anyway)
+};
 struct emAuthFixture_t {
 	unsigned long long id;
 	int		emit;							// 1 = emits, -1 = off (an exception to a material-wide emit), 0 = unset
@@ -66,11 +79,13 @@ struct emAuthFixture_t {
 	float	reach;							// <= 0: unset (r_rtEmissiveReachDefault)
 	idStr	follow;							// a light key ("" = none): the emitter follows that light's animation
 	int		followIndex;	unsigned int followGen;		// resolved lightDef index (-1 = not found), cached per data generation
+	emAuthLook_t look;
 };
 struct emAuthMaterial_t {
 	idStr				name;
 	const idMaterial *	mat;
 	bool				emit;
+	emAuthLook_t		look;				// the default appearance of every surface of the material in this map
 };
 struct emMapLight_t { idStr name; idVec3 origin; };
 struct emLightCache_t { unsigned int serial; unsigned int gen; int auth; float animAvg; bool animDone; idStr key; };
@@ -149,6 +164,52 @@ static void EmAuth_Tokenize( const char *line, idStrList &out ) {
 		out.Append( tok );
 	}
 }
+// One appearance word of a material / fixture line at w[k] (and its values): true = it was one (k advanced past it)
+static bool EmAuth_ParseLookWord( const idStrList &w, int &k, emAuthLook_t &look ) {
+	if ( w[k].Icmp( "radiance" ) == 0 && k + 1 < w.Num() ) {
+		look.radiance = ( w[k+1].Icmp( "matched" ) == 0 ) ? -1.0f : Max( (float)atof( w[k+1] ), 0.0f );
+		k += 1;
+		return true;
+	}
+	if ( w[k].Icmp( "tint" ) == 0 && k + 3 < w.Num() ) {
+		look.hasTint = true;
+		look.tint.Set( Max( (float)atof( w[k+1] ), 0.0f ), Max( (float)atof( w[k+2] ), 0.0f ), Max( (float)atof( w[k+3] ), 0.0f ) );
+		k += 3;
+		return true;
+	}
+	if ( w[k].Icmp( "profile" ) == 0 && k + 1 < w.Num() ) {
+		const char *v = w[k+1];
+		look.profile = !idStr::Icmp( v, "tube" ) ? 0 : !idStr::Icmp( v, "lambert" ) ? 1 : !idStr::Icmp( v, "uniform" ) ? 2 : idMath::ClampInt( 0, 2, atoi( v ) );
+		k += 1;
+		return true;
+	}
+	if ( w[k].Icmp( "twosided" ) == 0 && k + 1 < w.Num() ) {
+		look.twoSided = atoi( w[k+1] ) != 0 ? 1 : 0;
+		k += 1;
+		return true;
+	}
+	return false;
+}
+
+static void EmAuth_ClearLook( emAuthLook_t &look ) {
+	look.radiance = 0.0f; look.hasTint = false; look.tint.Set( 1.0f, 1.0f, 1.0f ); look.profile = -1; look.twoSided = -1;
+}
+
+static bool EmAuth_LookSet( const emAuthLook_t &look ) {
+	return look.radiance != 0.0f || look.hasTint || look.profile >= 0 || look.twoSided >= 0;
+}
+
+// the appearance words of a line (what EmAuth_ParseLookWord reads back)
+static idStr EmAuth_LookWords( const emAuthLook_t &look ) {
+	static const char *profileName[3] = { "tube", "lambert", "uniform" };
+	idStr out;
+	if ( look.radiance > 0.0f ) { out += va( " radiance %.3f", look.radiance ); }
+	else if ( look.radiance < 0.0f ) { out += " radiance matched"; }
+	if ( look.hasTint ) { out += va( " tint %.3f %.3f %.3f", look.tint.x, look.tint.y, look.tint.z ); }
+	if ( look.profile >= 0 ) { out += va( " profile %s", profileName[ idMath::ClampInt( 0, 2, look.profile ) ] ); }
+	if ( look.twoSided >= 0 ) { out += va( " twosided %d", look.twoSided ); }
+	return out;
+}
 // EMAUTH-TEST-END
 
 static void EmAuth_ScanMapLights( const char *mapName ) {
@@ -187,6 +248,7 @@ static void EmAuth_NewLight( emAuthLight_t &l, const char *key ) {
 }
 static void EmAuth_NewFixture( emAuthFixture_t &f, unsigned long long id ) {
 	f.id = id; f.emit = 0; f.scale = 0.0f; f.reach = 0.0f; f.follow.Clear(); f.followIndex = -1; f.followGen = 0;
+	EmAuth_ClearLook( f.look );
 }
 
 static idStr EmAuth_RecoveryPath( const char *mapName ) {
@@ -232,7 +294,12 @@ static bool EmAuth_ReadFileFrom( const idStr &path ) {
 			emAuthMaterial_t &em = s_emMaterials.Alloc();
 			em.name = w[1];
 			em.mat = declManager->FindMaterial( w[1], false );
-			em.emit = w.Num() >= 3 && w[2].Icmp( "emit" ) == 0;
+			em.emit = false;
+			EmAuth_ClearLook( em.look );
+			for ( int k = 2; k < w.Num(); k++ ) {
+				if ( w[k].Icmp( "emit" ) == 0 ) { em.emit = true; }
+				else if ( !EmAuth_ParseLookWord( w, k, em.look ) ) { common->Warning( "%s line %d: unknown material word '%s'", path.c_str(), lineNo, w[k].c_str() ); }
+			}
 		} else if ( w[0].Icmp( "fixture" ) == 0 && w.Num() >= 2 ) {
 			emAuthFixture_t &f = s_emFixtures.Alloc();
 			EmAuth_NewFixture( f, strtoull( w[1].c_str(), NULL, 16 ) );
@@ -242,6 +309,7 @@ static bool EmAuth_ReadFileFrom( const idStr &path ) {
 				else if ( w[k].Icmp( "scale" ) == 0 && k + 1 < w.Num() ) { f.scale = atof( w[k+1] ); k += 1; }
 				else if ( w[k].Icmp( "reach" ) == 0 && k + 1 < w.Num() ) { f.reach = atof( w[k+1] ); k += 1; }
 				else if ( w[k].Icmp( "follow" ) == 0 && k + 1 < w.Num() ) { f.follow = w[k+1]; k += 1; }
+				else if ( EmAuth_ParseLookWord( w, k, f.look ) ) {}
 				else { common->Warning( "%s line %d: unknown fixture word '%s'", path.c_str(), lineNo, w[k].c_str() ); }
 			}
 		} else {
@@ -373,29 +441,54 @@ Does this emitter-table fixture emit under the map's authored setup? Its own emi
 Out: the fixture's scale (1 = unset), reach (0 = unset) and the lightDef index whose animation it follows (-1 = none).
 ===================
 */
-bool R_EmAuthFixtureEmits( const idRenderWorldLocal *world, unsigned long long fixtureId, const idMaterial *mat, float *scale, float *reach, int *followLight ) {
-	*scale = 1.0f; *reach = 0.0f; *followLight = -1;
+static const emAuthMaterial_t *EmAuth_MaterialEntry( const idMaterial *mat ) {
+	if ( mat == NULL ) { return NULL; }
+	for ( int i = 0; i < s_emMaterials.Num(); i++ ) {
+		if ( s_emMaterials[i].mat == mat || ( s_emMaterials[i].mat == NULL && s_emMaterials[i].name.Icmp( mat->GetName() ) == 0 ) ) { return &s_emMaterials[i]; }
+	}
+	return NULL;
+}
+
+// a fixture's EFFECTIVE appearance: its own fields, else its material's, else the defaults
+static void EmAuth_ResolveLook( const emAuthLook_t *own, const emAuthLook_t *mat, rtEmAuthEmit_t *out ) {
+	float rad = ( own != NULL && own->radiance != 0.0f ) ? own->radiance : ( mat != NULL ) ? mat->radiance : 0.0f;
+	out->radiance = Max( rad, 0.0f );
+	const emAuthLook_t *t = ( own != NULL && own->hasTint ) ? own : ( mat != NULL && mat->hasTint ) ? mat : NULL;
+	out->tint[0] = t ? t->tint.x : 1.0f; out->tint[1] = t ? t->tint.y : 1.0f; out->tint[2] = t ? t->tint.z : 1.0f;
+	out->profile = ( own != NULL && own->profile >= 0 ) ? own->profile : ( mat != NULL && mat->profile >= 0 ) ? mat->profile : 0;
+	out->twoSided = ( ( own != NULL && own->twoSided >= 0 ) ? own->twoSided : ( mat != NULL && mat->twoSided >= 0 ) ? mat->twoSided : 0 ) != 0;
+}
+
+/*
+===================
+R_EmAuthFixtureEmits
+
+Does this emitter-table fixture emit under the map's authored setup? Its own emit / off line wins, else its material's.
+Out (always filled, also for a fixture that does not emit): the fixture's brightness scale (1 = unset), reach (0 = unset),
+the lightDef index it follows (-1 = none) and its effective appearance - radiance (0 = power-matched), tint, emission
+profile, two-sided.
+===================
+*/
+bool R_EmAuthFixtureEmits( const idRenderWorldLocal *world, unsigned long long fixtureId, const idMaterial *mat, rtEmAuthEmit_t *out ) {
+	out->scale = 1.0f; out->reach = 0.0f; out->followLight = -1;
 	EmAuth_Sync( world );
 	int emit = 0;
+	const emAuthLook_t *ownLook = NULL;
 	const int fi = EmAuth_FindFixture( fixtureId );
 	if ( fi >= 0 ) {
 		emAuthFixture_t &f = s_emFixtures[ fi ];
 		emit = f.emit;
-		if ( f.scale > 0.0f ) { *scale = f.scale; }
-		if ( f.reach > 0.0f ) { *reach = f.reach; }
+		ownLook = &f.look;
+		if ( f.scale > 0.0f ) { out->scale = f.scale; }
+		if ( f.reach > 0.0f ) { out->reach = f.reach; }
 		if ( f.follow.Length() > 0 ) {
 			if ( f.followGen != s_emGen ) { f.followIndex = EmAuth_LightIndexByKey( world, f.follow ); f.followGen = s_emGen; }
-			*followLight = f.followIndex;
+			out->followLight = f.followIndex;
 		}
 	}
-	if ( emit == 0 && mat != NULL ) {
-		for ( int i = 0; i < s_emMaterials.Num(); i++ ) {
-			if ( s_emMaterials[i].mat == mat || ( s_emMaterials[i].mat == NULL && s_emMaterials[i].name.Icmp( mat->GetName() ) == 0 ) ) {
-				emit = s_emMaterials[i].emit ? 1 : 0;
-				break;
-			}
-		}
-	}
+	const emAuthMaterial_t *me = EmAuth_MaterialEntry( mat );
+	if ( emit == 0 && me != NULL ) { emit = me->emit ? 1 : 0; }
+	EmAuth_ResolveLook( ownLook, me != NULL ? &me->look : NULL, out );
 	return emit > 0;
 }
 
@@ -435,11 +528,8 @@ struct emMenu_t {
 	unsigned long long	fixture;	const idMaterial *mat;	idVec3 pos;	// EM_MENU_SURFACE
 	int					openFrames;								// frames since it opened (the cursor is placed on the first ones)
 	int					prevSel;	unsigned int prevSelSerial;	// the selection before the menu took it
-	// the surface menu's Appearance (emitters.cfg, all maps): staged until Apply (it re-bakes the table)
-	bool				apLoaded;	int apScope;				// 0 = the material, 1 = this surface (a per-fixture override)
-	float				apScale;	float apTint[3];	int apProfile;	bool apTwoSided, apIndicator, apHasEntry;
+	int					apScope;								// the surface menu's Appearance: 0 = the material, 1 = this surface
 };
-static bool							s_emLibDirty = false;		// emitters.cfg edited from the menu since its last save
 static emMenu_t						s_emMenu = { EM_MENU_NONE };
 // a two-step "follow" link armed from the menu: the next right-click picks the other end
 enum { EM_ARM_NONE, EM_ARM_PICK_LIGHT, EM_ARM_PICK_SURFACE };
@@ -464,11 +554,11 @@ bool R_EmAuthLookMode( void ) {
 
 // a fixture's authored state: 1 = emits, -1 = off by its own exception line, 0 = can emit (nothing says it does)
 static int EmAuth_FixtureState( const idRenderWorldLocal *world, unsigned long long id, const idMaterial *mat, bool *own ) {
-	float sc, re; int fl;
+	rtEmAuthEmit_t ap;
 	const int fi = EmAuth_FindFixture( id );
 	*own = fi >= 0 && s_emFixtures[ fi ].emit != 0;
 	if ( fi >= 0 && s_emFixtures[ fi ].emit < 0 ) { return -1; }
-	return R_EmAuthFixtureEmits( world, id, mat, &sc, &re, &fl ) ? 1 : 0;
+	return R_EmAuthFixtureEmits( world, id, mat, &ap ) ? 1 : 0;
 }
 
 static bool EmAuth_LightOverridden( const emAuthLight_t &l ) {
@@ -863,11 +953,24 @@ static void EmAuth_SetMaterialEmit( const idMaterial *mat, bool on ) {
 		if ( !on ) { return; }
 		emAuthMaterial_t &em = s_emMaterials.Alloc();
 		em.name = mat->GetName(); em.mat = mat; em.emit = false;
+		EmAuth_ClearLook( em.look );
 		mi = s_emMaterials.Num() - 1;
 	}
 	s_emMaterials[ mi ].emit = on;
-	if ( !on ) { s_emMaterials.RemoveIndex( mi ); }
+	if ( !on && !EmAuth_LookSet( s_emMaterials[ mi ].look ) ) { s_emMaterials.RemoveIndex( mi ); }
 	EmAuth_Changed();
+}
+
+// the material's entry, created on demand (emit off)
+static emAuthMaterial_t &EmAuth_MaterialRef( const idMaterial *mat ) {
+	int mi = EmAuth_FindMaterial( mat->GetName() );
+	if ( mi < 0 ) {
+		emAuthMaterial_t &em = s_emMaterials.Alloc();
+		em.name = mat->GetName(); em.mat = mat; em.emit = false;
+		EmAuth_ClearLook( em.look );
+		mi = s_emMaterials.Num() - 1;
+	}
+	return s_emMaterials[ mi ];
 }
 
 static bool EmAuth_MaterialEmits( const idMaterial *mat ) {
@@ -927,7 +1030,8 @@ static bool EmAuth_WriteFile( const idStr &path, const char *what ) {
 	if ( f == NULL ) { common->Warning( "emissive authoring: could not write %s", path.c_str() ); return false; }
 	f->Printf( "// DUDE emissive setup for %s (docs/rtx-light-editor.md). Emissive mode only - a map without this file is unchanged.\n", s_emMap.c_str() );
 	if ( what != NULL ) { f->Printf( "// %s\n", what ); }
-	f->Printf( "// light <\"name\" | @x,y,z> delete    material \"<name>\" emit    fixture <idhex> emit|off [scale <x>] [reach <units>] [follow \"<light>\"]\n" );
+	f->Printf( "// light <\"name\" | @x,y,z> delete    material \"<name>\" [emit] [look]    fixture <idhex> [emit|off] [scale <x>] [reach <units>] [follow \"<light>\"] [look]\n" );
+	f->Printf( "// look = [radiance <x> | radiance matched] [tint <r g b>] [profile tube|lambert|uniform] [twosided 0|1]  (a fixture's own, else its material's)\n" );
 	for ( int i = 0; i < s_emLights.Num(); i++ ) {
 		const emAuthLight_t &l = s_emLights[i];
 		if ( l.key[0] == '@' ) { f->Printf( "light %s", l.key.c_str() ); } else { f->Printf( "light \"%s\"", l.key.c_str() ); }
@@ -938,16 +1042,18 @@ static bool EmAuth_WriteFile( const idStr &path, const char *what ) {
 		f->Printf( "\n" );
 	}
 	for ( int i = 0; i < s_emMaterials.Num(); i++ ) {
-		if ( s_emMaterials[i].emit ) { f->Printf( "material \"%s\" emit\n", s_emMaterials[i].name.c_str() ); }
+		const emAuthMaterial_t &m = s_emMaterials[i];
+		if ( !m.emit && !EmAuth_LookSet( m.look ) ) { continue; }
+		f->Printf( "material \"%s\"%s%s\n", m.name.c_str(), m.emit ? " emit" : "", EmAuth_LookWords( m.look ).c_str() );
 	}
 	for ( int i = 0; i < s_emFixtures.Num(); i++ ) {
 		const emAuthFixture_t &x = s_emFixtures[i];
-		if ( x.emit == 0 && x.scale <= 0.0f && x.reach <= 0.0f && x.follow.Length() == 0 ) { continue; }
+		if ( x.emit == 0 && x.scale <= 0.0f && x.reach <= 0.0f && x.follow.Length() == 0 && !EmAuth_LookSet( x.look ) ) { continue; }
 		f->Printf( "fixture %016llx%s", x.id, x.emit > 0 ? " emit" : x.emit < 0 ? " off" : "" );
 		if ( x.scale > 0.0f ) { f->Printf( " scale %.3f", x.scale ); }
 		if ( x.reach > 0.0f ) { f->Printf( " reach %.0f", x.reach ); }
 		if ( x.follow.Length() ) { f->Printf( " follow \"%s\"", x.follow.c_str() ); }
-		f->Printf( "\n" );
+		f->Printf( "%s\n", EmAuth_LookWords( x.look ).c_str() );
 	}
 	fileSystem->CloseFile( f );
 	return true;
@@ -1006,13 +1112,13 @@ static void EmAuth_Info_f( const idCmdArgs &args ) {
 		common->Printf( "  light %s%s%s\n", s_emLights[i].key.c_str(), s_emLights[i].deleted ? " delete" : "", li < 0 ? "  (not in the map now)" : "" );
 	}
 	for ( int i = 0; i < s_emMaterials.Num(); i++ ) {
-		common->Printf( "  material %s %s%s\n", s_emMaterials[i].name.c_str(), s_emMaterials[i].emit ? "emit" : "-", s_emMaterials[i].mat ? "" : "  (not loaded)" );
+		common->Printf( "  material %s %s%s%s\n", s_emMaterials[i].name.c_str(), s_emMaterials[i].emit ? "emit" : "-", EmAuth_LookWords( s_emMaterials[i].look ).c_str(), s_emMaterials[i].mat ? "" : "  (not loaded)" );
 	}
 	for ( int i = 0; i < s_emFixtures.Num(); i++ ) {
 		const emAuthFixture_t &x = s_emFixtures[i];
-		common->Printf( "  fixture %016llx %s%s%s%s\n", x.id, x.emit > 0 ? "emit" : x.emit < 0 ? "off" : "-",
+		common->Printf( "  fixture %016llx %s%s%s%s%s\n", x.id, x.emit > 0 ? "emit" : x.emit < 0 ? "off" : "-",
 			x.scale > 0.0f ? va( " scale %.2f", x.scale ) : "", x.reach > 0.0f ? va( " reach %.0f", x.reach ) : "",
-			x.follow.Length() ? va( " follow %s", x.follow.c_str() ) : "" );
+			x.follow.Length() ? va( " follow %s", x.follow.c_str() ) : "", EmAuth_LookWords( x.look ).c_str() );
 	}
 }
 
@@ -1148,11 +1254,8 @@ bool R_EmAuthMouseButton( int button, bool down ) {
 static void EmAuth_MenuFileButtons( void ) {
 	idCmdArgs none;
 	ImGui::Separator();
-	if ( ImGui::Button( ( s_emDirty || s_emLibDirty ) ? "Save*" : "Save" ) ) {
-		EmAuth_Save_f( none );
-		if ( s_emLibDirty ) { cmdSystem->BufferCommandText( CMD_EXEC_APPEND, "rtEmissiveSaveTable\n" ); s_emLibDirty = false; }
-	}
-	if ( ImGui::IsItemHovered() ) { ImGui::SetTooltip( "Write %s to the save path%s", EmAuth_FilePath( s_emMap ).c_str(), s_emLibDirty ? ", and emitters.cfg (Appearance edits)" : "" ); }
+	if ( ImGui::Button( s_emDirty ? "Save*" : "Save" ) ) { EmAuth_Save_f( none ); }
+	if ( ImGui::IsItemHovered() ) { ImGui::SetTooltip( "Write %s to the save path", EmAuth_FilePath( s_emMap ).c_str() ); }
 	ImGui::SameLine();
 	if ( ImGui::Button( "Reload" ) ) { EmAuth_Reload_f( none ); }
 	if ( ImGui::IsItemHovered() ) { ImGui::SetTooltip( "Re-read the saved file (unsaved edits are lost)" ); }
@@ -1203,7 +1306,7 @@ static void EmAuth_MenuLight( idRenderWorldLocal *world ) {
 }
 
 // the power match's multiplier under the AUTHORED setup (the gather's authoredRowScale without an entry): a row at its
-// authored reach, its own colour, no inherited light - where a new emitters.cfg entry starts, so Apply keeps the look
+// authored reach, its own colour, no inherited light - where a switch to physical radiance starts, so the look holds
 static float EmAuth_AuthoredMatched( const rtEmissiveRow_t &row ) {
 	const int fi = EmAuth_FindFixture( row.fixtureId );
 	rtEmissiveRow_t m = row;
@@ -1212,65 +1315,95 @@ static float EmAuth_AuthoredMatched( const rtEmissiveRow_t &row ) {
 	return R_RtEmissiveMatchedScale( m );
 }
 
-// stage the Appearance controls from the scope's entry, else what it inherits (the material entry, else the power match)
-static void EmAuth_MenuLoadAppearance( void ) {
-	emMenu_t &m = s_emMenu;
-	m.apLoaded = true;
-	const bool fixtureScope = m.apScope == 1;
-	if ( fixtureScope ) {
-		m.apHasEntry = R_RtEmissiveLightTableGet( m.fixture, &m.apScale, m.apTint, &m.apProfile, &m.apTwoSided, &m.apIndicator );
-	} else {
-		m.apHasEntry = m.mat != NULL && R_RtEmissiveMatTableGet( m.mat, &m.apScale, m.apTint, &m.apProfile, &m.apTwoSided, &m.apIndicator );
-	}
-	if ( m.apHasEntry ) { return; }
-	if ( fixtureScope && m.mat != NULL && R_RtEmissiveMatTableGet( m.mat, &m.apScale, m.apTint, &m.apProfile, &m.apTwoSided, &m.apIndicator ) ) { return; }
-	m.apTint[0] = m.apTint[1] = m.apTint[2] = 1.0f;
-	m.apProfile = 0; m.apTwoSided = false; m.apIndicator = false;
-	// the starting radiance: this row's power match, or the area-weighted one over the material's rows
+// the power match under the authored setup for the menu's surface (scope 1) or the area-weighted one over its material's
+// rows (scope 0): where a switch to physical radiance starts, so the look does not jump
+static float EmAuth_MenuMatched( int scope ) {
 	const rtEmissiveRow_t *rows = NULL;
 	const int n = R_RtEmissiveRows( &rows );
 	double w = 0.0, sum = 0.0;
 	for ( int i = 0; i < n; i++ ) {
-		if ( fixtureScope ? rows[i].fixtureId != m.fixture : rows[i].mat != m.mat ) { continue; }
+		if ( scope == 1 ? rows[i].fixtureId != s_emMenu.fixture : rows[i].mat != s_emMenu.mat ) { continue; }
 		if ( rows[i].dark || !( rows[i].area > 0.0f ) ) { continue; }
 		w += rows[i].area; sum += rows[i].area * EmAuth_AuthoredMatched( rows[i] );
 	}
-	m.apScale = ( w > 0.0 ) ? (float)( sum / w ) : 1.0f;
+	return ( w > 0.0 ) ? (float)( sum / w ) : 1.0f;
 }
 
+// The surface menu's Appearance - radiance, tint, emission profile, two-sided - for the material (every surface of it in
+// this map) or this surface only (its own value wins over the material's). Live: each change is in the next frame's rows.
 static void EmAuth_MenuAppearance( void ) {
 	emMenu_t &m = s_emMenu;
-	if ( !ImGui::CollapsingHeader( "Appearance (emitters.cfg, every map)" ) ) { return; }
-	if ( !m.apLoaded ) { EmAuth_MenuLoadAppearance(); }
-	int scope = m.apScope;
-	ImGui::RadioButton( "This material", &scope, 0 );
+	if ( !ImGui::CollapsingHeader( "Appearance" ) ) { return; }
+	ImGui::RadioButton( "This material", &m.apScope, 0 );
 	ImGui::SameLine();
-	ImGui::RadioButton( "This surface only", &scope, 1 );
-	if ( scope != m.apScope ) { m.apScope = scope; EmAuth_MenuLoadAppearance(); }
-	ImGui::TextDisabled( "%s", m.apHasEntry ? ( m.apScope ? "has its own entry: physical radiance" : "has a material entry: physical radiance" )
-		: "no entry: brightness power-matched to the reach (Apply makes it physical, starting from the same look)" );
-	ImGui::SliderFloat( "Radiance x", &m.apScale, 0.0f, 64.0f, "%.2f", ImGuiSliderFlags_Logarithmic );
-	if ( ImGui::IsItemHovered() ) { ImGui::SetTooltip( "Multiplier on the glow texture's mean radiance (x the stage colour); Brightness above multiplies it per surface in this map" ); }
-	ImGui::ColorEdit3( "Tint", m.apTint, ImGuiColorEditFlags_Float );
-	ImGui::Combo( "Emission profile", &m.apProfile, "sqrt(cos) - a bare tube\0Lambert - a diffuser / panel\0uniform - a globe / bulb\0" );
-	ImGui::Checkbox( "Two-sided", &m.apTwoSided );
-	if ( ImGui::Button( "Apply" ) ) {
-		if ( m.apScope == 1 ) { R_RtEmissiveLightTableSet( m.fixture, m.apScale, m.apTint, m.apProfile, m.apTwoSided, m.apIndicator ); }
-		else if ( m.mat != NULL ) { R_RtEmissiveMatTableSet( m.mat, m.apScale, m.apTint, m.apProfile, m.apTwoSided, m.apIndicator ); }
-		m.apHasEntry = true;
-		s_emLibDirty = true;
+	ImGui::RadioButton( "This surface only", &m.apScope, 1 );
+	if ( m.mat == NULL ) { m.apScope = 1; }
+	const bool surf = m.apScope == 1;
+	// the entry being edited (looked up every frame: the controls may create it) and what it inherits
+	const int fi = EmAuth_FindFixture( m.fixture );
+	const emAuthMaterial_t *me = EmAuth_MaterialEntry( m.mat );
+	const emAuthLook_t *matLook = ( me != NULL ) ? &me->look : NULL;
+	emAuthLook_t cur;
+	EmAuth_ClearLook( cur );
+	if ( surf ) { if ( fi >= 0 ) { cur = s_emFixtures[ fi ].look; } }
+	else if ( matLook != NULL ) { cur = *matLook; }
+	rtEmAuthEmit_t eff;															// what the controls show: the scope's own value, else what it inherits
+	if ( surf ) { EmAuth_ResolveLook( &cur, matLook, &eff ); } else { EmAuth_ResolveLook( NULL, &cur, &eff ); }
+	bool changed = false;
+	auto inheritNote = [&]( bool own ) { if ( surf && !own ) { ImGui::SameLine(); ImGui::TextDisabled( "(material's)" ); } };
+
+	// radiance: power-matched to the reach, or physical
+	bool physical = eff.radiance > 0.0f;
+	if ( ImGui::Checkbox( "Physical radiance", &physical ) ) {
+		if ( physical ) { cur.radiance = EmAuth_MenuMatched( m.apScope ); }		// start from the matched look
+		else { cur.radiance = ( surf && matLook != NULL && matLook->radiance > 0.0f ) ? -1.0f : 0.0f; }	// a surface under a physical material: explicitly matched
+		changed = true;
 	}
-	if ( ImGui::IsItemHovered() ) { ImGui::SetTooltip( "Into emitters.cfg in memory; the emitter table is rebuilt (a short hitch). Save writes it" ); }
-	if ( m.apHasEntry ) {
-		ImGui::SameLine();
-		if ( ImGui::Button( "Remove entry" ) ) {
-			if ( m.apScope == 1 ) { R_RtEmissiveLightTableRemove( m.fixture ); } else if ( m.mat != NULL ) { R_RtEmissiveMatTableRemove( m.mat ); }
-			s_emLibDirty = true;
-			EmAuth_MenuLoadAppearance();
+	if ( ImGui::IsItemHovered() ) { ImGui::SetTooltip( "Off: brightness set so the surface lights like a light of its own colour at its Reach.\n"
+		"On: its glow's own radiance x the multiplier below - Reach then only limits how far it lights." ); }
+	inheritNote( cur.radiance != 0.0f );
+	if ( physical ) {
+		float rad = ( cur.radiance > 0.0f ) ? cur.radiance : eff.radiance;
+		if ( ImGui::SliderFloat( "Radiance x", &rad, 0.05f, 256.0f, "%.2f", ImGuiSliderFlags_Logarithmic ) ) { cur.radiance = Max( rad, 0.01f ); changed = true; }
+		inheritNote( cur.radiance > 0.0f );
+	}
+	// tint
+	float tint[3] = { eff.tint[0], eff.tint[1], eff.tint[2] };
+	if ( ImGui::ColorEdit3( "Tint", tint, ImGuiColorEditFlags_Float ) ) { cur.hasTint = true; cur.tint.Set( tint[0], tint[1], tint[2] ); changed = true; }
+	inheritNote( cur.hasTint );
+	if ( cur.hasTint ) { ImGui::SameLine(); if ( ImGui::SmallButton( "Reset##tint" ) ) { cur.hasTint = false; changed = true; } }
+	// emission profile
+	int prof = cur.profile + 1;
+	const char *profItems = surf ? "as its material\0sqrt(cos) - a bare tube\0Lambert - a diffuser / panel\0uniform - a globe / bulb\0"
+		: "default (bare tube)\0sqrt(cos) - a bare tube\0Lambert - a diffuser / panel\0uniform - a globe / bulb\0";
+	if ( ImGui::Combo( "Emission profile", &prof, profItems ) ) { cur.profile = prof - 1; changed = true; }
+	// two-sided
+	int two = cur.twoSided + 1;
+	const char *twoItems = surf ? "as its material\0one-sided\0two-sided\0" : "default (one-sided)\0one-sided\0two-sided\0";
+	if ( ImGui::Combo( "Faces", &two, twoItems ) ) { cur.twoSided = two - 1; changed = true; }
+	if ( m.mat != NULL && m.mat->ShouldCreateBackSides() ) { ImGui::TextDisabled( "(this material has back faces in its model: both sides emit anyway)" ); }
+
+	if ( changed ) {
+		if ( surf ) {
+			EmAuth_FixtureRef( m.fixture ).look = cur;
+		} else if ( m.mat != NULL ) {
+			emAuthMaterial_t &em = EmAuth_MaterialRef( m.mat );
+			em.look = cur;
+			if ( !em.emit && !EmAuth_LookSet( em.look ) ) { s_emMaterials.RemoveIndex( EmAuth_FindMaterial( m.mat->GetName() ) ); }
 		}
+		EmAuth_Changed();
 	}
-	ImGui::SameLine();
-	if ( ImGui::Button( "Revert" ) ) { EmAuth_MenuLoadAppearance(); }
+	if ( ImGui::SmallButton( surf ? "Clear this surface's appearance" : "Clear the material's appearance" ) ) {
+		if ( surf ) { if ( fi >= 0 ) { EmAuth_ClearLook( s_emFixtures[ fi ].look ); } }
+		else if ( m.mat != NULL ) {
+			const int mi = EmAuth_FindMaterial( m.mat->GetName() );
+			if ( mi >= 0 ) {
+				EmAuth_ClearLook( s_emMaterials[ mi ].look );
+				if ( !s_emMaterials[ mi ].emit ) { s_emMaterials.RemoveIndex( mi ); }
+			}
+		}
+		EmAuth_Changed();
+	}
 }
 
 static void EmAuth_MenuSurface( idRenderWorldLocal *world ) {
@@ -1401,6 +1534,7 @@ void Com_DrawLightEditorMenu( void ) {
 #endif // IMGUI_DISABLE
 
 void R_EmAuthRegisterCommands( void ) {
+	cmdSystem->AddCommand( "editEmitter", EmAuth_EditLights_f, CMD_FL_RENDERER, "the old Emitter Editor's command (2026-10-31): now an alias of editLights - the Light Editor's look mode; right-click a surface for its emitter settings" );
 	cmdSystem->AddCommand( "editLights", EmAuth_EditLights_f, CMD_FL_RENDERER, "emissive authoring: toggle the Light Editor's look mode (editLights [0|1]; bind it to a key) - lights and glowing surfaces drawn by their authored state, the one under the crosshair named" );
 	cmdSystem->AddCommand( "lightPick", EmAuth_LightPick_f, CMD_FL_RENDERER, "emissive authoring: name the placed light nearest the crosshair (its .map name or @x,y,z)" );
 	cmdSystem->AddCommand( "lightDelete", EmAuth_LightDelete_f, CMD_FL_RENDERER, "emissive authoring: delete the placed light nearest the crosshair (or lightDelete <name>) in emissive mode" );

@@ -162,13 +162,18 @@ returns you to look mode.
    - **Nothing under the crosshair:** the map's file and counts, Recover / Discard the recovery copy, Leave look mode.
    - Every menu: Save / Reload / Close, and "Turn it on" when emissive mode is off. Esc, a click outside (a left
      click there closes the menu instead of firing) or a lost focus closes it.
-   - **Appearance** (the surface menu, from the old Emitter Editor - user, 2026-10-31): Radiance x, Tint, Emission
-     profile, Two-sided, for the material or this surface only. These stay in emitters.cfg (every map) and are baked
-     into the table, so Apply re-bakes it (a short hitch). Without an entry a surface's brightness is power-matched
-     to its reach; an entry makes it physical (Radiance x on the glow's mean radiance). Apply starts the entry from the
-     authored power match, so the look does not jump. The per-map Brightness multiplies on top. Save writes both
-     files. The old Indicator flag is not offered: authored mode ignores it.
-   - The Emitter Editor stays until L5 (removing it touches Dhewm3SettingsMenu.cpp).
+   - **Appearance** (the surface menu, from the old Emitter Editor - user, 2026-10-31): Physical radiance + Radiance x,
+     Tint, Emission profile, Faces (one- / two-sided), for the material or this surface only (its own value wins, else
+     the material's, else the default). Live: they ride on the emitter row (rt_emissive.glsl projS.xyz = tint,
+     projT.z = profile, projT.w = two-sided; the radiance is the row's intensity), no table rebuild, no Apply.
+     Without a radiance a surface's brightness is power-matched to its reach; with one it is physical. Turning
+     physical on starts from the matched value, so the look holds. The per-surface Brightness multiplies on top.
+   - **emitters.cfg and the Emitter Editor are gone** (user, 2026-10-31: "dump the emitters.cfg file altogether and make
+     all the changes converge in the new system"): the table bakes no per-material values any more, the bake / save /
+     reload commands are removed, `editEmitter` is an alias of `editLights`, and the settings menu's Emissive section
+     has an "Enter look mode" button instead. Per-map file syntax: `material "<m>" [emit] [look]`,
+     `fixture <id> [emit|off] [scale x] [reach r] [follow "<light>"] [look]`, look = `[radiance <x> | radiance matched]
+     [tint r g b] [profile tube|lambert|uniform] [twosided 0|1]`.
    Original plan text: the ImGui Light Editor replaces the Emitter Editor: the light and surface panels, the material-wide
    toggle, live edits, save / reload.
 4. **L4:** follow-a-light, match-power, and the light colour / radius overrides through `UpdateLightDef`.

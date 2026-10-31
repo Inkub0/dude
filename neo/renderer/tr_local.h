@@ -1189,14 +1189,22 @@ unsigned long long R_RtEmissiveTableAddress( int *numTris, float *totalFlux, flo
 // of the scene-light buffer (centroid, bounding radius, flux, flux-weighted mean linear radiance x material scale, total
 // area, the inherited reach of the placed light it replaces (0 = none), its triangle range in the table). dark = every
 // triangle at zero flux (switched off / gone): never a row.
-struct rtEmissiveRow_t { const idMaterial *mat; idVec3 centroid; float boundRadius; float flux; float area; idVec3 meanRadiance; float reach; float lightLum; idVec3 lightOrigin; int lightIndex; unsigned long long fixtureId; bool hasLight; bool noShadows; bool tableEntry; bool indicator; int firstTri, numTris; bool dark; };
+struct rtEmissiveRow_t { const idMaterial *mat; idVec3 centroid; float boundRadius; float flux; float area; idVec3 meanRadiance; float reach; float lightLum; idVec3 lightOrigin; int lightIndex; unsigned long long fixtureId; bool hasLight; bool noShadows; bool indicator; int firstTri, numTris; bool dark; };
 int R_RtEmissiveRows( const rtEmissiveRow_t **rows );		// the rows (0 = no table)
 float R_RtEmissiveLightFlicker( int lightIndex, float liveLum );	// a dropped light's live / average luminance (-1 = it does not animate)
 float R_RtEmissiveLightAnimatedAverage( const idRenderLightLocal *ld );	// time-average luminance of a light's animated colour (0 = steady)
 // emissive mode AUTHORING (RtEmissiveAuthor.cpp, docs/rtx-light-editor.md): the per-map emissive/<map>.cfg decides which placed
 // lights are deleted and which glowing fixtures emit - no heuristics; a map without the file is unchanged
 bool R_EmAuthLightDeleted( const idRenderWorldLocal *world, int index );
-bool R_EmAuthFixtureEmits( const idRenderWorldLocal *world, unsigned long long fixtureId, const idMaterial *mat, float *scale, float *reach, int *followLight );
+struct rtEmAuthEmit_t {			// a fixture's authored emission, resolved (its own fields, else its material's, else the defaults)
+	float scale, reach;			// brightness multiplier (1 = unset); reach (0 = r_rtEmissiveReachDefault)
+	int   followLight;			// the lightDef whose animation it follows (-1 = none)
+	float radiance;				// > 0 = PHYSICAL: this multiplier on the glow's mean radiance; 0 = power-matched to the reach
+	float tint[3];				// colour multiplier
+	int   profile;				// 0 sqrt(cos), 1 Lambert, 2 uniform
+	bool  twoSided;				// both faces emit (a material with back faces in its model does anyway)
+};
+bool R_EmAuthFixtureEmits( const idRenderWorldLocal *world, unsigned long long fixtureId, const idMaterial *mat, rtEmAuthEmit_t *out );
 float R_EmAuthLightAnimAverage( const idRenderWorldLocal *world, int index );
 unsigned int R_EmAuthGeneration( void );
 void R_EmAuthRegisterCommands( void );
@@ -1213,21 +1221,6 @@ bool R_EmAuthMouseButton( int button, bool down );	// events.cpp, a mouse button
 float R_RtEmissiveMatchedScale( const rtEmissiveRow_t &row );
 // the HDR eye adaptation runs when the user asked for it OR physical emissive mode asks for it (r_rtEmissiveAutoExposure)
 bool R_HdrEyeAdaptationWanted( void );	// the power match's radiance multiplier on the row's mean (1 = authored)
-// emitters.cfg, the per-material emitter table (E2 physical; the editor's data)
-int  R_RtEmissiveMatTableNum( void );
-bool R_RtEmissiveMatTableGet( const idMaterial *mat, float *scale, float *tint, int *profile, bool *twoSided, bool *indicator );
-void R_RtEmissiveMatTableSet( const idMaterial *mat, float scale, const float *tint, int profile, bool twoSided, bool indicator );
-void R_RtEmissiveMatTableRemove( const idMaterial *mat );
-void R_RtEmissiveMatTableSave_f( const idCmdArgs &args );
-void R_RtEmissiveMatTableReload_f( const idCmdArgs &args );
-void R_RtEmissiveBakeTable_f( const idCmdArgs &args );
-const idMaterial *R_RtEmissivePickMaterial( void );		// the editor's pick: the material under the crosshair (through flares)
-float R_RtEmissiveMatMatchedScale( const idMaterial *mat, int *rowsOut, int *fixturesOut );	// the power match's multiplier for a material (area-weighted over its rows)
-// per-fixture (light id) overrides: the same material used two ways gets a per-instance tuning on top of its material entry
-int  R_RtEmissiveLightTableNum( void );
-bool R_RtEmissiveLightTableGet( unsigned long long id, float *scale, float *tint, int *profile, bool *twoSided, bool *indicator );
-void R_RtEmissiveLightTableSet( unsigned long long id, float scale, const float *tint, int profile, bool twoSided, bool indicator );
-void R_RtEmissiveLightTableRemove( unsigned long long id );
 unsigned long long R_RtEmissivePickFixture( const idMaterial **matOut, idVec3 *posOut, float *hitDistOut = NULL );	// the editor's pick: the fixture id of the cluster under the crosshair (+ the trace distance to it)
 bool R_RtEmissiveDebugGeometry( unsigned int *vb, unsigned int *ib, int *numIndexes );
 bool R_RtEmissiveLightDebugGeometry( unsigned int *vb, unsigned int *ib, int *numIndexes );	// overlay mode 5: the placed lights as census-coloured spheres

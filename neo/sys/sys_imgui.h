@@ -15,7 +15,7 @@ enum D3ImGuiWindow {
 	D3_ImGuiWin_Settings    = 1, // advanced DUDE settings menu
 	D3_ImGuiWin_Demo        = 2, // ImGui demo window
 	D3_ImGuiWin_PbrEditor   = 4, // in-game PBR material editor (docs/pbr-materials.md)
-	D3_ImGuiWin_EmitterEditor = 8, // in-game emitter editor (docs/rtx-experimental-lighting.md, emitters.cfg)
+	// 8 was the Emitter Editor (emitters.cfg): replaced by the Light Editor, 2026-10-31
 	D3_ImGuiWin_LightEditor = 16, // the Light Editor's right-click menu (docs/rtx-light-editor.md, renderer/RtEmissiveAuthor.cpp)
 	// next should be 32, then 64, etc so a bitmask can be used
 };
