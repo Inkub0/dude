@@ -2722,22 +2722,20 @@ struct rtEmissiveTriGPU_t {
 	float			p1[3];	unsigned int	emit;		// bits 0-15 the glow texture's bindless slot + 1 (idImage::rhiHandle), 16-31 RT_EMIT_* flags
 	float			p2[3];	float			scale;		// material intensity scale (r_rtEmissiveScale x the D2 table when it lands)
 	unsigned int	st0, st1, st2;						// per-vertex st as half2 (packHalf2x16 layout: s low, t high)
-	unsigned int	tint;								// the stage's constant colour as RGBA8 (R low byte); alpha = the DIFFUSEGLOW threshold
+	unsigned int	tint;								// the stage's constant colour as RGBA8 (R low byte); alpha 255
 	unsigned int	meanRG, meanB;						// the emitter's MEAN linear radiance (glow average x stage colour), half floats: E2 lights with
-														// this flat colour (a uniform emitter; the texel pattern is variance, not light); DIFFUSEGLOW = 0
+														// this flat colour (a uniform emitter; the texel pattern is variance, not light)
 	unsigned int	reach;								// unused since the census went (2026-10-31): 0, kept for the 64-byte layout (rt_emissive.glsl)
 	unsigned int	lightLum;							// unused likewise: 0
 };
 static const int	RT_EMISSIVE_HEADER_BYTES = 16;		// uint count, float totalFlux, uint cdfOffsetBytes, float meanFlux
 static const int	RT_EMISSIVE_MAX_TRIS     = 1 << 18;	// 262144 x 64 B = 16 MB table ceiling (+1 MB CDF); a census overflow is reported
-static const float	RT_EMISSIVE_FLARE_REACH  = 48.0f;	// a flare this close to a surface sits on it (inference / hiding)
-static const float	RT_EMISSIVE_DIFFUSE_GLOW_THRESHOLD = 0.6f;	// diffuse texels brighter than this emit (flare-inferred emitters)
 #define RT_EMIT_FLAG_ANIMATED	( 1u << 16 )			// stage colour is register-driven: flux is a snapshot, read the live colour
 #define RT_EMIT_FLAG_ENTITY		( 1u << 17 )			// from a static entity model (else worldspawn)
 #define RT_EMIT_FLAG_TWOSIDED	( 1u << 18 )			// material creates back sides: its reversed twin is in the table too (both faces emit)
 // bit 19 was RT_EMIT_FLAG_INLIGHT (the census, removed 2026-10-31)
 #define RT_EMIT_FLAG_DARK		( 1u << 20 )			// the fixture is switched OFF in its current state (skin / parm): zero flux, kept in place
-#define RT_EMIT_FLAG_DIFFUSEGLOW ( 1u << 21 )		// the glow slot is the DIFFUSE map: texels brighter than the threshold (tint alpha / 255) emit
+// bit 21 was RT_EMIT_FLAG_DIFFUSEGLOW (flare inference, removed 2026-10-31)
 #define RT_EMIT_FLAG_PROFILE_SHIFT 22					// bits 22-23: the emission profile, always 0 in the table now - the map's authored profile rides on the row (rt_emissive.glsl)
 // bit 24 was RT_EMIT_FLAG_INDICATOR (emitters.cfg, removed 2026-10-31)
 
@@ -2901,7 +2899,7 @@ float R_RtEmissiveMatchedScale( const rtEmissiveRow_t &row, float reach, float l
 	return Max( Lmatch, meanLum ) / meanLum;
 }
 
-static float R_RtPointTriangleDistance( const idVec3 &p, const idVec3 &a, const idVec3 &b, const idVec3 &c );	// defined below (flare inference)
+static float R_RtPointTriangleDistance( const idVec3 &p, const idVec3 &a, const idVec3 &b, const idVec3 &c );	// defined below
 
 // The editor's pick for a per-fixture override: the id of the emitter CLUSTER (row) under the crosshair. Traces (through
 // flares) to a surface, finds the nearest table triangle, then the row that holds it, and returns that row's fixture id
@@ -3135,20 +3133,19 @@ static bool R_RtEmissiveEntityGatherable( const idRenderEntityLocal *def ) {
 }
 
 // per-material census row for the build report
-struct rtEmissiveCensus_t { const idMaterial *mat; int tris; float flux; bool animated; bool texMatrix; unsigned int slot; bool inferred; bool clipped; };
+struct rtEmissiveCensus_t { const idMaterial *mat; int tris; float flux; bool animated; bool texMatrix; unsigned int slot; bool clipped; };
 
 // Append every triangle of one emissive surface. modelMatrix NULL = the verts are already world space (an _areaN).
-static float R_RtPointTriangleDistance( const idVec3 &p, const idVec3 &a, const idVec3 &b, const idVec3 &c );	// defined with the flare inference below
 
 // Emit the LIGHT of one triangle (Q2RTX collect_one_light_poly): with valid, non-entire image extents the triangle is
 // clipped, per texture repetition, to the st rectangle of the bright texels (Sutherland-Hodgman in st; vertices mapped
 // back through the triangle's barycentrics), fan-triangulated, and each piece is an entry with the bright texels' MEAN
 // radiance - a wall panel with two LEDs becomes two small lights, so the flux proposal matches the real emission. No
 // extents / entire = the whole triangle. p[] are MODEL-space (or world, mm NULL) positions, st[] the baked st.
-// reachPoint / reach: keep only pieces within reach of the point (the flare-inferred fixtures). Returns entries added.
+// Returns entries added.
 static int R_RtEmissiveEmitTriangle( const idVec3 p[3], const float st[3][2], const float *mm, const imageEmissiveExtents_t *ext,
 		float lumPerArea, unsigned int emit, unsigned int tint, unsigned int meanRG, unsigned int meanB, float scale,
-		idList<rtEmissiveTriGPU_t> &out, idList<idVec3> *localOut, int &overflow, const idVec3 *reachPoint, float reach ) {
+		idList<rtEmissiveTriGPU_t> &out, idList<idVec3> *localOut, int &overflow ) {
 	struct pv_t { float s, t; idVec3 p; };
 	pv_t poly[12], clipped[12];
 	int added = 0;
@@ -3158,7 +3155,6 @@ static int R_RtEmissiveEmitTriangle( const idVec3 p[3], const float st[3][2], co
 		if ( mm != NULL ) { R_LocalPointToGlobal( mm, a.p, w0 ); R_LocalPointToGlobal( mm, b.p, w1 ); R_LocalPointToGlobal( mm, c.p, w2 ); }
 		const float area = 0.5f * ( ( w1 - w0 ).Cross( w2 - w0 ) ).Length();
 		if ( area < 1e-3f ) { return; }
-		if ( reachPoint != NULL && R_RtPointTriangleDistance( *reachPoint, w0, w1, w2 ) > reach ) { return; }
 		if ( mm != NULL && localOut != NULL ) { localOut->Append( a.p ); localOut->Append( b.p ); localOut->Append( c.p ); }
 		rtEmissiveTriGPU_t &e = out.Alloc();
 		e.p0[0] = w0.x; e.p0[1] = w0.y; e.p0[2] = w0.z;
@@ -3255,7 +3251,7 @@ static void R_RtEmissiveAddSurface( const srfTriangles_t *tri, const idMaterial 
 	const bool hasTexMatrix = R_RtEmissiveStageTexMatrix( mat, stage, entityParms, tm );
 	int ci = -1;
 	for ( int i = 0; i < census.Num(); i++ ) { if ( census[i].mat == mat ) { ci = i; break; } }
-	if ( ci < 0 ) { rtEmissiveCensus_t c; c.mat = mat; c.tris = 0; c.flux = 0.0f; c.animated = !constant; c.texMatrix = hasTexMatrix; c.slot = (unsigned int)img->rhiHandle & 0xFFFFu; c.inferred = false; c.clipped = ( ext != NULL && !ext->entire ); ci = census.Append( c ); }
+	if ( ci < 0 ) { rtEmissiveCensus_t c; c.mat = mat; c.tris = 0; c.flux = 0.0f; c.animated = !constant; c.texMatrix = hasTexMatrix; c.slot = (unsigned int)img->rhiHandle & 0xFFFFu; c.clipped = ( ext != NULL && !ext->entire ); ci = census.Append( c ); }
 
 	for ( int n = 0; n + 2 < tri->numIndexes; n += 3 ) {
 		const idDrawVert *vv[3] = { &tri->verts[ tri->indexes[n + 0] ], &tri->verts[ tri->indexes[n + 1] ], &tri->verts[ tri->indexes[n + 2] ] };
@@ -3272,7 +3268,7 @@ static void R_RtEmissiveAddSurface( const srfTriangles_t *tri, const idMaterial 
 			st[k][0] = s0; st[k][1] = t0;
 		}
 		const int before = out.Num();
-		R_RtEmissiveEmitTriangle( pp, st, modelMatrix, ext, lumPerArea, emit, tint, meanRG, meanB, scale, out, localOut, overflow, NULL, 0.0f );
+		R_RtEmissiveEmitTriangle( pp, st, modelMatrix, ext, lumPerArea, emit, tint, meanRG, meanB, scale, out, localOut, overflow );
 		for ( int t = before; t < out.Num(); t++ ) { census[ci].tris++; census[ci].flux += out[t].flux; }
 	}
 }
@@ -3340,139 +3336,6 @@ static float R_RtEmissiveTableDistance( const idVec3 &p ) {
 	return best;
 }
 static bool R_RtEmissiveNearTable( const idVec3 &p, float reach ) { return R_RtEmissiveTableDistance( p ) < reach; }
-
-// Flare-inferred emitters (user, 2026-10-20): a fixture whose material has NO glow stage - its "tube" is a white
-// patch in the diffuse map lit by the placed light (EnPro's techdr1frame_cop) - is found through the FLARE sprite
-// the mapper put on it. For every flare not already next to a table triangle: the nearest opaque / perforated
-// surface (world or static entity) within RT_EMISSIVE_FLARE_REACH that has a diffuse map and no additive stage;
-// its triangles within reach of the flare become entries whose glow slot is the DIFFUSE map, flagged DIFFUSEGLOW
-// with the brightness threshold in the tint alpha - E2 (and overlay mode 3) read the diffuse through the threshold
-// so only the bright patch emits. Flux = area x linearised diffuse average x scale (an over-estimate for a mostly
-// grey panel: the threshold read keeps the LIGHT right, only the sampling share is generous; D2 can refine).
-// Entity-sourced inferred entries are not mover-tracked (door frames and lamp housings do not move).
-static int R_RtEmissiveInferFromFlares( const idRenderWorldLocal *world, float scale, idList<rtEmissiveCensus_t> &census ) {
-	int inferred = 0;
-	const unsigned int thresholdByte = (unsigned int)( RT_EMISSIVE_DIFFUSE_GLOW_THRESHOLD * 255.0f + 0.5f );
-	struct best_t { const srfTriangles_t *tri; const idMaterial *mat; const shaderStage_t *diffuse; float mm[16]; bool entity; float dist; };
-	for ( int fi = 0; fi < world->entityDefs.Num(); fi++ ) {
-		const idRenderEntityLocal *flare = world->entityDefs[fi];
-		if ( !R_RtEmissiveIsFlareEntity( flare ) ) {
-			continue;
-		}
-		const idVec3 o = flare->parms.origin;
-		const float tableDist = R_RtEmissiveTableDistance( o );
-		// a fixture's flare sits ON its surface (the door frames: 0-1 units); a wall 20 units behind a flare is not the
-		// fixture (false positives on enwall3 / a barrel's label, 2026-10-20) - the inference reach is short
-		best_t best; best.tri = NULL; best.mat = NULL; best.diffuse = NULL; best.entity = false; best.dist = 6.0f;
-		// candidate surfaces: a lambda over one model (world area: identity; entity: its matrix)
-		auto consider = [&]( const idRenderModel *model, const float *mm, const idDeclSkin *skin, const idMaterial *custom, bool entity ) {
-			for ( int sf = 0; model && sf < model->NumSurfaces(); sf++ ) {
-				const modelSurface_t *surf = model->Surface( sf );
-				const srfTriangles_t *tri = surf->geometry;
-				if ( tri == NULL || tri->verts == NULL || tri->indexes == NULL ) {
-					continue;
-				}
-				const idMaterial *mat = R_RemapShaderBySkin( surf->shader, skin, custom );
-				if ( mat == NULL || ( mat->Coverage() != MC_OPAQUE && mat->Coverage() != MC_PERFORATED ) || mat->HasGui() || mat->Deform() != DFRM_NONE ) {
-					continue;
-				}
-				if ( R_RtEmissiveStage( mat ) != NULL ) {
-					continue;													// has a real glow stage: it is (or was rejected as) an emitter already
-				}
-				const shaderStage_t *diffuse = NULL;
-				bool additive = false;
-				for ( int k = 0; k < mat->GetNumStages(); k++ ) {
-					const shaderStage_t *st = mat->GetStage( k );
-					if ( st->lighting == SL_DIFFUSE && st->texture.image != NULL && st->texture.image->rhiHandle != 0 && st->texture.image->type != TT_CUBIC && diffuse == NULL ) { diffuse = st; }
-					if ( ( st->drawStateBits & GLS_SRCBLEND_BITS ) == GLS_SRCBLEND_ONE && ( st->drawStateBits & GLS_DSTBLEND_BITS ) == GLS_DSTBLEND_ONE ) { additive = true; }
-				}
-				if ( diffuse == NULL || additive ) {
-					continue;
-				}
-				// bounds reject (world space), then the nearest triangle centroid
-				idBounds b;
-				if ( mm != NULL ) { b.FromTransformedBounds( tri->bounds, idVec3( mm[12], mm[13], mm[14] ), idMat3( mm[0], mm[1], mm[2], mm[4], mm[5], mm[6], mm[8], mm[9], mm[10] ) ); }
-				else { b = tri->bounds; }
-				b.ExpandSelf( RT_EMISSIVE_FLARE_REACH );
-				if ( !b.ContainsPoint( o ) ) {
-					continue;
-				}
-				for ( int n = 0; n + 2 < tri->numIndexes; n += 3 ) {
-					idVec3 pa = tri->verts[ tri->indexes[n] ].xyz, pb = tri->verts[ tri->indexes[n + 1] ].xyz, pc = tri->verts[ tri->indexes[n + 2] ].xyz;
-					if ( mm != NULL ) { idVec3 w; R_LocalPointToGlobal( mm, pa, w ); pa = w; R_LocalPointToGlobal( mm, pb, w ); pb = w; R_LocalPointToGlobal( mm, pc, w ); pc = w; }
-					const float d = R_RtPointTriangleDistance( o, pa, pb, pc );		// true distance: a coarse mesh's centroids sit far from the flare
-					if ( d < best.dist ) {
-						best.dist = d; best.tri = tri; best.mat = mat; best.diffuse = diffuse; best.entity = entity;
-						if ( mm != NULL ) { memcpy( best.mm, mm, sizeof( best.mm ) ); } else { memset( best.mm, 0, sizeof( best.mm ) ); best.mm[0] = best.mm[5] = best.mm[10] = best.mm[15] = 1.0f; }
-					}
-				}
-			}
-		};
-		for ( int a = 0; a < world->NumAreas(); a++ ) {
-			consider( renderModelManager->FindModel( va( "_area%i", a ) ), NULL, NULL, NULL, false );
-		}
-		for ( int i = 0; i < world->entityDefs.Num(); i++ ) {
-			const idRenderEntityLocal *def = world->entityDefs[i];
-			if ( i == fi || !R_RtEmissiveEntityGatherable( def ) ) {
-				continue;
-			}
-			float mm[16];
-			R_AxisToModelMatrix( def->parms.axis, def->parms.origin, mm );
-			consider( def->parms.hModel, mm, def->parms.customSkin, def->parms.customShader, true );
-		}
-		if ( best.tri == NULL || tableDist <= best.dist ) {
-			// no glow-less surface under it, or a real emitter is nearer: this flare belongs to that emitter (or to nothing)
-			R_RtEmissiveReport( "    flare entity %d at %.0f %.0f %.0f: %s (nearest emitter %.0f units%s)\n", fi, o.x, o.y, o.z,
-				best.tri == NULL ? "no glow-less opaque surface within reach" : va( "'%s' at %.0f units is farther than the emitter", best.mat->GetName(), best.dist ),
-				tableDist < 1e29f ? tableDist : 9999.0f, tableDist < 64.0f ? ": its fixture" : "" );
-			continue;
-		}
-		// the surface's triangles within reach of the flare become entries clipped to the DIFFUSE map's bright extents
-		// (the white light bar), lit with the bright texels' mean: a proper small light, no texel read (Q2RTX recipe).
-		// The bright patch must be a PATCH (< 30% of the texels): a light-coloured wall or a barrel's label is not a tube.
-		const idImage *img = best.diffuse->texture.image;
-		if ( !img->brightExtents.valid || img->brightExtents.coverage > 0.3f ) {
-			R_RtEmissiveReport( "    flare entity %d at %.0f %.0f %.0f: '%s' at %.0f units has %s - not inferred\n", fi, o.x, o.y, o.z, best.mat->GetName(), best.dist,
-				img->brightExtents.valid ? va( "%.0f%% of its texels above %.0f%% (a bright material, not a light patch)", img->brightExtents.coverage * 100.0f, RT_EMISSIVE_DIFFUSE_GLOW_THRESHOLD * 100.0f )
-				                         : va( "no texels above %.0f%%", RT_EMISSIVE_DIFFUSE_GLOW_THRESHOLD * 100.0f ) );
-			continue;
-		}
-		R_RtEmissiveReport( "    flare entity %d at %.0f %.0f %.0f: INFERRED '%s' at %.0f units\n", fi, o.x, o.y, o.z, best.mat->GetName(), best.dist );
-		const imageEmissiveExtents_t *ext = &img->brightExtents;
-		const float lumPerArea = R_RtLuminance( ext->mean ) * scale;
-		const unsigned int emit = ( (unsigned int)img->rhiHandle & 0xFFFFu ) | RT_EMIT_FLAG_DIFFUSEGLOW | ( best.entity ? RT_EMIT_FLAG_ENTITY : 0u );
-		const unsigned int meanRG = R_RtPackHalf2( ext->mean[0], ext->mean[1] ), meanB = R_RtPackHalf2( ext->mean[2], 0.0f );
-		float tm[6];
-		const bool hasTexMatrix = R_RtEmissiveStageTexMatrix( best.mat, best.diffuse, NULL, tm );
-		const int firstTri = s_rtEmissiveTris.Num();
-		int overflowI = 0;
-		for ( int n = 0; n + 2 < best.tri->numIndexes; n += 3 ) {
-			const idDrawVert *vv[3] = { &best.tri->verts[ best.tri->indexes[n] ], &best.tri->verts[ best.tri->indexes[n + 1] ], &best.tri->verts[ best.tri->indexes[n + 2] ] };
-			idVec3 pp[3];
-			float st[3][2];
-			for ( int k = 0; k < 3; k++ ) {
-				pp[k] = vv[k]->xyz;
-				float s0 = vv[k]->st[0], t0 = vv[k]->st[1];
-				if ( hasTexMatrix ) { const float s1 = tm[0] * s0 + tm[1] * t0 + tm[2]; const float t1 = tm[3] * s0 + tm[4] * t0 + tm[5]; s0 = s1; t0 = t1; }
-				st[k][0] = s0; st[k][1] = t0;
-			}
-			R_RtEmissiveEmitTriangle( pp, st, best.mm, ext->entire ? NULL : ext, lumPerArea, emit, 0x00FFFFFFu | ( thresholdByte << 24 ), meanRG, meanB, scale,
-				s_rtEmissiveTris, NULL, overflowI, &o, RT_EMISSIVE_FLARE_REACH );
-		}
-		const int numTris = s_rtEmissiveTris.Num() - firstTri;
-		if ( numTris == 0 ) {
-			continue;
-		}
-		rtEmissiveLabel_t l; l.mat = best.mat; l.firstTri = firstTri; l.numTris = numTris;
-		s_rtEmissiveLabels.Append( l );
-		int ci = -1;
-		for ( int i = 0; i < census.Num(); i++ ) { if ( census[i].mat == best.mat ) { ci = i; break; } }
-		if ( ci < 0 ) { rtEmissiveCensus_t cr; cr.mat = best.mat; cr.tris = 0; cr.flux = 0.0f; cr.animated = false; cr.texMatrix = hasTexMatrix; cr.slot = (unsigned int)img->rhiHandle & 0xFFFFu; cr.inferred = true; cr.clipped = true; ci = census.Append( cr ); }
-		for ( int t = firstTri; t < s_rtEmissiveTris.Num(); t++ ) { census[ci].tris++; census[ci].flux += s_rtEmissiveTris[t].flux; }
-		inferred++;
-	}
-	return inferred;
-}
 
 static void R_RtEmissiveFree( void ) {
 	rhi::RHI *r = rhi::GetRHI();
@@ -3702,8 +3565,6 @@ static void R_RtEmissiveBuild( const idRenderWorldLocal *world, rhi::RHI *r ) {
 		R_RtEmissiveReport( "r_rtEmissiveTable: %d entity material runs split into separate fixtures: %d emitters\n", entityRunsSplit, entityFixtures );
 	}
 
-	if ( r_rtEmissiveFlareInfer.GetBool() ) { R_RtEmissiveReport( "r_rtEmissiveTable: flare inference:\n" ); }
-	const int inferredFixtures = r_rtEmissiveFlareInfer.GetBool() ? R_RtEmissiveInferFromFlares( world, scale, census ) : 0;
 	const int n = s_rtEmissiveTris.Num();
 	if ( n == 0 ) {
 		R_RtEmissiveReport( "r_rtEmissiveTable: no emissive triangles on this map (%d screen surfaces excluded)\n", screens );
@@ -3752,7 +3613,7 @@ static void R_RtEmissiveBuild( const idRenderWorldLocal *world, rhi::RHI *r ) {
 		R_RtEmissiveDebugTint( census[i].slot, rgb, &hue );
 		R_RtEmissiveReport( "    %6.1f%%  %6d tris  %-46s view1 %-10s #%02X%02X%02X%s%s%s\n", 100.0f * census[i].flux / s_rtEmissiveTotalFlux, census[i].tris,
 			census[i].mat->GetName(), hue, rgb[0], rgb[1], rgb[2], census[i].animated ? "  (animated colour)" : "", census[i].texMatrix ? "  (texture matrix baked)" : "",
-			census[i].inferred ? "  (FLARE-INFERRED: diffuse patch under a flare)" : census[i].clipped ? "  (clipped to the glow's extents)" : "" );
+			census[i].clipped ? "  (clipped to the glow's extents)" : "" );
 	}
 	if ( excluded.Num() > 0 ) {
 		R_RtEmissiveReport( "r_rtEmissiveTable: %d self-illuminated materials EXCLUDED:\n", excluded.Num() );
@@ -3778,7 +3639,7 @@ static void R_RtEmissiveBuild( const idRenderWorldLocal *world, rhi::RHI *r ) {
 			s_rtEmissiveFlareCount++;
 		}
 	}
-	R_RtEmissiveReport( "r_rtEmissiveTable: %d fixtures inferred from flares (glow-less materials: diffuse patch emits), %d flare sprites sit on emitters (hidden while r_rtEmissiveHideFlares is on)\n", inferredFixtures, s_rtEmissiveFlareCount );
+	R_RtEmissiveReport( "r_rtEmissiveTable: %d flare sprites sit on emitters (hidden while r_rtEmissiveHideFlares is on)\n", s_rtEmissiveFlareCount );
 }
 
 // The debug overlay's vertices for table triangles [firstTri, firstTri + numTris): xyz world, st, normal = (flux,
@@ -3800,7 +3661,7 @@ static void R_RtEmissiveFillDebugVerts( int firstTri, int numTris, idDrawVert *v
 				const float m[3] = { R_RtF16toF32( e.meanRG & 0xFFFFu ), R_RtF16toF32( e.meanRG >> 16 ), R_RtF16toF32( e.meanB & 0xFFFFu ) };
 				for ( int ch = 0; ch < 3; ch++ ) { v.color[ch] = (byte)( idMath::ClampFloat( 0.0f, 1.0f, m[ch] ) * 255.0f + 0.5f ); }	// the MEAN radiance E2 lights with (mode 3)
 			}
-			v.color[3] = (byte)( ( e.tint >> 24 ) & 0xFFu );		// alpha carries the DIFFUSEGLOW threshold (255 otherwise)
+			v.color[3] = (byte)( ( e.tint >> 24 ) & 0xFFu );
 		}
 	}
 }
@@ -4560,8 +4421,6 @@ void R_RtEmissiveProbe_f( const idCmdArgs &args ) {
 		}
 	} else if ( why[0] != '\0' ) {
 		common->Printf( "  verdict: NOT an emitter - %s\n", why );
-	} else if ( [&]() { for ( int i = 0; i < s_rtEmissiveLabels.Num(); i++ ) { if ( s_rtEmissiveLabels[i].mat == mat ) { return true; } } return false; }() ) {
-		common->Printf( "  verdict: FLARE-INFERRED emitter - no glow stage, but a flare sits on it: its diffuse texels brighter than %.0f%% emit\n", RT_EMISSIVE_DIFFUSE_GLOW_THRESHOLD * 100.0f );
 	} else {
 		common->Printf( "  verdict: NOT an emitter - the material has no additive (blend add) stage: what glows is lit diffuse, not self-illumination\n" );
 	}

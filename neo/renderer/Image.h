@@ -313,10 +313,9 @@ public:
 	float				averageColor[3];		// DUDE: mean RGB (0..1) of the source pixels, sampled at GenerateImage; used to tint emissive GUI fill lights. Defaults to white.
 	// DUDE RT emissive table (docs/rtx-emissive-triangles.md, the Q2RTX recipe): where the image's BRIGHT texels are -
 	// the st rectangle enclosing them, their mean LINEAR colour and their share of the texels - sampled at load like
-	// averageColor. glowExtents = texels above a low threshold (a glow map's lit part: an LED panel's LEDs);
-	// brightExtents = above 60% (a diffuse map's white light bar under a flare). The table clips an emissive triangle to
-	// the rectangle so the light covers only what glows.
-	imageEmissiveExtents_t	glowExtents, brightExtents;
+	// averageColor. glowExtents = texels above a low threshold (a glow map's lit part: an LED panel's LEDs). The table
+	// clips an emissive triangle to the rectangle so the light covers only what glows.
+	imageEmissiveExtents_t	glowExtents;
 
 	idImage				*cacheUsagePrev, *cacheUsageNext;	// for dynamic cache purging of old images
 
@@ -344,7 +343,7 @@ public:
 		// the Vulkan paths return early, so we carry it here and copy it to averageColor on main)
 		float			averageColor[3];
 		bool			hasAverageColor;
-		imageEmissiveExtents_t	glowExtents, brightExtents;		// DUDE: sampled on the worker beside averageColor
+		imageEmissiveExtents_t	glowExtents;		// DUDE: sampled on the worker beside averageColor
 	};
 	parallelLoad_t *	parallelData;
 };
@@ -380,7 +379,6 @@ ID_INLINE idImage::idImage() {
 	internalFormat = 0;
 	averageColor[0] = averageColor[1] = averageColor[2] = 1.0f;
 	memset( &glowExtents, 0, sizeof( glowExtents ) );
-	memset( &brightExtents, 0, sizeof( brightExtents ) );
 	cacheUsagePrev = cacheUsageNext = NULL;
 	hashNext = NULL;
 	refCount = 0;

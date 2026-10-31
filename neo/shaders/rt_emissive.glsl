@@ -19,8 +19,8 @@ struct RtEmissiveTri {
 	vec3  p1;	uint  emit;			// bits 0-15 the glow texture's bindless slot + 1 (0 = none), bits 16-31 RT_EMIT_* flags
 	vec3  p2;	float scale;		// material intensity scale (r_rtEmissiveScale x the D2 table)
 	uint  st0, st1, st2;			// per-vertex st, half2 (unpackHalf2x16)
-	uint  tint;						// the stage's constant colour, RGBA8 (unpackUnorm4x8); white when RT_EMIT_ANIMATED; alpha = the DIFFUSEGLOW threshold
-	uint  meanRG, meanB;			// the MEAN linear radiance (glow average x stage colour), halves: a uniform emitter lights with this (0 for DIFFUSEGLOW)
+	uint  tint;						// the stage's constant colour, RGBA8 (unpackUnorm4x8); white when RT_EMIT_ANIMATED; alpha 255
+	uint  meanRG, meanB;			// the MEAN linear radiance (glow average x stage colour), halves: a uniform emitter lights with this
 	uint  reach;					// float bits: the authored radius of the placed light this emitter replaces (0 = none)
 	uint  lightLum;					// float bits: that light's colour luminance (E2 v3 power match, read on the CPU; 0 = none)
 };
@@ -29,7 +29,6 @@ const uint RT_EMIT_ANIMATED = 1u << 16;		// stage colour is register-driven: the
 const uint RT_EMIT_ENTITY   = 1u << 17;		// from a static entity model (else worldspawn)
 const uint RT_EMIT_TWOSIDED = 1u << 18;		// the material creates back sides: its reversed twin is in the table too
 const uint RT_EMIT_DARK     = 1u << 20;		// the fixture is switched OFF in its current state (skin / parm): zero flux, kept in place
-const uint RT_EMIT_DIFFUSEGLOW = 1u << 21;	// the glow slot is the DIFFUSE map: texels brighter than the threshold (tint alpha) emit (flare-inferred)
 const uint RT_EMIT_PROFILE_SHIFT = 22u;		// bits 22-23: unused since emitters.cfg went (the profile is the ROW's, projT.z)
 
 // The MEAN radiance of a uniform emitter (E2 lights with this: a tile, a tube, an LED panel as a faint flat panel - the
@@ -38,15 +37,8 @@ vec3 rtEmissiveMeanRadiance( RtEmissiveTri e ) {
 	return vec3( unpackHalf2x16( e.meanRG ), unpackHalf2x16( e.meanB ).x );
 }
 
-// The emitted colour of a glow texel: a real glow map as is; a DIFFUSEGLOW entry through its threshold (only the
-// bright patch under the flare emits, rescaled to 0..1 above the threshold).
+// The emitted colour of a glow texel: the glow map x the stage colour.
 vec3 rtEmissiveTexelToRadiance( RtEmissiveTri e, vec3 texel ) {
-	if ( ( e.emit & RT_EMIT_DIFFUSEGLOW ) != 0u ) {
-		float th  = unpackUnorm4x8( e.tint ).a;
-		float lum = dot( texel, vec3( 0.2126, 0.7152, 0.0722 ) );
-		float k   = clamp( ( lum - th ) / max( 1.0 - th, 1e-3 ), 0.0, 1.0 );
-		return texel * k;
-	}
 	return texel * unpackUnorm4x8( e.tint ).rgb;
 }
 

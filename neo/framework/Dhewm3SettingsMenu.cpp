@@ -5428,15 +5428,11 @@ static void DrawDbgGroup_RTEmitters()
 		"glow stages: neon tubes, light tiles, LED panels, lava - world and static props, including the pure light-source "
 		"surfaces that cast no shadow and are not in the ray-tracing scene) into a GPU table with its position, glow "
 		"texture and flux, plus a flux CDF for area-light sampling. Built once per level; the console prints a census "
-		"(triangle counts, the strongest materials, fixtured vs ambience placed lights). Use the view below to inspect it. "
+		"(triangle counts, the strongest materials). Use the view below to inspect it. "
 		"GUI / video screens are excluded (they keep the Emissive Surfaces fill lights). (r_rtEmissiveTable)" );
 	ImGui::BeginDisabled( !r_rtEmissiveTable.GetBool() && !r_rtEmissiveLighting.GetBool() );
 	CvarSliderF( "Emissive Scale", r_rtEmissiveScale, 0.0f, 16.0f, "%.2f", "Global multiplier on every emitter's flux and "
 		"emitted colour (the stand-in for a per-material intensity table). A change rebuilds the table. (r_rtEmissiveScale)" );
-	CvarCheckbox( "Infer Fixtures from Flares", r_rtEmissiveFlareInfer, "A fixture whose material has no glow stage (its "
-		"'tube' is a white patch in the diffuse map) is found through the flare the mapper put on it: the bright part of "
-		"the diffuse under the flare becomes a small light. Marked FLARE-INFERRED in the census / overlay. A change "
-		"rebuilds the table. (r_rtEmissiveFlareInfer)" );
 	CvarCheckbox( "Hide Fixture Flares", r_rtEmissiveHideFlares, "Do not draw the flare sprites that sit on light fixtures "
 		"which are emitters in the table (Emissive Mode always hides them). (r_rtEmissiveHideFlares)" );
 
@@ -5450,8 +5446,7 @@ static void DrawDbgGroup_RTEmitters()
 			r_rtEmissiveTableDebug.SetInteger( dbg );
 		}
 		CvarTip( r_rtEmissiveTableDebug,  "Draw the table's triangles over the view, depth-tested against the scene, with their material names. "
-			"'Emitters by texture' tints each glow texture its own colour (striped = a pulsing stage colour, checkered = "
-			"flare-inferred); 'Flux' shows each triangle's power relative to the table's mean (blue faint, green average, red "
+			"'Emitters by texture' tints each glow texture its own colour (striped = a pulsing stage colour); 'Flux' shows each triangle's power relative to the table's mean (blue faint, green average, red "
 			"4x, white 16x+); 'Emitted colour' is the flat mean radiance the mode lights with. The Light Editor's look mode "
 			"(editLights) shows the placed lights and each surface's authored state. (r_rtEmissiveTableDebug)" );
 		}
