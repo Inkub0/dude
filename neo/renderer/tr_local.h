@@ -1149,7 +1149,6 @@ extern idCVar r_rtEmissiveBounce;			// emitter rows ride the GI bounce in normal
 extern idCVar r_rtEmissiveReach;			// emissive mode: reach as a multiple of the replaced light's authored radius (0 = physical)
 extern idCVar r_rtEmissiveReachDefault;	// emissive mode: reach (units) of an emitter no placed light covers
 extern idCVar r_rtEmissiveHideFlares;		// emitter mode: hide the flare sprites of fixtures that are table emitters			// RT emissive table: global flux / emitted-colour multiplier (rebuilds the table)
-extern idCVar r_rtEmissiveFlareInfer;		// RT emissive table: promote the diffuse patch under a flare on a glow-less fixture to an emitter
 extern idCVar r_rtReflTemporal;				// RR6: accumulate RT reflections through the SSR temporal pipeline (+ ray jitter) to kill the firefly grid
 extern idCVar r_rtReflJitter;				// RR6: per-frame RT-reflection ray jitter cone scale (needs r_rtReflTemporal)
 extern idCVar r_rtReflBlur;					// RR6b: box-blur the RT reflection before compositing (dissolves the static firefly grid)

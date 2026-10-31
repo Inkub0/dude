@@ -5,8 +5,7 @@
 //   1 = TEXTURE: a stable tint per glow texture (which surfaces are in the table, and which material each belongs to);
 //   2 = FLUX: the triangle's flux relative to the table's MEAN (u_localParam0.y = 1 / meanFlux), log ramp:
 //       blue = 1/16 of the mean or fainter, green = the mean, red = 4x, white = 16x and above;
-//   3 = EMITTED COLOUR: the emitter's MEAN radiance (glow average x stage colour x scale, flat - what E2 lights with); a
-//       flare-inferred patch shows its diffuse through the threshold instead.
+//   3 = EMITTED COLOUR: the emitter's MEAN radiance (glow average x stage colour x scale, flat - what E2 lights with).
 //   6 / 7 = the Light Editor's look mode (editLights, docs/rtx-light-editor.md L2): 6 = light spheres + the highlighted
 //       volume (vertex colour; normal.y = x-ray: drawn faint where the scene hides it), 7 = a surface tint (u_localParam1).
 // Opaque (modes 1-3) / alpha-blended (6, 7), into the pre-tonemap HDR scene. (4 = light coverage and 5 = the placed lights
@@ -61,7 +60,6 @@ void main() {
 	if ( mode == 1 ) {
 		vec3 c = dbgTint( slot );
 		if ( ( flags & ( 1u << 16 ) ) != 0u ) { c = mix( c, vec3( 1.0 ), 0.35 * step( 0.5, fract( gl_FragCoord.x * 0.125 ) ) ); }	// animated colour: striped
-		if ( ( flags & ( 1u << 21 ) ) != 0u ) { c = mix( c, vec3( 0.0 ), 0.5 * step( 0.5, fract( gl_FragCoord.x * 0.0625 ) ) * step( 0.5, fract( gl_FragCoord.y * 0.0625 ) ) ); }	// flare-inferred: checkered
 		fragColor = vec4( c, 1.0 );
 	} else if ( mode == 2 ) {
 		float rel = var_FluxScaleIndex.x * u_localParam0.y;					// flux / meanFlux
