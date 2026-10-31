@@ -223,6 +223,10 @@ public:
 													// lightDef INDEX is reused as soon as a def is freed (a weapon switch frees the old
 													// weapon light and allocates the flashlight into the same slot), so the ReSTIR DI
 													// gradient compares THIS to know it is re-shading the same light (Plan R1)
+	renderLight_t			dudePristine;			// DUDE Light Editor (L4): the parms exactly as the game last passed them; parms
+													// holds them with the map's authored colour / brightness / radius override applied
+													// (emissive mode only - RtEmissiveAuthor.cpp R_EmAuthOverrideLight)
+	bool					dudeOverridden;			// parms differ from dudePristine (an override is applied)
 
 	idVec3					globalLightOrigin;		// accounting for lightCenter and parallel
 
@@ -1217,6 +1221,12 @@ void R_EmAuthLookFrame( const idRenderWorldLocal *world, const struct viewDef_s 
 int  R_EmAuthLookTints( const rtEmAuthTint_t **out );
 bool R_EmAuthLookGeometry( const idDrawVert **verts, int *numVerts, const glIndex_t **indexes, int *numIndexes );	// light spheres + the highlighted volume
 const char *R_EmAuthHoverText( void );	// the one-line label under the crosshair (NULL = nothing highlighted)
+bool R_EmAuthKey( int key, bool down );		// events.cpp, Del (1) / Ins (2) in game: true = look mode took it
+bool R_EmAuthWheel( int dir, bool material );	// events.cpp, a wheel step in game (Ctrl = the material): true = look mode took it
+// L4: the authored light overrides (emissive mode only) on a copy of the game's parms (UpdateLightDef), and the re-derive
+// of every affected light when the data or the mode changes (RenderScene)
+bool R_EmAuthOverrideLight( const idRenderWorldLocal *world, int index, const renderLight_t &in, renderLight_t *out );
+void R_EmAuthRefreshLightOverrides( idRenderWorldLocal *world );
 bool R_EmAuthMouseButton( int button, bool down );	// events.cpp, a mouse button in game (1 left, 2 right): true = the Light Editor took it (its menu)
 float R_RtEmissiveMatchedScale( const rtEmissiveRow_t &row );
 // the HDR eye adaptation runs when the user asked for it OR physical emissive mode asks for it (r_rtEmissiveAutoExposure)

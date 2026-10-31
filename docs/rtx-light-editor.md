@@ -177,6 +177,21 @@ returns you to look mode.
    Original plan text: the ImGui Light Editor replaces the Emitter Editor: the light and surface panels, the material-wide
    toggle, live edits, save / reload.
 4. **L4:** follow-a-light, match-power, and the light colour / radius overrides through `UpdateLightDef`.
+   Built on `feat/rtx-light-editor-overrides` (2026-10-31):
+   - **Light overrides** (light menu, "Colour, brightness, radius"): colour replaces shaderParms 0-2, brightness
+     multiplies them, radius replaces a point light's lightRadius. `idRenderWorldLocal::UpdateLightDef` keeps the
+     game's parms as `idRenderLightLocal::dudePristine` (renderer-internal: no ABI change) and derives from an
+     overridden copy (`R_EmAuthOverrideLight`); `RenderScene` re-derives every affected light when the data or the
+     mode changes (`R_EmAuthRefreshLightOverrides`). Emissive mode only; lights keep their key (the game's origin).
+     A light material whose stages ignore the colour parms shows no colour change.
+   - **Match a light's power** (surface menu, then right-click a light): reach = the light's radius, radiance = the
+     power match against its luminance (physical), Brightness reset. One-shot.
+   - **New emitters are physical** (user, 2026-10-31): emitOn / emitMaterial / the menu / Ins on a surface with no
+     radiance in effect sets the radiance to its current power match - same look, physical from then on.
+   - **Keys in look mode** (user, 2026-10-31): Del deletes the highlighted light (again: restores it) or stops the
+     highlighted surface emitting; Ins makes it emit. The **wheel** changes the highlighted surface's radiance by 10 %
+     a step (Ctrl: its material's) or the highlighted light's brightness; with nothing highlighted the wheel stays the
+     game's. Taken in sys/events.cpp only in game (no menu, no console, ImGui not capturing).
 5. **L5 cleanup:**
    - delete the heuristics listed above (and their cvars: `r_rtEmissiveShareExponent`, `r_rtEmissiveFixtureMinArea`
      and `FullArea`, `r_rtEmissivePowerMatch`, `r_rtEmissiveFlareInfer`, `r_rtEmissiveReach` and `ReachDefault` if

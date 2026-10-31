@@ -88,6 +88,9 @@ struct emAuthMaterial_t {
 	emAuthLook_t		look;				// the default appearance of every surface of the material in this map
 };
 struct emMapLight_t { idStr name; idVec3 origin; };
+struct emAuthLight_t;
+static bool EmAuth_LightOverridden( const emAuthLight_t &l );
+static void EmAuth_DefaultPhysical( bool material, unsigned long long fixture, const idMaterial *mat );
 struct emLightCache_t { unsigned int serial; unsigned int gen; int auth; float animAvg; bool animDone; idStr key; };
 
 static idList<emAuthLight_t>		s_emLights;
@@ -358,8 +361,7 @@ static void EmAuth_Sync( const idRenderWorldLocal *world ) {
 }
 
 // A placed light's key: its .map name when its spawn origin matches a light entity (within half a unit), else "@x,y,z"
-static idStr EmAuth_LightKey( const idRenderLightLocal *ld ) {
-	const idVec3 &o = ld->parms.origin;
+static idStr EmAuth_KeyForOrigin( const idVec3 &o ) {
 	int best = -1; float bestD = 0.5f;
 	for ( int i = 0; i < s_emMapLights.Num(); i++ ) {
 		const float d = ( s_emMapLights[i].origin - o ).LengthFast();
@@ -367,6 +369,10 @@ static idStr EmAuth_LightKey( const idRenderLightLocal *ld ) {
 	}
 	if ( best >= 0 ) { return s_emMapLights[ best ].name; }
 	return va( "@%d,%d,%d", idMath::FtoiFast( floorf( o.x + 0.5f ) ), idMath::FtoiFast( floorf( o.y + 0.5f ) ), idMath::FtoiFast( floorf( o.z + 0.5f ) ) );
+}
+// keyed by the GAME's origin (dudePristine): an authored override never changes a light's position, so its key holds
+static idStr EmAuth_LightKey( const idRenderLightLocal *ld ) {
+	return EmAuth_KeyForOrigin( ld->dudePristine.origin );
 }
 
 // The per-lightDef cache: its key and authored entry, valid while its slot holds the same light (serial) and the data
@@ -422,6 +428,72 @@ float R_EmAuthLightAnimAverage( const idRenderWorldLocal *world, int index ) {
 		c->animDone = true;
 	}
 	return c->animAvg;
+}
+
+/*
+===================
+R_EmAuthOverrideLight
+
+UpdateLightDef, for every light update: the map's authored colour / brightness / radius for this light (emissive mode
+only) applied to a copy of the game's parms. false = no override (out untouched). Colour replaces shaderParms 0-2,
+brightness multiplies them, radius replaces a point light's lightRadius.
+===================
+*/
+static int EmAuth_NumLightOverrides( void ) {
+	int n = 0;
+	for ( int i = 0; i < s_emLights.Num(); i++ ) { n += ( s_emLights[i].hasColor || s_emLights[i].hasRadius || s_emLights[i].brightness > 0.0f ) ? 1 : 0; }
+	return n;
+}
+
+bool R_EmAuthOverrideLight( const idRenderWorldLocal *world, int index, const renderLight_t &in, renderLight_t *out ) {
+	if ( !r_rtEmissiveLighting.GetBool() || world == NULL || world->mapName.Length() == 0 ) { return false; }
+	EmAuth_Sync( world );
+	if ( EmAuth_NumLightOverrides() == 0 ) { return false; }
+	const int a = EmAuth_FindLight( EmAuth_KeyForOrigin( in.origin ) );
+	if ( a < 0 ) { return false; }
+	const emAuthLight_t &l = s_emLights[a];
+	if ( !l.hasColor && !l.hasRadius && !( l.brightness > 0.0f ) ) { return false; }
+	*out = in;
+	if ( l.hasColor ) { out->shaderParms[ SHADERPARM_RED ] = l.color.x; out->shaderParms[ SHADERPARM_GREEN ] = l.color.y; out->shaderParms[ SHADERPARM_BLUE ] = l.color.z; }
+	if ( l.brightness > 0.0f ) { for ( int k = 0; k < 3; k++ ) { out->shaderParms[ SHADERPARM_RED + k ] *= l.brightness; } }
+	if ( l.hasRadius && in.pointLight && !in.parallel ) {
+		out->lightRadius.Set( Max( l.radius.x, 1.0f ), Max( l.radius.y, 1.0f ), Max( l.radius.z, 1.0f ) );
+	}
+	return true;
+}
+
+/*
+===================
+R_EmAuthRefreshLightOverrides
+
+RenderScene, before the views: when the authored data or emissive mode changed, every light that is overridden - or
+should be - re-derives from the game's own parms (UpdateLightDef applies the override, or none).
+===================
+*/
+void R_EmAuthRefreshLightOverrides( idRenderWorldLocal *world ) {
+	static unsigned int lastGen = 0;
+	static bool lastMode = false;
+	static const idRenderWorldLocal *lastWorld = NULL;
+	if ( world == NULL || world->mapName.Length() == 0 ) { return; }			// a GUI's world: nothing authored
+	const bool mode = r_rtEmissiveLighting.GetBool();
+	if ( world == lastWorld && mode == lastMode && s_emGen == lastGen ) { return; }
+	lastWorld = world; lastMode = mode; lastGen = s_emGen;
+	EmAuth_Sync( world );
+	lastGen = s_emGen;															// (a map change read its file just now)
+	const bool any = mode && EmAuth_NumLightOverrides() > 0;
+	for ( int i = 0; i < world->lightDefs.Num(); i++ ) {
+		idRenderLightLocal *ld = world->lightDefs[i];
+		if ( ld == NULL ) { continue; }
+		bool want = false;
+		if ( any ) {
+			const emLightCache_t *c = EmAuth_LightCache( world, i );
+			want = c != NULL && c->auth >= 0 && EmAuth_LightOverridden( s_emLights[ c->auth ] );
+		}
+		if ( want || ld->dudeOverridden ) {
+			const renderLight_t p = ld->dudePristine;
+			world->UpdateLightDef( i, &p );
+		}
+	}
 }
 
 static int EmAuth_LightIndexByKey( const idRenderWorldLocal *world, const char *key ) {
@@ -532,7 +604,7 @@ struct emMenu_t {
 };
 static emMenu_t						s_emMenu = { EM_MENU_NONE };
 // a two-step "follow" link armed from the menu: the next right-click picks the other end
-enum { EM_ARM_NONE, EM_ARM_PICK_LIGHT, EM_ARM_PICK_SURFACE };
+enum { EM_ARM_NONE, EM_ARM_PICK_LIGHT, EM_ARM_PICK_SURFACE, EM_ARM_MATCH_LIGHT };
 static int							s_emArm = EM_ARM_NONE;
 static unsigned long long			s_emArmFixture = 0;			// EM_ARM_PICK_LIGHT: the surface that will follow
 static idStr						s_emArmLightKey;			// EM_ARM_PICK_SURFACE: the light it will follow
@@ -733,7 +805,8 @@ void R_EmAuthLookFrame( const idRenderWorldLocal *world, const viewDef_t *viewDe
 			: idStr( va( "projected, reach %.0f", ld->parms.target.Length() ) );
 		idStr::snPrintf( s_emHoverText, sizeof( s_emHoverText ), "light \"%s\"  %s  %s - %s%s",
 			c ? c->key.c_str() : "?", lname, shape.c_str(),
-			( a != NULL && a->deleted ) ? "DELETED in emissive mode" : ( a != NULL && EmAuth_LightOverridden( *a ) ) ? "overridden" : "active",
+			( a != NULL && a->deleted ) ? "DELETED in emissive mode" : ( a != NULL && EmAuth_LightOverridden( *a ) )
+				? ( a->brightness > 0.0f ? va( "overridden, brightness x%.2f", a->brightness ) : "overridden" ) : "active",
 			s_emHoverLight == s_emSelLight ? "  [selected]" : "" );
 	} else if ( s_emHoverFixture != 0 ) {
 		bool own;
@@ -751,6 +824,11 @@ void R_EmAuthLookFrame( const idRenderWorldLocal *world, const viewDef_t *viewDe
 			state = "off (exception to its material)";
 		} else {
 			state = "can emit (emitOn / emitMaterial)";
+		}
+		{
+			rtEmAuthEmit_t ap;
+			R_EmAuthFixtureEmits( world, s_emHoverFixture, fixMat, &ap );
+			state += ( ap.radiance > 0.0f ) ? va( "  radiance x%.2f", ap.radiance ) : idStr( "  power-matched" );
 		}
 		state += va( "  reach %.0f", reach );
 		if ( f != NULL && f->follow.Length() ) { state += va( "  follows \"%s\"", f->follow.c_str() ); }
@@ -775,7 +853,8 @@ const char *R_EmAuthHoverText( void ) {
 	if ( s_emArm != EM_ARM_NONE ) {
 		static char armed[320];
 		idStr::snPrintf( armed, sizeof( armed ), "%s (right-click nothing to cancel)%s%s",
-			s_emArm == EM_ARM_PICK_LIGHT ? "RIGHT-CLICK THE LIGHT THIS SURFACE FOLLOWS" : va( "RIGHT-CLICK A SURFACE TO FOLLOW \"%s\"", s_emArmLightKey.c_str() ),
+			s_emArm == EM_ARM_PICK_LIGHT ? "RIGHT-CLICK THE LIGHT THIS SURFACE FOLLOWS" : s_emArm == EM_ARM_MATCH_LIGHT ? "RIGHT-CLICK THE LIGHT WHOSE POWER THIS SURFACE TAKES"
+			: va( "RIGHT-CLICK A SURFACE TO FOLLOW \"%s\"", s_emArmLightKey.c_str() ),
 			s_emHoverText[0] ? "  |  " : "", s_emHoverText );
 		return armed;
 	}
@@ -930,6 +1009,7 @@ static void EmAuth_SetFixtureEmit( int emit, const char *verb ) {
 	if ( f == NULL ) { return; }
 	f->emit = emit;
 	EmAuth_Changed();
+	if ( emit > 0 ) { EmAuth_DefaultPhysical( false, f->id, mat ); }
 	EmAuth_PrintFixture( *f, mat, pos, verb );
 }
 static void EmAuth_EmitOn_f( const idCmdArgs &args ) { EmAuth_SetFixtureEmit( 1, "emitOn:" ); }
@@ -988,6 +1068,46 @@ static emAuthFixture_t &EmAuth_FixtureRef( unsigned long long id ) {
 	return s_emFixtures[ fi ];
 }
 
+// the power match's multiplier under the AUTHORED setup (the gather's authoredRowScale without an entry): a row at its
+// authored reach, its own colour, no inherited light - where a switch to physical radiance starts, so the look holds
+static float EmAuth_AuthoredMatched( const rtEmissiveRow_t &row ) {
+	const int fi = EmAuth_FindFixture( row.fixtureId );
+	rtEmissiveRow_t m = row;
+	m.reach = ( fi >= 0 && s_emFixtures[ fi ].reach > 0.0f ) ? s_emFixtures[ fi ].reach : 0.0f;
+	m.lightLum = 0.0f; m.hasLight = false;
+	return R_RtEmissiveMatchedScale( m );
+}
+
+// the power match under the authored setup for one fixture (material = false) or the area-weighted one over a material's
+// rows: where a switch to physical radiance starts, so the look does not jump. -1 = no rows (no table built)
+static float EmAuth_MatchedFor( bool material, unsigned long long fixture, const idMaterial *mat ) {
+	const rtEmissiveRow_t *rows = NULL;
+	const int n = R_RtEmissiveRows( &rows );
+	double w = 0.0, sum = 0.0;
+	for ( int i = 0; i < n; i++ ) {
+		if ( material ? rows[i].mat != mat : rows[i].fixtureId != fixture ) { continue; }
+		if ( rows[i].dark || !( rows[i].area > 0.0f ) ) { continue; }
+		w += rows[i].area; sum += rows[i].area * EmAuth_AuthoredMatched( rows[i] );
+	}
+	return ( w > 0.0 ) ? (float)( sum / w ) : -1.0f;
+}
+
+// NEW emitters are PHYSICAL (user, 2026-10-31): a fixture / material just made to emit, with no radiance in effect (none
+// authored on it or, for a fixture, on its material - "radiance matched" counts as authored), gets the radiance its power
+// match gives now: the same look, from then on its own glow's radiance x that multiplier
+static void EmAuth_DefaultPhysical( bool material, unsigned long long fixture, const idMaterial *mat ) {
+	const int mi = ( mat != NULL ) ? EmAuth_FindMaterial( mat->GetName() ) : -1;
+	if ( mi >= 0 && s_emMaterials[ mi ].look.radiance != 0.0f ) { return; }
+	if ( !material ) {
+		const int fi = EmAuth_FindFixture( fixture );
+		if ( fi >= 0 && s_emFixtures[ fi ].look.radiance != 0.0f ) { return; }
+	}
+	const float v = EmAuth_MatchedFor( material, fixture, mat );
+	if ( !( v > 0.0f ) ) { return; }
+	if ( material ) { EmAuth_MaterialRef( mat ).look.radiance = v; } else { EmAuth_FixtureRef( fixture ).look.radiance = v; }
+	EmAuth_Changed();
+}
+
 static void EmAuth_EmitMaterial_f( const idCmdArgs &args ) {
 	if ( EmAuth_CmdWorld() == NULL ) { return; }
 	const idMaterial *mat = NULL; idVec3 pos;
@@ -997,6 +1117,7 @@ static void EmAuth_EmitMaterial_f( const idCmdArgs &args ) {
 	if ( args.Argc() > 1 ) { on = idStr::Icmp( args.Argv( 1 ), "off" ) != 0 && idStr::Icmp( args.Argv( 1 ), "0" ) != 0; }
 	else { on = !( mi >= 0 && s_emMaterials[ mi ].emit ); }		// no argument: toggle
 	EmAuth_SetMaterialEmit( mat, on );
+	if ( on ) { EmAuth_DefaultPhysical( true, 0, mat ); }
 	common->Printf( "emitMaterial: every '%s' surface in this map %s\n", mat->GetName(), on ? "EMITS" : "is back to off (per-fixture lines still apply)" );
 }
 
@@ -1139,7 +1260,7 @@ static void EmAuth_EditLights_f( const idCmdArgs &args ) {
 	if ( EmAuth_CmdWorld() == NULL ) { s_emLook = false; return; }
 	common->Printf( "editLights: look mode ON - lights: white active, red deleted, yellow overridden, cyan under the crosshair (+ its volume); "
 		"surfaces: green emits, grey can emit, orange off by exception, cyan under the crosshair (+ its reach). lightDelete / lightRestore / "
-		"emitOn / emitOff / emitMaterial ... act on what is highlighted; lightPick keeps a light's volume drawn. RIGHT-CLICK what you point at for its menu. editLights again to leave.\n" );
+		"emitOn / emitOff / emitMaterial ... act on what is highlighted; lightPick keeps a light's volume drawn. RIGHT-CLICK what you point at for its menu; Del deletes / restores the light (a surface: stops it emitting), Ins makes a surface emit; the WHEEL changes a surface's radiance (Ctrl: its material's) or a light's brightness. editLights again to leave.\n" );
 	if ( !r_rtEmissiveLighting.GetBool() ) {
 		common->Printf( "  emissive mode is off (r_rtEmissiveLighting 0): edits apply when it is on; the surface tints need it (or r_rtEmissiveTable 1)\n" );
 	}
@@ -1156,6 +1277,122 @@ Save writes the per-map file. Esc or a click outside closes it.
 
 ==============================================================================
 */
+
+// a placed light's luminance as authored by the game: its time-average when it animates, else its colour parms
+static float EmAuth_LightLum( const idRenderWorldLocal *world, int index ) {
+	const float avg = R_EmAuthLightAnimAverage( world, index );
+	if ( avg > 0.0f ) { return avg; }
+	const float *c = world->lightDefs[ index ]->dudePristine.shaderParms;
+	return Max( c[0], 0.0f ) * 0.2126f + Max( c[1], 0.0f ) * 0.7152f + Max( c[2], 0.0f ) * 0.0722f;
+}
+
+// MATCH POWER (L4, one-shot): the surface takes a placed light's power - its reach = the light's radius, its radiance the
+// power match against that light's luminance (L = C R^2 / 16 A, as the old census did for a light it replaced), physical
+// from then on; Brightness reset. Typically: delete the light, then match its fixture to it.
+static void EmAuth_MatchLightPower( idRenderWorldLocal *world, unsigned long long fixture, int light ) {
+	const idRenderLightLocal *ld = world->lightDefs[ light ];
+	const renderLight_t &p = ld->dudePristine;
+	const float R = p.pointLight ? Max( p.lightRadius.x, Max( p.lightRadius.y, p.lightRadius.z ) ) : p.target.Length();
+	const rtEmissiveRow_t *rows = NULL;
+	const int n = R_RtEmissiveRows( &rows );
+	const rtEmissiveRow_t *row = NULL;
+	for ( int i = 0; i < n && row == NULL; i++ ) { if ( rows[i].fixtureId == fixture ) { row = &rows[i]; } }
+	const emLightCache_t *c = EmAuth_LightCache( world, light );
+	if ( row == NULL || !( R > 0.0f ) ) { common->Printf( "Light Editor: match power - no emitter row for that surface / no radius\n" ); return; }
+	rtEmissiveRow_t m = *row;
+	m.reach = R; m.lightLum = Max( EmAuth_LightLum( world, light ), 1e-3f ); m.hasLight = true;
+	emAuthFixture_t &f = EmAuth_FixtureRef( fixture );
+	f.reach = R;
+	f.scale = 0.0f;
+	f.look.radiance = Max( R_RtEmissiveMatchedScale( m ), 0.01f );
+	EmAuth_Changed();
+	common->Printf( "Light Editor: fixture %016llx matched to light \"%s\": reach %.0f, radiance x%.2f\n", fixture, c ? c->key.c_str() : "?", R, f.look.radiance );
+}
+
+// the highlighted surface's material (from its emitter row)
+static const idMaterial *EmAuth_HoverMaterial( void ) {
+	const rtEmissiveRow_t *rows = NULL;
+	const int n = R_RtEmissiveRows( &rows );
+	for ( int i = 0; i < n; i++ ) { if ( rows[i].fixtureId == s_emHoverFixture ) { return rows[i].mat; } }
+	return NULL;
+}
+
+/*
+===================
+R_EmAuthKey
+
+events.cpp, Del (1) / Ins (2) in game while look mode is on: Del deletes the highlighted light (again: restores it) or
+stops the highlighted surface emitting; Ins makes the highlighted surface emit. true = taken (never reaches the game).
+===================
+*/
+bool R_EmAuthKey( int key, bool down ) {
+	if ( !s_emLook || tr.primaryWorld == NULL || s_emMenu.kind != EM_MENU_NONE ) { return false; }
+	if ( !down ) { return true; }
+	idRenderWorldLocal *world = tr.primaryWorld;
+	if ( s_emHoverLight >= 0 && s_emHoverLight < world->lightDefs.Num() && world->lightDefs[ s_emHoverLight ] != NULL ) {
+		if ( key != 1 ) { return true; }
+		const emLightCache_t *c = EmAuth_LightCache( world, s_emHoverLight );
+		const bool deleted = c != NULL && c->auth >= 0 && s_emLights[ c->auth ].deleted;
+		EmAuth_SetLightDeleted( world, s_emHoverLight, !deleted );
+		EmAuth_PrintLight( world, s_emHoverLight, deleted ? "Del: restored" : "Del: deleted" );
+		return true;
+	}
+	if ( s_emHoverFixture != 0 ) {
+		const idMaterial *mat = EmAuth_HoverMaterial();
+		emAuthFixture_t &f = EmAuth_FixtureRef( s_emHoverFixture );
+		if ( key == 2 ) {
+			f.emit = 1;
+			EmAuth_Changed();
+			EmAuth_DefaultPhysical( false, s_emHoverFixture, mat );
+		} else {
+			f.emit = EmAuth_MaterialEmits( mat ) ? -1 : 0;			// off: an exception when its material emits, else just unset
+			EmAuth_Changed();
+		}
+		common->Printf( "%s: fixture %016llx '%s' %s\n", key == 2 ? "Ins" : "Del", s_emHoverFixture, EmAuth_ShortMaterial( mat ), key == 2 ? "emits" : "does not emit" );
+	}
+	return true;
+}
+
+/*
+===================
+R_EmAuthWheel
+
+events.cpp, a mouse-wheel step in game while look mode is on: the highlighted surface's radiance (this surface; with Ctrl
+its material) or the highlighted light's brightness, 10 % a step. false = nothing highlighted (the wheel stays the game's).
+===================
+*/
+bool R_EmAuthWheel( int dir, bool material ) {
+	if ( !s_emLook || tr.primaryWorld == NULL || s_emMenu.kind != EM_MENU_NONE || dir == 0 ) { return false; }
+	idRenderWorldLocal *world = tr.primaryWorld;
+	const float step = ( dir > 0 ) ? 1.1f : 1.0f / 1.1f;
+	if ( s_emHoverLight >= 0 && s_emHoverLight < world->lightDefs.Num() && world->lightDefs[ s_emHoverLight ] != NULL ) {
+		const emLightCache_t *c = EmAuth_LightCache( world, s_emHoverLight );
+		if ( c == NULL ) { return true; }
+		int a = EmAuth_FindLight( c->key );
+		if ( a < 0 ) { EmAuth_NewLight( s_emLights.Alloc(), c->key ); a = s_emLights.Num() - 1; }
+		emAuthLight_t &l = s_emLights[a];
+		const float b = idMath::ClampFloat( 0.01f, 64.0f, ( ( l.brightness > 0.0f ) ? l.brightness : 1.0f ) * step );
+		l.brightness = ( idMath::Fabs( b - 1.0f ) < 0.02f ) ? 0.0f : b;		// back at x1: unset
+		if ( !l.deleted && !EmAuth_LightOverridden( l ) ) { s_emLights.RemoveIndex( a ); }
+		EmAuth_Changed();
+		return true;
+	}
+	if ( s_emHoverFixture == 0 ) { return false; }
+	const idMaterial *mat = EmAuth_HoverMaterial();
+	if ( material && mat == NULL ) { return true; }
+	rtEmAuthEmit_t eff;
+	const int fi = EmAuth_FindFixture( s_emHoverFixture );
+	const int mi = ( mat != NULL ) ? EmAuth_FindMaterial( mat->GetName() ) : -1;
+	if ( material ) { EmAuth_ResolveLook( NULL, mi >= 0 ? &s_emMaterials[ mi ].look : NULL, &eff ); }
+	else { EmAuth_ResolveLook( fi >= 0 ? &s_emFixtures[ fi ].look : NULL, mi >= 0 ? &s_emMaterials[ mi ].look : NULL, &eff ); }
+	float v = eff.radiance;
+	if ( !( v > 0.0f ) ) { v = EmAuth_MatchedFor( material, s_emHoverFixture, mat ); }	// matched so far: physical from its matched look
+	if ( !( v > 0.0f ) ) { v = 1.0f; }
+	v = idMath::ClampFloat( 0.01f, 1024.0f, v * step );
+	if ( material ) { EmAuth_MaterialRef( mat ).look.radiance = v; } else { EmAuth_FixtureRef( s_emHoverFixture ).look.radiance = v; }
+	EmAuth_Changed();
+	return true;
+}
 
 static void EmAuth_CloseMenu( void ) {
 	if ( s_emMenu.kind == EM_MENU_LIGHT ) { s_emSelLight = s_emMenu.prevSel; s_emSelSerial = s_emMenu.prevSelSerial; }
@@ -1207,6 +1444,12 @@ bool R_EmAuthMouseButton( int button, bool down ) {
 		} else {
 			common->Printf( "Light Editor: follow pick cancelled\n" );
 		}
+		s_emArm = EM_ARM_NONE;
+		return true;
+	}
+	if ( s_emArm == EM_ARM_MATCH_LIGHT ) {
+		if ( s_emHoverLight >= 0 ) { EmAuth_MatchLightPower( world, s_emArmFixture, s_emHoverLight ); }
+		else { common->Printf( "Light Editor: match pick cancelled\n" ); }
 		s_emArm = EM_ARM_NONE;
 		return true;
 	}
@@ -1268,6 +1511,37 @@ static void EmAuth_MenuFileButtons( void ) {
 	}
 }
 
+// L4: the light's colour / brightness / radius in emissive mode (live: RenderScene re-derives it from the game's parms)
+static void EmAuth_MenuLightOverrides( idRenderWorldLocal *world, const idStr &key ) {
+	if ( !ImGui::CollapsingHeader( "Colour, brightness, radius (emissive mode)" ) ) { return; }
+	const idRenderLightLocal *ld = world->lightDefs[ s_emMenu.light ];
+	const renderLight_t &p = ld->dudePristine;									// the game's own values
+	int a = EmAuth_FindLight( key );
+	emAuthLight_t cur;
+	if ( a >= 0 ) { cur = s_emLights[a]; } else { EmAuth_NewLight( cur, key ); }
+	bool changed = false;
+	float col[3] = { cur.hasColor ? cur.color.x : p.shaderParms[0], cur.hasColor ? cur.color.y : p.shaderParms[1], cur.hasColor ? cur.color.z : p.shaderParms[2] };
+	if ( ImGui::ColorEdit3( "Colour", col, ImGuiColorEditFlags_Float | ImGuiColorEditFlags_HDR ) ) { cur.hasColor = true; cur.color.Set( col[0], col[1], col[2] ); changed = true; }
+	if ( cur.hasColor ) { ImGui::SameLine(); if ( ImGui::SmallButton( "Reset##col" ) ) { cur.hasColor = false; changed = true; } }
+	float b = ( cur.brightness > 0.0f ) ? cur.brightness : 1.0f;
+	if ( ImGui::SliderFloat( "Brightness##light", &b, 0.05f, 16.0f, "%.2f x", ImGuiSliderFlags_Logarithmic ) ) { cur.brightness = b; changed = true; }
+	if ( cur.brightness > 0.0f ) { ImGui::SameLine(); if ( ImGui::SmallButton( "Reset##bri" ) ) { cur.brightness = 0.0f; changed = true; } }
+	if ( p.pointLight && !p.parallel ) {
+		float r[3] = { cur.hasRadius ? cur.radius.x : p.lightRadius.x, cur.hasRadius ? cur.radius.y : p.lightRadius.y, cur.hasRadius ? cur.radius.z : p.lightRadius.z };
+		if ( ImGui::DragFloat3( "Radius", r, 1.0f, 1.0f, 4096.0f, "%.0f" ) ) { cur.hasRadius = true; cur.radius.Set( r[0], r[1], r[2] ); changed = true; }
+		if ( cur.hasRadius ) { ImGui::SameLine(); if ( ImGui::SmallButton( "Reset##rad" ) ) { cur.hasRadius = false; changed = true; } }
+	} else {
+		ImGui::TextDisabled( "(a projected light: no radius override)" );
+	}
+	if ( !r_rtEmissiveLighting.GetBool() ) { ImGui::TextDisabled( "(applies while emissive mode is on)" ); }
+	if ( changed ) {
+		if ( a < 0 ) { s_emLights.Append( cur ); }
+		else if ( !cur.deleted && !EmAuth_LightOverridden( cur ) ) { s_emLights.RemoveIndex( a ); }
+		else { s_emLights[a] = cur; }
+		EmAuth_Changed();
+	}
+}
+
 static void EmAuth_MenuLight( idRenderWorldLocal *world ) {
 	const idRenderLightLocal *ld = world->lightDefs[ s_emMenu.light ];
 	const emLightCache_t *c = EmAuth_LightCache( world, s_emMenu.light );
@@ -1277,9 +1551,9 @@ static void EmAuth_MenuLight( idRenderWorldLocal *world ) {
 	const bool deleted = a != NULL && a->deleted;
 	ImGui::Text( "Light \"%s\"", key.c_str() );
 	ImGui::TextDisabled( "%s", ld->lightShader ? ld->lightShader->GetName() : "?" );
-	ImGui::TextDisabled( "at %.0f %.0f %.0f   %s", ld->parms.origin.x, ld->parms.origin.y, ld->parms.origin.z,
-		ld->parms.pointLight ? va( "radius %.0f %.0f %.0f", ld->parms.lightRadius.x, ld->parms.lightRadius.y, ld->parms.lightRadius.z ) : "projected" );
-	ImGui::TextDisabled( "colour %.2f %.2f %.2f%s%s", ld->parms.shaderParms[0], ld->parms.shaderParms[1], ld->parms.shaderParms[2],
+	ImGui::TextDisabled( "at %.0f %.0f %.0f   %s", ld->dudePristine.origin.x, ld->dudePristine.origin.y, ld->dudePristine.origin.z,
+		ld->dudePristine.pointLight ? va( "radius %.0f %.0f %.0f", ld->dudePristine.lightRadius.x, ld->dudePristine.lightRadius.y, ld->dudePristine.lightRadius.z ) : "projected" );
+	ImGui::TextDisabled( "colour %.2f %.2f %.2f%s%s", ld->dudePristine.shaderParms[0], ld->dudePristine.shaderParms[1], ld->dudePristine.shaderParms[2],
 		ld->parms.noShadows ? ", no shadows" : "", key[0] == '@' ? ", keyed by position (no .map name)" : "" );
 	ImGui::Separator();
 	if ( deleted ) {
@@ -1301,32 +1575,13 @@ static void EmAuth_MenuLight( idRenderWorldLocal *world ) {
 		s_emMenu.prevSel = keep ? s_emMenu.light : -1; s_emMenu.prevSelSerial = keep ? s_emMenu.serial : 0u;
 	}
 	if ( ImGui::SmallButton( "Copy name" ) ) { ImGui::SetClipboardText( key.c_str() ); }
-	ImGui::TextDisabled( "Colour / brightness / radius overrides: stage L4" );
+	EmAuth_MenuLightOverrides( world, key );
 	EmAuth_MenuFileButtons();
 }
 
-// the power match's multiplier under the AUTHORED setup (the gather's authoredRowScale without an entry): a row at its
-// authored reach, its own colour, no inherited light - where a switch to physical radiance starts, so the look holds
-static float EmAuth_AuthoredMatched( const rtEmissiveRow_t &row ) {
-	const int fi = EmAuth_FindFixture( row.fixtureId );
-	rtEmissiveRow_t m = row;
-	m.reach = ( fi >= 0 && s_emFixtures[ fi ].reach > 0.0f ) ? s_emFixtures[ fi ].reach : 0.0f;
-	m.lightLum = 0.0f; m.hasLight = false;
-	return R_RtEmissiveMatchedScale( m );
-}
-
-// the power match under the authored setup for the menu's surface (scope 1) or the area-weighted one over its material's
-// rows (scope 0): where a switch to physical radiance starts, so the look does not jump
 static float EmAuth_MenuMatched( int scope ) {
-	const rtEmissiveRow_t *rows = NULL;
-	const int n = R_RtEmissiveRows( &rows );
-	double w = 0.0, sum = 0.0;
-	for ( int i = 0; i < n; i++ ) {
-		if ( scope == 1 ? rows[i].fixtureId != s_emMenu.fixture : rows[i].mat != s_emMenu.mat ) { continue; }
-		if ( rows[i].dark || !( rows[i].area > 0.0f ) ) { continue; }
-		w += rows[i].area; sum += rows[i].area * EmAuth_AuthoredMatched( rows[i] );
-	}
-	return ( w > 0.0 ) ? (float)( sum / w ) : 1.0f;
+	const float v = EmAuth_MatchedFor( scope == 0, s_emMenu.fixture, s_emMenu.mat );
+	return ( v > 0.0f ) ? v : 1.0f;
 }
 
 // The surface menu's Appearance - radiance, tint, emission profile, two-sided - for the material (every surface of it in
@@ -1423,10 +1678,10 @@ static void EmAuth_MenuSurface( idRenderWorldLocal *world ) {
 	ImGui::SameLine(); bool ch = ImGui::RadioButton( "as its material", &emit, 0 );
 	ImGui::SameLine(); ch |= ImGui::RadioButton( "emits", &emit, 1 );
 	ImGui::SameLine(); ch |= ImGui::RadioButton( "off", &emit, -1 );
-	if ( ch ) { EmAuth_FixtureRef( id ).emit = emit; EmAuth_Changed(); }
+	if ( ch ) { EmAuth_FixtureRef( id ).emit = emit; EmAuth_Changed(); if ( emit > 0 ) { EmAuth_DefaultPhysical( false, id, mat ); } }
 	if ( mat != NULL ) {
 		bool matOn = EmAuth_MaterialEmits( mat );
-		if ( ImGui::Checkbox( "Every surface of this material in this map emits", &matOn ) ) { EmAuth_SetMaterialEmit( mat, matOn ); }
+		if ( ImGui::Checkbox( "Every surface of this material in this map emits", &matOn ) ) { EmAuth_SetMaterialEmit( mat, matOn ); if ( matOn ) { EmAuth_DefaultPhysical( true, 0, mat ); } }
 	}
 	// brightness and reach (0 = unset: shown at their defaults)
 	const float reachDef = idMath::ClampFloat( 0.0f, 4096.0f, r_rtEmissiveReachDefault.GetFloat() );
@@ -1458,6 +1713,13 @@ static void EmAuth_MenuSurface( idRenderWorldLocal *world ) {
 	}
 	if ( ImGui::IsItemHovered() ) { ImGui::SetTooltip( "Then right-click the placed light whose flicker / pulse this surface copies" ); }
 	ImGui::SameLine();
+	if ( ImGui::Button( "Match a light's power..." ) ) {
+		s_emArm = EM_ARM_MATCH_LIGHT; s_emArmFixture = id;
+		EmAuth_CloseMenu();
+		return;
+	}
+	if ( ImGui::IsItemHovered() ) { ImGui::SetTooltip( "Then right-click a placed light (usually the one you deleted for this fixture): this surface\n"
+		"takes its reach and lights like it (physical radiance from the power match), once" ); }
 	if ( ImGui::Button( "Clear this surface's settings" ) && fi2 >= 0 ) { s_emFixtures.RemoveIndex( fi2 ); EmAuth_Changed(); }
 	if ( ImGui::SmallButton( "Copy fixture id" ) ) { ImGui::SetClipboardText( va( "%016llx", id ) ); }
 	EmAuth_MenuAppearance();

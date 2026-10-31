@@ -1448,6 +1448,33 @@ sysEvent_t Sys_GetEvent() {
 			// ImGui has used the event, so it shouldn't also be handled by the game
 			continue;
 		}
+		// DUDE Light Editor look mode (editLights): Del / Ins edit what the crosshair highlights, the wheel its radiance /
+		// brightness (Ctrl: the surface's material) - taken only in game (no menu, no console; ImGui had its turn above)
+#if SDL_VERSION_ATLEAST(2, 0, 0)
+		if ( sessLocal.GetActiveMenu() == NULL && !console->Active() ) {
+			if ( ev.type == SDL_KEYDOWN || ev.type == SDL_KEYUP ) {
+#if SDL_VERSION_ATLEAST(3, 0, 0)
+				const SDL_Keycode kc = ev.key.key;
+#else
+				const SDL_Keycode kc = ev.key.keysym.sym;
+#endif
+				const int edKey = ( kc == SDLK_DELETE ) ? 1 : ( kc == SDLK_INSERT ) ? 2 : 0;
+				if ( edKey != 0 && R_EmAuthKey( edKey, ev.type == SDL_KEYDOWN ) ) {
+					continue;
+				}
+			}
+			if ( ev.type == SDL_MOUSEWHEEL && ev.wheel.y != 0 ) {
+#if SDL_VERSION_ATLEAST(3, 0, 0)
+				const bool ctrl = ( SDL_GetModState() & SDL_KMOD_CTRL ) != 0;
+#else
+				const bool ctrl = ( SDL_GetModState() & KMOD_CTRL ) != 0;
+#endif
+				if ( R_EmAuthWheel( ev.wheel.y > 0 ? 1 : -1, ctrl ) ) {
+					continue;
+				}
+			}
+		}
+#endif
 		// DUDE Light Editor look mode (editLights): a right-click in game opens the menu on what the crosshair points
 		// at (renderer/RtEmissiveAuthor.cpp) and never reaches the game's binding; a left click outside the open menu
 		// closes it (no shot)
