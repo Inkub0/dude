@@ -3415,6 +3415,7 @@ R_InitCommands
 void R_InitCommands( void ) {
 	cmdSystem->AddCommand( "MakeMegaTexture", idMegaTexture::MakeMegaTexture_f, CMD_FL_RENDERER|CMD_FL_CHEAT, "processes giant images" );
 	cmdSystem->AddCommand( "sizeUp", R_SizeUp_f, CMD_FL_RENDERER, "makes the rendered view larger" );
+	R_EmAuthRegisterCommands();		// emissive authoring: lightPick / lightDelete / emitOn / emissiveSave ... (RtEmissiveAuthor.cpp)
 	cmdSystem->AddCommand( "rtEmissiveLights", R_RtEmissiveLights_f, CMD_FL_RENDERER, "rtEmissiveLights [radius]: the emissive census around you - every placed light within radius (320) with its verdict (dropped + which emitter rows inherit it, or kept) and every emitter row there with the light it inherits, its reach and size" );
 	cmdSystem->AddCommand( "rtEmissiveProbe", R_RtEmissiveProbe_f, CMD_FL_RENDERER, "names the surface under the crosshair (material, stages, entity) and reports whether / why the RT emissive table treats it as an emitter" );
 	cmdSystem->AddCommand( "rtEmissiveBakeTable", R_RtEmissiveBakeTable_f, CMD_FL_RENDERER, "emitters.cfg: add an entry for every emitting material of the loaded map that has none, with the power match's radiance multiplier (the editor's starting point); existing entries are kept" );

@@ -1192,6 +1192,14 @@ unsigned long long R_RtEmissiveTableAddress( int *numTris, float *totalFlux, flo
 struct rtEmissiveRow_t { const idMaterial *mat; idVec3 centroid; float boundRadius; float flux; float area; idVec3 meanRadiance; float reach; float lightLum; idVec3 lightOrigin; int lightIndex; unsigned long long fixtureId; bool hasLight; bool noShadows; bool tableEntry; bool indicator; int firstTri, numTris; bool dark; };
 int R_RtEmissiveRows( const rtEmissiveRow_t **rows );		// the rows (0 = no table)
 float R_RtEmissiveLightFlicker( int lightIndex, float liveLum );	// a dropped light's live / average luminance (-1 = it does not animate)
+float R_RtEmissiveLightAnimatedAverage( const idRenderLightLocal *ld );	// time-average luminance of a light's animated colour (0 = steady)
+// emissive mode AUTHORING (RtEmissiveAuthor.cpp, docs/rtx-light-editor.md): the per-map emissive/<map>.cfg decides which placed
+// lights are deleted and which glowing fixtures emit - no heuristics; a map without the file is unchanged
+bool R_EmAuthLightDeleted( const idRenderWorldLocal *world, int index );
+bool R_EmAuthFixtureEmits( const idRenderWorldLocal *world, unsigned long long fixtureId, const idMaterial *mat, float *scale, float *reach, int *followLight );
+float R_EmAuthLightAnimAverage( const idRenderWorldLocal *world, int index );
+unsigned int R_EmAuthGeneration( void );
+void R_EmAuthRegisterCommands( void );
 float R_RtEmissiveMatchedScale( const rtEmissiveRow_t &row );
 // the HDR eye adaptation runs when the user asked for it OR physical emissive mode asks for it (r_rtEmissiveAutoExposure)
 bool R_HdrEyeAdaptationWanted( void );	// the power match's radiance multiplier on the row's mean (1 = authored)

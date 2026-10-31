@@ -4077,7 +4077,7 @@ static void R_RtEmissiveFillDebugVerts( int firstTri, int numTris, idDrawVert *v
 // flashtable[Parm4 + time * .25 * Parm3] * Parm0..2) is sampled over 32 s; sound-driven colours read silence here (no
 // emitter) and count as steady. Emissive mode drops a fixtured light, so its flicker would be lost: the gather scales
 // the emitter row that replaced it by live / this average - same mean brightness, the light's own flicker back.
-static float R_RtEmissiveLightAnimatedAverage( const idRenderLightLocal *ld ) {
+float R_RtEmissiveLightAnimatedAverage( const idRenderLightLocal *ld ) {
 	const idMaterial *ls = ld->lightShader;
 	const int numRegs = ( ls != NULL ) ? ls->GetNumRegisters() : 0;
 	if ( numRegs <= 0 || numRegs > 4096 ) {

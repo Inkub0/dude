@@ -6482,8 +6482,11 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 			col.Set( ld->parms.shaderParms[SHADERPARM_RED], ld->parms.shaderParms[SHADERPARM_GREEN], ld->parms.shaderParms[SHADERPARM_BLUE] );
 		}
 		// emissive mode: note a DROPPED light's live brightness before the dark test (an OFF phase must reach its row as 0)
-		const bool emDropped = R_RtEmissiveLightDropped( i, ld->dudeSerial );
-		if ( emDropped ) {
+		// emissive mode: a light the map's authored setup DELETES (emissive/<map>.cfg, RtEmissiveAuthor.cpp - no heuristics).
+		// Every evaluated light's live brightness is noted before the dark test (an OFF phase must reach a follower as 0):
+		// an authored emitter may follow any of them, deleted or kept
+		const bool emDropped = R_EmAuthLightDeleted( rw, i );
+		if ( r_rtEmissiveLighting.GetBool() ) {
 			if ( s_emDroppedLiveLum.Num() < rw->lightDefs.Num() ) {
 				const int was = s_emDroppedLiveLum.Num();
 				s_emDroppedLiveLum.SetNum( rw->lightDefs.Num(), false );
@@ -6625,7 +6628,7 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 	// With emissive mode OFF and r_rtEmissiveBounce on, the rows are BOUNCEONLY: the DI gather skips them (the placed
 	// lights keep the direct term), the bounce lights its hits with them. Capped at r_rtEmissiveMaxRows per view by
 	// importance at the eye; a row whose reach cannot touch the view (centre farther than reach + REACH) is left out.
-	int nEm = 0, nEmTotal = 0, nEmIndicators = 0, nEmCandidates = 0;
+	int nEm = 0, nEmTotal = 0, nEmCandidates = 0;
 	if ( r_rtEmissiveLighting.GetBool() || r_rtEmissiveBounce.GetBool() ) {
 		const rtEmissiveRow_t *rows = NULL;
 		int emTris = 0; float emTotal = 0.0f, emMean = 0.0f;
@@ -6654,21 +6657,36 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 			static int   pick[ RT_EMIT_MAX_ROWS ];
 			static float pickImp[ RT_EMIT_MAX_ROWS ];
 			int np = 0;
+			// EMISSIVE MODE = AUTHORED (docs/rtx-light-editor.md): only fixtures the map's emissive/<map>.cfg makes emit enter the
+			// buffer (an unauthored map: none - emissive mode changes nothing), at the authored reach, with no automatic indicator
+			// rule and no inherited light power. Brightness: an emitters.cfg material entry (its radiance is in the triangles),
+			// else a light of the surface's own colour at the fixture's reach (the power-match formula, standalone) - times the
+			// fixture's scale. Normal mode's bounce-only rows (r_rtEmissiveBounce) keep the old path.
+			const bool authoredMode = r_rtEmissiveLighting.GetBool();
+			auto authoredRowScale = [&]( const rtEmissiveRow_t &row, float aScale, float aReach ) -> float {
+				if ( row.tableEntry ) { return aScale; }
+				rtEmissiveRow_t m = row;
+				m.reach = aReach; m.lightLum = 0.0f; m.hasLight = false;		// own colour; reach 0 = r_rtEmissiveReachDefault
+				return R_RtEmissiveMatchedScale( m ) * aScale;
+			};
 			for ( int i = 0; i < nRows && cap > 0; i++ ) {
 				const rtEmissiveRow_t &row = rows[i];
 				if ( row.dark || !( row.flux > 0.0f ) || row.numTris <= 0 || row.firstTri < 0 || row.firstTri + row.numTris > emTris ) { continue; }
 				// an INDICATOR (effective area below the fixture floor: a LED, a button) is not a light: it never enters the
 				// buffer. After the per-fixture split a map has hundreds of them and they crowded the 511-row ceiling out of
 				// the fixtures that light the far end of a corridor (Access Hall, 2026-10-20)
-				if ( row.indicator || ( !row.tableEntry && row.flux / fluxScale < minArea ) ) { nEmIndicators++; continue; }
-				float R = ( row.reach > 0.0f ) ? row.reach : reachDef;
+				float aScale = 1.0f, aReach = 0.0f; int aFollow = -1;
+				if ( authoredMode ) {
+					if ( !R_EmAuthFixtureEmits( rw, row.fixtureId, row.mat, &aScale, &aReach, &aFollow ) ) { continue; }
+				} else if ( row.indicator || ( !row.tableEntry && row.flux / fluxScale < minArea ) ) { continue; }
+				float R = authoredMode ? ( ( aReach > 0.0f ) ? aReach : reachDef ) : ( ( row.reach > 0.0f ) ? row.reach : reachDef );
 				if ( !( R > 0.0f ) ) { R = Max( row.boundRadius * 4.0f, 64.0f ); }
 				const float radius = R * ( ( reachMul > 0.0f ) ? reachMul : 1.0f );
 				const float dist   = Max( ( row.centroid - viewOrg ).Length() - row.boundRadius, 0.0f );
 				if ( dist > gridExtent + radius ) { continue; }							// beyond the light grid's reach: a far surface there lights exhaustively, not from a near cell
 				// the pick ranks on the placed lights' scale too (C x radius^2 / d^2): matched = the replaced light's luminance
 				const float meanLum = row.meanRadiance.x * 0.2126f + row.meanRadiance.y * 0.7152f + row.meanRadiance.z * 0.0722f;
-				const float LrowP = meanLum * ( row.tableEntry ? 1.0f : R_RtEmissiveMatchedScale( row ) ) * intensity;
+				const float LrowP = meanLum * ( authoredMode ? authoredRowScale( row, aScale, aReach ) : ( row.tableEntry ? 1.0f : R_RtEmissiveMatchedScale( row ) ) ) * intensity;
 				const float imp = 16.0f * LrowP * row.area / Max( dist * dist, 64.0f * 64.0f );	// 16 L A / d^2: the placed lights' proxy scale
 				if ( !( imp > 0.0f ) ) { continue; }
 				nEmCandidates++;
@@ -6689,7 +6707,9 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 			const unsigned int tLo = (unsigned int)( tAddr & 0xFFFFFFFFull ), tHi = (unsigned int)( tAddr >> 32 );
 			for ( int k = 0; k < np; k++ ) {
 				const rtEmissiveRow_t &row = rows[ pick[k] ];
-				float R = ( row.reach > 0.0f ) ? row.reach : reachDef;
+				float aScale = 1.0f, aReach = 0.0f; int aFollow = -1;
+				if ( authoredMode ) { R_EmAuthFixtureEmits( rw, row.fixtureId, row.mat, &aScale, &aReach, &aFollow ); }
+				float R = authoredMode ? ( ( aReach > 0.0f ) ? aReach : reachDef ) : ( ( row.reach > 0.0f ) ? row.reach : reachDef );
 				if ( !( R > 0.0f ) ) { R = Max( row.boundRadius * 4.0f, 64.0f ); }
 				const float radius = R * ( ( reachMul > 0.0f ) ? reachMul : 1.0f );
 				RtReflLightGPU &L = sorted[ n + nFog + nEm ];
@@ -6709,7 +6729,7 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 				// The row's radiance multiplier on its glow mean: an emitters.cfg entry = the AUTHORED radiance (its scale is
 				// already in the triangles' scale field), else the power match - how much of the replaced light's power the
 				// emitter inherits, ramped by its effective emitting area (R_RtEmissiveMatchedScale, shared with the bake)
-				const float rowScale    = row.tableEntry ? 1.0f : R_RtEmissiveMatchedScale( row );
+				const float rowScale    = authoredMode ? authoredRowScale( row, aScale, aReach ) : ( row.tableEntry ? 1.0f : R_RtEmissiveMatchedScale( row ) );
 				const float rowIntensity = intensity * rowScale;
 				const float Lrow        = meanLum * rowScale * intensity;		// the row's luminance as lit
 				float Ceq;													// the row's colour on the PLACED lights' scale (the grid ranks by lum x radius^2 / d^2)
@@ -6727,13 +6747,20 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 				const float kc = ( meanLum > 1e-6f ) ? Ceq / meanLum : 0.0f;	// the emitter's own tint at that luminance
 				L.color[0] = row.meanRadiance.x * kc; L.color[1] = row.meanRadiance.y * kc; L.color[2] = row.meanRadiance.z * kc;
 				L.flags = 64u | ( r_rtEmissiveLighting.GetBool() ? 0u : 128u )		// bit6 = emissive row, bit7 = bounce-only (normal mode)
-				        | ( row.noShadows ? 4u : 0u );									// bit2 = the replaced light cast no shadows: no visibility ray (a tube behind its cover)
+				        | ( ( !authoredMode && row.noShadows ) ? 4u : 0u );				// bit2 = the replaced light cast no shadows: no visibility ray (a tube behind its cover)
 				// the replaced light's live flicker (its flash table) - 1 when it does not animate or was not evaluated this call;
 				// projF.y carries it for the R1 gradient (an emitter's change is its factor's change, restir_di_gradient.frag)
+				// authored mode: the light the fixture FOLLOWS (emitFollow), at live / its time-average
 				float flicker = 1.0f;
-				if ( row.lightIndex >= 0 && row.lightIndex < s_emDroppedLiveGen.Num() && s_emDroppedLiveGen[ row.lightIndex ] == s_emLiveGen ) {
-					const float f = R_RtEmissiveLightFlicker( row.lightIndex, s_emDroppedLiveLum[ row.lightIndex ] );
-					if ( f >= 0.0f ) { flicker = f; }										// -1: the light does not animate
+				const int fl = authoredMode ? aFollow : row.lightIndex;
+				if ( fl >= 0 && fl < s_emDroppedLiveGen.Num() && s_emDroppedLiveGen[ fl ] == s_emLiveGen ) {
+					if ( authoredMode ) {
+						const float avg = R_EmAuthLightAnimAverage( rw, fl );
+						if ( avg > 0.0f ) { flicker = idMath::ClampFloat( 0.0f, 4.0f, s_emDroppedLiveLum[ fl ] / avg ); }
+					} else {
+						const float f = R_RtEmissiveLightFlicker( fl, s_emDroppedLiveLum[ fl ] );
+						if ( f >= 0.0f ) { flicker = f; }									// -1: the light does not animate
+					}
 				}
 				L.proj[0][3] = rowIntensity * flicker;
 				L.proj[3][1] = flicker;
@@ -6756,14 +6783,16 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 		// spammed a line every time a light entered or left the view, 2026-10-20)
 		static bool lastMode = false;
 		static unsigned long long lastTable = 0;
+		static unsigned int lastGen = 0;
 		const bool mode = r_rtEmissiveLighting.GetBool();
 		const unsigned long long table = mode ? R_RtEmissiveTableAddress( NULL, NULL, NULL ) : 0;
-		if ( mode && ( !lastMode || table != lastTable ) && table != 0 ) {
-			common->Printf( "emissive mode: %d fixtured placed lights dropped in this view, %d placed lights kept, %d emitter rows added (%d fixtures in reach of the view, %d indicators left out, %d emitting surfaces in the map; cap %d)%s\n",
-				s_diSkipEmissiveDrop, n, nEm, nEmCandidates, nEmIndicators, nEmTotal, Min( r_rtEmissiveMaxRows.GetInteger(), RT_SCENE_MAX_ROWS - n - nFog ),
+		const unsigned int gen = R_EmAuthGeneration();
+		if ( mode && ( !lastMode || table != lastTable || gen != lastGen ) && table != 0 ) {
+			common->Printf( "emissive mode (authored): %d placed lights deleted in this view, %d kept; %d emitter rows (%d authored fixtures in reach of the view; %d glowing fixtures in the map; cap %d)%s\n",
+				s_diSkipEmissiveDrop, n, nEm, nEmCandidates, nEmTotal, Min( r_rtEmissiveMaxRows.GetInteger(), RT_SCENE_MAX_ROWS - n - nFog ),
 				( nEmCandidates > nEm ) ? " - CAP HIT: the weakest fixtures at the eye are missing" : "" );
 		}
-		lastMode = mode; lastTable = table;
+		lastMode = mode; lastTable = table; lastGen = gen;
 	}
 	// r_rtgiAmbient fold: the ambient rows go LAST, behind the emitter rows (the emitter cap above left them room)
 	nAmb = Min( nAmb, RT_SCENE_MAX_ROWS - n - nFog - nEm );
