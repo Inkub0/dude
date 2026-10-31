@@ -103,6 +103,12 @@ static bool							s_emFileFound = false;
 static bool							s_emDirty = false;
 static bool							s_emRecoveryNoticed = false;	// the recovery notice was shown for this map load
 static unsigned int					s_emGen = 1;		// bumps on every change: per-light / per-fixture caches re-resolve
+// SOLO (user, 2026-10-31: "we could try isolating a single light"): only this placed light or this emitting surface lights
+// the scene - every other light leaves the scene-light buffer and the forward pass (RhiWorld.cpp RB_RHI_GatherSceneLights).
+// Session only, never saved; cleared on leaving look mode and on a map change.
+static int							s_emSoloLight = -1;			// lightDef index (-1 = none)
+static unsigned int					s_emSoloSerial = 0u;
+static unsigned long long			s_emSoloFixture = 0;		// else an emitter fixture (0 = none)
 
 // "maps/game/mars_city1" -> "emissive/game/mars_city1.cfg" (relative to the game dir; the save path wins on read)
 static idStr EmAuth_FilePath( const char *mapName ) {
@@ -352,6 +358,7 @@ static void EmAuth_Sync( const idRenderWorldLocal *world ) {
 	s_emMap = world->mapName;
 	s_emRecoveryNoticed = false;
 	s_emLightCache.SetNum( 0, false );
+	s_emSoloLight = -1; s_emSoloSerial = 0u; s_emSoloFixture = 0;	// a solo never outlives its map
 	EmAuth_ScanMapLights( s_emMap );
 	EmAuth_ReadFile();
 	common->Printf( "emissive authoring: %s - %s (%d lights named in the .map)\n", s_emMap.c_str(),
@@ -616,6 +623,7 @@ static const byte EM_COL_ACTIVE[4]   = { 235, 235, 235, 255 };
 static const byte EM_COL_DELETED[4]  = { 255,  40,  40, 255 };
 static const byte EM_COL_OVERRIDE[4] = { 255, 220,  40, 255 };
 static const byte EM_COL_HOVER[4]    = {  40, 230, 255, 255 };
+static const byte EM_COL_SOLO[4]     = { 255,  60, 255, 255 };
 static const byte EM_COL_EMITS[4]    = {  40, 220,  60, 150 };
 static const byte EM_COL_CANEMIT[4]  = { 150, 150, 150, 130 };
 static const byte EM_COL_OFF[4]      = { 255, 140,  20, 150 };
@@ -706,6 +714,50 @@ static bool EmAuth_LightShown( const idRenderLightLocal *ld ) {
 
 /*
 ===================
+R_EmAuthSolo
+
+The gather, once per refill: is a solo on? Out: the soloed lightDef (-1 = a surface is soloed) and fixture (0 = a light is).
+A soloed light that went away ends the solo.
+===================
+*/
+bool R_EmAuthSolo( const idRenderWorldLocal *world, int *light, unsigned long long *fixture ) {
+	*light = -1; *fixture = 0;
+	if ( s_emSoloLight >= 0 ) {
+		if ( world == NULL || s_emSoloLight >= world->lightDefs.Num() || world->lightDefs[ s_emSoloLight ] == NULL
+				|| world->lightDefs[ s_emSoloLight ]->dudeSerial != s_emSoloSerial ) {
+			s_emSoloLight = -1;
+			return false;
+		}
+		*light = s_emSoloLight;
+		return true;
+	}
+	if ( s_emSoloFixture != 0 ) { *fixture = s_emSoloFixture; return true; }
+	return false;
+}
+
+static void EmAuth_ClearSolo( void ) {
+	s_emSoloLight = -1; s_emSoloSerial = 0u; s_emSoloFixture = 0;
+}
+
+// solo the light (or surface) under the crosshair; again on the soloed one ends it
+static void EmAuth_ToggleSoloHover( const idRenderWorldLocal *world ) {
+	if ( s_emHoverLight >= 0 && world != NULL && s_emHoverLight < world->lightDefs.Num() && world->lightDefs[ s_emHoverLight ] != NULL ) {
+		const bool same = s_emSoloLight == s_emHoverLight;
+		EmAuth_ClearSolo();
+		if ( !same ) { s_emSoloLight = s_emHoverLight; s_emSoloSerial = world->lightDefs[ s_emHoverLight ]->dudeSerial; }
+	} else if ( s_emHoverFixture != 0 ) {
+		const bool same = s_emSoloFixture == s_emHoverFixture;
+		EmAuth_ClearSolo();
+		if ( !same ) { s_emSoloFixture = s_emHoverFixture; }
+	} else {
+		EmAuth_ClearSolo();
+	}
+	common->Printf( s_emSoloLight >= 0 ? "Light Editor: SOLO light %d - only it lights the scene (Home / lightSolo again ends it)\n"
+		: s_emSoloFixture ? "Light Editor: SOLO surface - only it lights the scene (Home / lightSolo again ends it)\n" : "Light Editor: solo off\n", s_emSoloLight );
+}
+
+/*
+===================
 R_EmAuthLookFrame
 
 Frontend, once per primary view while look mode is on: the hover pick (the nearer of a light sphere and the glowing
@@ -765,7 +817,7 @@ void R_EmAuthLookFrame( const idRenderWorldLocal *world, const viewDef_t *viewDe
 	for ( int k = 0; k < sph.Num(); k++ ) {
 		const emLightCache_t *c = EmAuth_LightCache( world, sph[k].light );
 		const emAuthLight_t *a = ( c != NULL && c->auth >= 0 ) ? &s_emLights[ c->auth ] : NULL;
-		const byte *col = ( sph[k].light == s_emHoverLight || sph[k].light == s_emSelLight ) ? EM_COL_HOVER
+		const byte *col = ( sph[k].light == s_emSoloLight ) ? EM_COL_SOLO : ( sph[k].light == s_emHoverLight || sph[k].light == s_emSelLight ) ? EM_COL_HOVER
 			: ( a != NULL && a->deleted ) ? EM_COL_DELETED : ( a != NULL && EmAuth_LightOverridden( *a ) ) ? EM_COL_OVERRIDE : EM_COL_ACTIVE;
 		EmAuth_LookSphere( sph[k].o, sph[k].r, col );
 	}
@@ -782,7 +834,7 @@ void R_EmAuthLookFrame( const idRenderWorldLocal *world, const viewDef_t *viewDe
 		const int st = EmAuth_FixtureState( world, row.fixtureId, row.mat, &own );
 		const bool hov = s_emHoverFixture != 0 && row.fixtureId == s_emHoverFixture;
 		if ( hov ) { hoverRow = &row; }
-		const byte *col = hov ? EM_COL_HOVER : ( st > 0 ) ? EM_COL_EMITS : ( st < 0 ) ? EM_COL_OFF : EM_COL_CANEMIT;
+		const byte *col = ( s_emSoloFixture != 0 && row.fixtureId == s_emSoloFixture ) ? EM_COL_SOLO : hov ? EM_COL_HOVER : ( st > 0 ) ? EM_COL_EMITS : ( st < 0 ) ? EM_COL_OFF : EM_COL_CANEMIT;
 		byte rgba[4] = { col[0], col[1], col[2], hov ? (byte)170 : col[3] };
 		if ( row.dark ) { for ( int k = 0; k < 3; k++ ) { rgba[k] = rgba[k] / 2; } }	// switched off right now
 		if ( s_emLookTints.Num() > 0 ) {
@@ -850,6 +902,12 @@ bool R_EmAuthLookGeometry( const idDrawVert **verts, int *numVerts, const glInde
 
 const char *R_EmAuthHoverText( void ) {
 	if ( !s_emLook || s_emLookFrame < tr.frameCount - 1 ) { return NULL; }	// (the console draws this frame's 2D after the view)
+	if ( s_emSoloLight >= 0 || s_emSoloFixture != 0 ) {
+		static char solo[320];
+		idStr::snPrintf( solo, sizeof( solo ), "SOLO %s (Home ends it)%s%s", s_emSoloLight >= 0 ? "light" : "surface",
+			s_emHoverText[0] ? "  |  " : "", s_emHoverText );
+		if ( s_emArm == EM_ARM_NONE ) { return solo; }
+	}
 	if ( s_emArm != EM_ARM_NONE ) {
 		static char armed[320];
 		idStr::snPrintf( armed, sizeof( armed ), "%s (right-click nothing to cancel)%s%s",
@@ -1240,12 +1298,29 @@ static void EmAuth_Info_f( const idCmdArgs &args ) {
 	}
 }
 
+static void EmAuth_LightSolo_f( const idCmdArgs &args ) {
+	idRenderWorldLocal *world = EmAuth_CmdWorld();
+	if ( world == NULL ) { return; }
+	if ( args.Argc() > 1 && atoi( args.Argv( 1 ) ) == 0 && idStr::Cmp( args.Argv( 1 ), "0" ) == 0 ) { EmAuth_ClearSolo(); common->Printf( "lightSolo: off\n" ); return; }
+	if ( !s_emLook ) {														// outside look mode: the light nearest the crosshair (or named)
+		const int i = EmAuth_PickLight( world, args );
+		if ( i < 0 ) { return; }
+		const bool same = s_emSoloLight == i;
+		EmAuth_ClearSolo();
+		if ( !same ) { s_emSoloLight = i; s_emSoloSerial = world->lightDefs[i]->dudeSerial; }
+		EmAuth_PrintLight( world, i, same ? "lightSolo: off -" : "lightSolo: SOLO" );
+		return;
+	}
+	EmAuth_ToggleSoloHover( world );
+}
+
 static void EmAuth_EditLights_f( const idCmdArgs &args ) {
 	if ( args.Argc() > 1 ) { s_emLook = atoi( args.Argv( 1 ) ) != 0; } else { s_emLook = !s_emLook; }
 	if ( !s_emLook ) {
 		if ( s_emMenu.kind != EM_MENU_NONE ) { EmAuth_CloseMenu(); }
 		s_emSelLight = -1;
 		s_emArm = EM_ARM_NONE;
+		EmAuth_ClearSolo();
 		common->Printf( "editLights: look mode off\n" );
 		return;
 	}
@@ -1257,7 +1332,7 @@ static void EmAuth_EditLights_f( const idCmdArgs &args ) {
 	if ( EmAuth_CmdWorld() == NULL ) { s_emLook = false; return; }
 	common->Printf( "editLights: look mode ON - lights: white active, red deleted, yellow overridden, cyan under the crosshair (+ its volume); "
 		"surfaces: green emits, grey can emit, orange off by exception, cyan under the crosshair (+ its reach). lightDelete / lightRestore / "
-		"emitOn / emitOff / emitMaterial ... act on what is highlighted; lightPick keeps a light's volume drawn. RIGHT-CLICK what you point at for its menu; Del deletes / restores the light (a surface: stops it emitting), Ins makes a surface emit; the WHEEL changes a surface's radiance (Ctrl: its material's) or a light's brightness. editLights again to leave.\n" );
+		"emitOn / emitOff / emitMaterial ... act on what is highlighted; lightPick keeps a light's volume drawn. RIGHT-CLICK what you point at for its menu; Del deletes / restores the light (a surface: stops it emitting), Ins makes a surface emit, Home SOLOS it (only it lights the scene); the WHEEL changes a surface's radiance (Ctrl: its material's) or a light's brightness. editLights again to leave.\n" );
 	if ( !r_rtEmissiveLighting.GetBool() ) {
 		common->Printf( "  emissive mode is off (r_rtEmissiveLighting 0): edits apply when it is on; the surface tints need it (or r_rtEmissiveTable 1)\n" );
 	}
@@ -1325,6 +1400,7 @@ bool R_EmAuthKey( int key, bool down ) {
 	if ( !s_emLook || tr.primaryWorld == NULL || s_emMenu.kind != EM_MENU_NONE ) { return false; }
 	if ( !down ) { return true; }
 	idRenderWorldLocal *world = tr.primaryWorld;
+	if ( key == 3 ) { EmAuth_ToggleSoloHover( world ); return true; }	// Home: solo what is highlighted
 	if ( s_emHoverLight >= 0 && s_emHoverLight < world->lightDefs.Num() && world->lightDefs[ s_emHoverLight ] != NULL ) {
 		if ( key != 1 ) { return true; }
 		const emLightCache_t *c = EmAuth_LightCache( world, s_emHoverLight );
@@ -1577,6 +1653,11 @@ static void EmAuth_MenuLight( idRenderWorldLocal *world ) {
 	if ( ImGui::Checkbox( "Keep its volume shown", &keep ) ) {
 		s_emMenu.prevSel = keep ? s_emMenu.light : -1; s_emMenu.prevSelSerial = keep ? s_emMenu.serial : 0u;
 	}
+	bool solo = s_emSoloLight == s_emMenu.light;
+	if ( ImGui::Checkbox( "Solo: only this light lights the scene", &solo ) ) {
+		EmAuth_ClearSolo();
+		if ( solo ) { s_emSoloLight = s_emMenu.light; s_emSoloSerial = s_emMenu.serial; }
+	}
 	if ( ImGui::SmallButton( "Copy name" ) ) { ImGui::SetClipboardText( key.c_str() ); }
 	EmAuth_MenuLightOverrides( world, key );
 	EmAuth_MenuFileButtons();
@@ -1724,6 +1805,12 @@ static void EmAuth_MenuSurface( idRenderWorldLocal *world ) {
 	if ( ImGui::IsItemHovered() ) { ImGui::SetTooltip( "Then right-click a placed light (usually the one you deleted for this fixture): this surface\n"
 		"takes its reach and lights like it (physical radiance from the power match), once" ); }
 	if ( ImGui::Button( "Clear this surface's settings" ) && fi2 >= 0 ) { s_emFixtures.RemoveIndex( fi2 ); EmAuth_Changed(); }
+	bool solo = s_emSoloFixture == id;
+	if ( ImGui::Checkbox( "Solo: only this surface lights the scene", &solo ) ) {
+		EmAuth_ClearSolo();
+		if ( solo ) { s_emSoloFixture = id; }
+	}
+	if ( solo && st <= 0 ) { ImGui::SameLine(); ImGui::TextDisabled( "(it does not emit: the scene goes dark)" ); }
 	if ( ImGui::SmallButton( "Copy fixture id" ) ) { ImGui::SetClipboardText( va( "%016llx", id ) ); }
 	EmAuth_MenuAppearance();
 	EmAuth_MenuFileButtons();
@@ -1745,9 +1832,13 @@ static void EmAuth_MenuGeneral( void ) {
 		ImGui::SameLine();
 		if ( ImGui::Button( "Discard them" ) ) { EmAuth_DiscardRecovery_f( none ); }
 	}
+	if ( s_emSoloLight >= 0 || s_emSoloFixture != 0 ) {
+		if ( ImGui::Button( "End solo" ) ) { EmAuth_ClearSolo(); }
+		ImGui::SameLine();
+	}
 	if ( ImGui::Button( "Leave look mode" ) ) {
 		EmAuth_CloseMenu();
-		s_emLook = false; s_emSelLight = -1; s_emArm = EM_ARM_NONE;
+		s_emLook = false; s_emSelLight = -1; s_emArm = EM_ARM_NONE; EmAuth_ClearSolo();
 		return;
 	}
 	EmAuth_MenuFileButtons();
@@ -1799,6 +1890,7 @@ void Com_DrawLightEditorMenu( void ) {
 #endif // IMGUI_DISABLE
 
 void R_EmAuthRegisterCommands( void ) {
+	cmdSystem->AddCommand( "lightSolo", EmAuth_LightSolo_f, CMD_FL_RENDERER, "emissive authoring: SOLO the highlighted light or surface (look mode; else the light nearest the crosshair, or lightSolo <name>) - only it lights the scene; again (or lightSolo 0) ends it. Session only" );
 	cmdSystem->AddCommand( "editEmitter", EmAuth_EditLights_f, CMD_FL_RENDERER, "the old Emitter Editor's command (2026-10-31): now an alias of editLights - the Light Editor's look mode; right-click a surface for its emitter settings" );
 	cmdSystem->AddCommand( "editLights", EmAuth_EditLights_f, CMD_FL_RENDERER, "emissive authoring: toggle the Light Editor's look mode (editLights [0|1]; bind it to a key) - lights and glowing surfaces drawn by their authored state, the one under the crosshair named" );
 	cmdSystem->AddCommand( "lightPick", EmAuth_LightPick_f, CMD_FL_RENDERER, "emissive authoring: name the placed light nearest the crosshair (its .map name or @x,y,z)" );
