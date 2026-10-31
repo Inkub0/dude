@@ -139,6 +139,17 @@ returns you to look mode.
    - emissive mode reads only the authored data (unauthored map = no change).
    - Test: author a room by commands; the file round-trips.
 2. **L2 look mode:** the gizmos (light spheres, surface tints), hover pick, and the hover label.
+   - Built (`feat/rtx-light-editor-look`): `editLights [0|1]`. The frontend (`R_EmAuthLookFrame`, once per primary
+     view) picks and builds the gizmos; the table overlay pass draws them (`emissive.look` GPU scope, shader modes
+     6 / 7). Spheres scale with distance and show faint through walls (x-ray); lights in areas the view did not reach
+     are skipped, and so are lights within 40 units of the eye (flashlight, muzzle flash).
+   - The highlighted light also shows its **volume** (the edges of its frustum windings: a point light's radius box,
+     a projected light's frustum); a highlighted surface shows its **reach** as three circles (user suggestion,
+     2026-10-31). `lightPick` in look mode selects a light so its volume stays drawn; `lightPick` on nothing clears it.
+   - The light commands act on the highlighted light (else the selected one); the emit commands keep their own
+     surface pick, which is the same trace.
+   - The label is drawn on the console's 2D debug pass (the emissive labels' path), not the ImGui foreground, so
+     screenshots include it.
 3. **L3 panels:** the ImGui Light Editor replaces the Emitter Editor: the light and surface panels, the material-wide
    toggle, live edits, save / reload.
 4. **L4:** follow-a-light, match-power, and the light colour / radius overrides through `UpdateLightDef`.

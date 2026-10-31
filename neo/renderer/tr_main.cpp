@@ -3092,9 +3092,10 @@ static float R_RtPointTriangleDistance( const idVec3 &p, const idVec3 &a, const 
 // The editor's pick for a per-fixture override: the id of the emitter CLUSTER (row) under the crosshair. Traces (through
 // flares) to a surface, finds the nearest table triangle, then the row that holds it, and returns that row's fixture id
 // (the paired light origin, or the cluster centroid). matOut / posOut report the material and the fixture position. 0 = miss.
-unsigned long long R_RtEmissivePickFixture( const idMaterial **matOut, idVec3 *posOut ) {
+unsigned long long R_RtEmissivePickFixture( const idMaterial **matOut, idVec3 *posOut, float *hitDistOut ) {
 	if ( matOut ) { *matOut = NULL; }
 	if ( posOut ) { posOut->Zero(); }
+	if ( hitDistOut ) { *hitDistOut = 0.0f; }
 	idRenderWorldLocal *world = tr.primaryWorld;
 	if ( world == NULL || world->mapName.Length() == 0 || s_rtEmissiveRows.Num() == 0 ) { return 0; }
 	const idVec3 dir = tr.primaryRenderView.viewaxis[0];
@@ -3109,6 +3110,8 @@ unsigned long long R_RtEmissivePickFixture( const idMaterial **matOut, idVec3 *p
 		int bestT = -1; float bestD = 1e30f;
 		for ( int ri = 0; ri < s_rtEmissiveRows.Num(); ri++ ) {
 			const rtEmissiveRow_t &row = s_rtEmissiveRows[ri];
+			const float reachD = row.boundRadius + Min( bestD, 24.0f );	// the row's bound sphere cannot hold a nearer triangle: skip it
+			if ( ( row.centroid - mt.point ).LengthSqr() > reachD * reachD ) { continue; }	// (look mode picks every frame)
 			for ( int t = row.firstTri; t < row.firstTri + row.numTris && t < s_rtEmissiveTris.Num(); t++ ) {
 				const rtEmissiveTriGPU_t &e = s_rtEmissiveTris[t];
 				const idVec3 a( e.p0[0], e.p0[1], e.p0[2] ), b( e.p1[0], e.p1[1], e.p1[2] ), c( e.p2[0], e.p2[1], e.p2[2] );
@@ -3122,6 +3125,7 @@ unsigned long long R_RtEmissivePickFixture( const idMaterial **matOut, idVec3 *p
 				if ( bestT >= row.firstTri && bestT < row.firstTri + row.numTris ) {
 					if ( matOut ) { *matOut = row.mat; }	// the EMITTER's material, never the collision brush
 					if ( posOut ) { *posOut = row.centroid; }
+					if ( hitDistOut ) { *hitDistOut = ( mt.point - tr.primaryRenderView.vieworg ).Length(); }
 					return row.fixtureId;
 				}
 			}
@@ -4826,6 +4830,7 @@ static bool R_RtEmissiveScanNewEntities( const idRenderWorldLocal *world ) {
 // Keep the table in step with the live RT scene: build once per map (or when its cvars change), free when off.
 // Called from R_RtWorldUpdate while the persistent scene is live for `world`.
 static void R_RtEmissiveUpdate( const idRenderWorldLocal *world, rhi::RHI *r ) {
+	R_EmAuthLookFrame( world, tr.viewDef );			// L2 look mode (editLights): the hover pick + gizmos (no-op when off)
 	if ( !r_rtEmissiveTable.GetBool() && !r_rtEmissiveLighting.GetBool() ) {		// D6: the mode implies the table (the bounce alone does not: it needs r_rtEmissiveTable)
 		if ( s_rtEmissiveMap.Length() > 0 || s_rtEmissiveBuf != 0 ) {
 			R_RtEmissiveFree();

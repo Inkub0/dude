@@ -1202,6 +1202,13 @@ unsigned int R_EmAuthGeneration( void );
 void R_EmAuthRegisterCommands( void );
 void R_EmAuthEnterEditMode( void );		// entering edit mode: the recovery-copy notice (once per map load)
 void R_EmAuthShutdown( void );			// quitting: unsaved edits go to the recovery copy
+// L2 look mode (editLights): the frontend builds the gizmos once per primary view, the backend overlay draws them
+struct rtEmAuthTint_t { int firstTri, numTris; byte rgba[4]; };	// a run of emitter-table triangles tinted by its authored state
+bool R_EmAuthLookMode( void );
+void R_EmAuthLookFrame( const idRenderWorldLocal *world, const struct viewDef_s *viewDef );
+int  R_EmAuthLookTints( const rtEmAuthTint_t **out );
+bool R_EmAuthLookGeometry( const idDrawVert **verts, int *numVerts, const glIndex_t **indexes, int *numIndexes );	// light spheres + the highlighted volume
+const char *R_EmAuthHoverText( void );	// the one-line label under the crosshair (NULL = nothing highlighted)
 float R_RtEmissiveMatchedScale( const rtEmissiveRow_t &row );
 // the HDR eye adaptation runs when the user asked for it OR physical emissive mode asks for it (r_rtEmissiveAutoExposure)
 bool R_HdrEyeAdaptationWanted( void );	// the power match's radiance multiplier on the row's mean (1 = authored)
@@ -1220,7 +1227,7 @@ int  R_RtEmissiveLightTableNum( void );
 bool R_RtEmissiveLightTableGet( unsigned long long id, float *scale, float *tint, int *profile, bool *twoSided, bool *indicator );
 void R_RtEmissiveLightTableSet( unsigned long long id, float scale, const float *tint, int profile, bool twoSided, bool indicator );
 void R_RtEmissiveLightTableRemove( unsigned long long id );
-unsigned long long R_RtEmissivePickFixture( const idMaterial **matOut, idVec3 *posOut );	// the editor's pick: the fixture id of the cluster under the crosshair
+unsigned long long R_RtEmissivePickFixture( const idMaterial **matOut, idVec3 *posOut, float *hitDistOut = NULL );	// the editor's pick: the fixture id of the cluster under the crosshair (+ the trace distance to it)
 bool R_RtEmissiveDebugGeometry( unsigned int *vb, unsigned int *ib, int *numIndexes );
 bool R_RtEmissiveLightDebugGeometry( unsigned int *vb, unsigned int *ib, int *numIndexes );	// overlay mode 5: the placed lights as census-coloured spheres
 bool R_RtEmissiveLightDropped( int lightIndex, unsigned int serial );	// E5: a fixtured placed light is dropped while emissive mode is on

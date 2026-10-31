@@ -1,7 +1,7 @@
 /*
 ===========================================================================
 
-DUDE emissive mode AUTHORING (docs/rtx-light-editor.md, stage L1).
+DUDE emissive mode AUTHORING (docs/rtx-light-editor.md, stages L1 + L2).
 
 The old emissive census GUESSED, from geometry alone, which placed lights a glowing surface replaces; a day of fixes
 (2026-10-29) showed the mapper's intent is not in the geometry. Emissive mode now reads only what was authored for the
@@ -21,7 +21,12 @@ material library as before, else a standalone power match (a light of the surfac
 or r_rtEmissiveReachDefault), times the fixture's scale. "light ... color / brightness / radius" lines are kept but
 not applied yet (stage L4).
 
-Editing without UI (L1; the Light Editor's look mode and panels are L2 / L3): console commands on what is under the
+LOOK MODE (L2): editLights toggles it (bind it to a key). Lights are spheres (white active, red deleted, yellow
+overridden), glowing surfaces tinted (green emits, grey can emit, orange off by exception); the one under the crosshair
+is cyan with its volume (a light's radius box or frustum, a surface's reach sphere) and a label naming it. The commands
+below act on what is highlighted; lightPick keeps a light's volume drawn.
+
+Editing without UI (L1; the Light Editor's panels are L3): console commands on what is under the
 crosshair - lightPick / lightDelete / lightRestore (the light nearest the crosshair ray, or a named one), emitOn /
 emitOff / emitClear / emitMaterial / emitScale / emitReach / emitFollow (the fixture under the crosshair), emissiveSave,
 emissiveReload, emissiveInfo.
@@ -41,6 +46,7 @@ emissiveSave removes the copy (it is then out of date).
 #include "framework/DeclManager.h"
 #include "renderer/tr_local.h"
 #include "renderer/RenderWorld_local.h"
+#include "renderer/rhi/RHI.h"
 #include "sys/sys_imgui.h"
 
 struct emAuthLight_t {
@@ -398,6 +404,264 @@ unsigned int R_EmAuthGeneration( void ) {
 /*
 ==============================================================================
 
+Look mode (L2, editLights): every placed light as a sphere, every glowing surface tinted by its authored state, the
+light or surface under the crosshair highlighted with its volume (a light's radius box / projection frustum, a
+surface's reach sphere) and named by a one-line label under the crosshair. The frontend builds it all here, once per
+primary view (R_EmAuthLookFrame, from R_RtEmissiveUpdate); the backend overlay draws it (RhiWorld.cpp
+RB_RHI_RtEmissiveDebugOverlay) and the console's debug-text pass the label (Console.cpp). Vulkan only. You keep
+playing; the light / emit commands act on what is highlighted.
+
+==============================================================================
+*/
+
+static bool							s_emLook = false;
+static int							s_emHoverLight = -1;		// the lightDef under the crosshair (-1 = none)
+static unsigned long long			s_emHoverFixture = 0;		// else the fixture under the crosshair (0 = none)
+static int							s_emSelLight = -1;			// lightPick in look mode: keeps that light's volume drawn
+static unsigned int					s_emSelSerial = 0u;
+static idList<rtEmAuthTint_t>		s_emLookTints;
+static idList<idDrawVert>			s_emLookVerts;				// spheres + volume edges (world space; normal.y = x-ray)
+static idList<glIndex_t>			s_emLookIndexes;
+static char							s_emHoverText[200];
+static int							s_emLookFrame = -1;			// tr.frameCount the gizmos were built for (none drawn from a stale frame)
+
+static const byte EM_COL_ACTIVE[4]   = { 235, 235, 235, 255 };
+static const byte EM_COL_DELETED[4]  = { 255,  40,  40, 255 };
+static const byte EM_COL_OVERRIDE[4] = { 255, 220,  40, 255 };
+static const byte EM_COL_HOVER[4]    = {  40, 230, 255, 255 };
+static const byte EM_COL_EMITS[4]    = {  40, 220,  60, 150 };
+static const byte EM_COL_CANEMIT[4]  = { 150, 150, 150, 130 };
+static const byte EM_COL_OFF[4]      = { 255, 140,  20, 150 };
+
+bool R_EmAuthLookMode( void ) {
+	return s_emLook;
+}
+
+// a fixture's authored state: 1 = emits, -1 = off by its own exception line, 0 = can emit (nothing says it does)
+static int EmAuth_FixtureState( const idRenderWorldLocal *world, unsigned long long id, const idMaterial *mat, bool *own ) {
+	float sc, re; int fl;
+	const int fi = EmAuth_FindFixture( id );
+	*own = fi >= 0 && s_emFixtures[ fi ].emit != 0;
+	if ( fi >= 0 && s_emFixtures[ fi ].emit < 0 ) { return -1; }
+	return R_EmAuthFixtureEmits( world, id, mat, &sc, &re, &fl ) ? 1 : 0;
+}
+
+static bool EmAuth_LightOverridden( const emAuthLight_t &l ) {
+	return l.hasColor || l.hasRadius || l.brightness > 0.0f;
+}
+
+static void EmAuth_LookVert( const idVec3 &p, const byte *c, bool xray ) {
+	idDrawVert &v = s_emLookVerts.Alloc();
+	v.Clear();
+	v.xyz = p;
+	v.normal.Set( 1.0f, xray ? 1.0f : 0.0f, 0.0f );
+	v.color[0] = c[0]; v.color[1] = c[1]; v.color[2] = c[2]; v.color[3] = c[3];
+}
+
+static void EmAuth_LookSphere( const idVec3 &o, float r, const byte *c ) {
+	static const float t = 0.8506508f, u = 0.5257311f;
+	static const float ico[12][3] = { { -u, t, 0 }, { u, t, 0 }, { -u, -t, 0 }, { u, -t, 0 }, { 0, -u, t }, { 0, u, t }, { 0, -u, -t }, { 0, u, -t }, { t, 0, -u }, { t, 0, u }, { -t, 0, -u }, { -t, 0, u } };
+	static const int icoTri[20][3] = { {0,11,5},{0,5,1},{0,1,7},{0,7,10},{0,10,11},{1,5,9},{5,11,4},{11,10,2},{10,7,6},{7,1,8},{3,9,4},{3,4,2},{3,2,6},{3,6,8},{3,8,9},{4,9,5},{2,4,11},{6,2,10},{8,6,7},{9,8,1} };
+	const int base = s_emLookVerts.Num();
+	for ( int v = 0; v < 12; v++ ) { EmAuth_LookVert( o + idVec3( ico[v][0], ico[v][1], ico[v][2] ) * r, c, true ); }
+	for ( int f = 0; f < 20; f++ ) {
+		for ( int k = 0; k < 3; k++ ) { s_emLookIndexes.Append( (glIndex_t)( base + icoTri[f][k] ) ); }
+	}
+}
+
+// a line as a thin quad facing the eye, ~1.5 px wide at any distance
+static void EmAuth_LookSegment( const idVec3 &a, const idVec3 &b, const idVec3 &eye, const byte *c ) {
+	const idVec3 mid = ( a + b ) * 0.5f;
+	idVec3 side = ( b - a ).Cross( mid - eye );
+	if ( side.Normalize() < 1e-6f ) { return; }
+	side *= Max( 0.2f, 0.0011f * ( mid - eye ).Length() );
+	const int base = s_emLookVerts.Num();
+	EmAuth_LookVert( a - side, c, true ); EmAuth_LookVert( a + side, c, true );
+	EmAuth_LookVert( b + side, c, true ); EmAuth_LookVert( b - side, c, true );
+	static const int q[6] = { 0, 1, 2, 0, 2, 3 };
+	for ( int k = 0; k < 6; k++ ) { s_emLookIndexes.Append( (glIndex_t)( base + q[k] ) ); }
+}
+
+// a light's volume: the edges of its frustum windings (a point light's radius box, a projected light's frustum)
+static void EmAuth_LookLightVolume( const idRenderLightLocal *ld, const idVec3 &eye, const byte *c ) {
+	for ( int i = 0; i < 6; i++ ) {
+		const idWinding *w = ld->frustumWindings[i];
+		if ( w == NULL ) { continue; }
+		const int n = w->GetNumPoints();
+		for ( int k = 0; k < n; k++ ) { EmAuth_LookSegment( (*w)[k].ToVec3(), (*w)[ ( k + 1 ) % n ].ToVec3(), eye, c ); }
+	}
+}
+
+// a surface's reach: three great circles of radius r
+static void EmAuth_LookReach( const idVec3 &o, float r, const idVec3 &eye, const byte *c ) {
+	const int SEG = 48;
+	const idVec3 ax[3][2] = { { idVec3( 1, 0, 0 ), idVec3( 0, 1, 0 ) }, { idVec3( 1, 0, 0 ), idVec3( 0, 0, 1 ) }, { idVec3( 0, 1, 0 ), idVec3( 0, 0, 1 ) } };
+	for ( int a = 0; a < 3; a++ ) {
+		for ( int k = 0; k < SEG; k++ ) {
+			const float t0 = idMath::TWO_PI * k / SEG, t1 = idMath::TWO_PI * ( k + 1 ) / SEG;
+			EmAuth_LookSegment( o + ( ax[a][0] * idMath::Cos( t0 ) + ax[a][1] * idMath::Sin( t0 ) ) * r,
+			                    o + ( ax[a][0] * idMath::Cos( t1 ) + ax[a][1] * idMath::Sin( t1 ) ) * r, eye, c );
+		}
+	}
+}
+
+static const char *EmAuth_ShortMaterial( const idMaterial *mat ) {
+	if ( mat == NULL ) { return "?"; }
+	const char *name = mat->GetName();
+	if ( !idStr::Cmpn( name, "textures/", 9 ) ) { return name + 9; }
+	if ( !idStr::Cmpn( name, "models/mapobjects/", 18 ) ) { return name + 18; }
+	return name;
+}
+
+static bool EmAuth_LightShown( const idRenderLightLocal *ld ) {
+	return ld != NULL && ld->lightShader != NULL && !ld->parms.parallel;
+}
+
+/*
+===================
+R_EmAuthLookFrame
+
+Frontend, once per primary view while look mode is on: the hover pick (the nearer of a light sphere and the glowing
+surface under the crosshair), the light spheres, the surface tints and the highlighted object's volume.
+===================
+*/
+void R_EmAuthLookFrame( const idRenderWorldLocal *world, const viewDef_t *viewDef ) {
+	s_emLookTints.SetNum( 0, false );
+	s_emLookVerts.SetNum( 0, false );
+	s_emLookIndexes.SetNum( 0, false );
+	s_emHoverText[0] = '\0';
+	s_emHoverLight = -1;
+	s_emHoverFixture = 0;
+	if ( !s_emLook || world == NULL || viewDef == NULL || world->mapName.Length() == 0 ) { return; }
+	s_emLookFrame = tr.frameCount;
+	EmAuth_Sync( world );
+	const idVec3 eye = tr.primaryRenderView.vieworg;
+	const idVec3 dir = tr.primaryRenderView.viewaxis[0];
+	float wallDist = 4096.0f;									// a light sphere behind the first wall is not picked
+	{
+		modelTrace_t mt;
+		if ( const_cast<idRenderWorldLocal *>( world )->Trace( mt, eye, eye + dir * 4096.0f, 0.0f, false, true ) ) { wallDist = ( mt.point - eye ).Length(); }
+	}
+	// the surface under the crosshair
+	const idMaterial *fixMat = NULL; idVec3 fixPos; float fixDist = 0.0f;
+	const unsigned long long fix = R_RtEmissivePickFixture( &fixMat, &fixPos, &fixDist );
+	// the light spheres: lights in the areas this view reached (or in solid: inside a fixture's housing)
+	struct sph_t { int light; idVec3 o; float r; };
+	static idList<sph_t> sph;
+	sph.SetNum( 0, false );
+	int hover = -1; float hoverT = 1e30f;
+	for ( int i = 0; i < world->lightDefs.Num(); i++ ) {
+		const idRenderLightLocal *ld = world->lightDefs[i];
+		if ( !EmAuth_LightShown( ld ) ) { continue; }
+		const idVec3 o = ld->parms.origin;
+		const idVec3 v = o - eye;
+		const float dist = v.Length();
+		if ( dist < 40.0f || dist > 3000.0f ) { continue; }		// < 40: the player's own lights (flashlight, muzzle flash)
+		const int area = world->PointInArea( o );
+		if ( area >= 0 && area < world->NumAreas() && world->portalAreas[area].viewCount != tr.viewCount ) { continue; }
+		sph_t &s = sph.Alloc();
+		s.light = i; s.o = o; s.r = Max( 5.0f, 0.009f * dist );
+		const float t = v * dir;
+		if ( t <= 0.0f ) { continue; }
+		const float d = ( v - dir * t ).Length();
+		if ( d <= s.r * 1.5f && t - s.r <= wallDist + 16.0f && t < hoverT ) { hoverT = t; hover = i; }
+	}
+	if ( hover >= 0 && ( fix == 0 || hoverT - 8.0f <= fixDist ) ) {
+		s_emHoverLight = hover;
+	} else if ( fix != 0 ) {
+		s_emHoverFixture = fix;
+	}
+	if ( s_emSelLight >= 0 && ( s_emSelLight >= world->lightDefs.Num() || world->lightDefs[ s_emSelLight ] == NULL
+			|| world->lightDefs[ s_emSelLight ]->dudeSerial != s_emSelSerial ) ) {
+		s_emSelLight = -1;											// the selected light is gone
+	}
+	for ( int k = 0; k < sph.Num(); k++ ) {
+		const emLightCache_t *c = EmAuth_LightCache( world, sph[k].light );
+		const emAuthLight_t *a = ( c != NULL && c->auth >= 0 ) ? &s_emLights[ c->auth ] : NULL;
+		const byte *col = ( sph[k].light == s_emHoverLight || sph[k].light == s_emSelLight ) ? EM_COL_HOVER
+			: ( a != NULL && a->deleted ) ? EM_COL_DELETED : ( a != NULL && EmAuth_LightOverridden( *a ) ) ? EM_COL_OVERRIDE : EM_COL_ACTIVE;
+		EmAuth_LookSphere( sph[k].o, sph[k].r, col );
+	}
+	if ( s_emHoverLight >= 0 ) { EmAuth_LookLightVolume( world->lightDefs[ s_emHoverLight ], eye, EM_COL_HOVER ); }
+	if ( s_emSelLight >= 0 && s_emSelLight != s_emHoverLight ) { EmAuth_LookLightVolume( world->lightDefs[ s_emSelLight ], eye, EM_COL_HOVER ); }
+
+	// the surface tints: one entry per run of rows with the same state (rows are in table order)
+	const rtEmissiveRow_t *rows = NULL;
+	const int numRows = R_RtEmissiveRows( &rows );
+	const rtEmissiveRow_t *hoverRow = NULL;
+	for ( int ri = 0; ri < numRows; ri++ ) {
+		const rtEmissiveRow_t &row = rows[ri];
+		bool own;
+		const int st = EmAuth_FixtureState( world, row.fixtureId, row.mat, &own );
+		const bool hov = s_emHoverFixture != 0 && row.fixtureId == s_emHoverFixture;
+		if ( hov ) { hoverRow = &row; }
+		const byte *col = hov ? EM_COL_HOVER : ( st > 0 ) ? EM_COL_EMITS : ( st < 0 ) ? EM_COL_OFF : EM_COL_CANEMIT;
+		byte rgba[4] = { col[0], col[1], col[2], hov ? (byte)170 : col[3] };
+		if ( row.dark ) { for ( int k = 0; k < 3; k++ ) { rgba[k] = rgba[k] / 2; } }	// switched off right now
+		if ( s_emLookTints.Num() > 0 ) {
+			rtEmAuthTint_t &last = s_emLookTints[ s_emLookTints.Num() - 1 ];
+			if ( last.firstTri + last.numTris == row.firstTri && memcmp( last.rgba, rgba, 4 ) == 0 ) { last.numTris += row.numTris; continue; }
+		}
+		rtEmAuthTint_t &t = s_emLookTints.Alloc();
+		t.firstTri = row.firstTri; t.numTris = row.numTris;
+		memcpy( t.rgba, rgba, 4 );
+	}
+
+	// the label (and the hovered surface's reach)
+	if ( s_emHoverLight >= 0 ) {
+		const idRenderLightLocal *ld = world->lightDefs[ s_emHoverLight ];
+		const emLightCache_t *c = EmAuth_LightCache( world, s_emHoverLight );
+		const emAuthLight_t *a = ( c != NULL && c->auth >= 0 ) ? &s_emLights[ c->auth ] : NULL;
+		const char *lname = ld->lightShader->GetName();
+		if ( !idStr::Cmpn( lname, "lights/", 7 ) ) { lname += 7; }
+		const idStr shape = ld->parms.pointLight ? idStr( va( "r %.0f %.0f %.0f", ld->parms.lightRadius.x, ld->parms.lightRadius.y, ld->parms.lightRadius.z ) )
+			: idStr( va( "projected, reach %.0f", ld->parms.target.Length() ) );
+		idStr::snPrintf( s_emHoverText, sizeof( s_emHoverText ), "light \"%s\"  %s  %s - %s%s",
+			c ? c->key.c_str() : "?", lname, shape.c_str(),
+			( a != NULL && a->deleted ) ? "DELETED in emissive mode" : ( a != NULL && EmAuth_LightOverridden( *a ) ) ? "overridden" : "active",
+			s_emHoverLight == s_emSelLight ? "  [selected]" : "" );
+	} else if ( s_emHoverFixture != 0 ) {
+		bool own;
+		const int st = EmAuth_FixtureState( world, s_emHoverFixture, fixMat, &own );
+		const int fi = EmAuth_FindFixture( s_emHoverFixture );
+		const emAuthFixture_t *f = ( fi >= 0 ) ? &s_emFixtures[ fi ] : NULL;
+		const float reachDef = idMath::ClampFloat( 0.0f, 4096.0f, r_rtEmissiveReachDefault.GetFloat() );
+		float reach = ( f != NULL && f->reach > 0.0f ) ? f->reach : reachDef;
+		if ( !( reach > 0.0f ) && hoverRow != NULL ) { reach = Max( hoverRow->boundRadius * 4.0f, 64.0f ); }
+		idStr state;
+		if ( st > 0 ) {
+			state = va( "emits%s", own ? "" : " (its material)" );
+			if ( f != NULL && f->scale > 0.0f ) { state += va( " x%.2f", f->scale ); }
+		} else if ( st < 0 ) {
+			state = "off (exception to its material)";
+		} else {
+			state = "can emit (emitOn / emitMaterial)";
+		}
+		state += va( "  reach %.0f", reach );
+		if ( f != NULL && f->follow.Length() ) { state += va( "  follows \"%s\"", f->follow.c_str() ); }
+		idStr::snPrintf( s_emHoverText, sizeof( s_emHoverText ), "surface %s  fixture %016llx - %s", EmAuth_ShortMaterial( fixMat ), s_emHoverFixture, state.c_str() );
+		if ( reach > 0.0f ) { EmAuth_LookReach( hoverRow != NULL ? hoverRow->centroid : fixPos, reach, eye, EM_COL_HOVER ); }
+	}
+}
+
+int R_EmAuthLookTints( const rtEmAuthTint_t **out ) {
+	*out = s_emLookTints.Ptr();
+	return ( s_emLook && s_emLookFrame == tr.frameCount ) ? s_emLookTints.Num() : 0;
+}
+
+bool R_EmAuthLookGeometry( const idDrawVert **verts, int *numVerts, const glIndex_t **indexes, int *numIndexes ) {
+	*verts = s_emLookVerts.Ptr(); *numVerts = s_emLookVerts.Num();
+	*indexes = s_emLookIndexes.Ptr(); *numIndexes = s_emLookIndexes.Num();
+	return s_emLook && s_emLookFrame == tr.frameCount && *numIndexes > 0;
+}
+
+const char *R_EmAuthHoverText( void ) {
+	return ( s_emLook && s_emLookFrame >= tr.frameCount - 1 && s_emHoverText[0] != '\0' ) ? s_emHoverText : NULL;	// the console draws next frame's 2D
+}
+
+/*
+==============================================================================
+
 Console commands (L1: edit by command on what is under the crosshair)
 
 ==============================================================================
@@ -441,6 +705,10 @@ static int EmAuth_PickLight( idRenderWorldLocal *world, const idCmdArgs &args ) 
 		if ( i < 0 ) { common->Printf( "no light '%s' in this map\n", args.Argv( 1 ) ); }
 		return i;
 	}
+	if ( s_emLook ) {
+		if ( s_emHoverLight >= 0 && s_emHoverLight < world->lightDefs.Num() && world->lightDefs[ s_emHoverLight ] != NULL ) { return s_emHoverLight; }
+		if ( s_emSelLight >= 0 ) { return s_emSelLight; }
+	}
 	const idVec3 eye = tr.primaryRenderView.vieworg;
 	const idVec3 dir = tr.primaryRenderView.viewaxis[0];
 	int best = -1; float bestScore = 1e30f;
@@ -470,8 +738,16 @@ static void EmAuth_PrintLight( idRenderWorldLocal *world, int i, const char *ver
 static void EmAuth_LightPick_f( const idCmdArgs &args ) {
 	idRenderWorldLocal *world = EmAuth_CmdWorld();
 	if ( world == NULL ) { return; }
+	if ( s_emLook && args.Argc() <= 1 && s_emHoverLight < 0 ) {			// look mode, nothing under the crosshair: clear the selection
+		if ( s_emSelLight >= 0 ) { common->Printf( "lightPick: selection cleared\n" ); }
+		s_emSelLight = -1;
+		return;
+	}
 	const int i = EmAuth_PickLight( world, args );
-	if ( i >= 0 ) { EmAuth_PrintLight( world, i, "lightPick:" ); }
+	if ( i >= 0 ) {
+		EmAuth_PrintLight( world, i, "lightPick:" );
+		if ( s_emLook ) { s_emSelLight = i; s_emSelSerial = world->lightDefs[i]->dudeSerial; }	// its volume stays drawn
+	}
 }
 
 static void EmAuth_SetDeleted( const idCmdArgs &args, bool deleted ) {
@@ -679,7 +955,29 @@ static void EmAuth_Info_f( const idCmdArgs &args ) {
 	}
 }
 
+static void EmAuth_EditLights_f( const idCmdArgs &args ) {
+	if ( args.Argc() > 1 ) { s_emLook = atoi( args.Argv( 1 ) ) != 0; } else { s_emLook = !s_emLook; }
+	if ( !s_emLook ) {
+		s_emSelLight = -1;
+		common->Printf( "editLights: look mode off\n" );
+		return;
+	}
+	if ( rhi::GetActiveBackendType() != rhi::BT_VULKAN ) {
+		s_emLook = false;
+		common->Printf( "editLights: Vulkan only (r_backend vulkan)\n" );
+		return;
+	}
+	if ( EmAuth_CmdWorld() == NULL ) { s_emLook = false; return; }
+	common->Printf( "editLights: look mode ON - lights: white active, red deleted, yellow overridden, cyan under the crosshair (+ its volume); "
+		"surfaces: green emits, grey can emit, orange off by exception, cyan under the crosshair (+ its reach). lightDelete / lightRestore / "
+		"emitOn / emitOff / emitMaterial ... act on what is highlighted; lightPick keeps a light's volume drawn. editLights again to leave.\n" );
+	if ( !r_rtEmissiveLighting.GetBool() ) {
+		common->Printf( "  emissive mode is off (r_rtEmissiveLighting 0): edits apply when it is on; the surface tints need it (or r_rtEmissiveTable 1)\n" );
+	}
+}
+
 void R_EmAuthRegisterCommands( void ) {
+	cmdSystem->AddCommand( "editLights", EmAuth_EditLights_f, CMD_FL_RENDERER, "emissive authoring: toggle the Light Editor's look mode (editLights [0|1]; bind it to a key) - lights and glowing surfaces drawn by their authored state, the one under the crosshair named" );
 	cmdSystem->AddCommand( "lightPick", EmAuth_LightPick_f, CMD_FL_RENDERER, "emissive authoring: name the placed light nearest the crosshair (its .map name or @x,y,z)" );
 	cmdSystem->AddCommand( "lightDelete", EmAuth_LightDelete_f, CMD_FL_RENDERER, "emissive authoring: delete the placed light nearest the crosshair (or lightDelete <name>) in emissive mode" );
 	cmdSystem->AddCommand( "lightRestore", EmAuth_LightRestore_f, CMD_FL_RENDERER, "emissive authoring: restore the placed light nearest the crosshair (or lightRestore <name>)" );

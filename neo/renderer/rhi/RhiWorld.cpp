@@ -10444,11 +10444,20 @@ void RB_RHI_LightGridDebugOverlay( rhi::RHI *r, const viewDef_t *viewDef ) {
 // view as real world-space geometry (tr_main.cpp R_RtEmissiveDebugGeometry, built lazily from the table's CPU copy),
 // depth-tested in the fragment stage against the sealed scene depth. Validates the gather (which surfaces are
 // emitters, mode 1), the flux (mode 2) and the colour E2 would light with (mode 3) before anything consumes the table.
+static void RB_RHI_EmAuthLookOverlay( rhi::RHI *r, const viewDef_t *viewDef );
+static void RB_RHI_RtEmissiveTableDebugDraw( rhi::RHI *r, const viewDef_t *viewDef );
+
 void RB_RHI_RtEmissiveDebugOverlay( rhi::RHI *r, const viewDef_t *viewDef ) {
-	if ( r_rtEmissiveTableDebug.GetInteger() <= 0 || rhi::GetActiveBackendType() != rhi::BT_VULKAN
-			|| globalImages->currentDepthImage->uploadWidth <= 0 ) {
+	if ( rhi::GetActiveBackendType() != rhi::BT_VULKAN || globalImages->currentDepthImage->uploadWidth <= 0 ) {
 		return;
 	}
+	if ( r_rtEmissiveTableDebug.GetInteger() > 0 ) {
+		RB_RHI_RtEmissiveTableDebugDraw( r, viewDef );
+	}
+	RB_RHI_EmAuthLookOverlay( r, viewDef );			// L2 look mode (editLights), over the table overlay
+}
+
+static void RB_RHI_RtEmissiveTableDebugDraw( rhi::RHI *r, const viewDef_t *viewDef ) {
 	int numTris = 0; float totalFlux = 0.0f, meanFlux = 0.0f;
 	if ( R_RtEmissiveTableAddress( &numTris, &totalFlux, &meanFlux ) == 0 || numTris <= 0 ) {
 		return;
@@ -10512,6 +10521,107 @@ void RB_RHI_RtEmissiveDebugOverlay( rhi::RHI *r, const viewDef_t *viewDef ) {
 	r->Draw( da );
 	r->GpuScopeEnd();
 	backEnd.pc.c_drawElements++;
+	RB_RHI_ForgetTexBinds();
+}
+
+// L2 look mode (docs/rtx-light-editor.md, RtEmissiveAuthor.cpp R_EmAuthLookFrame built it this frame): the glowing
+// surfaces tinted by their authored state (the table overlay's geometry, one draw per run of same-state rows, mode 7:
+// hard depth test, the colour in u_localParam1), then the light spheres and the highlighted volume (streamed
+// geometry, mode 6: x-ray - faint where the scene hides them). Alpha-blended over the pre-tonemap scene.
+static void RB_RHI_EmAuthLookOverlay( rhi::RHI *r, const viewDef_t *viewDef ) {
+	if ( !R_EmAuthLookMode() ) {
+		return;
+	}
+	const rtEmAuthTint_t *tints = NULL;
+	const int numTints = R_EmAuthLookTints( &tints );
+	const idDrawVert *verts = NULL; const glIndex_t *indexes = NULL;
+	int numVerts = 0, numIndexes = 0;
+	const bool geo = R_EmAuthLookGeometry( &verts, &numVerts, &indexes, &numIndexes );
+	rhi::BufferHandle tvb = 0, tib = 0;
+	int tableIndexes = 0;
+	const bool table = numTints > 0 && R_RtEmissiveDebugGeometry( &tvb, &tib, &tableIndexes ) && tableIndexes > 0;
+	if ( !table && !geo ) {
+		return;
+	}
+	rhi::ShaderHandle prog = r->LoadShader( "rt_emissive_debug" );
+	if ( !prog ) {
+		return;
+	}
+	const int w = viewDef->viewport.x2 - viewDef->viewport.x1 + 1;
+	const int h = viewDef->viewport.y2 - viewDef->viewport.y1 + 1;
+	rhi::RenderParams parms;
+	memset( &parms, 0, sizeof( parms ) );
+	RB_RHI_SpaceMvp( viewDef, &viewDef->worldSpace, parms.mvpMatrix );
+	parms.depthTexRecip[0] = 1.0f / globalImages->currentDepthImage->uploadWidth;
+	parms.depthTexRecip[1] = 1.0f / globalImages->currentDepthImage->uploadHeight;
+	parms.screenCorrection[0] = 1.0f / w;
+	parms.screenCorrection[1] = 1.0f / h;
+	rhi::FillDepthParms( parms, viewDef->projectionMatrix );
+
+	r->SetViewport( tr.viewportOffset[0] + viewDef->viewport.x1, tr.viewportOffset[1] + viewDef->viewport.y1, w, h );
+	r->SetScissor( tr.viewportOffset[0] + viewDef->viewport.x1, tr.viewportOffset[1] + viewDef->viewport.y1, w, h );
+	backEnd.currentScissor = viewDef->scissor;
+
+	rhi::PipelineDesc pd;
+	pd.stateBits = GLS_DEPTHFUNC_ALWAYS | GLS_DEPTHMASK | GLS_SRCBLEND_SRC_ALPHA | GLS_DSTBLEND_ONE_MINUS_SRC_ALPHA;
+	pd.shader = prog;
+	pd.vertexLayout = rhi::VL_DRAWVERT;
+	pd.cullType = CT_TWO_SIDED;
+	r->BindPipeline( pd );
+	RB_RHI_BindUnit( 0, globalImages->currentDepthImage );
+	r->GpuScopeBegin( "emissive.look" );
+
+	rhi::DrawArgs da;
+	memset( &da, 0, sizeof( da ) );
+	da.uniformSize = sizeof( parms );
+	if ( table ) {
+		// one uniform slice per distinct colour (a handful), shared by every run of that colour
+		struct slice_t { byte rgba[4]; rhi::BufferHandle ub; int ofs; };
+		slice_t slices[16];
+		int numSlices = 0;
+		parms.localParam0[0] = 7.0f;
+		da.vertexBuffer = tvb;
+		da.indexBuffer = tib;
+		for ( int i = 0; i < numTints; i++ ) {
+			const rtEmAuthTint_t &t = tints[i];
+			const int first = t.firstTri * 3, count = t.numTris * 3;
+			if ( t.firstTri < 0 || count <= 0 || first + count > tableIndexes ) {
+				continue;											// the table was rebuilt under the list: skip (next frame rebuilds it)
+			}
+			int sl = -1;
+			for ( int k = 0; k < numSlices; k++ ) { if ( memcmp( slices[k].rgba, t.rgba, 4 ) == 0 ) { sl = k; break; } }
+			if ( sl < 0 ) {
+				if ( numSlices == 16 ) { continue; }
+				sl = numSlices++;
+				memcpy( slices[sl].rgba, t.rgba, 4 );
+				for ( int k = 0; k < 4; k++ ) { parms.localParam1[k] = t.rgba[k] * ( 1.0f / 255.0f ); }
+				slices[sl].ofs = r->AllocUniforms( &parms, sizeof( parms ), &slices[sl].ub );
+			}
+			da.uniformBuffer = slices[sl].ub;
+			da.uniformOffset = slices[sl].ofs;
+			da.firstIndex = first;
+			da.indexCount = count;
+			RB_RHI_VkTextures( da );
+			r->Draw( da );
+			backEnd.pc.c_drawElements++;
+		}
+	}
+	if ( geo ) {
+		parms.localParam0[0] = 6.0f;
+		rhi::BufferHandle ub, vb, ib;
+		da.uniformOffset = r->AllocUniforms( &parms, sizeof( parms ), &ub );
+		da.uniformBuffer = ub;
+		da.vertexOffset = r->AllocVertices( verts, numVerts * (int)sizeof( idDrawVert ), &vb );
+		const int idxOfs = r->AllocIndices( indexes, numIndexes * (int)sizeof( glIndex_t ), &ib );
+		da.vertexBuffer = vb;
+		da.indexBuffer = ib;
+		da.firstIndex = idxOfs / (int)sizeof( glIndex_t );
+		da.indexCount = numIndexes;
+		RB_RHI_VkTextures( da );
+		r->Draw( da );
+		backEnd.pc.c_drawElements++;
+	}
+	r->GpuScopeEnd();
 	RB_RHI_ForgetTexBinds();
 }
 
