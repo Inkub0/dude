@@ -1215,7 +1215,8 @@ void R_EmAuthLookFrame( const idRenderWorldLocal *world, const struct viewDef_s 
 int  R_EmAuthLookTints( const rtEmAuthTint_t **out );
 bool R_EmAuthLookGeometry( const idDrawVert **verts, int *numVerts, const glIndex_t **indexes, int *numIndexes );	// light spheres + the highlighted volume
 const char *R_EmAuthHoverText( void );	// the one-line label under the crosshair (NULL = nothing highlighted)
-bool R_EmAuthKey( int key, bool down );		// events.cpp, Del (1) / Ins (2) in game: true = look mode took it
+bool R_EmAuthKey( int key, bool down );		// events.cpp, Del (1) / Ins (2) / Home (3) in game: true = look mode took it
+bool R_EmAuthSolo( const idRenderWorldLocal *world, int *light, unsigned long long *fixture );	// the Light Editor's solo: only this light / surface lights
 bool R_EmAuthWheel( int dir, bool material );	// events.cpp, a wheel step in game (Ctrl = the material): true = look mode took it
 // L4: the authored light overrides (emissive mode only) on a copy of the game's parms (UpdateLightDef), and the re-derive
 // of every affected light when the data or the mode changes (RenderScene)

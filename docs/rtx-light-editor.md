@@ -188,6 +188,10 @@ returns you to look mode.
      power match against its luminance (physical), Brightness reset. One-shot.
    - **New emitters are physical** (user, 2026-10-31): emitOn / emitMaterial / the menu / Ins on a surface with no
      radiance in effect sets the radiance to its current power match - same look, physical from then on.
+   - **Solo** (user, 2026-10-31, to isolate the bright-groove floors): Home in look mode, the menus' "Solo" checkbox or
+     `lightSolo` - only the highlighted placed light or emitter row lights the scene (every other light is marked
+     DI-covered and left out of the buffer and the forward pass, like a deleted one; a soloed deleted light shines).
+     Magenta in look mode, "SOLO" in the label. Session only; cleared on leaving look mode or changing map.
    - **Keys in look mode** (user, 2026-10-31): Del deletes the highlighted light (again: restores it) or stops the
      highlighted surface emitting; Ins makes it emit. The **wheel** changes the highlighted surface's radiance by 10 %
      a step (Ctrl: its material's) or the highlighted light's brightness; with nothing highlighted the wheel stays the

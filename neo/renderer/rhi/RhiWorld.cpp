@@ -6398,6 +6398,11 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 	// Two passes: the lights the frontend LIT in this view first - under the ReSTIR DI apply the buffer IS the lit set, and a
 	// 256-entry buffer filled in lightDef order from everything within reach was full before some on-screen lights got their
 	// turn ("not-in-buffer 6 of 18: capacity 7", 2026-10-12) - then the off-screen ones (reflections, haze) until it is full.
+	// the Light Editor's SOLO (RtEmissiveAuthor.cpp): only that placed light - or only that emitter row - lights the scene.
+	// Every other light is marked DI-covered and left out, like a deleted one, so the forward pass skips it too.
+	int soloLight = -1;
+	unsigned long long soloFixture = 0;
+	const bool solo = R_EmAuthSolo( rw, &soloLight, &soloFixture );
 	for ( int pass = 0; pass < 2; pass++ ) {
 	for ( int i = 0; i < rw->lightDefs.Num(); i++ ) {
 		if ( ( viewLightOf[ i ] != NULL ) != ( pass == 0 ) ) { continue; }	// pass 0 = in view, pass 1 = off screen
@@ -6432,6 +6437,7 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 			continue;
 		}
 		if ( ls == NULL ) { if ( viewLightOf[ i ] != NULL ) { s_diSkipNoShader++; } continue; }
+		if ( solo && i != soloLight && !ls->IsBlendLight() ) { s_sceneLightCoveredGen[ i ] = s_sceneLightGen; continue; }	// soloing another light
 		// an ambient light is not a light the DI / reflections / haze can use (no position the fill comes from); the
 		// r_rtgiAmbient fold keeps it as a bounce-only AMBIENT row (collected apart, appended behind the emitters)
 		const bool ambRow = ls->IsAmbientLight() && foldAmbient;
@@ -6484,7 +6490,7 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 		// emissive mode: a light the map's authored setup DELETES (emissive/<map>.cfg, RtEmissiveAuthor.cpp - no heuristics).
 		// Every evaluated light's live brightness is noted before the dark test (an OFF phase must reach a follower as 0):
 		// an authored emitter may follow any of them, deleted or kept (the bounce-only rows of normal mode too)
-		const bool emDropped = R_EmAuthLightDeleted( rw, i );
+		const bool emDropped = R_EmAuthLightDeleted( rw, i ) && !( solo && i == soloLight );	// a soloed light shines even if deleted
 		if ( r_rtEmissiveLighting.GetBool() || r_rtEmissiveBounce.GetBool() ) {
 			if ( s_emDroppedLiveLum.Num() < rw->lightDefs.Num() ) {
 				const int was = s_emDroppedLiveLum.Num();
@@ -6670,6 +6676,7 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 				// an INDICATOR (effective area below the fixture floor: a LED, a button) is not a light: it never enters the
 				// buffer. After the per-fixture split a map has hundreds of them and they crowded the 511-row ceiling out of
 				// the fixtures that light the far end of a corridor (Access Hall, 2026-10-20)
+				if ( solo && row.fixtureId != soloFixture ) { continue; }			// the Light Editor's solo: another light / surface
 				rtEmAuthEmit_t ap;
 				if ( !R_EmAuthFixtureEmits( rw, row.fixtureId, row.mat, &ap ) ) { continue; }
 				float R = ( ap.reach > 0.0f ) ? ap.reach : reachDef;

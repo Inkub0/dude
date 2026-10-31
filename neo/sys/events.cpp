@@ -1448,7 +1448,7 @@ sysEvent_t Sys_GetEvent() {
 			// ImGui has used the event, so it shouldn't also be handled by the game
 			continue;
 		}
-		// DUDE Light Editor look mode (editLights): Del / Ins edit what the crosshair highlights, the wheel its radiance /
+		// DUDE Light Editor look mode (editLights): Del / Ins / Home (solo) edit what the crosshair highlights, the wheel its radiance /
 		// brightness (Ctrl: the surface's material) - taken only in game (no menu, no console; ImGui had its turn above)
 #if SDL_VERSION_ATLEAST(2, 0, 0)
 		if ( sessLocal.GetActiveMenu() == NULL && !console->Active() ) {
@@ -1458,7 +1458,7 @@ sysEvent_t Sys_GetEvent() {
 #else
 				const SDL_Keycode kc = ev.key.keysym.sym;
 #endif
-				const int edKey = ( kc == SDLK_DELETE ) ? 1 : ( kc == SDLK_INSERT ) ? 2 : 0;
+				const int edKey = ( kc == SDLK_DELETE ) ? 1 : ( kc == SDLK_INSERT ) ? 2 : ( kc == SDLK_HOME ) ? 3 : 0;
 				if ( edKey != 0 && R_EmAuthKey( edKey, ev.type == SDL_KEYDOWN ) ) {
 					continue;
 				}
