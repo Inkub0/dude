@@ -435,7 +435,11 @@ struct emMenu_t {
 	unsigned long long	fixture;	const idMaterial *mat;	idVec3 pos;	// EM_MENU_SURFACE
 	int					openFrames;								// frames since it opened (the cursor is placed on the first ones)
 	int					prevSel;	unsigned int prevSelSerial;	// the selection before the menu took it
+	// the surface menu's Appearance (emitters.cfg, all maps): staged until Apply (it re-bakes the table)
+	bool				apLoaded;	int apScope;				// 0 = the material, 1 = this surface (a per-fixture override)
+	float				apScale;	float apTint[3];	int apProfile;	bool apTwoSided, apIndicator, apHasEntry;
 };
+static bool							s_emLibDirty = false;		// emitters.cfg edited from the menu since its last save
 static emMenu_t						s_emMenu = { EM_MENU_NONE };
 // a two-step "follow" link armed from the menu: the next right-click picks the other end
 enum { EM_ARM_NONE, EM_ARM_PICK_LIGHT, EM_ARM_PICK_SURFACE };
@@ -1144,8 +1148,11 @@ bool R_EmAuthMouseButton( int button, bool down ) {
 static void EmAuth_MenuFileButtons( void ) {
 	idCmdArgs none;
 	ImGui::Separator();
-	if ( ImGui::Button( s_emDirty ? "Save*" : "Save" ) ) { EmAuth_Save_f( none ); }
-	if ( ImGui::IsItemHovered() ) { ImGui::SetTooltip( "Write %s to the save path", EmAuth_FilePath( s_emMap ).c_str() ); }
+	if ( ImGui::Button( ( s_emDirty || s_emLibDirty ) ? "Save*" : "Save" ) ) {
+		EmAuth_Save_f( none );
+		if ( s_emLibDirty ) { cmdSystem->BufferCommandText( CMD_EXEC_APPEND, "rtEmissiveSaveTable\n" ); s_emLibDirty = false; }
+	}
+	if ( ImGui::IsItemHovered() ) { ImGui::SetTooltip( "Write %s to the save path%s", EmAuth_FilePath( s_emMap ).c_str(), s_emLibDirty ? ", and emitters.cfg (Appearance edits)" : "" ); }
 	ImGui::SameLine();
 	if ( ImGui::Button( "Reload" ) ) { EmAuth_Reload_f( none ); }
 	if ( ImGui::IsItemHovered() ) { ImGui::SetTooltip( "Re-read the saved file (unsaved edits are lost)" ); }
@@ -1193,6 +1200,77 @@ static void EmAuth_MenuLight( idRenderWorldLocal *world ) {
 	if ( ImGui::SmallButton( "Copy name" ) ) { ImGui::SetClipboardText( key.c_str() ); }
 	ImGui::TextDisabled( "Colour / brightness / radius overrides: stage L4" );
 	EmAuth_MenuFileButtons();
+}
+
+// the power match's multiplier under the AUTHORED setup (the gather's authoredRowScale without an entry): a row at its
+// authored reach, its own colour, no inherited light - where a new emitters.cfg entry starts, so Apply keeps the look
+static float EmAuth_AuthoredMatched( const rtEmissiveRow_t &row ) {
+	const int fi = EmAuth_FindFixture( row.fixtureId );
+	rtEmissiveRow_t m = row;
+	m.reach = ( fi >= 0 && s_emFixtures[ fi ].reach > 0.0f ) ? s_emFixtures[ fi ].reach : 0.0f;
+	m.lightLum = 0.0f; m.hasLight = false;
+	return R_RtEmissiveMatchedScale( m );
+}
+
+// stage the Appearance controls from the scope's entry, else what it inherits (the material entry, else the power match)
+static void EmAuth_MenuLoadAppearance( void ) {
+	emMenu_t &m = s_emMenu;
+	m.apLoaded = true;
+	const bool fixtureScope = m.apScope == 1;
+	if ( fixtureScope ) {
+		m.apHasEntry = R_RtEmissiveLightTableGet( m.fixture, &m.apScale, m.apTint, &m.apProfile, &m.apTwoSided, &m.apIndicator );
+	} else {
+		m.apHasEntry = m.mat != NULL && R_RtEmissiveMatTableGet( m.mat, &m.apScale, m.apTint, &m.apProfile, &m.apTwoSided, &m.apIndicator );
+	}
+	if ( m.apHasEntry ) { return; }
+	if ( fixtureScope && m.mat != NULL && R_RtEmissiveMatTableGet( m.mat, &m.apScale, m.apTint, &m.apProfile, &m.apTwoSided, &m.apIndicator ) ) { return; }
+	m.apTint[0] = m.apTint[1] = m.apTint[2] = 1.0f;
+	m.apProfile = 0; m.apTwoSided = false; m.apIndicator = false;
+	// the starting radiance: this row's power match, or the area-weighted one over the material's rows
+	const rtEmissiveRow_t *rows = NULL;
+	const int n = R_RtEmissiveRows( &rows );
+	double w = 0.0, sum = 0.0;
+	for ( int i = 0; i < n; i++ ) {
+		if ( fixtureScope ? rows[i].fixtureId != m.fixture : rows[i].mat != m.mat ) { continue; }
+		if ( rows[i].dark || !( rows[i].area > 0.0f ) ) { continue; }
+		w += rows[i].area; sum += rows[i].area * EmAuth_AuthoredMatched( rows[i] );
+	}
+	m.apScale = ( w > 0.0 ) ? (float)( sum / w ) : 1.0f;
+}
+
+static void EmAuth_MenuAppearance( void ) {
+	emMenu_t &m = s_emMenu;
+	if ( !ImGui::CollapsingHeader( "Appearance (emitters.cfg, every map)" ) ) { return; }
+	if ( !m.apLoaded ) { EmAuth_MenuLoadAppearance(); }
+	int scope = m.apScope;
+	ImGui::RadioButton( "This material", &scope, 0 );
+	ImGui::SameLine();
+	ImGui::RadioButton( "This surface only", &scope, 1 );
+	if ( scope != m.apScope ) { m.apScope = scope; EmAuth_MenuLoadAppearance(); }
+	ImGui::TextDisabled( "%s", m.apHasEntry ? ( m.apScope ? "has its own entry: physical radiance" : "has a material entry: physical radiance" )
+		: "no entry: brightness power-matched to the reach (Apply makes it physical, starting from the same look)" );
+	ImGui::SliderFloat( "Radiance x", &m.apScale, 0.0f, 64.0f, "%.2f", ImGuiSliderFlags_Logarithmic );
+	if ( ImGui::IsItemHovered() ) { ImGui::SetTooltip( "Multiplier on the glow texture's mean radiance (x the stage colour); Brightness above multiplies it per surface in this map" ); }
+	ImGui::ColorEdit3( "Tint", m.apTint, ImGuiColorEditFlags_Float );
+	ImGui::Combo( "Emission profile", &m.apProfile, "sqrt(cos) - a bare tube\0Lambert - a diffuser / panel\0uniform - a globe / bulb\0" );
+	ImGui::Checkbox( "Two-sided", &m.apTwoSided );
+	if ( ImGui::Button( "Apply" ) ) {
+		if ( m.apScope == 1 ) { R_RtEmissiveLightTableSet( m.fixture, m.apScale, m.apTint, m.apProfile, m.apTwoSided, m.apIndicator ); }
+		else if ( m.mat != NULL ) { R_RtEmissiveMatTableSet( m.mat, m.apScale, m.apTint, m.apProfile, m.apTwoSided, m.apIndicator ); }
+		m.apHasEntry = true;
+		s_emLibDirty = true;
+	}
+	if ( ImGui::IsItemHovered() ) { ImGui::SetTooltip( "Into emitters.cfg in memory; the emitter table is rebuilt (a short hitch). Save writes it" ); }
+	if ( m.apHasEntry ) {
+		ImGui::SameLine();
+		if ( ImGui::Button( "Remove entry" ) ) {
+			if ( m.apScope == 1 ) { R_RtEmissiveLightTableRemove( m.fixture ); } else if ( m.mat != NULL ) { R_RtEmissiveMatTableRemove( m.mat ); }
+			s_emLibDirty = true;
+			EmAuth_MenuLoadAppearance();
+		}
+	}
+	ImGui::SameLine();
+	if ( ImGui::Button( "Revert" ) ) { EmAuth_MenuLoadAppearance(); }
 }
 
 static void EmAuth_MenuSurface( idRenderWorldLocal *world ) {
@@ -1249,6 +1327,7 @@ static void EmAuth_MenuSurface( idRenderWorldLocal *world ) {
 	ImGui::SameLine();
 	if ( ImGui::Button( "Clear this surface's settings" ) && fi2 >= 0 ) { s_emFixtures.RemoveIndex( fi2 ); EmAuth_Changed(); }
 	if ( ImGui::SmallButton( "Copy fixture id" ) ) { ImGui::SetClipboardText( va( "%016llx", id ) ); }
+	EmAuth_MenuAppearance();
 	EmAuth_MenuFileButtons();
 }
 

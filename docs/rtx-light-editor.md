@@ -162,6 +162,12 @@ returns you to look mode.
    - **Nothing under the crosshair:** the map's file and counts, Recover / Discard the recovery copy, Leave look mode.
    - Every menu: Save / Reload / Close, and "Turn it on" when emissive mode is off. Esc, a click outside (a left
      click there closes the menu instead of firing) or a lost focus closes it.
+   - **Appearance** (the surface menu, from the old Emitter Editor - user, 2026-10-31): Radiance x, Tint, Emission
+     profile, Two-sided, for the material or this surface only. These stay in emitters.cfg (every map) and are baked
+     into the table, so Apply re-bakes it (a short hitch). Without an entry a surface's brightness is power-matched
+     to its reach; an entry makes it physical (Radiance x on the glow's mean radiance). Apply starts the entry from the
+     authored power match, so the look does not jump. The per-map Brightness multiplies on top. Save writes both
+     files. The old Indicator flag is not offered: authored mode ignores it.
    - The Emitter Editor stays until L5 (removing it touches Dhewm3SettingsMenu.cpp).
    Original plan text: the ImGui Light Editor replaces the Emitter Editor: the light and surface panels, the material-wide
    toggle, live edits, save / reload.
