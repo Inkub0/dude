@@ -177,6 +177,13 @@ def main():
 			problems.append( f"{tag}: no r_vkGpuTime windows with >= {MIN_WINDOW_SAMPLES} samples" )
 		runs.append( { "tag": tag, "variant": v, "round": rnd, "rep": rep, "scopes": scopes or {}, "nwin": nwin, "clocks": clocks } )
 
+	# the GPU clock drifts with heat (the 3080 Ti: 1340 MHz warm-up -> ~1120 MHz settled, 2026-10-31): rescale every run's
+	# GPU time to the MEDIAN clock of the measured runs (assumes time scales with the core clock - memory-bound passes don't)
+	means = [ r["clocks"]["mean"] for r in runs if r["clocks"] and r["round"] != "w" ]
+	ref_clock = statistics.median( means ) if means else None
+	for r in runs:
+		gpu = ( r["rep"] or {} ).get( "gpu_avg" )
+		r["gpu_norm"] = gpu * r["clocks"]["mean"] / ref_clock if ( ref_clock and gpu and r["clocks"] ) else None
 	print( f"== {out}" )
 	print()
 	print( "per run:" )
@@ -185,14 +192,14 @@ def main():
 		c = r["clocks"]
 		clk = f"{c['mean']:.0f} MHz (min {c['min']:.0f}, limited {c['limited'] * 100:.0f}%)" if c else "no clock log"
 		warm = "  (warm-up)" if r["round"] == "w" else ""
-		print( f"  {r['tag']:<14} fps {rep.get('fps') or 0:6.1f}  GPU {rep.get('gpu_avg') or 0:6.2f} ms  "
+		norm = f"  @median clock {r['gpu_norm']:6.2f} ms" if r.get( "gpu_norm" ) else ""
+		print( f"  {r['tag']:<14} fps {rep.get('fps') or 0:6.1f}  GPU {rep.get('gpu_avg') or 0:6.2f} ms{norm}  "
 		       f"{r['nwin']:2d} windows  {clk}{warm}" )
-	means = [ r["clocks"]["mean"] for r in runs if r["clocks"] and r["round"] != "w" ]
-	if means:
-		top = max( means )
+	# flag runs off the MEDIAN clock (the best run is usually just the coolest one)
+	if ref_clock:
 		for r in runs:
-			if r["clocks"] and r["round"] != "w" and r["clocks"]["mean"] < 0.95 * top:
-				problems.append( f"{r['tag']}: mean clock {r['clocks']['mean']:.0f} MHz < 95% of the best run ({top:.0f}) - throttled?" )
+			if r["clocks"] and r["round"] != "w" and abs( r["clocks"]["mean"] - ref_clock ) > 0.05 * ref_clock:
+				problems.append( f"{r['tag']}: mean clock {r['clocks']['mean']:.0f} MHz is more than 5% off the median ({ref_clock:.0f}) - compare it with care" )
 	display = sorted( { ( r["rep"] or {} ).get( "display", "?" ) for r in runs } )
 	print( f"\ndisplay: {' | '.join( display )}" )
 
@@ -208,6 +215,9 @@ def main():
 			print( f"     fps {fmt( [ r['rep']['fps'] for r in rs ], 1 )}   frame avg {fmt( [ r['rep']['frame_avg'] for r in rs ] )} ms"
 			       f"   1% low {fmt( [ r['rep']['low1'] for r in rs ], 1 )} fps   GPU {fmt( [ r['rep']['gpu_avg'] for r in rs ] )} ms"
 			       f"   CPU {fmt( [ r['rep']['cpu_total'] for r in rs ] )} ms" )
+			if ref_clock:
+				print( f"     GPU at the median clock {ref_clock:.0f} MHz: {fmt( [ r.get( 'gpu_norm' ) for r in rs ] )} ms"
+				       "   (each run's GPU time x its clock / the median - assumes time scales with the core clock)" )
 
 		# scope table: every scope seen, in first-seen order of the first variant's runs
 		scope_names = []

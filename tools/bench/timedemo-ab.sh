@@ -2,7 +2,7 @@
 # DUDE A/B timedemo bench (method: docs/rtx-sigma-shadows.md section 7).
 #
 # Runs `timeDemoQuit <demo>` once per variant of a SET, alternating the order every round
-# (warm-up, then ABCD / DCBA / ABCD ...). Every run gets its OWN fresh sandbox (config + savepath),
+# (warm-ups, then ABCD / DCBA / ABCD ...). Every run gets its OWN fresh sandbox (config + savepath),
 # so archived cvars from your dude.cfg never leak in; only the display settings are copied from it.
 # nvidia-smi logs the GPU clocks once a second next to each run (the 3080 Ti throttles).
 # Afterwards tools/bench/timedemo_ab_report.py prints per-variant numbers: the benchmark report
@@ -11,12 +11,15 @@
 # It LAUNCHES THE GAME fullscreen, ~1.5 min per run. Close DUDE first.
 #
 # Usage: tools/bench/timedemo-ab.sh <set> [rounds]
-#   set m1 : ReSTIR DI boost knob split at Path Tracing Nightmare (4 variants)
+#   set m1     : ReSTIR DI boost knob split at Path Tracing Nightmare (4 variants)
+#   set serial : the light-serial fix, two BINARIES at Path Tracing Nightmare - A = build/dude-noserialfix, B = build/dude
 #   rounds : alternating rounds after the warm-up (default 3)
 # Env: DUDE_BIN  binary (default <repo>/build/dude)
 #      DUDE_CFG  your config, source of the display settings (default ~/.config/dude/base/dude.cfg)
 #      DEMO      demo name (default demo1)
-#      COOLDOWN  seconds idle between runs (default 10)
+#      COOLDOWN  seconds idle between runs (default 30)
+#      WARMUPS   discarded warm-up runs before the rounds (default 2: the 3080 Ti still runs cooler and faster on
+#                the run right after a single warm-up - 2026-10-31, 1340 -> 1221 -> ~1120 MHz)
 #      OUT       result directory (default ~/.local/share/dude/bench/<date>-<set>)
 #      VARIANTS  run only these variants of the set, in this order (e.g. VARIANTS="A D")
 #      DRYRUN=1  print the command lines, launch nothing
@@ -26,12 +29,13 @@ REPO="$( cd "$( dirname "$0" )/../.." && pwd )"
 BIN="${DUDE_BIN:-$REPO/build/dude}"
 DUDE_CFG="${DUDE_CFG:-$HOME/.config/dude/base/dude.cfg}"
 DEMO="${DEMO:-demo1}"
-COOLDOWN="${COOLDOWN:-10}"
+COOLDOWN="${COOLDOWN:-30}"
+WARMUPS="${WARMUPS:-2}"
 SET="${1:-}"
 ROUNDS="${2:-3}"
 
 declare -a NAMES
-declare -A DESC ARGS
+declare -A DESC ARGS BINV		# BINV: a variant's own binary (default: \$BIN) - for A/B of two builds
 case "$SET" in
 	m1)
 		# Path Tracing Nightmare (dude_rtx 2, preset 5); 0.9.6 had BoostHistory 2 / BoostConfidence 0
@@ -45,6 +49,18 @@ case "$SET" in
 		ARGS[C]="+set r_rtReStirDIBoostHistory 4 +set r_rtReStirDIBoostConfidence 0"
 		DESC[D]="0.9.6 values: BoostHistory 2, BoostConfidence 0"
 		ARGS[D]="+set r_rtReStirDIBoostHistory 2 +set r_rtReStirDIBoostConfidence 0"
+		;;
+	serial)
+		# 2026-10-29: dudeSerial was reassigned on EVERY UpdateLightDef - a light moved / re-parmed each frame reset the
+		# ReSTIR DI gradient's history on its footprint. Copy the build without the fix to build/dude-noserialfix first.
+		PRESET=5; RTX=2
+		NAMES=( A B )
+		DESC[A]="without the light serial fix"
+		BINV[A]="$REPO/build/dude-noserialfix"
+		ARGS[A]=""
+		DESC[B]="with the light serial fix"
+		BINV[B]="$BIN"
+		ARGS[B]=""
 		;;
 	*)
 		sed -n '2,24p' "$0"
@@ -61,7 +77,10 @@ if [ -n "${VARIANTS:-}" ]; then
 fi
 
 if [ "${DRYRUN:-0}" != 1 ]; then
-	[ -x "$BIN" ] || { echo "no binary at $BIN (build first, or set DUDE_BIN)" >&2; exit 1; }
+	for v in "${NAMES[@]}"; do
+		b="${BINV[$v]:-$BIN}"
+		[ -x "$b" ] || { echo "no binary at $b for variant $v (build first, or set DUDE_BIN)" >&2; exit 1; }
+	done
 	if pgrep -x dude > /dev/null; then
 		echo "DUDE is running - close it first (two instances would share the GPU)" >&2
 		exit 1
@@ -73,17 +92,21 @@ SCHEMA="$( sed -n 's/^#define DUDE_CONFIG_SCHEMA[[:space:]]*\([0-9]*\).*/\1/p' "
 OUT="${OUT:-${XDG_DATA_HOME:-$HOME/.local/share}/dude/bench/$( date +%Y%m%d-%H%M%S )-$SET}"
 mkdir -p "$OUT"
 {
-	echo "set: $SET  rounds: $ROUNDS  demo: $DEMO  preset: $PRESET  dude_rtx: $RTX"
+	echo "set: $SET  rounds: $ROUNDS  warm-ups: $WARMUPS  cooldown: ${COOLDOWN}s  demo: $DEMO  preset: $PRESET  dude_rtx: $RTX"
 	echo "binary: $BIN ($( stat -c '%y' "$BIN" 2> /dev/null || echo '?' ))"
 	echo "repo: $( git -C "$REPO" rev-parse --short HEAD 2> /dev/null || echo '?' ) on $( git -C "$REPO" branch --show-current 2> /dev/null || echo '?' )"
 	echo "display settings from $DUDE_CFG:"
 	grep -E '^seta (r_mode|r_fullscreen|r_fullscreenDesktop|r_fullscreenDisplay|r_fullscreenDisplayName|r_customWidth|r_customHeight|r_displayRefresh) ' "$DUDE_CFG" || true
 	for v in "${NAMES[@]}"; do echo "variant $v: ${DESC[$v]}  [${ARGS[$v]}]"; done
+	for v in "${NAMES[@]}"; do
+		if [ -n "${BINV[$v]:-}" ]; then echo "binary $v: ${BINV[$v]} ($( stat -c '%y' "${BINV[$v]}" 2> /dev/null || echo '?' ))"; fi
+	done
 } > "$OUT/meta.txt"
 cat "$OUT/meta.txt"
 
 # run order: warm-up (first variant, discarded), then alternating rounds
-order=( "w:${NAMES[0]}" )
+order=()
+for (( w = 0; w < WARMUPS; w++ )); do order+=( "w:${NAMES[0]}" ); done
 for (( r = 1; r <= ROUNDS; r++ )); do
 	if (( r % 2 )); then
 		for v in "${NAMES[@]}"; do order+=( "$r:$v" ); done
@@ -119,14 +142,14 @@ for item in "${order[@]}"; do
 		+timeDemoQuit "$DEMO" )
 	echo "[$n/${#order[@]}] round $round variant $v: ${DESC[$v]}"
 	if [ "${DRYRUN:-0}" = 1 ]; then
-		echo "  $BIN ${args[*]}"
+		echo "  ${BINV[$v]:-$BIN} ${args[*]}"
 		continue
 	fi
 	nvidia-smi --query-gpu=timestamp,clocks.gr,clocks.mem,temperature.gpu,power.draw,clocks_event_reasons.active \
 		--format=csv,noheader -lms 1000 > "$RUN/clocks.csv" 2> /dev/null &
 	smi=$!
 	set +e
-	timeout 900 "$BIN" "${args[@]}" > "$RUN/stdout.log" 2>&1
+	timeout 900 "${BINV[$v]:-$BIN}" "${args[@]}" > "$RUN/stdout.log" 2>&1
 	rc=$?
 	set -e
 	kill "$smi" 2> /dev/null || true
