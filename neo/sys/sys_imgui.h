@@ -16,7 +16,8 @@ enum D3ImGuiWindow {
 	D3_ImGuiWin_Demo        = 2, // ImGui demo window
 	D3_ImGuiWin_PbrEditor   = 4, // in-game PBR material editor (docs/pbr-materials.md)
 	D3_ImGuiWin_EmitterEditor = 8, // in-game emitter editor (docs/rtx-experimental-lighting.md, emitters.cfg)
-	// next should be 16, then 32, etc so a bitmask can be used
+	D3_ImGuiWin_LightEditor = 16, // the Light Editor's right-click menu (docs/rtx-light-editor.md, renderer/RtEmissiveAuthor.cpp)
+	// next should be 32, then 64, etc so a bitmask can be used
 };
 
 #ifndef IMGUI_DISABLE

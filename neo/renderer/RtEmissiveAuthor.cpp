@@ -48,6 +48,9 @@ emissiveSave removes the copy (it is then out of date).
 #include "renderer/RenderWorld_local.h"
 #include "renderer/rhi/RHI.h"
 #include "sys/sys_imgui.h"
+#ifndef IMGUI_DISABLE
+#include "../libs/imgui/imgui_internal.h"	// ImGui::TeleportMousePos (the menu puts the cursor on itself)
+#endif
 
 struct emAuthLight_t {
 	idStr	key;							// a .map name, or "@x,y,z"
@@ -424,6 +427,24 @@ static idList<idDrawVert>			s_emLookVerts;				// spheres + volume edges (world s
 static idList<glIndex_t>			s_emLookIndexes;
 static char							s_emHoverText[200];
 static int							s_emLookFrame = -1;			// tr.frameCount the gizmos were built for (none drawn from a stale frame)
+// the right-click menu (RtEmissiveAuthor.cpp R_EmAuthRightClick / Com_DrawLightEditorMenu): its target, frozen at the click
+enum { EM_MENU_NONE, EM_MENU_LIGHT, EM_MENU_SURFACE, EM_MENU_GENERAL };
+struct emMenu_t {
+	int					kind;
+	int					light;		unsigned int serial;		// EM_MENU_LIGHT
+	unsigned long long	fixture;	const idMaterial *mat;	idVec3 pos;	// EM_MENU_SURFACE
+	int					openFrames;								// frames since it opened (the cursor is placed on the first ones)
+	int					prevSel;	unsigned int prevSelSerial;	// the selection before the menu took it
+};
+static emMenu_t						s_emMenu = { EM_MENU_NONE };
+// a two-step "follow" link armed from the menu: the next right-click picks the other end
+enum { EM_ARM_NONE, EM_ARM_PICK_LIGHT, EM_ARM_PICK_SURFACE };
+static int							s_emArm = EM_ARM_NONE;
+static unsigned long long			s_emArmFixture = 0;			// EM_ARM_PICK_LIGHT: the surface that will follow
+static idStr						s_emArmLightKey;			// EM_ARM_PICK_SURFACE: the light it will follow
+static bool							s_emSwallowRightUp = false;
+static void EmAuth_CloseMenu( void );
+bool R_EmAuthMouseButton( int button, bool down );
 
 static const byte EM_COL_ACTIVE[4]   = { 235, 235, 235, 255 };
 static const byte EM_COL_DELETED[4]  = { 255,  40,  40, 255 };
@@ -656,7 +677,15 @@ bool R_EmAuthLookGeometry( const idDrawVert **verts, int *numVerts, const glInde
 }
 
 const char *R_EmAuthHoverText( void ) {
-	return ( s_emLook && s_emLookFrame >= tr.frameCount - 1 && s_emHoverText[0] != '\0' ) ? s_emHoverText : NULL;	// the console draws next frame's 2D
+	if ( !s_emLook || s_emLookFrame < tr.frameCount - 1 ) { return NULL; }	// (the console draws this frame's 2D after the view)
+	if ( s_emArm != EM_ARM_NONE ) {
+		static char armed[320];
+		idStr::snPrintf( armed, sizeof( armed ), "%s (right-click nothing to cancel)%s%s",
+			s_emArm == EM_ARM_PICK_LIGHT ? "RIGHT-CLICK THE LIGHT THIS SURFACE FOLLOWS" : va( "RIGHT-CLICK A SURFACE TO FOLLOW \"%s\"", s_emArmLightKey.c_str() ),
+			s_emHoverText[0] ? "  |  " : "", s_emHoverText );
+		return armed;
+	}
+	return s_emHoverText[0] != '\0' ? s_emHoverText : NULL;
 }
 
 /*
@@ -750,22 +779,28 @@ static void EmAuth_LightPick_f( const idCmdArgs &args ) {
 	}
 }
 
+// delete / restore placed light `i` (false = nothing to do: restoring a light that is active)
+static bool EmAuth_SetLightDeleted( const idRenderWorldLocal *world, int i, bool deleted ) {
+	const emLightCache_t *c = EmAuth_LightCache( world, i );
+	if ( c == NULL ) { return false; }
+	int a = EmAuth_FindLight( c->key );
+	if ( a < 0 ) {
+		if ( !deleted ) { return false; }
+		EmAuth_NewLight( s_emLights.Alloc(), c->key );
+		a = s_emLights.Num() - 1;
+	}
+	s_emLights[a].deleted = deleted;
+	if ( !deleted && !EmAuth_LightOverridden( s_emLights[a] ) ) { s_emLights.RemoveIndex( a ); }
+	EmAuth_Changed();
+	return true;
+}
+
 static void EmAuth_SetDeleted( const idCmdArgs &args, bool deleted ) {
 	idRenderWorldLocal *world = EmAuth_CmdWorld();
 	if ( world == NULL ) { return; }
 	const int i = EmAuth_PickLight( world, args );
 	if ( i < 0 ) { return; }
-	const emLightCache_t *c = EmAuth_LightCache( world, i );
-	if ( c == NULL ) { return; }
-	int a = EmAuth_FindLight( c->key );
-	if ( a < 0 ) {
-		if ( !deleted ) { EmAuth_PrintLight( world, i, "lightRestore: already active:" ); return; }
-		EmAuth_NewLight( s_emLights.Alloc(), c->key );
-		a = s_emLights.Num() - 1;
-	}
-	s_emLights[a].deleted = deleted;
-	if ( !deleted && !s_emLights[a].hasColor && !s_emLights[a].hasRadius && s_emLights[a].brightness <= 0.0f ) { s_emLights.RemoveIndex( a ); }
-	EmAuth_Changed();
+	if ( !EmAuth_SetLightDeleted( world, i, deleted ) ) { EmAuth_PrintLight( world, i, "lightRestore: already active:" ); return; }
 	EmAuth_PrintLight( world, i, deleted ? "lightDelete:" : "lightRestore:" );
 }
 static void EmAuth_LightDelete_f( const idCmdArgs &args ) { EmAuth_SetDeleted( args, true ); }
@@ -817,15 +852,11 @@ static void EmAuth_EmitClear_f( const idCmdArgs &args ) {
 	common->Printf( "emitClear: fixture %016llx '%s' back to its material's setting\n", id, mat ? mat->GetName() : "?" );
 }
 
-static void EmAuth_EmitMaterial_f( const idCmdArgs &args ) {
-	if ( EmAuth_CmdWorld() == NULL ) { return; }
-	const idMaterial *mat = NULL; idVec3 pos;
-	if ( R_RtEmissivePickFixture( &mat, &pos ) == 0 || mat == NULL ) { common->Printf( "emitMaterial: no glowing surface under the crosshair\n" ); return; }
+// every surface of `mat` in this map emits (on) or is back to its per-fixture lines (off)
+static void EmAuth_SetMaterialEmit( const idMaterial *mat, bool on ) {
 	int mi = EmAuth_FindMaterial( mat->GetName() );
-	bool on;
-	if ( args.Argc() > 1 ) { on = idStr::Icmp( args.Argv( 1 ), "off" ) != 0 && idStr::Icmp( args.Argv( 1 ), "0" ) != 0; }
-	else { on = !( mi >= 0 && s_emMaterials[ mi ].emit ); }		// no argument: toggle
 	if ( mi < 0 ) {
+		if ( !on ) { return; }
 		emAuthMaterial_t &em = s_emMaterials.Alloc();
 		em.name = mat->GetName(); em.mat = mat; em.emit = false;
 		mi = s_emMaterials.Num() - 1;
@@ -833,6 +864,32 @@ static void EmAuth_EmitMaterial_f( const idCmdArgs &args ) {
 	s_emMaterials[ mi ].emit = on;
 	if ( !on ) { s_emMaterials.RemoveIndex( mi ); }
 	EmAuth_Changed();
+}
+
+static bool EmAuth_MaterialEmits( const idMaterial *mat ) {
+	const int mi = ( mat != NULL ) ? EmAuth_FindMaterial( mat->GetName() ) : -1;
+	return mi >= 0 && s_emMaterials[ mi ].emit;
+}
+
+// a fixture's entry, created on demand
+static emAuthFixture_t &EmAuth_FixtureRef( unsigned long long id ) {
+	int fi = EmAuth_FindFixture( id );
+	if ( fi < 0 ) {
+		EmAuth_NewFixture( s_emFixtures.Alloc(), id );
+		fi = s_emFixtures.Num() - 1;
+	}
+	return s_emFixtures[ fi ];
+}
+
+static void EmAuth_EmitMaterial_f( const idCmdArgs &args ) {
+	if ( EmAuth_CmdWorld() == NULL ) { return; }
+	const idMaterial *mat = NULL; idVec3 pos;
+	if ( R_RtEmissivePickFixture( &mat, &pos ) == 0 || mat == NULL ) { common->Printf( "emitMaterial: no glowing surface under the crosshair\n" ); return; }
+	const int mi = EmAuth_FindMaterial( mat->GetName() );
+	bool on;
+	if ( args.Argc() > 1 ) { on = idStr::Icmp( args.Argv( 1 ), "off" ) != 0 && idStr::Icmp( args.Argv( 1 ), "0" ) != 0; }
+	else { on = !( mi >= 0 && s_emMaterials[ mi ].emit ); }		// no argument: toggle
+	EmAuth_SetMaterialEmit( mat, on );
 	common->Printf( "emitMaterial: every '%s' surface in this map %s\n", mat->GetName(), on ? "EMITS" : "is back to off (per-fixture lines still apply)" );
 }
 
@@ -958,7 +1015,9 @@ static void EmAuth_Info_f( const idCmdArgs &args ) {
 static void EmAuth_EditLights_f( const idCmdArgs &args ) {
 	if ( args.Argc() > 1 ) { s_emLook = atoi( args.Argv( 1 ) ) != 0; } else { s_emLook = !s_emLook; }
 	if ( !s_emLook ) {
+		if ( s_emMenu.kind != EM_MENU_NONE ) { EmAuth_CloseMenu(); }
 		s_emSelLight = -1;
+		s_emArm = EM_ARM_NONE;
 		common->Printf( "editLights: look mode off\n" );
 		return;
 	}
@@ -970,11 +1029,297 @@ static void EmAuth_EditLights_f( const idCmdArgs &args ) {
 	if ( EmAuth_CmdWorld() == NULL ) { s_emLook = false; return; }
 	common->Printf( "editLights: look mode ON - lights: white active, red deleted, yellow overridden, cyan under the crosshair (+ its volume); "
 		"surfaces: green emits, grey can emit, orange off by exception, cyan under the crosshair (+ its reach). lightDelete / lightRestore / "
-		"emitOn / emitOff / emitMaterial ... act on what is highlighted; lightPick keeps a light's volume drawn. editLights again to leave.\n" );
+		"emitOn / emitOff / emitMaterial ... act on what is highlighted; lightPick keeps a light's volume drawn. RIGHT-CLICK what you point at for its menu. editLights again to leave.\n" );
 	if ( !r_rtEmissiveLighting.GetBool() ) {
 		common->Printf( "  emissive mode is off (r_rtEmissiveLighting 0): edits apply when it is on; the surface tints need it (or r_rtEmissiveTable 1)\n" );
 	}
 }
+
+/*
+==============================================================================
+
+The right-click menu (L3, user 2026-10-31: "pointing at a light and right clicking should open a menu with all the
+available options to that light"): in look mode, a right-click freezes what is under the crosshair and opens an ImGui
+window at the crosshair with everything that applies to it - a light, a glowing surface, or (nothing under the
+crosshair) the map's file. The right-click never reaches the game. Edits are live (the next gather reads them);
+Save writes the per-map file. Esc or a click outside closes it.
+
+==============================================================================
+*/
+
+static void EmAuth_CloseMenu( void ) {
+	if ( s_emMenu.kind == EM_MENU_LIGHT ) { s_emSelLight = s_emMenu.prevSel; s_emSelSerial = s_emMenu.prevSelSerial; }
+	s_emMenu.kind = EM_MENU_NONE;
+#ifndef IMGUI_DISABLE
+	D3::ImGuiHooks::CloseWindow( D3::ImGuiHooks::D3_ImGuiWin_LightEditor );
+#endif
+}
+
+/*
+===================
+R_EmAuthRightClick
+
+events.cpp, for every right mouse button event in game (no menu, no console): true = the Light Editor took it (look
+mode on). Opens the menu on what is under the crosshair, or completes an armed follow pick.
+===================
+*/
+bool R_EmAuthRightClick( bool down ) {
+	return R_EmAuthMouseButton( 2, down );
+}
+
+// any mouse button in game (1 = left, 2 = right): the right one opens the menu; a left click outside an open menu (ImGui
+// did not take it) closes it instead of firing the weapon
+bool R_EmAuthMouseButton( int button, bool down ) {
+	static bool swallowLeftUp = false;
+	if ( button == 1 ) {
+		if ( !down ) { const bool took = swallowLeftUp; swallowLeftUp = false; return took; }
+		if ( s_emMenu.kind == EM_MENU_NONE ) { return false; }
+		EmAuth_CloseMenu();
+		swallowLeftUp = true;
+		return true;
+	}
+	if ( button != 2 ) { return false; }
+	if ( !down ) {
+		const bool took = s_emSwallowRightUp;
+		s_emSwallowRightUp = false;
+		return took;
+	}
+	if ( !s_emLook || tr.primaryWorld == NULL ) { return false; }
+	s_emSwallowRightUp = true;
+	idRenderWorldLocal *world = tr.primaryWorld;
+	if ( s_emArm == EM_ARM_PICK_LIGHT ) {
+		const emLightCache_t *c = ( s_emHoverLight >= 0 ) ? EmAuth_LightCache( world, s_emHoverLight ) : NULL;
+		if ( c != NULL ) {
+			emAuthFixture_t &f = EmAuth_FixtureRef( s_emArmFixture );
+			f.follow = c->key; f.followGen = 0;
+			EmAuth_Changed();
+			common->Printf( "Light Editor: fixture %016llx now follows light \"%s\"\n", s_emArmFixture, c->key.c_str() );
+		} else {
+			common->Printf( "Light Editor: follow pick cancelled\n" );
+		}
+		s_emArm = EM_ARM_NONE;
+		return true;
+	}
+	if ( s_emArm == EM_ARM_PICK_SURFACE ) {
+		if ( s_emHoverFixture != 0 ) {
+			emAuthFixture_t &f = EmAuth_FixtureRef( s_emHoverFixture );
+			f.follow = s_emArmLightKey; f.followGen = 0;
+			EmAuth_Changed();
+			common->Printf( "Light Editor: fixture %016llx now follows light \"%s\"\n", s_emHoverFixture, s_emArmLightKey.c_str() );
+		} else {
+			common->Printf( "Light Editor: follow pick cancelled\n" );
+		}
+		s_emArm = EM_ARM_NONE;
+		return true;
+	}
+#ifndef IMGUI_DISABLE
+	if ( !D3::ImGuiHooks::IsImguiEnabled() ) {
+		common->Printf( "Light Editor: ImGui is not available - use the console commands\n" );
+		return true;
+	}
+	if ( s_emMenu.kind != EM_MENU_NONE ) { EmAuth_CloseMenu(); }
+	emMenu_t m;
+	memset( &m, 0, sizeof( m ) );
+	m.prevSel = s_emSelLight; m.prevSelSerial = s_emSelSerial;
+	if ( s_emHoverLight >= 0 && s_emHoverLight < world->lightDefs.Num() && world->lightDefs[ s_emHoverLight ] != NULL ) {
+		m.kind = EM_MENU_LIGHT;
+		m.light = s_emHoverLight;
+		m.serial = world->lightDefs[ s_emHoverLight ]->dudeSerial;
+		s_emSelLight = m.light; s_emSelSerial = m.serial;		// its volume stays drawn while the menu is open
+	} else if ( s_emHoverFixture != 0 ) {
+		m.kind = EM_MENU_SURFACE;
+		m.fixture = R_RtEmissivePickFixture( &m.mat, &m.pos );
+		if ( m.fixture == 0 ) { m.fixture = s_emHoverFixture; }
+	} else {
+		m.kind = EM_MENU_GENERAL;
+	}
+	s_emMenu = m;
+	D3::ImGuiHooks::OpenWindow( D3::ImGuiHooks::D3_ImGuiWin_LightEditor );
+#endif
+	return true;
+}
+
+#ifndef IMGUI_DISABLE
+
+static void EmAuth_MenuFileButtons( void ) {
+	idCmdArgs none;
+	ImGui::Separator();
+	if ( ImGui::Button( s_emDirty ? "Save*" : "Save" ) ) { EmAuth_Save_f( none ); }
+	if ( ImGui::IsItemHovered() ) { ImGui::SetTooltip( "Write %s to the save path", EmAuth_FilePath( s_emMap ).c_str() ); }
+	ImGui::SameLine();
+	if ( ImGui::Button( "Reload" ) ) { EmAuth_Reload_f( none ); }
+	if ( ImGui::IsItemHovered() ) { ImGui::SetTooltip( "Re-read the saved file (unsaved edits are lost)" ); }
+	ImGui::SameLine();
+	if ( ImGui::Button( "Close" ) ) { EmAuth_CloseMenu(); }
+	if ( !r_rtEmissiveLighting.GetBool() ) {
+		ImGui::TextColored( ImVec4( 1.0f, 0.75f, 0.3f, 1.0f ), "Emissive mode is off: edits apply when it is on." );
+		ImGui::SameLine();
+		if ( ImGui::SmallButton( "Turn it on" ) ) { r_rtEmissiveLighting.SetBool( true ); }
+	}
+}
+
+static void EmAuth_MenuLight( idRenderWorldLocal *world ) {
+	const idRenderLightLocal *ld = world->lightDefs[ s_emMenu.light ];
+	const emLightCache_t *c = EmAuth_LightCache( world, s_emMenu.light );
+	if ( c == NULL ) { EmAuth_CloseMenu(); return; }
+	const idStr key = c->key;
+	const emAuthLight_t *a = ( c->auth >= 0 ) ? &s_emLights[ c->auth ] : NULL;
+	const bool deleted = a != NULL && a->deleted;
+	ImGui::Text( "Light \"%s\"", key.c_str() );
+	ImGui::TextDisabled( "%s", ld->lightShader ? ld->lightShader->GetName() : "?" );
+	ImGui::TextDisabled( "at %.0f %.0f %.0f   %s", ld->parms.origin.x, ld->parms.origin.y, ld->parms.origin.z,
+		ld->parms.pointLight ? va( "radius %.0f %.0f %.0f", ld->parms.lightRadius.x, ld->parms.lightRadius.y, ld->parms.lightRadius.z ) : "projected" );
+	ImGui::TextDisabled( "colour %.2f %.2f %.2f%s%s", ld->parms.shaderParms[0], ld->parms.shaderParms[1], ld->parms.shaderParms[2],
+		ld->parms.noShadows ? ", no shadows" : "", key[0] == '@' ? ", keyed by position (no .map name)" : "" );
+	ImGui::Separator();
+	if ( deleted ) {
+		ImGui::TextColored( ImVec4( 1.0f, 0.35f, 0.3f, 1.0f ), "Deleted in emissive mode" );
+		if ( ImGui::Button( "Restore" ) ) { EmAuth_SetLightDeleted( world, s_emMenu.light, false ); }
+	} else {
+		ImGui::Text( "Active" );
+		if ( ImGui::Button( "Delete in emissive mode" ) ) { EmAuth_SetLightDeleted( world, s_emMenu.light, true ); }
+		if ( ImGui::IsItemHovered() ) { ImGui::SetTooltip( "The light is gone while r_rtEmissiveLighting is on; normal mode keeps it" ); }
+	}
+	if ( ImGui::Button( "Make a surface follow this light..." ) ) {
+		s_emArm = EM_ARM_PICK_SURFACE; s_emArmLightKey = key;
+		EmAuth_CloseMenu();
+		return;
+	}
+	if ( ImGui::IsItemHovered() ) { ImGui::SetTooltip( "Then right-click a glowing surface: it flickers / pulses with this light" ); }
+	bool keep = s_emMenu.prevSel == s_emMenu.light && s_emMenu.prevSelSerial == s_emMenu.serial;
+	if ( ImGui::Checkbox( "Keep its volume shown", &keep ) ) {
+		s_emMenu.prevSel = keep ? s_emMenu.light : -1; s_emMenu.prevSelSerial = keep ? s_emMenu.serial : 0u;
+	}
+	if ( ImGui::SmallButton( "Copy name" ) ) { ImGui::SetClipboardText( key.c_str() ); }
+	ImGui::TextDisabled( "Colour / brightness / radius overrides: stage L4" );
+	EmAuth_MenuFileButtons();
+}
+
+static void EmAuth_MenuSurface( idRenderWorldLocal *world ) {
+	const unsigned long long id = s_emMenu.fixture;
+	const idMaterial *mat = s_emMenu.mat;
+	const int fi = EmAuth_FindFixture( id );
+	const emAuthFixture_t *f = ( fi >= 0 ) ? &s_emFixtures[ fi ] : NULL;
+	bool own;
+	const int st = EmAuth_FixtureState( world, id, mat, &own );
+	ImGui::Text( "Surface %s", EmAuth_ShortMaterial( mat ) );
+	ImGui::TextDisabled( "fixture %016llx at %.0f %.0f %.0f", id, s_emMenu.pos.x, s_emMenu.pos.y, s_emMenu.pos.z );
+	ImGui::TextColored( st > 0 ? ImVec4( 0.3f, 0.95f, 0.4f, 1.0f ) : st < 0 ? ImVec4( 1.0f, 0.6f, 0.2f, 1.0f ) : ImVec4( 0.7f, 0.7f, 0.7f, 1.0f ), "%s",
+		st > 0 ? ( own ? "Emits (this surface)" : "Emits (its material)" ) : st < 0 ? "Off (exception to its material)" : "Can emit" );
+	ImGui::Separator();
+	int emit = ( f != NULL ) ? f->emit : 0;
+	ImGui::TextUnformatted( "This surface:" );
+	ImGui::SameLine(); bool ch = ImGui::RadioButton( "as its material", &emit, 0 );
+	ImGui::SameLine(); ch |= ImGui::RadioButton( "emits", &emit, 1 );
+	ImGui::SameLine(); ch |= ImGui::RadioButton( "off", &emit, -1 );
+	if ( ch ) { EmAuth_FixtureRef( id ).emit = emit; EmAuth_Changed(); }
+	if ( mat != NULL ) {
+		bool matOn = EmAuth_MaterialEmits( mat );
+		if ( ImGui::Checkbox( "Every surface of this material in this map emits", &matOn ) ) { EmAuth_SetMaterialEmit( mat, matOn ); }
+	}
+	// brightness and reach (0 = unset: shown at their defaults)
+	const float reachDef = idMath::ClampFloat( 0.0f, 4096.0f, r_rtEmissiveReachDefault.GetFloat() );
+	float scale = ( f != NULL && f->scale > 0.0f ) ? f->scale : 1.0f;
+	if ( ImGui::SliderFloat( "Brightness", &scale, 0.05f, 32.0f, "%.2f x", ImGuiSliderFlags_Logarithmic ) ) {
+		EmAuth_FixtureRef( id ).scale = Max( scale, 0.01f ); EmAuth_Changed();
+	}
+	ImGui::SameLine();
+	if ( ImGui::SmallButton( "Reset##scale" ) && f != NULL ) { EmAuth_FixtureRef( id ).scale = 0.0f; EmAuth_Changed(); }
+	float reach = ( f != NULL && f->reach > 0.0f ) ? f->reach : reachDef;
+	if ( ImGui::SliderFloat( "Reach", &reach, 8.0f, 2048.0f, "%.0f units", ImGuiSliderFlags_Logarithmic ) ) {
+		EmAuth_FixtureRef( id ).reach = Max( reach, 1.0f ); EmAuth_Changed();
+	}
+	ImGui::SameLine();
+	if ( ImGui::SmallButton( "Reset##reach" ) && f != NULL ) { EmAuth_FixtureRef( id ).reach = 0.0f; EmAuth_Changed(); }
+	ImGui::TextDisabled( "(reset reach = r_rtEmissiveReachDefault, %.0f)", reachDef );
+	// re-read: the controls above may have created / changed the entry
+	const int fi2 = EmAuth_FindFixture( id );
+	const emAuthFixture_t *f2 = ( fi2 >= 0 ) ? &s_emFixtures[ fi2 ] : NULL;
+	if ( f2 != NULL && f2->follow.Length() ) {
+		ImGui::Text( "Follows light \"%s\"%s", f2->follow.c_str(), EmAuth_LightIndexByKey( world, f2->follow ) < 0 ? " (not in the map now)" : "" );
+		ImGui::SameLine();
+		if ( ImGui::SmallButton( "Stop" ) ) { EmAuth_FixtureRef( id ).follow.Clear(); EmAuth_FixtureRef( id ).followGen = 0; EmAuth_Changed(); }
+	}
+	if ( ImGui::Button( "Follow a light..." ) ) {
+		s_emArm = EM_ARM_PICK_LIGHT; s_emArmFixture = id;
+		EmAuth_CloseMenu();
+		return;
+	}
+	if ( ImGui::IsItemHovered() ) { ImGui::SetTooltip( "Then right-click the placed light whose flicker / pulse this surface copies" ); }
+	ImGui::SameLine();
+	if ( ImGui::Button( "Clear this surface's settings" ) && fi2 >= 0 ) { s_emFixtures.RemoveIndex( fi2 ); EmAuth_Changed(); }
+	if ( ImGui::SmallButton( "Copy fixture id" ) ) { ImGui::SetClipboardText( va( "%016llx", id ) ); }
+	EmAuth_MenuFileButtons();
+}
+
+static void EmAuth_MenuGeneral( void ) {
+	idCmdArgs none;
+	int deleted = 0;
+	for ( int i = 0; i < s_emLights.Num(); i++ ) { deleted += s_emLights[i].deleted ? 1 : 0; }
+	int emitting = 0;
+	for ( int i = 0; i < s_emFixtures.Num(); i++ ) { emitting += ( s_emFixtures[i].emit > 0 ) ? 1 : 0; }
+	ImGui::Text( "%s", s_emMap.c_str() );
+	ImGui::TextDisabled( "%s%s", EmAuth_FilePath( s_emMap ).c_str(), s_emFileFound ? "" : " (not saved yet)" );
+	ImGui::Text( "%d lights deleted, %d materials emit, %d surfaces emit on their own", deleted, s_emMaterials.Num(), emitting );
+	ImGui::TextDisabled( "Point at a light or a glowing surface and right-click it to edit it." );
+	if ( EmAuth_FileExists( EmAuth_RecoveryPath( s_emMap ) ) ) {
+		ImGui::TextColored( ImVec4( 1.0f, 0.75f, 0.3f, 1.0f ), "Unsaved edits from an earlier session were kept:" );
+		if ( ImGui::Button( "Recover them" ) ) { EmAuth_Recover_f( none ); }
+		ImGui::SameLine();
+		if ( ImGui::Button( "Discard them" ) ) { EmAuth_DiscardRecovery_f( none ); }
+	}
+	if ( ImGui::Button( "Leave look mode" ) ) {
+		EmAuth_CloseMenu();
+		s_emLook = false; s_emSelLight = -1; s_emArm = EM_ARM_NONE;
+		return;
+	}
+	EmAuth_MenuFileButtons();
+}
+
+/*
+===================
+Com_DrawLightEditorMenu
+
+sys_imgui.cpp, every ImGui frame while the window is open.
+===================
+*/
+void Com_DrawLightEditorMenu( void ) {
+	idRenderWorldLocal *world = tr.primaryWorld;
+	if ( s_emMenu.kind == EM_MENU_NONE || !s_emLook || world == NULL || world->mapName.Icmp( s_emMap ) != 0 ) {
+		EmAuth_CloseMenu();
+		return;
+	}
+	if ( s_emMenu.kind == EM_MENU_LIGHT && ( s_emMenu.light >= world->lightDefs.Num() || world->lightDefs[ s_emMenu.light ] == NULL
+			|| world->lightDefs[ s_emMenu.light ]->dudeSerial != s_emMenu.serial ) ) {
+		EmAuth_CloseMenu();											// the light went away under the menu
+		return;
+	}
+	const ImVec2 centre( ImGui::GetIO().DisplaySize.x * 0.5f, ImGui::GetIO().DisplaySize.y * 0.5f );
+	if ( s_emMenu.openFrames == 0 ) {
+		ImGui::SetNextWindowPos( ImVec2( centre.x + 24.0f, centre.y + 24.0f ), ImGuiCond_Always );
+		ImGui::SetNextWindowFocus();
+	}
+	if ( s_emMenu.openFrames < 3 ) {
+		ImGui::TeleportMousePos( ImVec2( centre.x + 48.0f, centre.y + 40.0f ) );	// the cursor onto the menu (the game had it hidden, relative)
+	}
+	bool open = true;
+	const char *title = s_emMenu.kind == EM_MENU_LIGHT ? "Light Editor - light###LightEditorMenu"
+		: s_emMenu.kind == EM_MENU_SURFACE ? "Light Editor - surface###LightEditorMenu" : "Light Editor###LightEditorMenu";
+	if ( ImGui::Begin( title, &open, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings ) ) {
+		if ( s_emMenu.kind == EM_MENU_LIGHT ) { EmAuth_MenuLight( world ); }
+		else if ( s_emMenu.kind == EM_MENU_SURFACE ) { EmAuth_MenuSurface( world ); }
+		else { EmAuth_MenuGeneral(); }
+		// Esc, or a click outside (focus lost once it had it), closes it
+		const bool focused = ImGui::IsWindowFocused( ImGuiFocusedFlags_RootAndChildWindows );
+		if ( focused && ImGui::IsKeyPressed( ImGuiKey_Escape ) ) { open = false; }
+		if ( !focused && s_emMenu.openFrames > 2 ) { open = false; }
+	}
+	ImGui::End();
+	if ( s_emMenu.kind != EM_MENU_NONE ) { s_emMenu.openFrames++; }
+	if ( !open && s_emMenu.kind != EM_MENU_NONE ) { EmAuth_CloseMenu(); }
+}
+
+#endif // IMGUI_DISABLE
 
 void R_EmAuthRegisterCommands( void ) {
 	cmdSystem->AddCommand( "editLights", EmAuth_EditLights_f, CMD_FL_RENDERER, "emissive authoring: toggle the Light Editor's look mode (editLights [0|1]; bind it to a key) - lights and glowing surfaces drawn by their authored state, the one under the crosshair named" );

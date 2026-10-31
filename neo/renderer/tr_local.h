@@ -1209,6 +1209,7 @@ void R_EmAuthLookFrame( const idRenderWorldLocal *world, const struct viewDef_s 
 int  R_EmAuthLookTints( const rtEmAuthTint_t **out );
 bool R_EmAuthLookGeometry( const idDrawVert **verts, int *numVerts, const glIndex_t **indexes, int *numIndexes );	// light spheres + the highlighted volume
 const char *R_EmAuthHoverText( void );	// the one-line label under the crosshair (NULL = nothing highlighted)
+bool R_EmAuthMouseButton( int button, bool down );	// events.cpp, a mouse button in game (1 left, 2 right): true = the Light Editor took it (its menu)
 float R_RtEmissiveMatchedScale( const rtEmissiveRow_t &row );
 // the HDR eye adaptation runs when the user asked for it OR physical emissive mode asks for it (r_rtEmissiveAutoExposure)
 bool R_HdrEyeAdaptationWanted( void );	// the power match's radiance multiplier on the row's mean (1 = authored)

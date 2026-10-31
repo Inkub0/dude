@@ -150,7 +150,20 @@ returns you to look mode.
      surface pick, which is the same trace.
    - The label is drawn on the console's 2D debug pass (the emissive labels' path), not the ImGui foreground, so
      screenshots include it.
-3. **L3 panels:** the ImGui Light Editor replaces the Emitter Editor: the light and surface panels, the material-wide
+3. **L3 panels** - built as a **right-click menu** (user, 2026-10-31: "pointing at a light and right clicking, should
+   open a menu with all the available options to that light"), branch `feat/rtx-light-editor-menu`:
+   - In look mode a right-click in game never reaches the game's binding (sys/events.cpp -> `R_EmAuthMouseButton`). It
+     freezes what the crosshair points at and opens an ImGui window at the crosshair, with the cursor placed on it.
+   - **Light:** name, material, origin, radius, colour; Delete in emissive mode / Restore; "Make a surface follow this
+     light..." (the next right-click on a surface links it); Keep its volume shown; Copy name.
+   - **Surface:** material, fixture id, state; this surface as its material / emits / off; every surface of the
+     material emits; Brightness and Reach sliders (live) with Reset; Follow a light... (the next right-click on a
+     light) / Stop; Clear this surface's settings; Copy fixture id.
+   - **Nothing under the crosshair:** the map's file and counts, Recover / Discard the recovery copy, Leave look mode.
+   - Every menu: Save / Reload / Close, and "Turn it on" when emissive mode is off. Esc, a click outside (a left
+     click there closes the menu instead of firing) or a lost focus closes it.
+   - The Emitter Editor stays until L5 (removing it touches Dhewm3SettingsMenu.cpp).
+   Original plan text: the ImGui Light Editor replaces the Emitter Editor: the light and surface panels, the material-wide
    toggle, live edits, save / reload.
 4. **L4:** follow-a-light, match-power, and the light colour / radius overrides through `UpdateLightDef`.
 5. **L5 cleanup:**

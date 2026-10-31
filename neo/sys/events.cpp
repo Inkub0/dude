@@ -1448,6 +1448,15 @@ sysEvent_t Sys_GetEvent() {
 			// ImGui has used the event, so it shouldn't also be handled by the game
 			continue;
 		}
+		// DUDE Light Editor look mode (editLights): a right-click in game opens the menu on what the crosshair points
+		// at (renderer/RtEmissiveAuthor.cpp) and never reaches the game's binding; a left click outside the open menu
+		// closes it (no shot)
+		if ( ( ev.type == SDL_MOUSEBUTTONDOWN || ev.type == SDL_MOUSEBUTTONUP )
+				&& ( ev.button.button == SDL_BUTTON_RIGHT || ev.button.button == SDL_BUTTON_LEFT )
+				&& sessLocal.GetActiveMenu() == NULL && !console->Active()
+				&& R_EmAuthMouseButton( ev.button.button == SDL_BUTTON_LEFT ? 1 : 2, IS_SDL_BTN_DOWN( ev.button ) ) ) {
+			continue;
+		}
 
 		switch (ev.type) {
 #if SDL_VERSION_ATLEAST(3, 0, 0)
