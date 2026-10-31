@@ -2,7 +2,7 @@
 # DUDE A/B timedemo bench (method: docs/rtx-sigma-shadows.md section 7).
 #
 # Runs `timeDemoQuit <demo>` once per variant of a SET, alternating the order every round
-# (warm-up, then ABCD / DCBA / ABCD ...). Every run gets its OWN fresh sandbox (config + savepath),
+# (warm-ups, then ABCD / DCBA / ABCD ...). Every run gets its OWN fresh sandbox (config + savepath),
 # so archived cvars from your dude.cfg never leak in; only the display settings are copied from it.
 # nvidia-smi logs the GPU clocks once a second next to each run (the 3080 Ti throttles).
 # Afterwards tools/bench/timedemo_ab_report.py prints per-variant numbers: the benchmark report
@@ -17,7 +17,9 @@
 # Env: DUDE_BIN  binary (default <repo>/build/dude)
 #      DUDE_CFG  your config, source of the display settings (default ~/.config/dude/base/dude.cfg)
 #      DEMO      demo name (default demo1)
-#      COOLDOWN  seconds idle between runs (default 10)
+#      COOLDOWN  seconds idle between runs (default 30)
+#      WARMUPS   discarded warm-up runs before the rounds (default 2: the 3080 Ti still runs cooler and faster on
+#                the run right after a single warm-up - 2026-10-31, 1340 -> 1221 -> ~1120 MHz)
 #      OUT       result directory (default ~/.local/share/dude/bench/<date>-<set>)
 #      VARIANTS  run only these variants of the set, in this order (e.g. VARIANTS="A D")
 #      DRYRUN=1  print the command lines, launch nothing
@@ -27,7 +29,8 @@ REPO="$( cd "$( dirname "$0" )/../.." && pwd )"
 BIN="${DUDE_BIN:-$REPO/build/dude}"
 DUDE_CFG="${DUDE_CFG:-$HOME/.config/dude/base/dude.cfg}"
 DEMO="${DEMO:-demo1}"
-COOLDOWN="${COOLDOWN:-10}"
+COOLDOWN="${COOLDOWN:-30}"
+WARMUPS="${WARMUPS:-2}"
 SET="${1:-}"
 ROUNDS="${2:-3}"
 
@@ -89,7 +92,7 @@ SCHEMA="$( sed -n 's/^#define DUDE_CONFIG_SCHEMA[[:space:]]*\([0-9]*\).*/\1/p' "
 OUT="${OUT:-${XDG_DATA_HOME:-$HOME/.local/share}/dude/bench/$( date +%Y%m%d-%H%M%S )-$SET}"
 mkdir -p "$OUT"
 {
-	echo "set: $SET  rounds: $ROUNDS  demo: $DEMO  preset: $PRESET  dude_rtx: $RTX"
+	echo "set: $SET  rounds: $ROUNDS  warm-ups: $WARMUPS  cooldown: ${COOLDOWN}s  demo: $DEMO  preset: $PRESET  dude_rtx: $RTX"
 	echo "binary: $BIN ($( stat -c '%y' "$BIN" 2> /dev/null || echo '?' ))"
 	echo "repo: $( git -C "$REPO" rev-parse --short HEAD 2> /dev/null || echo '?' ) on $( git -C "$REPO" branch --show-current 2> /dev/null || echo '?' )"
 	echo "display settings from $DUDE_CFG:"
@@ -102,7 +105,8 @@ mkdir -p "$OUT"
 cat "$OUT/meta.txt"
 
 # run order: warm-up (first variant, discarded), then alternating rounds
-order=( "w:${NAMES[0]}" )
+order=()
+for (( w = 0; w < WARMUPS; w++ )); do order+=( "w:${NAMES[0]}" ); done
 for (( r = 1; r <= ROUNDS; r++ )); do
 	if (( r % 2 )); then
 		for v in "${NAMES[@]}"; do order+=( "$r:$v" ); done
