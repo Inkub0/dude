@@ -9918,9 +9918,14 @@ void RB_RHI_RtaoDebugOverlay( rhi::RHI *r, const viewDef_t *viewDef ) {
 	RB_RHI_ForgetTexBinds();
 }
 
-// Fog-aware GI (r_rtgiFogAttenuate): the strength + exp() coefficient the GI fade uses, from the view's primary
-// fog light; both 0 when attenuation is off or the view has no fog. Shared by RB_RHI_RtgiApply (rtgi_apply.frag)
+// Fog-aware GI (r_rtgiFogAttenuate): the strength + exp() coefficient the GI fade uses, from the fog volume the CAMERA
+// stands in; both 0 when attenuation is off or the camera is in no fog. Shared by RB_RHI_RtgiApply (rtgi_apply.frag)
 // and the ReSTIR DI combined gather (restir_di.frag, the bounce folded in while r_rtgi is on).
+// The fade is one coefficient for the whole view (by view depth), so it may only come from fog that fills the space the
+// camera looks through. Until 2026-11-01 it took the FIRST fog light in the view's light list: a fridge's small mist
+// (mars_city1 Infirmary, fogs/basicfog, 20 x 40 units) coming into view applied its short fog distance to the whole
+// room, and with the strength-3 power the room's bounce light vanished - the ceiling went black whenever that fridge
+// entered the light list ("the light goes out when I step back").
 static void RB_RHI_RtgiFogCoefs( const viewDef_t *viewDef, float &strength, float &coef ) {
 	strength = 0.0f;
 	coef = 0.0f;
@@ -9928,9 +9933,17 @@ static void RB_RHI_RtgiFogCoefs( const viewDef_t *viewDef, float &strength, floa
 	if ( fogAtten <= 0.0f ) {
 		return;
 	}
+	const idVec3 &eye = viewDef->renderView.vieworg;
 	for ( const viewLight_t *vL = viewDef->viewLights; vL; vL = vL->next ) {
-		if ( !vL->lightShader->IsFogLight() ) {
+		if ( !vL->lightShader->IsFogLight() || vL->lightDef == NULL ) {
 			continue;
+		}
+		bool inside = true;													// the light volume's planes face OUT
+		for ( int p = 0; p < 6 && inside; p++ ) {
+			inside = vL->lightDef->frustum[p].Distance( eye ) <= 0.0f;
+		}
+		if ( !inside ) {
+			continue;														// a fog volume seen from outside: not the view's atmosphere
 		}
 		const shaderStage_t *fs = vL->lightShader->GetStage( 0 );
 		const float fogDensity = vL->shaderRegisters[fs->color.registers[3]];
@@ -9940,7 +9953,7 @@ static void RB_RHI_RtgiFogCoefs( const viewDef_t *viewDef, float &strength, floa
 		// the strength power, so strength > 1 overdrives the falloff (GI dies sooner than the fog is thick).
 		strength = fogAtten;
 		coef = -2.31587f / fogDist;
-		break;		// first fog light; layered / localized fog is approximated by this primary volume
+		break;		// the first fog volume holding the camera; layered fog is approximated by it
 	}
 }
 
