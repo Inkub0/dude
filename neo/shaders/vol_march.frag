@@ -5,6 +5,7 @@
 //
 // VK + ray-query only (RhiWorld.cpp RB_RHI_VolumetricLighting). Uniform packing:
 //   u_rtParms.xy       = scene TLAS device address, bit-cast (0 -> shadows forced off by the backend)
+//   u_rtParms.zw       = emissive mode: emitter rows the haze considers (after the fog rows), their haze scale
 //   u_color            = (scene-light buffer address lo/hi bit-cast, light count, fog-volume row count)
 //   u_modelViewMatrix  = inverse view (view -> world)
 //   u_localParam0      = (1/proj00, 1/proj11, scattering coefficient per world unit, intensity)
@@ -59,6 +60,11 @@ void main() {
 	vec4  candSph[ DUDE_VOL_MAX_LIGHTS ];
 	vec2  lit;																// [near, far] of the ray the candidate lights cover
 	uint  nCand = dudeVolCullRay( lights, nLights, lightMode, eyeW, viewDir, dist, cand, candSph, lit );
+	// emissive mode: the strongest emitter rows join the free slots (they replace point lights: only with r_volLights 2)
+	uint  nEmHaze = uint( u_rtParms.z );
+	if ( nEmHaze > 0u && lightMode >= 2u ) {
+		nCand = dudeVolCullEmitters( lights, nLights + uint( u_color.w ), nEmHaze, eyeW, viewDir, dist, cand, candSph, nCand, lit );
+	}
 	if ( nCand == 0u || lit.y <= lit.x ) { fragColor = vec4( 0.0, 0.0, 0.0, exp( -sigmaT * dist ) ); return; }	// unlit ray: extinction only
 	// stock fog volumes on this ray (rows behind the lights): inside one, the point-light haze thickens
 	uint  fogIdx[ DUDE_VOL_MAX_FOGS ];
@@ -99,7 +105,7 @@ void main() {
 		if ( nFogCand > 0u ) {
 			pointScale = mix( pointScale, max( pointScale, u_diffuseModifier.w ), dudeVolFogFactor( lights, fogIdx, fogSph, nFogCand, p ) );
 		}
-		rgb += dudeVolInScatter( lights, cand, candSph, nCand, tlasAddr, shadows, u_diffuseModifier.z > 0.5, p, viewDir, g, pointScale, u_diffuseModifier.y ) * ( T * sigmaS * dt );
+		rgb += dudeVolInScatter( lights, cand, candSph, nCand, tlasAddr, shadows, u_diffuseModifier.z > 0.5, p, viewDir, g, pointScale, u_diffuseModifier.y, u_rtParms.w ) * ( T * sigmaS * dt );
 		T   *= exp( -sigmaT * dt );
 	}
 	T *= exp( -sigmaT * ( dist - ( lit.y - lit.x ) ) );					// extinction over the unlit remainder of the ray

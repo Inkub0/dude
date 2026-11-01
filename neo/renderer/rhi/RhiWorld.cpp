@@ -919,6 +919,7 @@ static int					s_sceneLightSlotCount[ RT_REFL_LIGHT_SLOTS ] = { 0, 0, 0 };	// li
 static rhi::BufferHandle    s_rtReflLightBuf  = 0;
 static unsigned long long   s_rtReflLightAddr = 0;
 static int                  s_sceneFogCount   = 0;	// stock fog-light volumes appended AFTER the lights in the current slot (volumetrics only)
+static int                  s_sceneEmitterCount = 0;	// emitter rows after the fog rows, STRONGEST AT THE EYE FIRST (the haze reads the first few)
 #define SCENE_FOG_MAX        8
 // E2 v3 (docs/rtx-experimental-lighting.md "E2 v3"): the scene-light buffer carries the placed lights (<= RT_REFL_MAX_LIGHTS
 // incl. the fog rows), then the EMITTER rows (DUDE_LIGHT_EMISSIVE, one per emissive FIXTURE: RT_EMIT_MAX_ROWS). The DI
@@ -6346,6 +6347,7 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 	s_sceneLightCacheView = viewDef;	s_sceneLightCacheFrame = tr.frameCount;	cacheCount = 0;	cacheAddr = 0;	s_sceneRowCount = 0;
 	s_sceneLightGen++;		// every lightDef's stamp is now stale until the fill below re-includes it
 	s_sceneFogCount = 0;
+	s_sceneEmitterCount = 0;
 	s_sceneAmbStart = s_sceneAmbCount = 0;
 	*outAddr = 0;
 	s_diSkipDark = s_diSkipSuppressed = s_diSkipCapacity = s_diSkipNoShader = s_diSkipFogBlendAmb = 0;
@@ -6704,6 +6706,17 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 				for ( int k = 0; k < cap; k++ ) { pick[k] = pick2[k]; pickImp[k] = pickImp2[k]; }
 				np = cap;
 			}
+			// strongest at the eye FIRST: the volumetric haze (vol_march.frag) reads only the first few emitter rows, so the
+			// ones that matter to this view are those (DI, the grid and the bounce do not depend on the order)
+			{
+				static int ordS[ RT_EMIT_MAX_ROWS ];
+				for ( int k = 0; k < np; k++ ) { ordS[k] = k; }
+				std::sort( ordS, ordS + np, [&]( int a, int b ) { return pickImp[a] > pickImp[b]; } );
+				static int   pickS[ RT_EMIT_MAX_ROWS ];
+				static float pickImpS[ RT_EMIT_MAX_ROWS ];
+				for ( int k = 0; k < np; k++ ) { pickS[k] = pick[ ordS[k] ]; pickImpS[k] = pickImp[ ordS[k] ]; }
+				for ( int k = 0; k < np; k++ ) { pick[k] = pickS[k]; pickImp[k] = pickImpS[k]; }
+			}
 			const unsigned int tLo = (unsigned int)( tAddr & 0xFFFFFFFFull ), tHi = (unsigned int)( tAddr >> 32 );
 			for ( int k = 0; k < np; k++ ) {
 				const rtEmissiveRow_t &row = rows[ pick[k] ];
@@ -6789,6 +6802,7 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 	// r_rtgiAmbient fold: the ambient rows go LAST, behind the emitter rows (the emitter cap above left them room)
 	nAmb = Min( nAmb, RT_SCENE_MAX_ROWS - n - nFog - nEm );
 	for ( int k = 0; k < nAmb; k++ ) { sorted[ n + nFog + nEm + k ] = ambRows[ k ]; }
+	s_sceneEmitterCount = nEm;
 	if ( n + nFog + nEm + nAmb == 0 ) {
 		return 0;
 	}
@@ -7643,6 +7657,14 @@ void RB_RHI_VolumetricLighting( rhi::RHI *r, const viewDef_t *viewDef ) {
 	memcpy( &mp.color[0], &lightAddr, sizeof( lightAddr ) );
 	mp.color[2] = (float)numLights;
 	mp.color[3] = (float)s_sceneFogCount;								// fog-volume rows follow the lights
+	// emissive mode: the strongest emitter rows (they follow the fog rows, strongest at the eye first) light the haze too -
+	// the placed lights they replaced did (rtParms.z = how many to consider, rtParms.w = their haze scale; 0 = none)
+	{
+		const float emHaze = idMath::ClampFloat( 0.0f, 8.0f, r_volEmissiveScale.GetFloat() );
+		const int   VOL_EM_MAX = 32;
+		mp.rtParms[2] = ( r_rtEmissiveLighting.GetBool() && emHaze > 0.0f ) ? (float)Min( s_sceneEmitterCount, VOL_EM_MAX ) : 0.0f;
+		mp.rtParms[3] = emHaze;
+	}
 	mp.localParam0[0] = ( viewDef->projectionMatrix[0] != 0.0f ) ? 1.0f / viewDef->projectionMatrix[0] : 1.0f;
 	mp.localParam0[1] = ( viewDef->projectionMatrix[5] != 0.0f ) ? 1.0f / viewDef->projectionMatrix[5] : 1.0f;
 	// r_volDensity 1 = a scattering coefficient of 0.001 per world unit: a ~500-unit room scatters about
