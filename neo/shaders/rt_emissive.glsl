@@ -230,7 +230,16 @@ uint rtEmissiveSeed( uint li, vec3 P, float frame ) {
 // mapper lit the hall for - and fades out over the last quarter of the reach (the row's cull sphere, a Doom light's extent).
 // false = cannot reach (culled / dark / behind / below the horizon). Every stored index is checked against the table's
 // count: a row of another table (a stale frame across a rebuild) shades nothing rather than reading off the end.
+// The VISIBILITY target of the last rtEmissiveShadeRow: one of its area samples, picked with probability proportional to
+// its contribution (so visibility x the averaged contribution is unbiased for the visibility-weighted sum). The shadow ray
+// aims HERE, not at the centroid: a tube's or a bulb's centroid lies INSIDE its own surface, so every ray to it hit the
+// emitter itself and only the few that slipped through a crack between its triangles lit - fireflies and boiling under
+// the hanging neon tubes (2026-11-01). Set on every call (dist 0 = no sample reached P); per invocation, not shared.
+vec3  g_rtEmVisDir;
+float g_rtEmVisDist;
+
 bool rtEmissiveShadeRow( RtLights lights, uint li, vec3 P, vec3 N, uint seed, uint samples, out vec3 contrib, out vec3 ldir, out float dl, out float ndl ) {
+	g_rtEmVisDir = vec3( 0.0, 0.0, 1.0 );	g_rtEmVisDist = 0.0;
 	contrib = vec3( 0.0 );	ldir = vec3( 0.0, 0.0, 1.0 );	dl = 0.0;	ndl = 0.0;
 	uvec2 tAddr     = uvec2( floatBitsToUint( lights.l[ li ].projT.x ), floatBitsToUint( lights.l[ li ].projT.y ) );
 	uint  first     = floatBitsToUint( lights.l[ li ].projQ.x );
@@ -264,6 +273,7 @@ bool rtEmissiveShadeRow( RtLights lights, uint li, vec3 P, vec3 N, uint seed, ui
 	uint  rng = seed;
 	vec3  Lsum = vec3( 0.0 );
 	uint  got  = 0u;
+	float visW = 0.0;															// running sum of the samples' luminances (the visibility pick)
 	for ( uint sIdx = 0u; sIdx < ns; sIdx++ ) {
 		float pIn;
 		uint  ti = rtEmissiveSampleInGroup( t, first, num, rtEmissiveRand( rng ), pIn );
@@ -284,8 +294,12 @@ bool rtEmissiveShadeRow( RtLights lights, uint li, vec3 P, vec3 N, uint seed, ui
 		float fade  = noFade ? 1.0 : 1.0 - smoothstep( 0.75 * radius, radius, sl );
 		vec3  L = rtEmissiveMeanRadiance( e ) * tint * ( e.scale * intensity * boost * fade );
 		float cosR = max( dot( N, sd / sl ), 0.0 );								// this sample's own receiver cosine
-		Lsum += L * ( emit * cosR / ( pIn * pdfw ) );							// one Arvo estimate of the irradiance at P
+		vec3  est = L * ( emit * cosR / ( pIn * pdfw ) );						// one Arvo estimate of the irradiance at P
+		Lsum += est;
 		got++;
+		float yS = dot( est, vec3( 0.2126, 0.7152, 0.0722 ) );
+		visW += yS;
+		if ( yS > 0.0 && rtEmissiveRand( rng ) * visW < yS ) { g_rtEmVisDir = sd / sl; g_rtEmVisDist = sl; }	// reservoir pick, prob ~ contribution
 	}
 	if ( got == 0u ) { return false; }
 	contrib = Lsum * ( 1.0 / float( ns ) );										// averaged over the area samples (cosine per sample)
