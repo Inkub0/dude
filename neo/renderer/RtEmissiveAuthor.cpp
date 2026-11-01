@@ -624,6 +624,7 @@ static const byte EM_COL_DELETED[4]  = { 255,  40,  40, 255 };
 static const byte EM_COL_OVERRIDE[4] = { 255, 220,  40, 255 };
 static const byte EM_COL_HOVER[4]    = {  40, 230, 255, 255 };
 static const byte EM_COL_SOLO[4]     = { 255,  60, 255, 255 };
+static const byte EM_COL_SCREEN[4]   = { 110, 160, 255, 255 };	// a DUDE fill light: a glowing screen (r_emissiveSurfaces) or an item glow
 static const byte EM_COL_EMITS[4]    = {  40, 220,  60, 150 };
 static const byte EM_COL_CANEMIT[4]  = { 150, 150, 150, 130 };
 static const byte EM_COL_OFF[4]      = { 255, 140,  20, 150 };
@@ -818,6 +819,7 @@ void R_EmAuthLookFrame( const idRenderWorldLocal *world, const viewDef_t *viewDe
 		const emLightCache_t *c = EmAuth_LightCache( world, sph[k].light );
 		const emAuthLight_t *a = ( c != NULL && c->auth >= 0 ) ? &s_emLights[ c->auth ] : NULL;
 		const byte *col = ( sph[k].light == s_emSoloLight ) ? EM_COL_SOLO : ( sph[k].light == s_emHoverLight || sph[k].light == s_emSelLight ) ? EM_COL_HOVER
+			: world->lightDefs[ sph[k].light ]->dudeFillLight ? EM_COL_SCREEN
 			: ( a != NULL && a->deleted ) ? EM_COL_DELETED : ( a != NULL && EmAuth_LightOverridden( *a ) ) ? EM_COL_OVERRIDE : EM_COL_ACTIVE;
 		EmAuth_LookSphere( sph[k].o, sph[k].r, col );
 	}
@@ -857,7 +859,8 @@ void R_EmAuthLookFrame( const idRenderWorldLocal *world, const viewDef_t *viewDe
 			: idStr( va( "projected, reach %.0f", ld->parms.target.Length() ) );
 		idStr::snPrintf( s_emHoverText, sizeof( s_emHoverText ), "light \"%s\"  %s  %s - %s%s",
 			c ? c->key.c_str() : "?", lname, shape.c_str(),
-			( a != NULL && a->deleted ) ? "DELETED in emissive mode" : ( a != NULL && EmAuth_LightOverridden( *a ) )
+			ld->dudeFillLight ? ( ld->parms.pointLight ? "DUDE item glow (r_itemGlow, made by the engine)" : "DUDE screen light (r_emissiveSurfaces, made by the engine)" )
+			: ( a != NULL && a->deleted ) ? "DELETED in emissive mode" : ( a != NULL && EmAuth_LightOverridden( *a ) )
 				? ( a->brightness > 0.0f ? va( "overridden, brightness x%.2f", a->brightness ) : "overridden" ) : "active",
 			s_emHoverLight == s_emSelLight ? "  [selected]" : "" );
 	} else if ( s_emHoverFixture != 0 ) {
@@ -1330,7 +1333,7 @@ static void EmAuth_EditLights_f( const idCmdArgs &args ) {
 		return;
 	}
 	if ( EmAuth_CmdWorld() == NULL ) { s_emLook = false; return; }
-	common->Printf( "editLights: look mode ON - lights: white active, red deleted, yellow overridden, cyan under the crosshair (+ its volume); "
+	common->Printf( "editLights: look mode ON - lights: white active, red deleted, yellow overridden, light blue a glowing screen's / item's engine light, cyan under the crosshair (+ its volume); "
 		"surfaces: green emits, grey can emit, orange off by exception, cyan under the crosshair (+ its reach). lightDelete / lightRestore / "
 		"emitOn / emitOff / emitMaterial ... act on what is highlighted; lightPick keeps a light's volume drawn. RIGHT-CLICK what you point at for its menu; Del deletes / restores the light (a surface: stops it emitting), Ins makes a surface emit, Home SOLOS it (only it lights the scene); the WHEEL changes a surface's radiance (Ctrl: its material's) or a light's brightness. editLights again to leave.\n" );
 	if ( !r_rtEmissiveLighting.GetBool() ) {
