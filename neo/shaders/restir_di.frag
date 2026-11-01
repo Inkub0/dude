@@ -291,6 +291,8 @@ void main() {
 	vec3  ldirLoop    = vec3( 0.0, 0.0, 1.0 );
 	float dlLoop      = 0.0;
 	float ndlLoop     = 0.0;
+	vec3  visDirLoop  = vec3( 0.0, 0.0, 1.0 );	// an EMITTER winner's shadow-ray target: one of its area samples (rt_emissive.glsl g_rtEmVis*)
+	float visDistLoop = 0.0;
 	// RT light grid (docs/rtx-light-grid.md L2): when the grid is live and this point's cell holds candidates, enumerate
 	// the cell's short list (its top-N lights by importance) instead of EVERY scene light - the gather's biggest cost.
 	// Each stored light is a candidate with pdf 1, weight pHat: the exact exhaustive RIS, just a far shorter candidate set
@@ -337,6 +339,8 @@ void main() {
 			ldirLoop    = ldir;
 			dlLoop      = dl;
 			ndlLoop     = ndl;
+			visDirLoop  = g_rtEmVisDir;		// valid when this candidate's shade was an emitter's (the full-target loop)
+			visDistLoop = g_rtEmVisDist;
 		}
 #if DI_BOOST
 		// R3a: the extra independent picks share the candidate weights (same wSum), each with its own random draws
@@ -366,6 +370,8 @@ void main() {
 	if ( pHatChosen > 0.0 && diTargetIsAnalytic( lights, rowChosen - 1u ) ) {
 		vec3 ldS; float dlS, ndlS;
 		if ( !diShadeLight( lights, rowChosen - 1u, S, tgtChosen, ldS, dlS, ndlS, cheapTarget ) ) { tgtChosen = vec3( 0.0 ); }
+		visDirLoop  = g_rtEmVisDir;			// the winner's own area samples
+		visDistLoop = g_rtEmVisDist;
 	}
 	if ( pHatChosen > 0.0 ) {
 		ldirChosen    = ldirLoop;
@@ -380,7 +386,9 @@ void main() {
 	float W   = ( pHatChosen > 0.0 ) ? ( wSum / ( pdfOne ? 1.0 : float( draws ) ) ) / pHatChosen : 0.0;
 	float occDist = dlChosen;
 	float vis = ( !( pHatChosen > 0.0 ) || ( flagsChosen & DUDE_LIGHT_NOSHADOWS ) != 0u )
-		? 1.0 : traceVisibility( Pw, Nw, ldirChosen, dlChosen, diLightBlurScale( flagsChosen ), occDist );
+		? 1.0 : ( ( flagsChosen & DUDE_LIGHT_EMISSIVE ) != 0u
+			? ( ( visDistLoop > 0.0 ) ? traceVisibility( Pw, Nw, visDirLoop, visDistLoop, diLightBlurScale( flagsChosen ), occDist ) : 0.0 )	// an emitter: to its sampled point
+			: traceVisibility( Pw, Nw, ldirChosen, dlChosen, diLightBlurScale( flagsChosen ), occDist ) );
 
 	// the direct term, at the forward path's light scale (lightColor = lightScale * stage colour there)
 	vec3 outRad = max( radChosen * ( W * vis * u_shadowFalloffS.x ), vec3( 0.0 ) );
@@ -417,7 +425,10 @@ void main() {
 			float Wk = ( wSum / ( pdfOne ? 1.0 : float( draws ) ) ) / pH;
 			float od;
 			uint  flagsK = lights.l[ lk ].flags;
-			float visK = ( ( flagsK & DUDE_LIGHT_NOSHADOWS ) != 0u ) ? 1.0 : traceVisibility( Pw, Nw, ld, dl, diLightBlurScale( flagsK ), od );
+			const bool emK = ( flagsK & DUDE_LIGHT_EMISSIVE ) != 0u;		// an emitter: to the sampled point of its shade just above
+			const vec3  vdK = emK ? g_rtEmVisDir : ld;
+			const float vlK = emK ? g_rtEmVisDist : dl;
+			float visK = ( ( flagsK & DUDE_LIGHT_NOSHADOWS ) != 0u ) ? 1.0 : ( ( vlK > 0.0 ) ? traceVisibility( Pw, Nw, vdK, vlK, diLightBlurScale( flagsK ), od ) : 0.0 );
 			rk = max( rk * ( Wk * visK * u_shadowFalloffS.x ), vec3( 0.0 ) );
 			sumRad += rk;
 			sumSh  += ld * dot( rk, vec3( 0.2126, 0.7152, 0.0722 ) );
