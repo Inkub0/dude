@@ -1164,6 +1164,7 @@ extern idCVar r_volResScale;
 extern idCVar r_volMaxDist;
 extern idCVar r_volExtinction;
 extern idCVar r_volPointLightScale;
+extern idCVar r_volEmissiveScale;			// emissive mode: the emitters' share of the volumetric haze (vol_scatter.glsl)
 extern idCVar r_volFlashlightScale;
 extern idCVar r_volLargeLightRadius;
 extern idCVar r_volAoIntensity;
