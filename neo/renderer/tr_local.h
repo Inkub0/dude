@@ -1190,7 +1190,8 @@ unsigned long long R_RtEmissiveTableAddress( int *numTris, float *totalFlux, flo
 // area, the inherited reach of the placed light it replaces (0 = none), its triangle range in the table). dark = every
 // triangle at zero flux (switched off / gone): never a row.
 struct rtEmissiveRow_t { const idMaterial *mat; idVec3 centroid; float boundRadius; float flux; float area; idVec3 meanRadiance; unsigned long long fixtureId; int firstTri, numTris; bool dark; };
-int R_RtEmissiveRows( const rtEmissiveRow_t **rows );		// the rows (0 = no table)
+int R_RtEmissiveRows( const rtEmissiveRow_t **rows );
+bool R_RtEmissiveRowAnimTint( int row, float ratio[3] );	// a TIME-animated glow row: this frame's live / baked stage colour (false = steady)		// the rows (0 = no table)
 float R_RtEmissiveLightAnimatedAverage( const idRenderLightLocal *ld );	// time-average luminance of a light's animated colour (0 = steady)
 // emissive mode AUTHORING (RtEmissiveAuthor.cpp, docs/rtx-light-editor.md): the per-map emissive/<map>.cfg decides which placed
 // lights are deleted and which glowing fixtures emit - no heuristics; a map without the file is unchanged

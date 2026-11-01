@@ -139,7 +139,8 @@ vec3 dudeVolInScatter( RtLights lights, uint idx[ DUDE_VOL_MAX_LIGHTS ], vec4 sp
 		if ( ( fl & DUDE_LIGHT_EMISSIVE ) != 0u ) {
 			// an EMITTER row as a small light at its centroid, by the shade's own far field (rtEmissiveTargetRow): its row
 			// colour is its irradiance proxy at its reach R (16 L A / R^2), so L A = colour R^2 / 16, over d^2 with the reach
-			// boost and fade, the near field floored at its bound radius; its live flicker (projF.y) and the omni scale of
+			// boost and fade, the near field floored at its bound radius; its follow flicker (projF.z: its colour already carries
+			// an animated glow's tint) and the omni scale of
 			// the point lights it replaced. Shadowed like a point light, the ray stopping OUTSIDE the fixture's bound sphere
 			// (a tube's or a bulb's own surface must not shadow its light).
 			vec3  toC  = lights.l[ li ].pos - p;
@@ -152,7 +153,7 @@ vec3 dudeVolInScatter( RtLights lights, uint idx[ DUDE_VOL_MAX_LIGHTS ], vec4 sp
 			float boost = ( knee > 0.0 ) ? max( dc / knee, 1.0 ) : 1.0;
 			float fade = ( lights.l[ li ].projQ.w > 0.5 ) ? 1.0 : 1.0 - smoothstep( 0.75 * R, R, max( dc - br, 0.0 ) );
 			float d2   = max( dc * dc, max( br * br, 1.0 ) );
-			vec3  ec   = lights.l[ li ].color * ( ( R * R / 16.0 ) * boost * fade / d2 * max( lights.l[ li ].projF.y, 0.0 )
+			vec3  ec   = lights.l[ li ].color * ( ( R * R / 16.0 ) * boost * fade / d2 * max( lights.l[ li ].projF.z, 0.0 )
 			                                      * pointScale * emissiveScale * dudeVolPhase( dot( edir, viewDir ), g ) );
 			if ( max( ec.r, max( ec.g, ec.b ) ) < 0.004 ) { continue; }
 			if ( shadows && pointShadows && ( fl & DUDE_LIGHT_NOSHADOWS ) == 0u ) {

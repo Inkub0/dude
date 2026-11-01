@@ -6681,6 +6681,10 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 				if ( solo && row.fixtureId != soloFixture ) { continue; }			// the Light Editor's solo: another light / surface
 				rtEmAuthEmit_t ap;
 				if ( !R_EmAuthFixtureEmits( rw, row.fixtureId, row.mat, &ap ) ) { continue; }
+				{
+					float at[3];
+					if ( R_RtEmissiveRowAnimTint( i, at ) ) { ap.tint[0] *= at[0]; ap.tint[1] *= at[1]; ap.tint[2] *= at[2]; }	// an animated glow, this frame
+				}
 				float R = ( ap.reach > 0.0f ) ? ap.reach : reachDef;
 				if ( !( R > 0.0f ) ) { R = Max( row.boundRadius * 4.0f, 64.0f ); }
 				const float radius = R * ( ( reachMul > 0.0f ) ? reachMul : 1.0f );
@@ -6722,6 +6726,16 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 				const rtEmissiveRow_t &row = rows[ pick[k] ];
 				rtEmAuthEmit_t ap;
 				R_EmAuthFixtureEmits( rw, row.fixtureId, row.mat, &ap );
+				// a TIME-animated glow stage (a pulse, a flicker table): this frame's live / baked colour rides the tint, so the
+				// shade, the grid's proxy and the haze all follow it; its luminance joins projF.y for the R1 gradient below
+				float animLum = 1.0f;
+				{
+					float at[3];
+					if ( R_RtEmissiveRowAnimTint( pick[k], at ) ) {
+						ap.tint[0] *= at[0]; ap.tint[1] *= at[1]; ap.tint[2] *= at[2];
+						animLum = at[0] * 0.2126f + at[1] * 0.7152f + at[2] * 0.0722f;
+					}
+				}
 				float R = ( ap.reach > 0.0f ) ? ap.reach : reachDef;
 				if ( !( R > 0.0f ) ) { R = Max( row.boundRadius * 4.0f, 64.0f ); }
 				const float radius = R * ( ( reachMul > 0.0f ) ? reachMul : 1.0f );
@@ -6768,7 +6782,8 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 				L.proj[0][3] = rowIntensity * flicker;
 				L.proj[1][2] = (float)ap.profile;									// projT.z = the emission profile
 				L.proj[1][3] = ap.twoSided ? 1.0f : 0.0f;							// projT.w = both faces emit
-				L.proj[3][1] = flicker;
+				L.proj[3][1] = flicker * animLum;									// the R1 gradient's "this emitter changed" factor
+				L.proj[3][2] = flicker;												// projF.z: the follow flicker alone (the haze; its colour already carries the animated tint)
 				memcpy( &L.proj[1][0], &tLo, sizeof( tLo ) );
 				memcpy( &L.proj[1][1], &tHi, sizeof( tHi ) );
 				const unsigned int first = (unsigned int)row.firstTri, num = (unsigned int)row.numTris;

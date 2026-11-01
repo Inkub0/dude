@@ -239,6 +239,7 @@ int rtgiTraceBounce( RtgiBounceParms bp, vec3 Pw, vec3 Nw, vec3 eyeW, float d, v
 			vec3  ldir; float dl;
 			float ndl;
 			vec3  contrib;
+			vec3  visDir;  float visDist;										// the shadow ray's target if this light turns out dominant
 			if ( ( lflags & DUDE_LIGHT_EMISSIVE ) != 0u ) {
 				// E2 v3: an EMITTER row (also the BOUNCEONLY rows of normal mode) - one sample point on its surface, seeded by
 				// the pixel + frame; Lambert at H as the lights below (Doom: no 1/pi). Its visibility rides the dominant-light
@@ -247,6 +248,10 @@ int rtgiTraceBounce( RtgiBounceParms bp, vec3 Pw, vec3 Nw, vec3 eyeW, float d, v
 				uint seed = rtEmissiveSeed( li, hitWorld, bp.sampleFrame ) ^ ( uint( sfrag.x ) * 7919u + uint( sfrag.y ) * 104729u );
 				if ( !rtEmissiveShadeRow( lights, li, hitWorld, hitN, seed | 1u, 1u, c, ldir, dl, ndl ) ) { continue; }
 				contrib = albedo * c * bp.lightScale;
+				// the shadow ray aims at the SAMPLED point, not the centroid: a tube's or a bulb's centroid lies inside its own
+				// surface, so as the dominant light it always read occluded and its bounce was dropped (rt_emissive.glsl)
+				visDir = g_rtEmVisDir;	visDist = g_rtEmVisDist;
+				if ( !( visDist > 0.0 ) ) { continue; }
 			} else {
 			dudeLightDir( lights, li, hitWorld, ldir, dl );
 			ndl = max( dot( hitN, ldir ), 0.0 );
@@ -258,12 +263,13 @@ int rtgiTraceBounce( RtgiBounceParms bp, vec3 Pw, vec3 Nw, vec3 eyeW, float d, v
 				: vec3( dudeLightAtten( lights, li, hitWorld, dl, lflags, gate, false ) );
 			if ( atten.r + atten.g + atten.b <= 0.0 ) { continue; }
 			contrib = albedo * lights.l[ li ].color * ( atten * ndl * bp.lightScale );
+			visDir = ldir;	visDist = dl;
 			}
 			Li += contrib;
 			if ( !fast ) { LiCache += contrib; }								// a fast light's bounce is never learned
 			// track the DOMINANT (brightest) reaching light at this hit for the H6d shadow ray
 			float lum = dot( contrib, vec3( 0.299, 0.587, 0.114 ) );
-			if ( lum > domLum ) { domLum = lum; domContrib = contrib; domDir = ldir; domDist = dl; domFast = fast; }
+			if ( lum > domLum ) { domLum = lum; domContrib = contrib; domDir = visDir; domDist = visDist; domFast = fast; }
 		}
 	}
 	// RR16g: self-illumination sampled PER-PIXEL from the additive glow stage (bindless slot in flags bits
