@@ -392,7 +392,8 @@ bool rtEmissiveShadeRow( RtLights lights, uint li, vec3 P, vec3 N, uint seed, ui
 // rtEmissiveShadeRow (r_rtEmissiveSamples area samples each), the gather's main cost in emissive mode (~1.75 ms per sample on
 // mars_city1). The row's colour is its irradiance proxy at its reach R, 16 L A / R^2 (RB_RHI_GatherSceneLights), so
 // L A = colour R^2 / 16 and the far-field irradiance is that / d^2 times the shade's own reach boost and fade, times the
-// receiver cosine toward the row's pos (the shade's ndl). Only the winner is then area-sampled. Any positive target keeps
+// receiver cosine bounded over the run's bounding sphere (below; gated like the shade by ndl > 0 toward the row's pos). Only
+// the winner is then area-sampled. Any positive target keeps
 // RIS unbiased as long as it is non-zero wherever the shade can be: the cull, the flags and the ndl gate are the shade's, and
 // the fade is taken at the emitter's NEAREST possible point (its bound sphere: cull.w - radius around the centroid), never
 // below the fade of any sample the shade could draw. The near field is floored at the bound radius (a solid angle cannot
@@ -454,7 +455,21 @@ bool rtEmissiveTargetRow( RtLights lights, uint li, vec3 P, vec3 N, out vec3 con
 		if ( !( fade > 0.0 ) ) { return false; }
 	}
 	float d2     = max( dc * dc, max( br * br, 1.0 ) );
-	contrib = lights.l[ li ].color * ( ( R * R / 16.0 ) * boost * fade * ndl / d2 );
+	// The receiver cosine: its BOUND over the run's bounding sphere (the best cosine toward any point the run can occupy), not
+	// the cosine toward the centroid (2026-11-02). A large emitter seen from a surface whose normal is nearly perpendicular to
+	// the centroid direction - the 53-unit swinglight tubes from their own reflector, the ceiling, the walls around - got
+	// ndl -> 0 while the near part of the tube lit it fully: true / target up to ~120 at 3-60 units (offline, the real tube).
+	// RIS then drew it rarely and weighted it hugely, through the GI bounce (which picks its emitter with this target) as
+	// sparse bright pixels across the room and boiling after the denoise. The bound keeps true / target <= ~2.7 there, at the
+	// price of over-weighting such emitters 2-5x; far away (a small bounding angle) it is the plain cosine. The support is
+	// unchanged (the shade's own gate, ndl > 0 toward the centroid, still decides), so RIS stays unbiased; the returned ndl
+	// stays the centroid's (the winner's material response and SH direction use it).
+	float cR = 1.0;
+	if ( dc > br ) {
+		const float sb = br / dc, cb = sqrt( max( 1.0 - sb * sb, 0.0 ) );
+		cR = ( ndl >= cb ) ? 1.0 : ndl * cb + sqrt( max( 1.0 - ndl * ndl, 0.0 ) ) * sb;	// cos( theta_n - theta_b ), theta_n < pi/2
+	}
+	contrib = lights.l[ li ].color * ( ( R * R / 16.0 ) * boost * fade * cR / d2 );
 	return !( any( isnan( contrib ) ) ) && dot( contrib, vec3( 1.0 ) ) > 0.0;
 }
 
