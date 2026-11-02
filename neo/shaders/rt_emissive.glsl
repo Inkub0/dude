@@ -204,25 +204,29 @@ float rtEmissiveSolidAngle( RtEmissiveTri e, vec3 P, vec3 n, bool twoSided ) {
 // plane, so the centroid's side is every point's), or every vertex on or below the receiver's horizon (every sample's
 // N.L is 0) - dividing by this pick's probability keeps the estimate unbiased. The reach boost rides along (it only
 // grows with distance); the fade does not (0 at the centroid is not 0 everywhere on the triangle).
-float rtEmissiveTriWeight( RtEmissiveTri e, vec3 P, vec3 N, uint prof, bool twoSided, float knee ) {
-	if ( !( e.flux > 0.0 ) ) { return 0.0; }
-	vec3  v0 = e.p0 - P, v1 = e.p1 - P, v2 = e.p2 - P;
+// The radiance x area is the triangle's FLUX (the table's own, the flux CDF's weight): only its first 48 bytes are read
+// (vertices, flux, flags), not the whole 80-byte record.
+float rtEmissiveTriWeight( RtEmissiveTable t, uint i, vec3 P, vec3 N, uint prof, bool twoSided, float knee ) {
+	RtEmissiveTris tris = RtEmissiveTris( rtEmissiveOffsetAddr( t.addr, RT_EMISSIVE_HEADER_BYTES ) );
+	const float flux = tris.t[ i ].flux;
+	if ( !( flux > 0.0 ) ) { return 0.0; }
+	const vec3 p0 = tris.t[ i ].p0, p1 = tris.t[ i ].p1, p2 = tris.t[ i ].p2;
+	vec3  v0 = p0 - P, v1 = p1 - P, v2 = p2 - P;
 	float hMax = max( dot( N, v0 ), max( dot( N, v1 ), dot( N, v2 ) ) );
 	if ( !( hMax > 0.0 ) ) { return 0.0; }
-	vec3  g  = cross( e.p1 - e.p0, e.p2 - e.p0 );						// = -faceNormal, |g| = 2 x area
+	vec3  g  = cross( p1 - p0, p2 - p0 );								// = -faceNormal, |g| = 2 x area
 	vec3  c  = ( v0 + v1 + v2 ) * ( 1.0 / 3.0 );						// P -> the centroid
 	float gc = dot( g, c );												// > 0: the face looks at P (rtEmissiveSampleSolidAngle's front)
-	if ( !( gc > 0.0 ) && !twoSided && ( e.emit & RT_EMIT_TWOSIDED ) == 0u ) { return 0.0; }
+	if ( !( gc > 0.0 ) && !twoSided && ( tris.t[ i ].emit & RT_EMIT_TWOSIDED ) == 0u ) { return 0.0; }
 	float g2 = dot( g, g ), d2 = dot( c, c );
 	if ( !( g2 > 0.0 ) || !( d2 > 0.0 ) ) { return 0.0; }
-	float invD = inversesqrt( d2 );
-	float cosL = abs( gc ) * inversesqrt( g2 ) * invD;
+	float invD = inversesqrt( d2 ), invG = inversesqrt( g2 );
+	float cosL = abs( gc ) * invG * invD;
 	float emit = ( prof == 1u ) ? cosL : ( prof == 2u ) ? 1.0 : sqrt( cosL );
-	float area = 0.5 * sqrt( g2 );
+	float area = 0.5 * g2 * invG;
 	float cosR = max( dot( N, c ), 0.25 * hMax ) * invD;				// > 0: a vertex is above the horizon
 	float boost = ( knee > 0.0 ) ? max( d2 * invD / knee, 1.0 ) : 1.0;
-	float L = dot( rtEmissiveMeanRadiance( e ), vec3( 0.2126, 0.7152, 0.0722 ) ) * e.scale;
-	return L * boost * emit * cosR * area * cosL / max( d2, 0.5 * area );
+	return flux * boost * emit * cosR * cosL / max( d2, 0.5 * area );
 }
 
 // Runs up to this many triangles take the receiver-aware pick (it walks the run twice); longer ones keep the flux CDF.
@@ -311,15 +315,26 @@ bool rtEmissiveShadeRow( RtLights lights, uint li, vec3 P, vec3 N, uint seed, ui
 	float visW = 0.0;															// running sum of the samples' luminances (the visibility pick)
 	// the receiver-aware pick: pass 1 sums the run's weights, the sample loop below walks them again (the same code in the
 	// same order) up to each stratified position. A position past the walk's end (float error) takes the last triangle
-	// that reached P.
+	// that reached P. ONE sample needs no second walk: a weighted reservoir over the run draws its triangle with exactly
+	// the probability weight / total in the single pass (walk = num then skips the loop's walk).
 	const bool rPick = receiverPick && num <= RT_EMISSIVE_PICK_MAX_TRIS;
 	float wTot = 0.0, step = 0.0, u0 = 0.0, cum = 0.0, curW = 0.0;
 	uint  walk = 0u, curT = first;
 	if ( rPick ) {
-		for ( uint k = 0u; k < num; k++ ) { wTot += rtEmissiveTriWeight( rtEmissiveFetch( t, first + k ), P, N, prof, twoSided, knee ); }
+		if ( ns == 1u ) {
+			for ( uint k = 0u; k < num; k++ ) {
+				const float w = rtEmissiveTriWeight( t, first + k, P, N, prof, twoSided, knee );
+				if ( !( w > 0.0 ) ) { continue; }
+				wTot += w;
+				if ( rtEmissiveRand( rng ) * wTot < w ) { curT = first + k; curW = w; }
+			}
+			walk = num;
+		} else {
+			for ( uint k = 0u; k < num; k++ ) { wTot += rtEmissiveTriWeight( t, first + k, P, N, prof, twoSided, knee ); }
+			step = wTot / float( ns );
+			u0   = rtEmissiveRand( rng );
+		}
 		if ( !( wTot > 0.0 ) ) { return false; }								// no triangle of the run can reach P
-		step = wTot / float( ns );
-		u0   = rtEmissiveRand( rng );
 	}
 	for ( uint sIdx = 0u; sIdx < ns; sIdx++ ) {
 		float pIn;
@@ -327,7 +342,7 @@ bool rtEmissiveShadeRow( RtLights lights, uint li, vec3 P, vec3 N, uint seed, ui
 		if ( rPick ) {
 			const float pos = ( float( sIdx ) + u0 ) * step;
 			while ( cum <= pos && walk < num ) {
-				const float w = rtEmissiveTriWeight( rtEmissiveFetch( t, first + walk ), P, N, prof, twoSided, knee );
+				const float w = rtEmissiveTriWeight( t, first + walk, P, N, prof, twoSided, knee );
 				if ( w > 0.0 ) { cum += w; curT = first + walk; curW = w; }
 				walk++;
 			}
