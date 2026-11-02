@@ -126,7 +126,8 @@ bool diShadeLight( RtLights lights, uint li, in DiSurface s, out vec3 contrib, o
 		// E2 v3: an EMITTER row - one sample point on its surface (rt_emissive.glsl), the same material response as any
 		// light. The seed is (row, point, frame): the loop's target and the winner's re-shade draw the same point.
 		uint emSamples = uint( max( u_texGen0S.x, 1.0 ) + 0.5 );	// r_rtEmissiveSamples: area samples averaged per emitter shade (far-field)
-		if ( !rtEmissiveShadeRow( lights, li, s.Pw, s.Nw, rtEmissiveSeed( li, s.Pw, u_localParam1.x ), emSamples, contrib, ldir, dl, ndl ) ) { return false; }
+		// the receiver-aware triangle pick (true): the DI shade is one emitter per pixel, so it can afford to weigh its triangles
+		if ( !rtEmissiveShadeRow( lights, li, s.Pw, s.Nw, rtEmissiveSeed( li, s.Pw, u_localParam1.x ), emSamples, true, contrib, ldir, dl, ndl ) ) { return false; }
 		if ( s.applyMode && !targetOnly ) {
 			contrib *= diMaterialResponse( s, ldir, ndl );
 		}

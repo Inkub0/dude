@@ -588,3 +588,11 @@ Workflow: Emissive Mode on -> Bake defaults -> Physical on -> walk the map with 
   per sample: every emitter CANDIDATE of a pixel's list ran them all, not only the winner), and 10 / 4 / 1 looked the same
   -> the default is 2 (`tune/emissive-samples-default`, the user's choice: "makes the emissive mode playable"); a saved value
   is kept, so set it by hand where one is archived.
+  2026-11-02 (`feat/rtx-emissive-solid-angle-sampling`): WHY 2 was not 16 - the run's triangle was drawn by FLUX (a strip's far
+  end as often as its near end; facing-away / below-horizon triangles drawn and wasted) and the cheap RIS target ignored the
+  emitter's orientation. Now the DI shade weighs the run's triangles by their contribution at the pixel (rtEmissiveTriWeight:
+  flux x profile x cosines / d^2, 0 only where the shade gets nothing) and spreads the samples evenly over that distribution
+  (one weighted-reservoir pass at 1 sample); the target multiplies by the light-BVH orientation bound of the run's normal
+  cone (rtEmissiveOrientBound; cone from R_RtEmissiveBuildRows, in projF.x / projF.w). Both unbiased. User A/B (mars_city1,
+  raw-gather RMS noise on their shots): new 1 = new 2 = new 16 (0.200) < old 16 (0.224); new 1 costs the old 2 (~6.7 ms
+  gather at 1440p x 0.75) -> default 1. The GI bounce keeps the flux pick (it shades every emitter of the hit's cell).

@@ -197,6 +197,41 @@ float rtEmissiveSolidAngle( RtEmissiveTri e, vec3 P, vec3 n, bool twoSided ) {
 	return max( 2.0 * atan( abs( dot( A, cross( B, C ) ) ), 1.0 + dot( A, B ) + dot( B, C ) + dot( A, C ) ) - 1e-5, 0.0 );
 }
 
+// The RECEIVER-AWARE pick weight of triangle e at P (normal N, 2026-11-02): its estimated contribution - radiance x
+// emission profile x solid angle x receiver cosine, a point approximation at its centroid with the distance floored near
+// the triangle - so a strip's near end draws the samples its light deserves, not 1 / num of them (the flux pick). 0 ONLY
+// where the shade cannot get anything from the triangle: dark, facing away (the shade's own one-/two-sided test: the same
+// plane, so the centroid's side is every point's), or every vertex on or below the receiver's horizon (every sample's
+// N.L is 0) - dividing by this pick's probability keeps the estimate unbiased. The reach boost rides along (it only
+// grows with distance); the fade does not (0 at the centroid is not 0 everywhere on the triangle).
+// The radiance x area is the triangle's FLUX (the table's own, the flux CDF's weight): only its first 48 bytes are read
+// (vertices, flux, flags), not the whole 80-byte record.
+float rtEmissiveTriWeight( RtEmissiveTable t, uint i, vec3 P, vec3 N, uint prof, bool twoSided, float knee ) {
+	RtEmissiveTris tris = RtEmissiveTris( rtEmissiveOffsetAddr( t.addr, RT_EMISSIVE_HEADER_BYTES ) );
+	const float flux = tris.t[ i ].flux;
+	if ( !( flux > 0.0 ) ) { return 0.0; }
+	const vec3 p0 = tris.t[ i ].p0, p1 = tris.t[ i ].p1, p2 = tris.t[ i ].p2;
+	vec3  v0 = p0 - P, v1 = p1 - P, v2 = p2 - P;
+	float hMax = max( dot( N, v0 ), max( dot( N, v1 ), dot( N, v2 ) ) );
+	if ( !( hMax > 0.0 ) ) { return 0.0; }
+	vec3  g  = cross( p1 - p0, p2 - p0 );								// = -faceNormal, |g| = 2 x area
+	vec3  c  = ( v0 + v1 + v2 ) * ( 1.0 / 3.0 );						// P -> the centroid
+	float gc = dot( g, c );												// > 0: the face looks at P (rtEmissiveSampleSolidAngle's front)
+	if ( !( gc > 0.0 ) && !twoSided && ( tris.t[ i ].emit & RT_EMIT_TWOSIDED ) == 0u ) { return 0.0; }
+	float g2 = dot( g, g ), d2 = dot( c, c );
+	if ( !( g2 > 0.0 ) || !( d2 > 0.0 ) ) { return 0.0; }
+	float invD = inversesqrt( d2 ), invG = inversesqrt( g2 );
+	float cosL = abs( gc ) * invG * invD;
+	float emit = ( prof == 1u ) ? cosL : ( prof == 2u ) ? 1.0 : sqrt( cosL );
+	float area = 0.5 * g2 * invG;
+	float cosR = max( dot( N, c ), 0.25 * hMax ) * invD;				// > 0: a vertex is above the horizon
+	float boost = ( knee > 0.0 ) ? max( d2 * invD / knee, 1.0 ) : 1.0;
+	return flux * boost * emit * cosR * cosL / max( d2, 0.5 * area );
+}
+
+// Runs up to this many triangles take the receiver-aware pick (it walks the run twice); longer ones keep the flux CDF.
+const uint RT_EMISSIVE_PICK_MAX_TRIS = 32u;
+
 vec2 rtEmissiveST( RtEmissiveTri e, vec3 bary ) {
 	return bary.x * unpackHalf2x16( e.st0 ) + bary.y * unpackHalf2x16( e.st1 ) + bary.z * unpackHalf2x16( e.st2 );
 }
@@ -221,7 +256,8 @@ uint rtEmissiveSeed( uint li, vec3 P, float frame ) {
 }
 
 // The unshadowed irradiance ESTIMATE of emitter row li at surface point P (normal N): one triangle of the run drawn by
-// flux (the CDF restricted to the run), one point on it uniform in solid angle (Arvo), value f / p = radiance x emission
+// its contribution at P (receiverPick, the DI shade) or by flux (the CDF restricted to the run: the GI bounce, and runs
+// over RT_EMISSIVE_PICK_MAX_TRIS), one point on it uniform in solid angle (Arvo), value f / p = radiance x emission
 // profile x N.L x (solid angle / flux share). Unbiased for the row's total, so the DI reservoir can hold an emitter row
 // next to a placed light with pdf 1 exactly like any other candidate. ldir / dl = the SAMPLED point (the visibility ray).
 // ldir / dl are the SAMPLED point (the visibility ray); the receiver cosine comes from the authored light origin when there is one.
@@ -238,7 +274,11 @@ uint rtEmissiveSeed( uint li, vec3 P, float frame ) {
 vec3  g_rtEmVisDir;
 float g_rtEmVisDist;
 
-bool rtEmissiveShadeRow( RtLights lights, uint li, vec3 P, vec3 N, uint seed, uint samples, out vec3 contrib, out vec3 ldir, out float dl, out float ndl ) {
+// receiverPick (the DI shade; the GI bounce, which shades every emitter of a cell at one sample, keeps the flux pick): the
+// run's triangles are drawn by their contribution at P (rtEmissiveTriWeight), the `samples` draws STRATIFIED over that
+// distribution (positions ( s + u ) / samples), for runs up to RT_EMISSIVE_PICK_MAX_TRIS. Each draw is the same Arvo point
+// and the same per-sample value as the flux pick, divided by its own probability: both estimate the same integral.
+bool rtEmissiveShadeRow( RtLights lights, uint li, vec3 P, vec3 N, uint seed, uint samples, bool receiverPick, out vec3 contrib, out vec3 ldir, out float dl, out float ndl ) {
 	g_rtEmVisDir = vec3( 0.0, 0.0, 1.0 );	g_rtEmVisDist = 0.0;
 	contrib = vec3( 0.0 );	ldir = vec3( 0.0, 0.0, 1.0 );	dl = 0.0;	ndl = 0.0;
 	uvec2 tAddr     = uvec2( floatBitsToUint( lights.l[ li ].projT.x ), floatBitsToUint( lights.l[ li ].projT.y ) );
@@ -274,9 +314,44 @@ bool rtEmissiveShadeRow( RtLights lights, uint li, vec3 P, vec3 N, uint seed, ui
 	vec3  Lsum = vec3( 0.0 );
 	uint  got  = 0u;
 	float visW = 0.0;															// running sum of the samples' luminances (the visibility pick)
+	// the receiver-aware pick: pass 1 sums the run's weights, the sample loop below walks them again (the same code in the
+	// same order) up to each stratified position. A position past the walk's end (float error) takes the last triangle
+	// that reached P. ONE sample needs no second walk: a weighted reservoir over the run draws its triangle with exactly
+	// the probability weight / total in the single pass (walk = num then skips the loop's walk).
+	const bool rPick = receiverPick && num <= RT_EMISSIVE_PICK_MAX_TRIS;
+	float wTot = 0.0, step = 0.0, u0 = 0.0, cum = 0.0, curW = 0.0;
+	uint  walk = 0u, curT = first;
+	if ( rPick ) {
+		if ( ns == 1u ) {
+			for ( uint k = 0u; k < num; k++ ) {
+				const float w = rtEmissiveTriWeight( t, first + k, P, N, prof, twoSided, knee );
+				if ( !( w > 0.0 ) ) { continue; }
+				wTot += w;
+				if ( rtEmissiveRand( rng ) * wTot < w ) { curT = first + k; curW = w; }
+			}
+			walk = num;
+		} else {
+			for ( uint k = 0u; k < num; k++ ) { wTot += rtEmissiveTriWeight( t, first + k, P, N, prof, twoSided, knee ); }
+			step = wTot / float( ns );
+			u0   = rtEmissiveRand( rng );
+		}
+		if ( !( wTot > 0.0 ) ) { return false; }								// no triangle of the run can reach P
+	}
 	for ( uint sIdx = 0u; sIdx < ns; sIdx++ ) {
 		float pIn;
-		uint  ti = rtEmissiveSampleInGroup( t, first, num, rtEmissiveRand( rng ), pIn );
+		uint  ti;
+		if ( rPick ) {
+			const float pos = ( float( sIdx ) + u0 ) * step;
+			while ( cum <= pos && walk < num ) {
+				const float w = rtEmissiveTriWeight( t, first + walk, P, N, prof, twoSided, knee );
+				if ( w > 0.0 ) { cum += w; curT = first + walk; curW = w; }
+				walk++;
+			}
+			ti  = curT;
+			pIn = curW / wTot;
+		} else {
+			ti = rtEmissiveSampleInGroup( t, first, num, rtEmissiveRand( rng ), pIn );
+		}
 		if ( ti < first || ti >= first + num || !( pIn > 0.0 ) ) { continue; }
 		RtEmissiveTri e = rtEmissiveFetch( t, ti );
 		if ( !( e.flux > 0.0 ) ) { continue; }
@@ -317,6 +392,39 @@ bool rtEmissiveShadeRow( RtLights lights, uint li, vec3 P, vec3 N, uint seed, ui
 // the fade is taken at the emitter's NEAREST possible point (its bound sphere: cull.w - radius around the centroid), never
 // below the fade of any sample the shade could draw. The near field is floored at the bound radius (a solid angle cannot
 // exceed the hemisphere). ldir / dl / ndl are the shade's (toward pos).
+vec3 rtEmissiveOctDecode( vec2 o ) {
+	vec3 n = vec3( o, 1.0 - abs( o.x ) - abs( o.y ) );
+	if ( n.z < 0.0 ) { n.xy = ( 1.0 - abs( n.yx ) ) * vec2( n.x >= 0.0 ? 1.0 : -1.0, n.y >= 0.0 ? 1.0 : -1.0 ); }
+	return normalize( n );
+}
+
+// The ORIENTATION BOUND of emitter row li toward P (2026-11-02): the emission profile of the smallest angle any of its face
+// normals can make with the direction from any of its points to P - the light-BVH bound (Conty Estevez & Kulla 2018):
+// theta' = max( theta_w - theta_o - theta_b, 0 ), theta_w = the cone axis vs the direction centroid -> P, theta_o = the
+// cone's half-angle, theta_b = the half-angle the run's bounding sphere subtends from P. 0 ONLY when every triangle faces
+// away from P (one-sided), so the target keeps the shade's support; 1 = no bound (no cone - a tube, a bulb - or P inside
+// the bounding sphere). The cone rides projF.x (axis, octahedral snorm16 x2) and projF.w (cos theta_o, + 4 = the
+// material emits from both faces: theta_w folds to the nearer face).
+float rtEmissiveOrientBound( RtLights lights, uint li, vec3 P, float dc, float br, uint prof, bool twoSided ) {
+	const float cw4  = lights.l[ li ].projF.w;
+	const bool  both = twoSided || cw4 > 2.0;
+	const float co   = ( cw4 > 2.0 ) ? cw4 - 4.0 : cw4;
+	if ( !( co > -1.0 ) || !( dc > br ) ) { return 1.0; }
+	const vec3 a = rtEmissiveOctDecode( unpackSnorm2x16( floatBitsToUint( lights.l[ li ].projF.x ) ) );
+	float cw = dot( a, ( P - lights.l[ li ].cull.xyz ) / dc );
+	if ( both ) { cw = abs( cw ); }
+	const float sb = br / dc, cb = sqrt( max( 1.0 - sb * sb, 0.0 ) );
+	const float so = sqrt( max( 1.0 - co * co, 0.0 ) );
+	if ( cb < -co ) { return 1.0; }												// theta_o + theta_b >= pi: every direction possible
+	const float cs = co * cb - so * sb, ss = so * cb + co * sb;					// cos / sin of theta_o + theta_b
+	if ( cw >= cs ) { return 1.0; }												// theta_w inside the widened cone
+	const float c = cw * cs + sqrt( max( 1.0 - cw * cw, 0.0 ) ) * ss;			// cos( theta_w - theta_o - theta_b )
+	if ( !( c > 0.0 ) ) { return 0.0; }
+	return ( prof == 1u ) ? c : ( prof == 2u ) ? 1.0 : sqrt( c );
+}
+
+// Times rtEmissiveOrientBound (2026-11-02): an emitter facing away from P is never picked (it shaded 0: a black sample),
+// one seen edge-on (a wall panel from the floor beside it) no longer outweighs the ceiling.
 bool rtEmissiveTargetRow( RtLights lights, uint li, vec3 P, vec3 N, out vec3 contrib, out vec3 ldir, out float dl, out float ndl ) {
 	contrib = vec3( 0.0 );	ldir = vec3( 0.0, 0.0, 1.0 );	dl = 0.0;	ndl = 0.0;
 	if ( floatBitsToUint( lights.l[ li ].projQ.y ) == 0u ) { return false; }	// no triangles: the shade reaches nothing
@@ -334,6 +442,12 @@ bool rtEmissiveTargetRow( RtLights lights, uint li, vec3 P, vec3 N, out vec3 con
 	float boost  = ( knee > 0.0 ) ? max( dc / knee, 1.0 ) : 1.0;
 	float fade   = noFade ? 1.0 : 1.0 - smoothstep( 0.75 * R, R, max( dc - br, 0.0 ) );
 	if ( !( fade > 0.0 ) ) { return false; }
+	{
+		const uint prof     = uint( clamp( lights.l[ li ].projT.z, 0.0, 2.0 ) + 0.5 );
+		const bool twoSided = lights.l[ li ].projT.w > 0.5;
+		fade *= rtEmissiveOrientBound( lights, li, P, dc, br, prof, twoSided );
+		if ( !( fade > 0.0 ) ) { return false; }
+	}
 	float d2     = max( dc * dc, max( br * br, 1.0 ) );
 	contrib = lights.l[ li ].color * ( ( R * R / 16.0 ) * boost * fade * ndl / d2 );
 	return !( any( isnan( contrib ) ) ) && dot( contrib, vec3( 1.0 ) ) > 0.0;
