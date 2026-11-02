@@ -3671,6 +3671,14 @@ cmHandle_t idCollisionModelManagerLocal::LoadModel( const char *modelNameArg, co
 	canonicalName.BackSlashesToSlashes();
 	const char *modelName = canonicalName.c_str();
 
+	// DUDE (2026-11-02): no collision map loaded - the model table is allocated by LoadMap and freed by FreeMap - so there is
+	// nothing to load into. The timeDemo's level-load emulation (Session.cpp, com_timeDemoLevelLoad) precaches media through
+	// the game's CacheDictionaryMedia with no game map, and its .cm precache wrote models[numModels] through the NULL table
+	// (SIGSEGV in ParseCollisionModel). A render demo needs no collision models; every game DLL's precache is safe this way.
+	if ( models == NULL ) {
+		return 0;
+	}
+
 	handle = FindModel( modelName );
 	if ( handle >= 0 ) {
 		return handle;
