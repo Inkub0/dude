@@ -2867,6 +2867,7 @@ static void R_RtEmissiveReport( const char *fmt, ... ) {
 // treat an emitter exactly like a placed light. CPU only (no GPU group buffer): rebuilt whenever flux (a fixture's
 // state) or positions (movers) change. The row's triangles are sampled on the GPU straight from the table.
 static idList<rtEmissiveRow_t>	s_rtEmissiveRows;
+static idList<idVec3>			s_rtEmissiveRowAnim;		// per row: an ANIMATED glow's live / baked stage colour; x < 0 = steady (R_RtEmissiveUpdateAnimatedRows)
 
 // A stable 64-bit id for a fixture at world position p (its emitter surface's CENTROID): quantised to a 0.1-unit grid -
 // the centroid is computed identically every load (same triangles, same split), so the key is stable, and 0.1 keeps even
@@ -3346,6 +3347,7 @@ static void R_RtEmissiveFree( void ) {
 	}
 	s_rtEmissiveBuf = 0;	s_rtEmissiveAddr = 0;	s_rtEmissiveTotalFlux = 0.0f;
 	s_rtEmissiveRows.Clear();
+	s_rtEmissiveRowAnim.Clear();
 	s_rtEmissiveDbgVB = s_rtEmissiveDbgIB = 0;	s_rtEmissiveDbgIndexes = 0;
 	s_rtEmissiveTris.Clear();
 	s_rtEmissiveTriSrc.Clear();
@@ -3755,6 +3757,56 @@ static void R_RtEmissiveBuildRows( void ) {
 	}
 }
 
+// ANIMATED GLOWS (2026-11-01): a glow stage whose colour is TIME-driven (a table, a sine - RT_EMIT_FLAG_ANIMATED) was baked
+// at its t = 0 colour and never moved: a pulsing panel lit the room at one constant level. Once per frame (frontend) each
+// such row's stage colour is evaluated at the view's time with the surface's live parms and divided by the baked colour
+// (the same t = 0 snapshot and 0.25 floor R_RtEmissiveAddSurface used); the gather multiplies the row's tint by it.
+
+static void R_RtEmissiveUpdateAnimatedRows( const idRenderWorldLocal *world ) {
+	const int n = s_rtEmissiveRows.Num();
+	s_rtEmissiveRowAnim.SetNum( n, false );
+	for ( int ri = 0; ri < n; ri++ ) {
+		s_rtEmissiveRowAnim[ri].Set( -1.0f, 0.0f, 0.0f );
+		const rtEmissiveRow_t &row = s_rtEmissiveRows[ri];
+		if ( row.numTris <= 0 || row.firstTri < 0 || row.firstTri >= s_rtEmissiveTris.Num() || row.mat == NULL || tr.viewDef == NULL ) { continue; }
+		const unsigned int emit = s_rtEmissiveTris[ row.firstTri ].emit;
+		if ( ( emit & RT_EMIT_FLAG_ANIMATED ) == 0u ) { continue; }
+		const float *parms = NULL;											// world surfaces: the default parms (as the bake)
+		if ( ( emit & RT_EMIT_FLAG_ENTITY ) != 0u ) {
+			for ( int gi = 0; gi < s_rtEmissiveGroups.Num(); gi++ ) {
+				const rtEmissiveGroup_t &g = s_rtEmissiveGroups[gi];
+				if ( row.firstTri < g.firstTri || row.firstTri >= g.firstTri + g.numTris ) { continue; }
+				if ( g.entityIndex >= 0 && g.entityIndex < world->entityDefs.Num() && world->entityDefs[ g.entityIndex ] != NULL ) {
+					parms = world->entityDefs[ g.entityIndex ]->parms.shaderParms;
+				}
+				break;
+			}
+		}
+		const shaderStage_t *st = R_RtEmissiveStage( row.mat, NULL, parms );
+		const int numRegs = row.mat->GetNumRegisters();
+		if ( st == NULL || numRegs <= 0 || numRegs > 4096 ) { continue; }
+		float baked[3];
+		R_RtEmissiveStageColor( row.mat, st, parms, baked );				// the t = 0 snapshot the bake used
+		if ( R_RtLuminance( baked ) < 0.25f ) { baked[0] = baked[1] = baked[2] = 0.25f; }	// ...and its floor
+		static const float defaultParms[MAX_ENTITY_SHADER_PARMS] = { 1.0f, 1.0f, 1.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f };
+		float *regs = (float *)_alloca16( numRegs * (int)sizeof( float ) );
+		row.mat->EvaluateRegisters( regs, parms != NULL ? parms : defaultParms, tr.viewDef, NULL );	// the view's time + global parms
+		idVec3 ratio;
+		for ( int k = 0; k < 3; k++ ) {
+			const int r = st->color.registers[k];
+			const float live = ( r >= 0 && r < numRegs ) ? idMath::ClampFloat( 0.0f, 16.0f, regs[r] ) : 1.0f;
+			ratio[k] = live / Max( baked[k], 1e-3f );
+		}
+		s_rtEmissiveRowAnim[ri] = ratio;
+	}
+}
+
+bool R_RtEmissiveRowAnimTint( int row, float ratio[3] ) {
+	if ( row < 0 || row >= s_rtEmissiveRowAnim.Num() || s_rtEmissiveRowAnim[row].x < 0.0f ) { return false; }
+	ratio[0] = s_rtEmissiveRowAnim[row].x; ratio[1] = s_rtEmissiveRowAnim[row].y; ratio[2] = s_rtEmissiveRowAnim[row].z;
+	return true;
+}
+
 int R_RtEmissiveRows( const rtEmissiveRow_t **rows ) {
 	if ( rows ) { *rows = s_rtEmissiveRows.Ptr(); }
 	return ( s_rtEmissiveBuf != 0 ) ? s_rtEmissiveRows.Num() : 0;
@@ -4096,6 +4148,7 @@ static void R_RtEmissiveUpdate( const idRenderWorldLocal *world, rhi::RHI *r ) {
 	const bool stale = s_rtEmissiveMap.Icmp( world->mapName ) != 0 || r_rtEmissiveTable.IsModified() || r_rtEmissiveLighting.IsModified() || r_rtEmissiveScale.IsModified();
 	if ( !stale ) {
 		R_RtEmissiveRefreshMovers( world, r );	// E1e: moved doors / lifts / platforms re-bake their slice
+		R_RtEmissiveUpdateAnimatedRows( world );	// time-driven glow colours: this frame's live / baked ratio per row
 		if ( r_rtEmissiveTableDebug.GetInteger() > 0 ) {
 			R_RtEmissiveProjectLabels( tr.viewDef );	// E1d: the overlay's material names (frontend: the area stamps are current; not over the light spheres)
 		} else {
