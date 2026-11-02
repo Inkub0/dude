@@ -197,36 +197,41 @@ float rtEmissiveSolidAngle( RtEmissiveTri e, vec3 P, vec3 n, bool twoSided ) {
 	return max( 2.0 * atan( abs( dot( A, cross( B, C ) ) ), 1.0 + dot( A, B ) + dot( B, C ) + dot( A, C ) ) - 1e-5, 0.0 );
 }
 
-// The RECEIVER-AWARE pick weight of triangle e at P (normal N, 2026-11-02): its estimated contribution - radiance x
-// emission profile x solid angle x receiver cosine, a point approximation at its centroid with the distance floored near
-// the triangle - so a strip's near end draws the samples its light deserves, not 1 / num of them (the flux pick). 0 ONLY
-// where the shade cannot get anything from the triangle: dark, facing away (the shade's own one-/two-sided test: the same
-// plane, so the centroid's side is every point's), or every vertex on or below the receiver's horizon (every sample's
-// N.L is 0) - dividing by this pick's probability keeps the estimate unbiased. The reach boost rides along (it only
-// grows with distance); the fade does not (0 at the centroid is not 0 everywhere on the triangle).
-// The radiance x area is the triangle's FLUX (the table's own, the flux CDF's weight): only its first 48 bytes are read
-// (vertices, flux, flags), not the whole 80-byte record.
+// The RECEIVER-AWARE pick weight of triangle i at P (normal N, 2026-11-02): its estimated contribution - radiance x its EXACT
+// solid angle from P (the spherical excess, the same expression the Arvo sampler draws from) x the emission profile and the
+// receiver cosine at the most favourable of its centroid and corners - so a strip's near end draws the samples its light
+// deserves, not 1 / num of them (the flux pick). The first version took a point light at the centroid (area x cosines / d^2):
+// for a LONG THIN triangle beside the receiver (the hanging swinglight tubes: 53 x 4 units, aspect ~19, inside their shade)
+// the centroid is ~10x farther than the triangle's near end, the weight came out up to ~100x too small, and drawing such a
+// triangle divided a large sample by that tiny probability - fireflies around the tubes (offline, the real tube with
+// receivers 1.5-6 units off it: 99.9th percentile 10-35x the mean, vs 1.6-4.9x with this weight and 2-3x with the flux
+// pick). 0 ONLY where the shade cannot get anything from the triangle: dark, facing away (the shade's own one-/two-sided
+// test: the same plane, so the centroid's side is every point's), every vertex on or below the receiver's horizon, or a
+// spherical area the sampler rejects - dividing by this pick's probability keeps the estimate unbiased. The reach boost rides
+// along (it only grows with distance); the fade does not (0 at the centroid is not 0 everywhere on the triangle). Reads the
+// first 48 bytes of the record (vertices, flux, flags): radiance = flux / area.
 float rtEmissiveTriWeight( RtEmissiveTable t, uint i, vec3 P, vec3 N, uint prof, bool twoSided, float knee ) {
 	RtEmissiveTris tris = RtEmissiveTris( rtEmissiveOffsetAddr( t.addr, RT_EMISSIVE_HEADER_BYTES ) );
 	const float flux = tris.t[ i ].flux;
 	if ( !( flux > 0.0 ) ) { return 0.0; }
 	const vec3 p0 = tris.t[ i ].p0, p1 = tris.t[ i ].p1, p2 = tris.t[ i ].p2;
-	vec3  v0 = p0 - P, v1 = p1 - P, v2 = p2 - P;
-	float hMax = max( dot( N, v0 ), max( dot( N, v1 ), dot( N, v2 ) ) );
-	if ( !( hMax > 0.0 ) ) { return 0.0; }
-	vec3  g  = cross( p1 - p0, p2 - p0 );								// = -faceNormal, |g| = 2 x area
-	vec3  c  = ( v0 + v1 + v2 ) * ( 1.0 / 3.0 );						// P -> the centroid
-	float gc = dot( g, c );												// > 0: the face looks at P (rtEmissiveSampleSolidAngle's front)
-	if ( !( gc > 0.0 ) && !twoSided && ( tris.t[ i ].emit & RT_EMIT_TWOSIDED ) == 0u ) { return 0.0; }
-	float g2 = dot( g, g ), d2 = dot( c, c );
-	if ( !( g2 > 0.0 ) || !( d2 > 0.0 ) ) { return 0.0; }
-	float invD = inversesqrt( d2 ), invG = inversesqrt( g2 );
-	float cosL = abs( gc ) * invG * invD;
-	float emit = ( prof == 1u ) ? cosL : ( prof == 2u ) ? 1.0 : sqrt( cosL );
-	float area = 0.5 * g2 * invG;
-	float cosR = max( dot( N, c ), 0.25 * hMax ) * invD;				// > 0: a vertex is above the horizon
-	float boost = ( knee > 0.0 ) ? max( d2 * invD / knee, 1.0 ) : 1.0;
-	return flux * boost * emit * cosR * cosL / max( d2, 0.5 * area );
+	const vec3 v0 = p0 - P, v1 = p1 - P, v2 = p2 - P;
+	if ( !( max( dot( N, v0 ), max( dot( N, v1 ), dot( N, v2 ) ) ) > 0.0 ) ) { return 0.0; }
+	const vec3  g  = cross( p1 - p0, p2 - p0 );							// = -faceNormal, |g| = 2 x area
+	const vec3  c  = ( v0 + v1 + v2 ) * ( 1.0 / 3.0 );					// P -> the centroid
+	if ( !( dot( g, c ) > 0.0 ) && !twoSided && ( tris.t[ i ].emit & RT_EMIT_TWOSIDED ) == 0u ) { return 0.0; }
+	const float g2 = dot( g, g ), c2 = dot( c, c );
+	if ( !( g2 > 0.0 ) || !( c2 > 0.0 ) || !( dot( v0, v0 ) > 0.0 ) || !( dot( v1, v1 ) > 0.0 ) || !( dot( v2, v2 ) > 0.0 ) ) { return 0.0; }
+	const vec3  A = normalize( v0 ), B = normalize( v1 ), C = normalize( v2 ), M = c * inversesqrt( c2 );
+	const float omega = 2.0 * atan( abs( dot( A, cross( B, C ) ) ), 1.0 + dot( A, B ) + dot( B, C ) + dot( A, C ) );
+	if ( !( omega > 1e-7 ) ) { return 0.0; }								// rtEmissiveSampleSolidAngle rejects it too
+	const float invG = inversesqrt( g2 );
+	const vec3  gn   = g * invG;
+	const float cosR = max( max( max( dot( N, A ), dot( N, B ) ), max( dot( N, C ), dot( N, M ) ) ), 0.0 );	// > 0: a vertex is above the horizon
+	const float cosL = max( max( abs( dot( gn, A ) ), abs( dot( gn, B ) ) ), max( abs( dot( gn, C ) ), abs( dot( gn, M ) ) ) );
+	const float emit = ( prof == 1u ) ? cosL : ( prof == 2u ) ? 1.0 : sqrt( cosL );
+	const float boost = ( knee > 0.0 ) ? max( c2 * inversesqrt( c2 ) / knee, 1.0 ) : 1.0;
+	return ( 2.0 * flux * invG ) * boost * omega * emit * cosR;			// flux / area = the radiance
 }
 
 // Runs up to this many triangles take the receiver-aware pick (it walks the run twice); longer ones keep the flux CDF.
