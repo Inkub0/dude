@@ -3743,6 +3743,33 @@ static void R_RtEmissiveBuildRows( void ) {
 			const float *pp[3] = { e.p0, e.p1, e.p2 };
 			for ( int k = 0; k < 3; k++ ) { const float d2 = ( idVec3( pp[k][0], pp[k][1], pp[k][2] ) - c ).LengthSqr(); if ( d2 > r2 ) { r2 = d2; } }
 		}
+		// the cone of the EMITTING face normals (cross( p2 - p0, p1 - p0 ), the side rt_emissive.glsl calls front): the
+		// area-weighted mean as the axis, the widest triangle around it as the half-angle. The DI target bounds the row's
+		// emission toward a receiver with it (rtEmissiveTargetRow). A tube or a bulb has no useful cone (-1: no bound).
+		idVec3 nSum( 0.0f, 0.0f, 0.0f );
+		for ( int t = 0; t < l.numTris; t++ ) {
+			const rtEmissiveTriGPU_t &e = s_rtEmissiveTris[ l.firstTri + t ];
+			const idVec3 p0( e.p0[0], e.p0[1], e.p0[2] ), p1( e.p1[0], e.p1[1], e.p1[2] ), p2( e.p2[0], e.p2[1], e.p2[2] );
+			nSum += ( p2 - p0 ).Cross( p1 - p0 );
+		}
+		row.coneAxis.Set( 0.0f, 0.0f, 1.0f );
+		row.coneCos = -1.0f;
+		if ( nSum.LengthSqr() > 1e-12f ) {
+			row.coneAxis = nSum;
+			row.coneAxis.Normalize();
+			float cmin = 1.0f;
+			for ( int t = 0; t < l.numTris; t++ ) {
+				const rtEmissiveTriGPU_t &e = s_rtEmissiveTris[ l.firstTri + t ];
+				const idVec3 p0( e.p0[0], e.p0[1], e.p0[2] ), p1( e.p1[0], e.p1[1], e.p1[2] ), p2( e.p2[0], e.p2[1], e.p2[2] );
+				idVec3 n = ( p2 - p0 ).Cross( p1 - p0 );
+				if ( n.LengthSqr() <= 1e-12f ) { continue; }						// a sliver: no direction (the shade rejects it too)
+				n.Normalize();
+				cmin = Min( cmin, n * row.coneAxis );
+			}
+			// a little slack for float error: the bound must never cut off a triangle that faces the receiver
+			row.coneCos = idMath::ClampFloat( -1.0f, 1.0f, cmin - 1e-3f );
+		}
+		row.twoSidedTris = ( s_rtEmissiveTris[ l.firstTri ].emit & RT_EMIT_FLAG_TWOSIDED ) != 0u;	// one material per row
 		row.centroid = c;
 		row.boundRadius = idMath::Sqrt( r2 );
 		row.flux = flux;
@@ -4188,6 +4215,21 @@ static void R_RtEmissiveUpdate( const idRenderWorldLocal *world, rhi::RHI *r ) {
 	R_RtEmissiveBuild( world, r );
 	if ( s_rtEmissiveBuf != 0 ) {
 		R_RtEmissiveBuildRows();				// E2 v3: the emitter rows the scene-light gather appends
+		// TEMPORARY (r_rtEmissiveSampleAB, remove at merge): how many triangles the rows hold - the DI shade's receiver-aware
+		// triangle pick walks a row twice up to RT_EMISSIVE_PICK_MAX_TRIS (rt_emissive.glsl), larger rows keep the flux pick
+		int all[5] = { 0, 0, 0, 0, 0 }, authored[5] = { 0, 0, 0, 0, 0 }, cones = 0;
+		for ( int ri = 0; ri < s_rtEmissiveRows.Num(); ri++ ) {
+			const rtEmissiveRow_t &row = s_rtEmissiveRows[ri];
+			const int b = ( row.numTris <= 2 ) ? 0 : ( row.numTris <= 8 ) ? 1 : ( row.numTris <= 32 ) ? 2 : ( row.numTris <= 128 ) ? 3 : 4;
+			all[b]++;
+			rtEmAuthEmit_t ap;
+			if ( R_EmAuthFixtureEmits( world, row.fixtureId, row.mat, &ap ) ) {
+				authored[b]++;
+				if ( row.coneCos > 0.0f ) { cones++; }
+			}
+		}
+		common->Printf( "r_rtEmissiveTable: row sizes (tris <=2 / <=8 / <=32 / <=128 / more): all %d / %d / %d / %d / %d, authored %d / %d / %d / %d / %d (%d with a normal cone under 90 deg)\n",
+			all[0], all[1], all[2], all[3], all[4], authored[0], authored[1], authored[2], authored[3], authored[4], cones );
 	}
 	if ( !s_rtEmissiveReport ) {
 		common->Printf( "r_rtEmissiveTable: rebuilt in %.1f ms (%d emissive triangles)\n", Sys_MillisecondsPrecise() - buildStart, s_rtEmissiveTris.Num() );

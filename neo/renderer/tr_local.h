@@ -1140,6 +1140,7 @@ extern idCVar r_rtEmissiveIntensity;		// emissive mode: radiance multiplier of e
 extern idCVar r_rtEmissiveMaxRows;
 extern idCVar r_rtEmissiveCheapTarget;	// emissive mode: analytic RIS target for emitter candidates (only the winner is area-sampled)
 extern idCVar r_rtEmissiveSamples;		// emissive mode: area-light samples averaged per emitter shade (far-field representation)
+extern idCVar r_rtEmissiveSampleAB;		// TEMPORARY A/B (remove at merge): bit 1 = receiver-aware in-run triangle pick, bit 2 = oriented DI target
 extern idCVar r_rtEmissiveGridSlots;		// emissive mode: light-grid candidates per cell (the larger of this and r_rtLightGridSlots)		// emissive mode: emitter rows (surfaces) a view's scene-light buffer may carry
 extern idCVar r_rtEmissivePhysical;		// emissive mode: physical emitters - inverse square, no reach, cull where the contribution is negligible
 extern idCVar r_rtEmissiveCullIrradiance;	// physical: the irradiance below which an emitter's row stops (its cull radius)
@@ -1189,7 +1190,9 @@ unsigned long long R_RtEmissiveTableAddress( int *numTris, float *totalFlux, flo
 // of the scene-light buffer (centroid, bounding radius, flux, flux-weighted mean linear radiance x material scale, total
 // area, the inherited reach of the placed light it replaces (0 = none), its triangle range in the table). dark = every
 // triangle at zero flux (switched off / gone): never a row.
-struct rtEmissiveRow_t { const idMaterial *mat; idVec3 centroid; float boundRadius; float flux; float area; idVec3 meanRadiance; unsigned long long fixtureId; int firstTri, numTris; bool dark; };
+struct rtEmissiveRow_t { const idMaterial *mat; idVec3 centroid; float boundRadius; float flux; float area; idVec3 meanRadiance; unsigned long long fixtureId; int firstTri, numTris; bool dark;
+	idVec3 coneAxis; float coneCos;	// the emitting face normals' cone (the DI target's orientation bound): unit axis + cos of its half-angle (-1 = no bound)
+	bool twoSidedTris; };				// its material emits from both faces (RT_EMIT_FLAG_TWOSIDED)
 int R_RtEmissiveRows( const rtEmissiveRow_t **rows );
 bool R_RtEmissiveRowAnimTint( int row, float ratio[3] );	// a TIME-animated glow row: this frame's live / baked stage colour (false = steady)		// the rows (0 = no table)
 float R_RtEmissiveLightAnimatedAverage( const idRenderLightLocal *ld );	// time-average luminance of a light's animated colour (0 = steady)

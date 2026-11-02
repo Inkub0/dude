@@ -6784,6 +6784,24 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 				L.proj[1][3] = ap.twoSided ? 1.0f : 0.0f;							// projT.w = both faces emit
 				L.proj[3][1] = flicker * animLum;									// the R1 gradient's "this emitter changed" factor
 				L.proj[3][2] = flicker;												// projF.z: the follow flicker alone (the haze; its colour already carries the animated tint)
+				// projF.x / projF.w: the emitting normals' cone for the DI target's orientation bound (rt_emissive.glsl
+				// rtEmissiveTargetRow): x = the axis, octahedral snorm16 x2 (bits), w = cos of the half-angle, + 4 when the
+				// material emits from both faces. Never a texture slot: no consumer can take it for a bindless index.
+				{
+					const idVec3 &a = row.coneAxis;
+					const float l1 = idMath::Fabs( a.x ) + idMath::Fabs( a.y ) + idMath::Fabs( a.z );
+					float ox = ( l1 > 0.0f ) ? a.x / l1 : 0.0f, oy = ( l1 > 0.0f ) ? a.y / l1 : 0.0f;
+					if ( a.z < 0.0f ) {
+						const float fx = ( 1.0f - idMath::Fabs( oy ) ) * ( ox >= 0.0f ? 1.0f : -1.0f );
+						const float fy = ( 1.0f - idMath::Fabs( ox ) ) * ( oy >= 0.0f ? 1.0f : -1.0f );
+						ox = fx; oy = fy;
+					}
+					const int sx = idMath::ClampInt( -32767, 32767, (int)idMath::Rint( ox * 32767.0f ) );
+					const int sy = idMath::ClampInt( -32767, 32767, (int)idMath::Rint( oy * 32767.0f ) );
+					const unsigned int oct = ( (unsigned int)sx & 0xFFFFu ) | ( ( (unsigned int)sy & 0xFFFFu ) << 16 );	// GLSL unpackSnorm2x16
+					memcpy( &L.proj[3][0], &oct, sizeof( oct ) );
+					L.proj[3][3] = row.coneCos + ( row.twoSidedTris ? 4.0f : 0.0f );
+				}
 				memcpy( &L.proj[1][0], &tLo, sizeof( tLo ) );
 				memcpy( &L.proj[1][1], &tHi, sizeof( tHi ) );
 				const unsigned int first = (unsigned int)row.firstTri, num = (unsigned int)row.numTris;
@@ -8886,6 +8904,7 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	parms.localParam1[0] = (float)( tr.frameCount & 0xFFFF );			// RNG decorrelation per frame
 	parms.texGen0S[0] = (float)idMath::ClampInt( 1, 16, r_rtEmissiveSamples.GetInteger() );	// emitter area samples averaged per shade (far-field, restir_di_shade.glsl)
 	parms.texGen0S[1] = r_rtEmissiveCheapTarget.GetBool() ? 1.0f : 0.0f;	// emitter candidates weighed analytically (diTargetLight)
+	parms.texGen0S[2] = (float)idMath::ClampInt( 0, 3, r_rtEmissiveSampleAB.GetInteger() );	// TEMPORARY A/B: 1 = receiver-aware in-run triangle pick, 2 = oriented emitter target
 	parms.localParam1[2] = cbParity;									// checkerboard parity (0 = off)
 	// gather runs at rw x rh: gl_FragCoord -> [0,1] uv is 1/rw, -> the full-res depth tc carries the (w/rw)
 	// stretch (mirrors RB_RHI_RtgiPass). At scale 1 + no checkerboard: 1/w, 1/uploadW (unchanged).
