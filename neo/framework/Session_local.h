@@ -114,6 +114,7 @@ typedef struct {
 	int				sceneFrames;		// demo frames the scene sums cover
 	int				lastSceneDemoFrame;	// numDemoFrames at the last scene sample
 	bool			precached;			// the timed pass followed an un-timed precache pass (`twice`)
+	bool			levelLoad;			// the demo's map was loaded like a level (com_timeDemoLevelLoad)
 } timeDemoStats_t;
 const int CONNECT_TRANSMIT_TIME		= 1000;
 const int MAX_LOGGED_USERCMDS		= 60*60*60;	// one hour of single player, 15 minutes of four player

@@ -44,10 +44,17 @@ aspect, the same Hor+ rule `idGameLocal::CalcFov` applies in play, so the 3D vie
 proportions and field of view the game would have at that resolution. The recorded 2D HUD
 overlay is still a 640x480 GUI stretched like any other, as in play.
 
-`timeDemo demo1 twice` (any second argument) still plays the demo once un-timed to precache; `timeDemoQuit demo1 twice` takes
-it too (2026-11-02). Without it a render demo - which never does a level load - loads every texture on first sight INSIDE the
-timed pass: in demo1 ~5 s of 400-800 ms stalls (flashlight, imp fireballs, the underarm machine), at every RTX tier. The report's
-`playback` line says `precache pass: yes (twice)` or `NO`.
+**Level load (2026-11-02, `com_timeDemoLevelLoad 1`, default).** A render demo never does a level load, so it used to load every
+texture on first sight INSIDE the timed pass: in demo1 ~5 s of 400-800 ms stalls (flashlight, imp fireballs, the underarm
+machine), at every RTX tier, stalls play does not have. The timeDemo now loads the demo's map the way `ExecuteMapChange` does:
+the decl / render / sound BeginLevelLoad before the demo's `DC_LOADMAP`, then every map entity's spawnArgs, its class and the
+defs their `def*` keys reference, plus the player def (`player_doommarine`: weapons, the flashlight), through the game's
+`CacheDictionaryMedia`, then EndLevelLoad (textures in parallel on Vulkan, the derived height fields with them). What a level
+load would not have loaded still streams in, as in play. 0 = the old first-sight streaming.
+
+`timeDemo demo1 twice` (any second argument) still plays the demo once un-timed first, and `timeDemoQuit demo1 twice` takes it
+too: everything the demo shows is then warm (more than a level load gives). The report's `playback` line ends with
+`precache: level load (com_timeDemoLevelLoad)`, `... + an un-timed pass (twice)`, `an un-timed pass (twice)` or `NONE`.
 Sound stays muted in both modes, as before.
 
 ## What is measured

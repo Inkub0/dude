@@ -29,6 +29,7 @@ If you have questions concerning this license or the applicable additional terms
 #include "sys/platform.h"
 #include "idlib/hashing/CRC32.h"
 #include "idlib/LangDict.h"
+#include "idlib/MapFile.h"
 #include "framework/async/AsyncNetwork.h"
 #include "framework/Console.h"
 #include "framework/Game.h"
@@ -68,6 +69,8 @@ extern idCVar r_scaleMenusTo43;
 // keeps the demo on its recorded clock and renders as many frames as it can in between.
 idCVar com_timeDemoRealTime( "com_timeDemoRealTime", "1", CVAR_SYSTEM | CVAR_BOOL | CVAR_ARCHIVE,
 	"timeDemo plays the demo at its recorded speed (30 Hz demo clock) and renders as many frames as it can in between, like real gameplay. 0 = classic Doom 3 timedemo: one demo frame per rendered frame, so the demo fast-forwards on fast hardware" );
+idCVar com_timeDemoLevelLoad( "com_timeDemoLevelLoad", "1", CVAR_SYSTEM | CVAR_BOOL | CVAR_ARCHIVE,
+	"timeDemo loads the demo's map like a level load: the textures, models and derived height fields of the map, its entities and the player (with his weapons) load up front, as when the game loads a level, instead of on first sight inside the timed run (a render demo never does a level load). 0 = the old first-sight streaming. `twice` (a whole un-timed pass) still works on top" );
 idCVar	idSessionLocal::com_showDemo( "com_showDemo", "0", CVAR_SYSTEM | CVAR_BOOL, "" );
 idCVar	idSessionLocal::com_skipGameDraw( "com_skipGameDraw", "0", CVAR_SYSTEM | CVAR_BOOL, "" );
 idCVar	idSessionLocal::com_aviDemoSamples( "com_aviDemoSamples", "16", CVAR_SYSTEM, "" );
@@ -1042,6 +1045,49 @@ void idSessionLocal::StartPlayingRenderDemo( idStr demoName ) {
 	timeDemoStartTime = Sys_Milliseconds();
 }
 
+// DUDE (com_timeDemoLevelLoad): the media a level load caches for the demo's map, the way ExecuteMapChange gets it - the
+// game caches every map entity's spawnArgs and its class (idGameLocal's map precache), the player def ("player_doommarine":
+// weapons, items, the flashlight) and, through each entity def's parse, everything their def* keys reference. A def's parse
+// only precaches while a map is loaded or loading (DeclEntityDef.cpp: session->GetCurrentMapName()), never in a demo, so the
+// def chain is walked here and each dict cached explicitly.
+static void TimeDemo_PrecacheDict( const idDict *dict, idStrList &seen, int depth );
+static void TimeDemo_PrecacheDef( const char *name, idStrList &seen, int depth ) {
+	if ( name == NULL || name[0] == '\0' || depth > 16 || seen.FindIndex( name ) >= 0 ) {
+		return;
+	}
+	seen.Append( name );
+	const idDeclEntityDef *def = static_cast<const idDeclEntityDef *>( declManager->FindType( DECL_ENTITYDEF, name, false ) );
+	if ( def != NULL ) {
+		TimeDemo_PrecacheDict( &def->dict, seen, depth + 1 );
+	}
+}
+static void TimeDemo_PrecacheDict( const idDict *dict, idStrList &seen, int depth ) {
+	if ( dict == NULL || game == NULL ) {
+		return;
+	}
+	game->CacheDictionaryMedia( dict );
+	for ( const idKeyValue *kv = dict->MatchPrefix( "def" ); kv != NULL; kv = dict->MatchPrefix( "def", kv ) ) {
+		TimeDemo_PrecacheDef( kv->GetValue().c_str(), seen, depth );
+	}
+}
+static int TimeDemo_PrecacheMap( const char *mapName ) {
+	if ( mapName == NULL || mapName[0] == '\0' || game == NULL ) {
+		return -1;
+	}
+	idStrList seen;
+	TimeDemo_PrecacheDef( "player_doommarine", seen, 0 );		// the player and his inventory (Doom 3 / RoE / LM; absent elsewhere)
+	idMapFile mapFile;
+	if ( !mapFile.Parse( mapName ) ) {
+		return -1;
+	}
+	for ( int i = 0; i < mapFile.GetNumEntities(); i++ ) {
+		const idMapEntity *ent = mapFile.GetEntity( i );
+		TimeDemo_PrecacheDict( &ent->epairs, seen, 0 );
+		TimeDemo_PrecacheDef( ent->epairs.GetString( "classname" ), seen, 0 );
+	}
+	return mapFile.GetNumEntities();
+}
+
 /*
 ================
 idSessionLocal::TimeRenderDemo
@@ -1053,7 +1099,38 @@ void idSessionLocal::TimeRenderDemo( const char *demoName, bool twice ) {
 	// no sound in time demos
 	soundSystem->SetMute( true );
 
+	// DUDE (com_timeDemoLevelLoad): load the demo's map like a level load (ExecuteMapChange's bracket): media referenced
+	// between Begin and End loads in EndLevelLoad - textures in parallel on Vulkan, the derived height fields with them - so
+	// the timed run streams only what play would stream. Without it every texture of every entity, and of every surface the
+	// flashlight or a fireball first lights, loaded synchronously on first sight inside the timed pass: ~5 s of 400-800 ms
+	// stalls in demo1 (r_hitchTrace, 2026-11-02). The bracket must open BEFORE the demo's DC_LOADMAP (InitFromMap), or
+	// EndLevelLoad would purge the world's own area models as unreferenced.
+	extern const char *R_DemoMapName( void );
+	extern void R_DemoClearMapName( void );
+	extern void R_DemoRestoreMapSettings( void );
+	const bool levelLoad = com_timeDemoLevelLoad.GetBool();
+	int precachedEntities = -1;
+	if ( levelLoad ) {
+		R_DemoClearMapName();
+		declManager->BeginLevelLoad();
+		renderSystem->BeginLevelLoad();
+		soundSystem->BeginLevelLoad();
+	}
+
 	StartPlayingRenderDemo( demo );
+
+	if ( levelLoad ) {
+		const int t0 = Sys_Milliseconds();
+		if ( readDemo ) {
+			precachedEntities = TimeDemo_PrecacheMap( R_DemoMapName() );
+		}
+		renderSystem->EndLevelLoad();
+		soundSystem->EndLevelLoad( R_DemoMapName() );
+		declManager->EndLevelLoad();
+		R_DemoRestoreMapSettings();		// EndLevelLoad reset allowNoSpecular; the demo header set it (DC_LOADMAP)
+		common->Printf( "timeDemo: %s loaded like a level (%d map entities + the player precached), %d ms\n",
+			R_DemoMapName()[0] ? R_DemoMapName() : "(no map)", precachedEntities, Sys_Milliseconds() - t0 );
+	}
 
 	if ( twice && readDemo ) {
 		// cycle through once to precache everything
@@ -1092,6 +1169,7 @@ void idSessionLocal::TimeRenderDemo( const char *demoName, bool twice ) {
 	memset( &timeDemoStats, 0, sizeof( timeDemoStats ) );
 	timeDemoStats.lastFrameStart = -1.0;
 	timeDemoStats.precached = twice;
+	timeDemoStats.levelLoad = levelLoad && precachedEntities >= 0;
 	renderSystem->SetGpuTimerRequested( true );
 	renderFrameStats_t fs;
 	renderSystem->GetFrameStats( fs );
@@ -1229,11 +1307,12 @@ idStr idSessionLocal::TimeDemoReport( const char *demoName, float demoSeconds ) 
 	// renderView times would understate it)
 	const float recordedSeconds = numDemoFrames * USERCMD_PER_DEMO_FRAME / (float)USERCMD_HZ;
 	const bool realTime = com_timeDemoRealTime.GetBool();
-	report += va( "playback: %s  |  demo: %i frames = %.1f s, played in %.1f s%s  |  precache pass: %s\n",
+	report += va( "playback: %s  |  demo: %i frames = %.1f s, played in %.1f s%s  |  precache: %s\n",
 		realTime ? "real-time (30 Hz demo clock, rendering decoupled)" : "classic (one demo frame per rendered frame)",
 		numDemoFrames, recordedSeconds, demoSeconds,
 		( realTime && demoSeconds > recordedSeconds * 1.05f ) ? "  (slower than real time: frames were dropped to keep up)" : "",
-		st.precached ? "yes (twice)" : "NO - first-sight texture loads are inside the timed pass" );
+		( st.levelLoad && st.precached ) ? "level load + an un-timed pass (twice)" : st.levelLoad ? "level load (com_timeDemoLevelLoad)"
+			: st.precached ? "an un-timed pass (twice)" : "NONE - first-sight texture loads are inside the timed pass" );
 
 	// ---- frame rate / frame time ----
 	const int frames = st.renderedFrames;
