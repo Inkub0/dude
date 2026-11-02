@@ -13,6 +13,7 @@
 # Usage: tools/bench/timedemo-ab.sh <set> [rounds]
 #   set m1     : ReSTIR DI boost knob split at Path Tracing Nightmare (4 variants)
 #   set serial : the light-serial fix, two BINARIES at Path Tracing Nightmare - A = build/dude-noserialfix, B = build/dude
+#   (gather / boostgi / bounceem are HISTORY - 2026-11-02: their cvars only existed in those branches' builds)
 #   set gather : the ReSTIR DI gather's cost split in EMISSIVE MODE (needs the diag/di-gather-profile build: r_rtDiGatherProfile
 #                bits each remove one piece - timing only, the image is wrong) - 7 variants; your authored emissive setups are
 #                copied into every sandbox (demo1 = game/mc_underground)

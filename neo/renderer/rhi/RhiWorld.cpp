@@ -8536,7 +8536,6 @@ static void RB_RHI_RtgiPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	parms.localParam0[2] = radius;
 	parms.localParam0[3] = idMath::ClampFloat( 0.0f, 16.0f, r_rtgiEmissiveClamp.GetFloat() );	// emissive peak clamp (pre-NRD variance cut)
 	parms.localParam1[0] = giFrameIndex;
-	parms.texGen0Q[0] = (float)idMath::ClampInt( 0, 2, r_rtgiBounceEmitterPick.GetInteger() );	// TEMPORARY A/B: the bounce hit's emitter pick (rtgi_bounce.glsl)
 	parms.localParam1[1] = r_rtgiShadow.GetBool() ? 1.0f : 0.0f;	// H6d: dominant-light shadow ray at the bounce hit
 	// H6g checkerboard parity: 0 = off (resScale path), 1 = even frame, 2 = odd frame. The gather packs the
 	// left half of the rw x rh buffer accordingly; NRD's constant BLACK mode + frameIndex reconstructs it (the
@@ -8911,7 +8910,6 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	parms.localParam1[0] = (float)( tr.frameCount & 0xFFFF );			// RNG decorrelation per frame
 	parms.texGen0S[0] = (float)idMath::ClampInt( 1, 16, r_rtEmissiveSamples.GetInteger() );	// emitter area samples averaged per shade (far-field, restir_di_shade.glsl)
 	parms.texGen0S[1] = r_rtEmissiveCheapTarget.GetBool() ? 1.0f : 0.0f;	// emitter candidates weighed analytically (diTargetLight)
-	parms.texGen0Q[0] = (float)idMath::ClampInt( 0, 2, r_rtgiBounceEmitterPick.GetInteger() );	// TEMPORARY A/B: the bounce hit's emitter pick (rtgi_bounce.glsl)
 	parms.localParam1[2] = cbParity;									// checkerboard parity (0 = off)
 	// gather runs at rw x rh: gl_FragCoord -> [0,1] uv is 1/rw, -> the full-res depth tc carries the (w/rw)
 	// stretch (mirrors RB_RHI_RtgiPass). At scale 1 + no checkerboard: 1/w, 1/uploadW (unchanged).
@@ -9123,10 +9121,11 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	// The R3a boost REUSES the plain gather's GI term (2026-11-02): it re-ran the whole GI bounce for every young pixel to
 	// rebuild the value the plain gather had just computed for it (2.4 ms of a 3.8 ms boost in the demo1 timedemo). The plain
 	// gather stores it per texel (rhiReStirDIGiBuf: the demodulated GI radiance + its SH1 share) and the boost
-	// adds it back. u_texGen0T = ( address lo, hi, row stride, cells ) bit-cast, all 0 = off (the boost traces its own).
+	// adds it back (bit-identical). u_texGen0T = ( address lo, hi, row stride, cells ) bit-cast, all 0 = off (no buffer: the
+	// boost traces its own).
 	// FragmentStorageBarrier on both sides: this gather's writes after last frame's boost reads, the boost's reads after them.
 	bool diGiSide = false;
-	if ( boostWant && combineGI && r_rtReStirDIBoostReuseGI.GetBool() ) {
+	if ( boostWant && combineGI ) {
 		const int cells = rw * rh;
 		if ( rhiReStirDIGiBuf != 0 && rhiReStirDIGiCells != cells ) {
 			r->DestroyBuffer( rhiReStirDIGiBuf );

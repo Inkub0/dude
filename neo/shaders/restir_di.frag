@@ -170,7 +170,7 @@ vec4 packNrdNormal( vec3 Nraw ) {
 // pixel to rebuild exactly this value (2.4 ms of a 3.8 ms boost in the demo1 timedemo). The plain gather stores the term it
 // added - the demodulated radiance and its SH1 share (direction x luminance), 6 floats - and the boost adds the same numbers
 // back: bit-identical to the re-trace (same seeds, same cache reads). u_texGen0T = ( address lo, hi, row stride, cells ),
-// all 0 = off (RB_RHI_ReStirDIPass: the boost on, the bounce combined, r_rtReStirDIBoostReuseGI); every index is checked
+// all 0 = off (RB_RHI_ReStirDIPass: set only when the boost runs with the bounce combined); every index is checked
 // against the cell count.
 layout(buffer_reference, std430, buffer_reference_align = 4) buffer DiGiSide { float v[]; };
 const uint DI_GI_SIDE_FLOATS = 6u;
@@ -495,7 +495,6 @@ void main() {
 		bp.ambientRows    = floatBitsToUint( u_pbrParms2.x );	// r_rtgiAmbient fold: ( first row << 8 ) | count, 0 = none
 		bp.eyePullback    = u_pbrParms2.z;
 		bp.sampleFrame    = u_localParam1.x;				// frame index: advances the R2 bounce-direction sequence
-		bp.emitterPick    = uint( u_texGen0Q.x + 0.5 );		// TEMPORARY r_rtgiBounceEmitterPick
 		// the irradiance cache (r_rtgiCache): the hit reads its cell, this pixel then teaches its own cell what it saw
 		bp.cache          = rtgiCacheParmsFromUniforms( uvec2( floatBitsToUint( u_particleRadius.z ), floatBitsToUint( u_particleRadius.w ) ) );
 		const bool cacheOn = rtgiCachePresent( bp.cache );

@@ -34,8 +34,6 @@ struct RtgiBounceParms {
 	uint  ambientRows;		// r_rtgiAmbient fold: the AMBIENT rows of the light buffer, ( first row << 8 ) | count; 0 = none
 	float eyePullback;		// ray origin pulled toward the eye per unit depth (crease-leak fix)
 	float sampleFrame;		// frame index (tr.frameCount & 0xFFFF) advancing the R2 bounce-direction sequence
-	uint  emitterPick;		// TEMPORARY A/B (r_rtgiBounceEmitterPick): 0 = every emitter of the cell area-sampled, 1 = one picked
-							// by the oriented analytic target, 2 = one picked by the cell's stored importance (see the light loop)
 	// RT irradiance cache (docs/rtx-irradiance-cache.md C2): when cacheLookup, the hit also receives the INDIRECT light
 	// its cell has learned (albedo(H) * E_cache(H) * scale) - the recursion that makes the one bounce multi-bounce. The
 	// caller fills `cache` from the shared uniform packing (rtgi_cache.glsl) and does the UPDATE at its primary point.
@@ -229,12 +227,14 @@ int rtgiTraceBounce( RtgiBounceParms bp, vec3 Pw, vec3 Nw, vec3 eyeW, float d, v
 		}
 		lgUse = lgUse && lgBase >= 0 && lgN > 0u;
 		uint nIter = lgUse ? lgN : bp.nLights;
-		// EMITTER rows (2026-11-02): an area sample for EVERY emitter of the hit's cell was ~3 ms of the gather in the demo1
-		// timedemo (emissive mode). Instead one weighted reservoir over them picks ONE, area-sampled after the loop and weighted
-		// by total / its weight - unbiased, as every weight is > 0 wherever that emitter can light H. The weight: the oriented
-		// analytic target at H (rtEmissiveTargetRow, the DI's), or the cell's stored importance (no per-emitter work, but blind
-		// to orientation and to where in the cell H is). The placed lights keep their exact sum.
-		const uint emPick = bp.emitterPick;
+		// EMITTER rows (2026-11-02): an area sample for EVERY emitter of the hit's cell was ~2 ms of the gather in the demo1
+		// timedemo (emissive mode, Path Tracing Nightmare). Instead one weighted reservoir over them picks ONE, area-sampled after
+		// the loop and weighted by total / its weight - unbiased, as the weight (the oriented analytic target at H,
+		// rtEmissiveTargetRow, the DI's) is > 0 wherever that emitter can light H. The picked emitter then competes for the
+		// dominant shadow ray as the estimate of ALL of them, so emitter bounce light is shadowed where the old sum shadowed
+		// only the brightest emitter and leaked the rest (GI near emitters behind walls reads darker: correct). Weighing by the
+		// cell's stored importance instead (no per-emitter work, 1 ms cheaper) was 17-25 % noisier in the raw gather, in blobs.
+		// The placed lights keep their exact sum.
 		uint  emRng     = lgPcg( uint( sfrag.x ) * 7919u + uint( sfrag.y ) * 104729u + uint( bp.sampleFrame ) * 15485863u + 0x632BE5ABu ) | 1u;
 		float emWSum    = 0.0, emWChosen = 0.0;
 		uint  emChosen  = 0xFFFFFFFFu;
@@ -251,32 +251,16 @@ int rtgiTraceBounce( RtgiBounceParms bp, vec3 Pw, vec3 Nw, vec3 eyeW, float d, v
 			float ndl;
 			vec3  contrib;
 			vec3  visDir;  float visDist;										// the shadow ray's target if this light turns out dominant
-			if ( ( lflags & DUDE_LIGHT_EMISSIVE ) != 0u && emPick != 0u ) {
-				float w = 0.0;
-				if ( emPick == 2u && lgUse ) {
-					w = lgSlotImp( lgG, lgBase, ii );
-				} else {
-					vec3 tc, tld; float tdl, tndl;
-					if ( rtEmissiveTargetRow( lights, li, hitWorld, hitN, tc, tld, tdl, tndl ) ) { w = dot( tc, vec3( 0.2126, 0.7152, 0.0722 ) ); }
-				}
+			if ( ( lflags & DUDE_LIGHT_EMISSIVE ) != 0u ) {
+				// an EMITTER row (also the BOUNCEONLY rows of normal mode): a reservoir candidate (above), shaded after the loop
+				vec3 tc, tld; float tdl, tndl;
+				if ( !rtEmissiveTargetRow( lights, li, hitWorld, hitN, tc, tld, tdl, tndl ) ) { continue; }
+				const float w = dot( tc, vec3( 0.2126, 0.7152, 0.0722 ) );
 				if ( !( w > 0.0 ) ) { continue; }
 				emWSum += w;
 				if ( lgRand( emRng ) * emWSum < w ) { emChosen = li; emWChosen = w; }
 				continue;
 			}
-			if ( ( lflags & DUDE_LIGHT_EMISSIVE ) != 0u ) {
-				// E2 v3: an EMITTER row (also the BOUNCEONLY rows of normal mode) - one sample point on its surface, seeded by
-				// the pixel + frame; Lambert at H as the lights below (Doom: no 1/pi). Its visibility rides the dominant-light
-				// shadow ray like every other light here.
-				vec3 c;
-				uint seed = rtEmissiveSeed( li, hitWorld, bp.sampleFrame ) ^ ( uint( sfrag.x ) * 7919u + uint( sfrag.y ) * 104729u );
-				if ( !rtEmissiveShadeRow( lights, li, hitWorld, hitN, seed | 1u, 1u, false, c, ldir, dl, ndl ) ) { continue; }
-				contrib = albedo * c * bp.lightScale;
-				// the shadow ray aims at the SAMPLED point, not the centroid: a tube's or a bulb's centroid lies inside its own
-				// surface, so as the dominant light it always read occluded and its bounce was dropped (rt_emissive.glsl)
-				visDir = g_rtEmVisDir;	visDist = g_rtEmVisDist;
-				if ( !( visDist > 0.0 ) ) { continue; }
-			} else {
 			dudeLightDir( lights, li, hitWorld, ldir, dl );
 			ndl = max( dot( hitN, ldir ), 0.0 );
 			if ( ndl <= 0.0 ) { continue; }
@@ -288,7 +272,6 @@ int rtgiTraceBounce( RtgiBounceParms bp, vec3 Pw, vec3 Nw, vec3 eyeW, float d, v
 			if ( atten.r + atten.g + atten.b <= 0.0 ) { continue; }
 			contrib = albedo * lights.l[ li ].color * ( atten * ndl * bp.lightScale );
 			visDir = ldir;	visDist = dl;
-			}
 			Li += contrib;
 			if ( !fast ) { LiCache += contrib; }								// a fast light's bounce is never learned
 			// track the DOMINANT (brightest) reaching light at this hit for the H6d shadow ray
@@ -296,7 +279,8 @@ int rtgiTraceBounce( RtgiBounceParms bp, vec3 Pw, vec3 Nw, vec3 eyeW, float d, v
 			if ( lum > domLum ) { domLum = lum; domContrib = contrib; domDir = visDir; domDist = visDist; domFast = fast; }
 		}
 		// the picked emitter: one area sample (the receiver-aware triangle pick: one emitter per hit can afford it), weighted by
-		// the reservoir; it competes for the dominant shadow ray like any light, aimed at its sampled point
+		// the reservoir; it competes for the dominant shadow ray like any light, aimed at its SAMPLED point (a tube's or a bulb's
+		// centroid lies inside its own surface: aimed there it always read occluded and its bounce was dropped)
 		if ( emChosen != 0xFFFFFFFFu && emWChosen > 0.0 ) {
 			vec3 c, ldir; float dl, ndl;
 			uint seed = rtEmissiveSeed( emChosen, hitWorld, bp.sampleFrame ) ^ ( uint( sfrag.x ) * 7919u + uint( sfrag.y ) * 104729u );
