@@ -764,7 +764,10 @@ Session_TimeDemoQuit_f
 ================
 */
 static void Session_TimeDemoQuit_f( const idCmdArgs &args ) {
-	sessLocal.TimeRenderDemo( va( "demos/%s", args.Argv(1) ) );
+	// DUDE: `twice` as timeDemo takes it - an un-timed first pass precaches the demo's textures / models. A render demo does no
+	// level load, so without it every texture loads on first sight INSIDE the timed pass: ~5 s of 400-800 ms stalls in demo1
+	// (2026-11-02, r_hitchTrace) that a level load would have done up front - the benchmark measured loading, not play.
+	sessLocal.TimeRenderDemo( va( "demos/%s", args.Argv(1) ), ( args.Argc() > 2 ) );
 	if ( sessLocal.timeDemo == TD_YES ) {
 		// this allows hardware vendors to automate some testing
 		sessLocal.timeDemo = TD_YES_THEN_QUIT;
@@ -1088,6 +1091,7 @@ void idSessionLocal::TimeRenderDemo( const char *demoName, bool twice ) {
 	timeDemoStats.gpuMs.Clear();
 	memset( &timeDemoStats, 0, sizeof( timeDemoStats ) );
 	timeDemoStats.lastFrameStart = -1.0;
+	timeDemoStats.precached = twice;
 	renderSystem->SetGpuTimerRequested( true );
 	renderFrameStats_t fs;
 	renderSystem->GetFrameStats( fs );
@@ -1225,10 +1229,11 @@ idStr idSessionLocal::TimeDemoReport( const char *demoName, float demoSeconds ) 
 	// renderView times would understate it)
 	const float recordedSeconds = numDemoFrames * USERCMD_PER_DEMO_FRAME / (float)USERCMD_HZ;
 	const bool realTime = com_timeDemoRealTime.GetBool();
-	report += va( "playback: %s  |  demo: %i frames = %.1f s, played in %.1f s%s\n",
+	report += va( "playback: %s  |  demo: %i frames = %.1f s, played in %.1f s%s  |  precache pass: %s\n",
 		realTime ? "real-time (30 Hz demo clock, rendering decoupled)" : "classic (one demo frame per rendered frame)",
 		numDemoFrames, recordedSeconds, demoSeconds,
-		( realTime && demoSeconds > recordedSeconds * 1.05f ) ? "  (slower than real time: frames were dropped to keep up)" : "" );
+		( realTime && demoSeconds > recordedSeconds * 1.05f ) ? "  (slower than real time: frames were dropped to keep up)" : "",
+		st.precached ? "yes (twice)" : "NO - first-sight texture loads are inside the timed pass" );
 
 	// ---- frame rate / frame time ----
 	const int frames = st.renderedFrames;
@@ -3692,7 +3697,7 @@ void idSessionLocal::Init() {
 	cmdSystem->AddCommand( "stopRecording", Session_StopRecordingDemo_f, CMD_FL_SYSTEM, "stops demo recording" );
 	cmdSystem->AddCommand( "playDemo", Session_PlayDemo_f, CMD_FL_SYSTEM, "plays back a demo", idCmdSystem::ArgCompletion_DemoName );
 	cmdSystem->AddCommand( "timeDemo", Session_TimeDemo_f, CMD_FL_SYSTEM, "benchmarks a demo (timeDemo demo1 [twice]): real-time playback, frame-time percentiles, CPU/GPU split; report in benchmarks/ (see com_timeDemoRealTime)", idCmdSystem::ArgCompletion_DemoName );
-	cmdSystem->AddCommand( "timeDemoQuit", Session_TimeDemoQuit_f, CMD_FL_SYSTEM, "benchmarks a demo and quits", idCmdSystem::ArgCompletion_DemoName );
+	cmdSystem->AddCommand( "timeDemoQuit", Session_TimeDemoQuit_f, CMD_FL_SYSTEM, "benchmarks a demo and quits (timeDemoQuit demo1 [twice]: twice = an un-timed precache pass first, as timeDemo)", idCmdSystem::ArgCompletion_DemoName );
 	cmdSystem->AddCommand( "aviDemo", Session_AVIDemo_f, CMD_FL_SYSTEM, "writes AVIs for a demo", idCmdSystem::ArgCompletion_DemoName );
 	cmdSystem->AddCommand( "compressDemo", Session_CompressDemo_f, CMD_FL_SYSTEM, "compresses a demo file", idCmdSystem::ArgCompletion_DemoName );
 #endif

@@ -32,6 +32,8 @@
 #      VARIANTS  run only these variants of the set, in this order (e.g. VARIANTS="A D")
 #      EMISSIVE_DIR  authored emissive setups copied into every sandbox for sets that need them (default
 #                ~/.local/share/dude/base/emissive: the plain ./build/dude save path; run.sh saves under the repo's base/)
+#      TWICE     1 (default) = `timeDemoQuit <demo> twice`: an un-timed precache pass first, so the timed pass measures play,
+#                not first-sight texture loading (a demo never does a level load); 0 = the old single pass
 #      DRYRUN=1  print the command lines, launch nothing
 set -euo pipefail
 
@@ -40,6 +42,9 @@ BIN="${DUDE_BIN:-$REPO/build/dude}"
 DUDE_CFG="${DUDE_CFG:-$HOME/.config/dude/base/dude.cfg}"
 DEMO="${DEMO:-demo1}"
 COOLDOWN="${COOLDOWN:-30}"
+TWICE="${TWICE:-1}"
+TWICE_ARG=""
+if [ "$TWICE" = 1 ]; then TWICE_ARG="twice"; fi
 WARMUPS="${WARMUPS:-2}"
 SET="${1:-}"
 ROUNDS="${2:-3}"
@@ -138,7 +143,7 @@ SCHEMA="$( sed -n 's/^#define DUDE_CONFIG_SCHEMA[[:space:]]*\([0-9]*\).*/\1/p' "
 OUT="${OUT:-${XDG_DATA_HOME:-$HOME/.local/share}/dude/bench/$( date +%Y%m%d-%H%M%S )-$SET}"
 mkdir -p "$OUT"
 {
-	echo "set: $SET  rounds: $ROUNDS  warm-ups: $WARMUPS  cooldown: ${COOLDOWN}s  demo: $DEMO  preset: $PRESET  dude_rtx: $RTX"
+	echo "set: $SET  rounds: $ROUNDS  warm-ups: $WARMUPS  cooldown: ${COOLDOWN}s  demo: $DEMO  preset: $PRESET  dude_rtx: $RTX  precache pass (twice): $TWICE"
 	echo "binary: $BIN ($( stat -c '%y' "$BIN" 2> /dev/null || echo '?' ))"
 	echo "repo: $( git -C "$REPO" rev-parse --short HEAD 2> /dev/null || echo '?' ) on $( git -C "$REPO" branch --show-current 2> /dev/null || echo '?' )"
 	echo "display settings from $DUDE_CFG:"
@@ -190,7 +195,7 @@ for item in "${order[@]}"; do
 		+set dude_rtx "$RTX" +dudePreset "$PRESET"
 		+set r_rtEmissiveLighting 0 +set r_vkGpuTime 3
 		${ARGS[$v]}
-		+timeDemoQuit "$DEMO" )
+		+timeDemoQuit "$DEMO" ${TWICE_ARG:+"$TWICE_ARG"} )
 	echo "[$n/${#order[@]}] round $round variant $v: ${DESC[$v]}"
 	if [ "${DRYRUN:-0}" = 1 ]; then
 		echo "  ${BINV[$v]:-$BIN} ${args[*]}"
