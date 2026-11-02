@@ -366,6 +366,8 @@ public:
 	virtual bool			GetGpuFrameMs( double &ms, int &serial ) { return false; }
 	virtual ImageHandle		CreateImage( ImageFormat fmt, int w, int h, const void *pixels ) = 0;
 	virtual void			DestroyImage( ImageHandle i ) = 0;
+	// The base level size of a live image (what textureSize( sampler, 0 ) returns for its bindless slot); false = unknown.
+	virtual bool			GetImageSize( ImageHandle i, int &w, int &h ) { return false; }
 
 	// Phase 4 M2 image ownership: engine texture upload. pixels is RGBA8;
 	// textureFilter/textureRepeat carry the engine's textureFilter_t /

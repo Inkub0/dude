@@ -341,7 +341,9 @@ void main() {
 		}
 		float w    = pdfOne ? pHat : pHat * float( nLights );	// pHat / candidate pdf (grid + exhaustive: pdf 1; uniform-M: 1/nLights)
 		wSum += w;
-		if ( wSum > 0.0 && rnd( rng ) < ( w / wSum ) ) {
+		// keep it with probability w / wSum, decided as u * wSum < w: no division per candidate, and no draw at all for one
+		// that cannot win (w = 0: culled, behind the surface, outside the light's box - often most of a cell's list)
+		if ( w > 0.0 && rnd( rng ) * wSum < w ) {
 			pHatChosen  = pHat;
 			rowChosen   = li + 1u;
 			tgtChosen   = contrib;
@@ -354,7 +356,7 @@ void main() {
 #if DI_BOOST
 		// R3a: the extra independent picks share the candidate weights (same wSum), each with its own random draws
 		for ( int k = 1; k < K; k++ ) {
-			if ( wSum > 0.0 && rnd( rng ) < ( w / wSum ) ) { pickB[k] = li + 1u; }
+			if ( w > 0.0 && rnd( rng ) * wSum < w ) { pickB[k] = li + 1u; }
 		}
 #endif
 	}

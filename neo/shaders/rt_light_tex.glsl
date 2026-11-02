@@ -30,7 +30,8 @@ layout(set = 2, binding = 0) uniform sampler2D u_rtTextures[];
 // Isotropic (the minor axis), which is what anisotropic filtering keys its LOD on; the falloff ramp stays mip 0.
 vec3 dudeLightAttenTex( RtLights lights, uint li, vec3 p, float dl, uint flags, bool frustumGate, bool roundSpot, float pixelWorld ) {
 	if ( ( flags & DUDE_LIGHT_EMISSIVE ) != 0u ) { return vec3( 0.0 ); }		// an emitter row: not a frustum light (rtEmissiveShadeRow)
-	uint projTex = lights.l[ li ].projTex;
+	const uint projWord = lights.l[ li ].projTex;	// bits 0-15 = slot + 1; 16-24 = the cookie's size (RB_RHI_LightCookieWord)
+	const uint projTex  = projWord & 0xFFFFu;
 	if ( projTex == 0u ) {
 		return vec3( dudeLightAtten( lights, li, p, dl, flags, frustumGate, roundSpot ) );
 	}
@@ -48,7 +49,12 @@ vec3 dudeLightAttenTex( RtLights lights, uint li, vec3 p, float dl, uint flags, 
 	if ( pixelWorld > 0.0 ) {
 		vec3  gs = ( lights.l[ li ].projS.xyz - st.x * lights.l[ li ].projQ.xyz ) / q;
 		vec3  gt = ( lights.l[ li ].projT.xyz - st.y * lights.l[ li ].projQ.xyz ) / q;
-		vec2  texels = vec2( textureSize( u_rtTextures[ nonuniformEXT( projTex - 1u ) ], 0 ) ) * vec2( length( gs ), length( gt ) ) * pixelWorld;
+		// the cookie's base size: from the row for a power-of-two image (bit 24), the exact value textureSize returns - the query
+		// is a texture-unit round trip in the middle of every DI candidate's dependency chain - else queried
+		const vec2 cookieSize = ( ( projWord & 0x1000000u ) != 0u )
+			? vec2( float( 1u << ( ( projWord >> 16u ) & 0xFu ) ), float( 1u << ( ( projWord >> 20u ) & 0xFu ) ) )
+			: vec2( textureSize( u_rtTextures[ nonuniformEXT( projTex - 1u ) ], 0 ) );
+		vec2  texels = cookieSize * vec2( length( gs ), length( gt ) ) * pixelWorld;
 		lod = log2( max( max( texels.x, texels.y ), 1e-6 ) );
 	}
 	vec3  atten = textureLod( u_rtTextures[ nonuniformEXT( projTex - 1u ) ], st, lod ).rgb;

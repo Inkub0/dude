@@ -201,9 +201,10 @@ void main() {
 					isStatic = length( ( camUV - prevUV ) * fullRes ) <= staticPx;
 				}
 			}
-			// the darkest-previous candidate: static, a light was chosen there last frame (a valid row, not an emitter)
-			if ( isStatic && prevRowPlus1 != 0u && prevRowPlus1 <= nPrevLights
-					&& ( prevLights.l[ prevRowPlus1 - 1u ].flags & DUDE_LIGHT_EMISSIVE ) == 0u && prevLum < dkPrevLum ) {
+			// the darkest-previous candidate: static, a light was chosen there last frame (a valid row, not an emitter). The
+			// comparison before the row's flags: a pixel that is not darker skips that scattered load
+			if ( isStatic && prevRowPlus1 != 0u && prevRowPlus1 <= nPrevLights && prevLum < dkPrevLum
+					&& ( prevLights.l[ prevRowPlus1 - 1u ].flags & DUDE_LIGHT_EMISSIVE ) == 0u ) {
 				dkPrevLum = prevLum;
 				dkPrevRow = prevRowPlus1;
 				dkFrag    = sfrag;

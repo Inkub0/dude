@@ -6247,7 +6247,8 @@ static bool RB_RHI_EnsureSsrColorMip( rhi::RHI *r, int w, int h ) {
 // std430, 128 B. projTex / falloffTex = bindless slot+1 (rhiHandle) of the light stage's projection cookie and
 // the light's falloff ramp - the SAME two images the forward interaction draw samples (tr_render.cpp
 // inter.lightImage / lightFalloffImage), so a textured consumer (rt_light_tex.glsl) reproduces the shaped /
-// coloured light exactly. 0 = none (consumer falls back to the analytic frustum attenuation).
+// coloured light exactly. 0 = none (consumer falls back to the analytic frustum attenuation). projTex's high bits carry the
+// cookie's size (RB_RHI_LightCookieWord): consumers mask the slot with 0xFFFF.
 struct RtReflLightGPU { float cull[4]; float pos[3]; float radius; float color[3]; unsigned int flags; float proj[4][4]; unsigned int projTex; unsigned int falloffTex; unsigned int pad0; unsigned int pad1; };
 
 // Bake a light stage's evaluated texture matrix into the light's world-space S/T projection planes - the
@@ -6273,6 +6274,25 @@ static unsigned int RB_RHI_LightImageIndex( idImage *img ) {
 	}
 	img->Bind();
 	return img->rhiHandle;
+}
+
+// The scene-light row's projTex word for a light's projection COOKIE: bits 0-15 = the bindless slot + 1 (RB_RHI_LightImageIndex;
+// the array holds 8192), and for a power-of-two image its size - bits 16-19 / 20-23 = log2 of the width / height, bit 24 = present.
+// rt_light_tex.glsl's cookie LOD needs that size for every ReSTIR DI candidate inside the light's box; carried here it is not
+// queried (textureSize on a bindless image is a texture-unit round trip in the candidate loop's dependency chain). Exact: the
+// same base level size the query returns (VulkanBackend::GetImageSize); any other image keeps the query.
+static unsigned int RB_RHI_LightCookieWord( idImage *img ) {
+	const unsigned int slot = RB_RHI_LightImageIndex( img );
+	if ( slot == 0 || slot > 0xFFFFu ) {
+		return 0;
+	}
+	rhi::RHI *r = rhi::GetRHI();
+	int w = 0, h = 0;
+	if ( r != NULL && r->GetImageSize( (rhi::ImageHandle)slot, w, h ) && w <= 32768 && h <= 32768
+			&& ( w & ( w - 1 ) ) == 0 && ( h & ( h - 1 ) ) == 0 ) {
+		return slot | ( (unsigned int)idMath::ILog2( w ) << 16 ) | ( (unsigned int)idMath::ILog2( h ) << 20 ) | ( 1u << 24 );
+	}
+	return slot;
 }
 
 // Per-view MEMBERSHIP of the scene-light buffer (ReSTIR DI Stage D): which lightDefs the fill below included,
@@ -6592,7 +6612,7 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 			// light keeps the analytic attenuation instead of sampling an unwritten descriptor
 			if ( liveStage != NULL && liveStage->texture.image != NULL && liveStage->texture.image->type == TT_2D
 					&& liveStage->texture.cinematic == NULL ) {
-				L.projTex = RB_RHI_LightImageIndex( liveStage->texture.image );
+				L.projTex = RB_RHI_LightCookieWord( liveStage->texture.image );	// slot + 1 | the cookie's size (rt_light_tex.glsl)
 				// Bake the stage's texture matrix ONLY into a zero-clamped cookie. The consumer (rt_light_tex.glsl)
 				// treats s/t outside [0,1] as black - exact for a CLAMP_TO_ZERO cookie, where a scroll/rotate really
 				// moves its black border - but a REPEATING cookie (lights/cloudscroll*: no zeroClamp, "translate
@@ -6769,6 +6789,7 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 					knee = 0.0f; noFade = true;
 				}
 				Ceq = 16.0f * Lrow * row.area / ( radiusRow * radiusRow );
+				// cull.xyz == pos (both the centroid): rt_emissive.glsl rtEmissiveTargetRow takes the distance to the centre as dl
 				L.cull[0] = row.centroid.x; L.cull[1] = row.centroid.y; L.cull[2] = row.centroid.z; L.cull[3] = row.boundRadius + radiusRow;
 				L.radius = radiusRow;
 				const float kc = ( meanLum > 1e-6f ) ? Ceq / meanLum : 0.0f;	// the emitter's own tint at that luminance
