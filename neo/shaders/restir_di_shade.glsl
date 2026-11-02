@@ -126,8 +126,8 @@ bool diShadeLight( RtLights lights, uint li, in DiSurface s, out vec3 contrib, o
 		// E2 v3: an EMITTER row - one sample point on its surface (rt_emissive.glsl), the same material response as any
 		// light. The seed is (row, point, frame): the loop's target and the winner's re-shade draw the same point.
 		uint emSamples = uint( max( u_texGen0S.x, 1.0 ) + 0.5 );	// r_rtEmissiveSamples: area samples averaged per emitter shade (far-field)
-		const bool rPick = ( uint( u_texGen0S.z + 0.5 ) & 1u ) != 0u;	// TEMPORARY r_rtEmissiveSampleAB bit 1: the receiver-aware in-run triangle pick
-		if ( !rtEmissiveShadeRow( lights, li, s.Pw, s.Nw, rtEmissiveSeed( li, s.Pw, u_localParam1.x ), emSamples, rPick, contrib, ldir, dl, ndl ) ) { return false; }
+		// the receiver-aware triangle pick (true): the DI shade is one emitter per pixel, so it can afford to weigh its triangles
+		if ( !rtEmissiveShadeRow( lights, li, s.Pw, s.Nw, rtEmissiveSeed( li, s.Pw, u_localParam1.x ), emSamples, true, contrib, ldir, dl, ndl ) ) { return false; }
 		if ( s.applyMode && !targetOnly ) {
 			contrib *= diMaterialResponse( s, ldir, ndl );
 		}
@@ -161,7 +161,7 @@ bool diTargetLight( RtLights lights, uint li, in DiSurface s, out vec3 contrib, 
 	contrib = vec3( 0.0 );	ldir = vec3( 0.0, 0.0, 1.0 );	dl = 0.0;	ndl = 0.0;
 	if ( !dudeLightInRange( lights, li, s.Pw ) ) { return false; }
 	if ( ( lights.l[ li ].flags & ( DUDE_LIGHT_DIFORWARD | DUDE_LIGHT_FOGVOLUME | DUDE_LIGHT_BOUNCEONLY ) ) != 0u ) { return false; }
-	return rtEmissiveTargetRow( lights, li, s.Pw, s.Nw, ( uint( u_texGen0S.z + 0.5 ) & 2u ) != 0u, contrib, ldir, dl, ndl );	// TEMPORARY r_rtEmissiveSampleAB bit 2: the orientation bound
+	return rtEmissiveTargetRow( lights, li, s.Pw, s.Nw, contrib, ldir, dl, ndl );
 }
 
 // one hard any-occluder shadow ray from the surface toward the chosen light (interaction.frag's inline ray).

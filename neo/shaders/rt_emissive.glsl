@@ -256,7 +256,8 @@ uint rtEmissiveSeed( uint li, vec3 P, float frame ) {
 }
 
 // The unshadowed irradiance ESTIMATE of emitter row li at surface point P (normal N): one triangle of the run drawn by
-// flux (the CDF restricted to the run), one point on it uniform in solid angle (Arvo), value f / p = radiance x emission
+// its contribution at P (receiverPick, the DI shade) or by flux (the CDF restricted to the run: the GI bounce, and runs
+// over RT_EMISSIVE_PICK_MAX_TRIS), one point on it uniform in solid angle (Arvo), value f / p = radiance x emission
 // profile x N.L x (solid angle / flux share). Unbiased for the row's total, so the DI reservoir can hold an emitter row
 // next to a placed light with pdf 1 exactly like any other candidate. ldir / dl = the SAMPLED point (the visibility ray).
 // ldir / dl are the SAMPLED point (the visibility ray); the receiver cosine comes from the authored light origin when there is one.
@@ -422,9 +423,9 @@ float rtEmissiveOrientBound( RtLights lights, uint li, vec3 P, float dc, float b
 	return ( prof == 1u ) ? c : ( prof == 2u ) ? 1.0 : sqrt( c );
 }
 
-// oriented (r_rtEmissiveSampleAB bit 2): times rtEmissiveOrientBound - an emitter facing away from P is never picked (it
-// shaded 0: a black sample), one seen edge-on (a wall panel from the floor beside it) no longer outweighs the ceiling.
-bool rtEmissiveTargetRow( RtLights lights, uint li, vec3 P, vec3 N, bool oriented, out vec3 contrib, out vec3 ldir, out float dl, out float ndl ) {
+// Times rtEmissiveOrientBound (2026-11-02): an emitter facing away from P is never picked (it shaded 0: a black sample),
+// one seen edge-on (a wall panel from the floor beside it) no longer outweighs the ceiling.
+bool rtEmissiveTargetRow( RtLights lights, uint li, vec3 P, vec3 N, out vec3 contrib, out vec3 ldir, out float dl, out float ndl ) {
 	contrib = vec3( 0.0 );	ldir = vec3( 0.0, 0.0, 1.0 );	dl = 0.0;	ndl = 0.0;
 	if ( floatBitsToUint( lights.l[ li ].projQ.y ) == 0u ) { return false; }	// no triangles: the shade reaches nothing
 	vec3 cd = lights.l[ li ].pos - P;
@@ -441,7 +442,7 @@ bool rtEmissiveTargetRow( RtLights lights, uint li, vec3 P, vec3 N, bool oriente
 	float boost  = ( knee > 0.0 ) ? max( dc / knee, 1.0 ) : 1.0;
 	float fade   = noFade ? 1.0 : 1.0 - smoothstep( 0.75 * R, R, max( dc - br, 0.0 ) );
 	if ( !( fade > 0.0 ) ) { return false; }
-	if ( oriented ) {
+	{
 		const uint prof     = uint( clamp( lights.l[ li ].projT.z, 0.0, 2.0 ) + 0.5 );
 		const bool twoSided = lights.l[ li ].projT.w > 0.5;
 		fade *= rtEmissiveOrientBound( lights, li, P, dc, br, prof, twoSided );

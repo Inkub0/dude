@@ -4215,21 +4215,6 @@ static void R_RtEmissiveUpdate( const idRenderWorldLocal *world, rhi::RHI *r ) {
 	R_RtEmissiveBuild( world, r );
 	if ( s_rtEmissiveBuf != 0 ) {
 		R_RtEmissiveBuildRows();				// E2 v3: the emitter rows the scene-light gather appends
-		// TEMPORARY (r_rtEmissiveSampleAB, remove at merge): how many triangles the rows hold - the DI shade's receiver-aware
-		// triangle pick walks a row twice up to RT_EMISSIVE_PICK_MAX_TRIS (rt_emissive.glsl), larger rows keep the flux pick
-		int all[5] = { 0, 0, 0, 0, 0 }, authored[5] = { 0, 0, 0, 0, 0 }, cones = 0;
-		for ( int ri = 0; ri < s_rtEmissiveRows.Num(); ri++ ) {
-			const rtEmissiveRow_t &row = s_rtEmissiveRows[ri];
-			const int b = ( row.numTris <= 2 ) ? 0 : ( row.numTris <= 8 ) ? 1 : ( row.numTris <= 32 ) ? 2 : ( row.numTris <= 128 ) ? 3 : 4;
-			all[b]++;
-			rtEmAuthEmit_t ap;
-			if ( R_EmAuthFixtureEmits( world, row.fixtureId, row.mat, &ap ) ) {
-				authored[b]++;
-				if ( row.coneCos > 0.0f ) { cones++; }
-			}
-		}
-		common->Printf( "r_rtEmissiveTable: row sizes (tris <=2 / <=8 / <=32 / <=128 / more): all %d / %d / %d / %d / %d, authored %d / %d / %d / %d / %d (%d with a normal cone under 90 deg)\n",
-			all[0], all[1], all[2], all[3], all[4], authored[0], authored[1], authored[2], authored[3], authored[4], cones );
 	}
 	if ( !s_rtEmissiveReport ) {
 		common->Printf( "r_rtEmissiveTable: rebuilt in %.1f ms (%d emissive triangles)\n", Sys_MillisecondsPrecise() - buildStart, s_rtEmissiveTris.Num() );

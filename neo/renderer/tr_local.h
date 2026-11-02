@@ -1140,7 +1140,6 @@ extern idCVar r_rtEmissiveIntensity;		// emissive mode: radiance multiplier of e
 extern idCVar r_rtEmissiveMaxRows;
 extern idCVar r_rtEmissiveCheapTarget;	// emissive mode: analytic RIS target for emitter candidates (only the winner is area-sampled)
 extern idCVar r_rtEmissiveSamples;		// emissive mode: area-light samples averaged per emitter shade (far-field representation)
-extern idCVar r_rtEmissiveSampleAB;		// TEMPORARY A/B (remove at merge): bit 1 = receiver-aware in-run triangle pick, bit 2 = oriented DI target
 extern idCVar r_rtEmissiveGridSlots;		// emissive mode: light-grid candidates per cell (the larger of this and r_rtLightGridSlots)		// emissive mode: emitter rows (surfaces) a view's scene-light buffer may carry
 extern idCVar r_rtEmissivePhysical;		// emissive mode: physical emitters - inverse square, no reach, cull where the contribution is negligible
 extern idCVar r_rtEmissiveCullIrradiance;	// physical: the irradiance below which an emitter's row stops (its cull radius)
