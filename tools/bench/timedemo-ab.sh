@@ -16,6 +16,8 @@
 #   set gather : the ReSTIR DI gather's cost split in EMISSIVE MODE (needs the diag/di-gather-profile build: r_rtDiGatherProfile
 #                bits each remove one piece - timing only, the image is wrong) - 7 variants; your authored emissive setups are
 #                copied into every sandbox (demo1 = game/mc_underground)
+#   set boostgi : the ReSTIR DI boost reusing the plain gather's GI term (perf/restir-di-boost-reuse-gi, r_rtReStirDIBoostReuseGI),
+#                emissive mode as in 'gather' - A = the old re-trace, B = the reuse
 #   rounds : alternating rounds after the warm-up (default 3)
 # Env: DUDE_BIN  binary (default <repo>/build/dude)
 #      DUDE_CFG  your config, source of the display settings (default ~/.config/dude/base/dude.cfg)
@@ -83,8 +85,16 @@ case "$SET" in
 		DESC[F]="DI: first candidate only";                   ARGS[F]="$EM +set r_rtDiGatherProfile 16"
 		DESC[G]="no cache update";                            ARGS[G]="$EM +set r_rtDiGatherProfile 32"
 		;;
+	boostgi)
+		# 2026-11-02: the boost pass re-traced the GI bounce for every young pixel (2.4 ms of 3.8 in the 'gather' profile)
+		PRESET=5; RTX=2; SEED_EMISSIVE=1
+		EM="+set r_rtEmissiveLighting 1 +set r_rtEmissivePhysical 1 +set r_rtEmissiveSamples 1"
+		NAMES=( A B )
+		DESC[A]="boost re-traces the GI bounce (old)";   ARGS[A]="$EM +set r_rtReStirDIBoostReuseGI 0"
+		DESC[B]="boost reuses the gather's GI term";     ARGS[B]="$EM +set r_rtReStirDIBoostReuseGI 1"
+		;;
 	*)
-		sed -n '2,30p' "$0"
+		sed -n '2,32p' "$0"
 		exit 1
 		;;
 esac
