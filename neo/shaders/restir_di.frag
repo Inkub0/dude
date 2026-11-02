@@ -495,6 +495,7 @@ void main() {
 		bp.ambientRows    = floatBitsToUint( u_pbrParms2.x );	// r_rtgiAmbient fold: ( first row << 8 ) | count, 0 = none
 		bp.eyePullback    = u_pbrParms2.z;
 		bp.sampleFrame    = u_localParam1.x;				// frame index: advances the R2 bounce-direction sequence
+		bp.emitterPick    = uint( u_texGen0Q.x + 0.5 );		// TEMPORARY r_rtgiBounceEmitterPick
 		// the irradiance cache (r_rtgiCache): the hit reads its cell, this pixel then teaches its own cell what it saw
 		bp.cache          = rtgiCacheParmsFromUniforms( uvec2( floatBitsToUint( u_particleRadius.z ), floatBitsToUint( u_particleRadius.w ) ) );
 		const bool cacheOn = rtgiCachePresent( bp.cache );

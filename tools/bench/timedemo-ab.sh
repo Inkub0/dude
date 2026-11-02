@@ -18,6 +18,8 @@
 #                copied into every sandbox (demo1 = game/mc_underground)
 #   set boostgi : the ReSTIR DI boost reusing the plain gather's GI term (perf/restir-di-boost-reuse-gi, r_rtReStirDIBoostReuseGI),
 #                emissive mode as in 'gather' - A = the old re-trace, B = the reuse
+#   set bounceem : the GI bounce hit's emitters (perf/rtgi-bounce-emitter-sampling, r_rtgiBounceEmitterPick), emissive mode as
+#                in 'gather' - A = every emitter area-sampled (old), B = one picked by the oriented target, C = by stored importance
 #   rounds : alternating rounds after the warm-up (default 3)
 # Env: DUDE_BIN  binary (default <repo>/build/dude)
 #      DUDE_CFG  your config, source of the display settings (default ~/.config/dude/base/dude.cfg)
@@ -93,8 +95,17 @@ case "$SET" in
 		DESC[A]="boost re-traces the GI bounce (old)";   ARGS[A]="$EM +set r_rtReStirDIBoostReuseGI 0"
 		DESC[B]="boost reuses the gather's GI term";     ARGS[B]="$EM +set r_rtReStirDIBoostReuseGI 1"
 		;;
+	bounceem)
+		# 2026-11-02: an area sample for every emitter of the bounce hit's cell was ~3 ms of the gather ('gather' profile)
+		PRESET=5; RTX=2; SEED_EMISSIVE=1
+		EM="+set r_rtEmissiveLighting 1 +set r_rtEmissivePhysical 1 +set r_rtEmissiveSamples 1"
+		NAMES=( A B C )
+		DESC[A]="every emitter of the cell area-sampled (old)";  ARGS[A]="$EM +set r_rtgiBounceEmitterPick 0"
+		DESC[B]="one emitter by the oriented target";           ARGS[B]="$EM +set r_rtgiBounceEmitterPick 1"
+		DESC[C]="one emitter by the cell's stored importance";  ARGS[C]="$EM +set r_rtgiBounceEmitterPick 2"
+		;;
 	*)
-		sed -n '2,32p' "$0"
+		sed -n '2,34p' "$0"
 		exit 1
 		;;
 esac
