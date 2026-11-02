@@ -4198,9 +4198,31 @@ static bool R_RtEmissiveAppendEntity( const idRenderWorldLocal *world, rhi::RHI 
 // its dark group instead (R_RtEmissiveAdoptGroup) and is not listed.
 static void R_RtEmissiveScanNewEntities( const idRenderWorldLocal *world, idList<int> &newEntities ) {
 	newEntities.SetNum( 0, false );
+	// the model each slot's group tracks (live or dark): a slot whose group has this very model is the refresh's - it re-gathers
+	// a returning model back on (R_RtEmissiveRefreshMoversBody) - and must NOT be appended again. Without this, a slot that
+	// held another model in between (the seen-model cache moved on) got a second group for the same entity, both live: double
+	// emission (mfscompcell in the demo1 timedemo, 2026-11-02; the full rebuild this path replaced always started clean).
+	static idList<const idRenderModel *> trackedModel;
+	trackedModel.SetNum( world->entityDefs.Num(), false );
+	for ( int i = 0; i < trackedModel.Num(); i++ ) {
+		trackedModel[i] = NULL;
+	}
+	for ( int gi = 0; gi < s_rtEmissiveGroups.Num(); gi++ ) {
+		const rtEmissiveGroup_t &g = s_rtEmissiveGroups[gi];
+		if ( g.entityIndex >= 0 && g.entityIndex < trackedModel.Num() && g.model != NULL ) {
+			trackedModel[ g.entityIndex ] = g.model;
+		}
+	}
 	for ( int i = 0; i < world->entityDefs.Num(); i++ ) {
 		const idRenderEntityLocal *def = world->entityDefs[i];
 		if ( !R_RtEmissiveEntityGatherable( def ) ) {
+			continue;
+		}
+		if ( trackedModel[i] == def->parms.hModel ) {
+			while ( s_rtEmissiveSeenModel.Num() <= i ) {
+				s_rtEmissiveSeenModel.Append( NULL );
+			}
+			s_rtEmissiveSeenModel[i] = def->parms.hModel;
 			continue;
 		}
 		// the build examined this slot with this very model: whatever it found (emitters, tracked; or nothing) stands
