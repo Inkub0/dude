@@ -275,6 +275,7 @@ public:
 	}
 	virtual void	Dispatch( const ComputeArgs &args );
 	virtual void	PostComputeBarrier();
+	virtual void	FragmentStorageBarrier();
 	virtual void	DispatchSync( const ComputeArgs &args );
 	virtual bool	RunFsr2( const Fsr2DispatchArgs &args );
 	virtual void	Fsr2CaptureOpaque( RenderTargetHandle sceneRT );
@@ -5160,6 +5161,27 @@ void VulkanBackend::Dispatch( const ComputeArgs &args ) {
 // Identical masks to the per-dispatch barrier above: SHADER_WRITE -> vertex-attribute /
 // index / shader read+write, so the skinned/deformed vertex buffers are visible to the
 // draws (and to a following deform dispatch that reads a skin output).
+void VulkanBackend::FragmentStorageBarrier() {
+	if ( device == VK_NULL_HANDLE || !frameOpen || skipFrame ) {
+		return;
+	}
+	if ( insideTargetPass ) {
+		static bool warned = false;
+		if ( !warned ) { warned = true; common->Warning( "VK: FragmentStorageBarrier() inside a target pass - skipped (call it between passes)" ); }
+		return;
+	}
+	VkCommandBuffer cb = frames[frameIndex].cb;
+	if ( insideScenePass ) {
+		vkCmdEndRenderPass( cb );		// suspended like BeginTargetPass does; the next Draw resumes it (EnsureScenePass)
+		insideScenePass = false;
+	}
+	VkMemoryBarrier mb = {};
+	mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+	mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+	mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+	vkCmdPipelineBarrier( cb, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 1, &mb, 0, NULL, 0, NULL );
+}
+
 void VulkanBackend::PostComputeBarrier() {
 	if ( device == VK_NULL_HANDLE || !frameOpen || skipFrame || insideScenePass || insideTargetPass ) {
 		return;

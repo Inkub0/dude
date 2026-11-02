@@ -590,6 +590,10 @@ public:
 	// calls: makes all preceding compute writes visible to vertex-attribute / index /
 	// shader reads this frame. Call once after the batch (the skin + deform flushes). GL3 no-ops.
 	virtual void	PostComputeBarrier() {}
+	// Order FRAGMENT-shader storage-buffer accesses across target passes: earlier passes' writes become visible to later
+	// passes' reads, and earlier reads finish before later writes (a target pass's implicit dependencies cover its
+	// attachments only). Call between passes. VK only (device-address buffers); the default is a no-op.
+	virtual void	FragmentStorageBarrier() {}
 	// Like Dispatch but on a dedicated command buffer, submitted and WAITED ON (synchronous),
 	// so the result is ready for a ReadBuffer immediately. For dev/validation and load-time
 	// GPU work; stalls the GPU, so never per-frame. GL3 no-ops.
