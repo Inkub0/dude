@@ -1103,6 +1103,16 @@ lit corridor, measured per-pass. Acceptance: look-away fade returns within <= 4 
 multi-light shadow regions brighter and quieter than the 1-spp gather in the RAW debug view; sun parity vs forward
 held; no new blotching in motion (the course's correlation warning - the 1 tap dithers it).
 
+**R3a cost, eighth finding (2026-11-02, timedemo `tools/bench/timedemo-ab.sh gather`, demo1 in emissive mode at Path Tracing
+Nightmare):** with the RTGI bounce COMBINED into the DI buffer, the boost program re-ran the whole bounce (trace, hit shading,
+every emitter of the hit's cell, the dominant shadow ray, the cache lookup) for every boosted pixel, to rebuild the value the
+plain gather had just computed for it: 2.4 ms of a 3.8 ms `restir.di.boost` while the demo camera moves. The plain gather now
+stores the GI term it added (demodulated radiance + its SH1 share, 6 floats per texel, `rhiReStirDIGiBuf`, `u_texGen0T`) and
+the boost adds the same numbers back - bit-identical (same seeds, same cache reads; user: no difference toggling it at
+disocclusions). `RHI::FragmentStorageBarrier` orders the fragment-shader buffer accesses across the target passes (a target
+pass's implicit dependencies cover its attachments only), before the gather (last frame's boost reads) and before the boost.
+Bench `boostgi`: boost 4.02 -> 1.60 ms, frame -2.5 ms.
+
 ### R4 - denoiser inputs (F4, F6) - small/medium
 Files: `gbuffer.frag` (`out_Velocity`), `RhiWorld.cpp` (velocity target format + NRD `mvScale.z`), `restir_di.frag`
 (material ID, hitT), `VulkanBackend.cpp` (`minMaterialForDiffuse`, `historyFixAlternatePixelStrideMaterialID`).

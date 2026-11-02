@@ -173,6 +173,12 @@ def main():
 					problems.append( f"{tag}: {k} = {got!r}, expected {want!r}" )
 			if rep["playback"] != "real-time":
 				problems.append( f"{tag}: playback {rep['playback']!r} (want real-time)" )
+			# emissive mode on: the demo's map must have come up AUTHORED (the setup copied into the sandbox), or the run
+			# measured nothing of emissive mode
+			if expect.get( "r_rtEmissiveLighting" ) == "1":
+				log = read( os.path.join( run, "stdout.log" ) )
+				if "emissive authoring:" in log and not re.search( r'^emissive authoring: \S+ - .*: \d+ lights,', log, re.M ):
+					problems.append( f"{tag}: emissive mode on but the demo's map is UNAUTHORED (no setup in the sandbox)" )
 		if scopes is None:
 			problems.append( f"{tag}: no r_vkGpuTime windows with >= {MIN_WINDOW_SAMPLES} samples" )
 		runs.append( { "tag": tag, "variant": v, "round": rnd, "rep": rep, "scopes": scopes or {}, "nwin": nwin, "clocks": clocks } )

@@ -595,4 +595,13 @@ Workflow: Emissive Mode on -> Bake defaults -> Physical on -> walk the map with 
   (one weighted-reservoir pass at 1 sample); the target multiplies by the light-BVH orientation bound of the run's normal
   cone (rtEmissiveOrientBound; cone from R_RtEmissiveBuildRows, in projF.x / projF.w). Both unbiased. User A/B (mars_city1,
   raw-gather RMS noise on their shots): new 1 = new 2 = new 16 (0.200) < old 16 (0.224); new 1 costs the old 2 (~6.7 ms
-  gather at 1440p x 0.75) -> default 1. The GI bounce keeps the flux pick (it shades every emitter of the hit's cell).
+  gather at 1440p x 0.75) -> default 1. (The GI bounce: below.)
+  2026-11-02 later (`perf/rtgi-bounce-emitter-sampling`, timedemo profile `tools/bench/timedemo-ab.sh gather`): the GI BOUNCE
+  area-sampled EVERY emitter of its hit's light-grid cell - ~3 ms of the 8.3 ms ReSTIR DI gather in demo1 (+1.6 ms in the
+  boost before it reused the gather's GI term). Now one weighted reservoir over the cell's emitters (weight = the oriented
+  analytic target at the hit, rtEmissiveTargetRow) picks ONE, area-sampled with the receiver-aware triangle pick and weighted
+  by total / its weight: unbiased; placed lights keep their exact sum. Bench `bounceem`: gather -2.0 ms (8.90 -> 6.90), frame
+  -2.05 ms, 1% low 11.9 -> 16.8 fps. Weighing by the cell's STORED importance instead (no per-emitter work) saved another
+  1 ms but was 17-25 % noisier in the raw gather, in blobs (user saw "coarser dots") - rejected. The raw GI read ~7 % darker:
+  with the bounce shadow ray off the two match (1.01), so it is the H6d dominant shadow ray now covering the picked emitter
+  as the estimate of ALL emitters, where the old sum shadow-tested only the brightest one and leaked the rest through walls.

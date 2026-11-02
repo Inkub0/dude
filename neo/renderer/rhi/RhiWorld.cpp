@@ -522,6 +522,11 @@ static rhi::RenderTargetHandle rhiReStirDIPrevRT = 0;	// R1 rev.2: the gather MR
 static float rhiReStirDIPrevCb = 0.0f;				// last frame's checkerboard parity (0 off / 1 / 2): where a pixel's data sits
 #define DI_LIGHTMAP_MAX		4096					// lightDef -> row table capacity (uints per ring slot)
 static rhi::BufferHandle	s_diLightMapBuf = 0;
+// The plain gather's GI term per pixel for the R3a boost (restir_di.frag DiGiSide): 6 floats (24 B) per gather texel, laid
+// out like rhiReStirDIRT. GPU-only; sized rw x rh (re-made on a resize).
+static rhi::BufferHandle	rhiReStirDIGiBuf = 0;
+static unsigned long long	rhiReStirDIGiAddr = 0;
+static int					rhiReStirDIGiCells = 0;
 static unsigned long long	s_diLightMapAddr = 0;
 // H4b guide inputs + H4c denoise state: NRD's IN_VIEWZ (signed linear Z, R16F) and
 // IN_NORMAL_ROUGHNESS (world-space encoding-2 pack, RGBA16F) targets, plus the previous
@@ -4482,6 +4487,7 @@ void RB_RHI_ResetWorldTargets( void ) {
 	rhiReStirDIGradConfValid = false;	rhiReStirDIGatherPrevValid = false;
 	rhiReStirDIYoungRT[0] = rhiReStirDIYoungRT[1] = 0;	rhiReStirDIYoungW = rhiReStirDIYoungH = 0;	rhiReStirDIYoungValid = false;
 	s_diLightMapBuf = 0;	s_diLightMapAddr = 0;
+	rhiReStirDIGiBuf = 0;	rhiReStirDIGiAddr = 0;	rhiReStirDIGiCells = 0;	// the boost's GI side buffer
 	s_sceneLightSlotFrame[0] = s_sceneLightSlotFrame[1] = s_sceneLightSlotFrame[2] = -1;
 	rhiRtaoVelRT = 0;			rhiRtaoVelW = rhiRtaoVelH = 0;
 	rhiRtBlurRayRT = rhiRtBlurPingRT = rhiRtBlurMaskRT = rhiRtBlurTileRT[0] = rhiRtBlurTileRT[1] = 0;
@@ -9112,6 +9118,35 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	if ( rhiRtLightGrid.readyThisView && rhiRtLightGrid.filledThisFrame ) {	// never hand a consumer an UNFILLED grid (garbage indices)
 		RB_RHI_LightGridPack( parms, rhiRtLightGrid.parms );
 	}
+	// The R3a boost REUSES the plain gather's GI term (2026-11-02): it re-ran the whole GI bounce for every young pixel to
+	// rebuild the value the plain gather had just computed for it (2.4 ms of a 3.8 ms boost in the demo1 timedemo). The plain
+	// gather stores it per texel (rhiReStirDIGiBuf: the demodulated GI radiance + its SH1 share) and the boost
+	// adds it back (bit-identical). u_texGen0T = ( address lo, hi, row stride, cells ) bit-cast, all 0 = off (no buffer: the
+	// boost traces its own).
+	// FragmentStorageBarrier on both sides: this gather's writes after last frame's boost reads, the boost's reads after them.
+	bool diGiSide = false;
+	if ( boostWant && combineGI ) {
+		const int cells = rw * rh;
+		if ( rhiReStirDIGiBuf != 0 && rhiReStirDIGiCells != cells ) {
+			r->DestroyBuffer( rhiReStirDIGiBuf );
+			rhiReStirDIGiBuf = 0;	rhiReStirDIGiAddr = 0;	rhiReStirDIGiCells = 0;
+		}
+		if ( rhiReStirDIGiBuf == 0 && cells > 0 ) {
+			rhiReStirDIGiBuf   = r->CreateBuffer( rhi::BU_STORAGE_DEVICE, cells * 24, NULL );	// restir_di.frag DI_GI_SIDE_FLOATS 6
+			rhiReStirDIGiAddr  = ( rhiReStirDIGiBuf != 0 ) ? r->GetBufferDeviceAddress( rhiReStirDIGiBuf ) : 0;
+			rhiReStirDIGiCells = ( rhiReStirDIGiAddr != 0 ) ? cells : 0;
+		}
+		diGiSide = rhiReStirDIGiAddr != 0 && rhiReStirDIGiCells == cells;
+	}
+	{
+		unsigned int gs[4] = { 0u, 0u, 0u, 0u };
+		if ( diGiSide ) {
+			gs[0] = (unsigned int)( rhiReStirDIGiAddr & 0xFFFFFFFFull );	gs[1] = (unsigned int)( rhiReStirDIGiAddr >> 32 );
+			gs[2] = (unsigned int)rw;										gs[3] = (unsigned int)rhiReStirDIGiCells;
+			r->FragmentStorageBarrier();
+		}
+		memcpy( parms.texGen0T, gs, sizeof( gs ) );
+	}
 	r->GpuScopeBegin( "restir.di.gather" );			// r_vkGpuTime 2: the 1-spp DI resample + visibility ray (+ R3a's K rays on young pixels)
 	if ( cbActive ) { r->SetNextTargetPassArea( 0, 0, rw / 2, rh ); }
 	r->BeginTargetPass( rhiReStirDIRT, NULL );
@@ -9168,6 +9203,7 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		r->GpuScopeEnd();
 		rhiReStirDIYoungValid = true;
 		rhiReStirDIYoungIdx = yi ^ 1;
+		if ( diGiSide ) { r->FragmentStorageBarrier(); }	// the plain gather's GI terms, visible to the boost
 		r->GpuScopeBegin( "restir.di.boost" );		// r_vkGpuTime 2: K picks + rays on the clustered young pixels only
 		if ( cbActive ) { r->SetNextTargetPassArea( 0, 0, rw / 2, rh ); }
 		r->SetNextTargetPassLoad();

@@ -13,6 +13,14 @@
 # Usage: tools/bench/timedemo-ab.sh <set> [rounds]
 #   set m1     : ReSTIR DI boost knob split at Path Tracing Nightmare (4 variants)
 #   set serial : the light-serial fix, two BINARIES at Path Tracing Nightmare - A = build/dude-noserialfix, B = build/dude
+#   (gather / boostgi / bounceem are HISTORY - 2026-11-02: their cvars only existed in those branches' builds)
+#   set gather : the ReSTIR DI gather's cost split in EMISSIVE MODE (needs the diag/di-gather-profile build: r_rtDiGatherProfile
+#                bits each remove one piece - timing only, the image is wrong) - 7 variants; your authored emissive setups are
+#                copied into every sandbox (demo1 = game/mc_underground)
+#   set boostgi : the ReSTIR DI boost reusing the plain gather's GI term (perf/restir-di-boost-reuse-gi, r_rtReStirDIBoostReuseGI),
+#                emissive mode as in 'gather' - A = the old re-trace, B = the reuse
+#   set bounceem : the GI bounce hit's emitters (perf/rtgi-bounce-emitter-sampling, r_rtgiBounceEmitterPick), emissive mode as
+#                in 'gather' - A = every emitter area-sampled (old), B = one picked by the oriented target, C = by stored importance
 #   rounds : alternating rounds after the warm-up (default 3)
 # Env: DUDE_BIN  binary (default <repo>/build/dude)
 #      DUDE_CFG  your config, source of the display settings (default ~/.config/dude/base/dude.cfg)
@@ -22,6 +30,8 @@
 #                the run right after a single warm-up - 2026-10-31, 1340 -> 1221 -> ~1120 MHz)
 #      OUT       result directory (default ~/.local/share/dude/bench/<date>-<set>)
 #      VARIANTS  run only these variants of the set, in this order (e.g. VARIANTS="A D")
+#      EMISSIVE_DIR  authored emissive setups copied into every sandbox for sets that need them (default
+#                ~/.local/share/dude/base/emissive: the plain ./build/dude save path; run.sh saves under the repo's base/)
 #      DRYRUN=1  print the command lines, launch nothing
 set -euo pipefail
 
@@ -36,6 +46,8 @@ ROUNDS="${2:-3}"
 
 declare -a NAMES
 declare -A DESC ARGS BINV		# BINV: a variant's own binary (default: \$BIN) - for A/B of two builds
+SEED_EMISSIVE=0					# 1 = copy the authored emissive/<map>.cfg files into every sandbox
+EMISSIVE_DIR="${EMISSIVE_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/dude/base/emissive}"
 case "$SET" in
 	m1)
 		# Path Tracing Nightmare (dude_rtx 2, preset 5); 0.9.6 had BoostHistory 2 / BoostConfidence 0
@@ -62,8 +74,39 @@ case "$SET" in
 		BINV[B]="$BIN"
 		ARGS[B]=""
 		;;
+	gather)
+		# 2026-11-02: where the ~6.7 ms ReSTIR DI gather goes in emissive mode (docs/rtx-experimental-lighting.md). Each bit of
+		# r_rtDiGatherProfile REMOVES one piece; the drop vs A is its cost. Emissive mode as the user plays it (physical, 1 sample).
+		PRESET=5; RTX=2; SEED_EMISSIVE=1
+		EM="+set r_rtEmissiveLighting 1 +set r_rtEmissivePhysical 1 +set r_rtEmissiveSamples 1"
+		NAMES=( A B C D E F G )
+		DESC[A]="reference (nothing removed)";                ARGS[A]="$EM +set r_rtDiGatherProfile 0"
+		DESC[B]="no GI bounce block (trace, hit shade, cache update)"; ARGS[B]="$EM +set r_rtDiGatherProfile 1"
+		DESC[C]="no emitter rows at the bounce hit";          ARGS[C]="$EM +set r_rtDiGatherProfile 2"
+		DESC[D]="no cache tail serve (every hit shaded live)"; ARGS[D]="$EM +set r_rtDiGatherProfile 4"
+		DESC[E]="no DI shadow ray";                           ARGS[E]="$EM +set r_rtDiGatherProfile 8"
+		DESC[F]="DI: first candidate only";                   ARGS[F]="$EM +set r_rtDiGatherProfile 16"
+		DESC[G]="no cache update";                            ARGS[G]="$EM +set r_rtDiGatherProfile 32"
+		;;
+	boostgi)
+		# 2026-11-02: the boost pass re-traced the GI bounce for every young pixel (2.4 ms of 3.8 in the 'gather' profile)
+		PRESET=5; RTX=2; SEED_EMISSIVE=1
+		EM="+set r_rtEmissiveLighting 1 +set r_rtEmissivePhysical 1 +set r_rtEmissiveSamples 1"
+		NAMES=( A B )
+		DESC[A]="boost re-traces the GI bounce (old)";   ARGS[A]="$EM +set r_rtReStirDIBoostReuseGI 0"
+		DESC[B]="boost reuses the gather's GI term";     ARGS[B]="$EM +set r_rtReStirDIBoostReuseGI 1"
+		;;
+	bounceem)
+		# 2026-11-02: an area sample for every emitter of the bounce hit's cell was ~3 ms of the gather ('gather' profile)
+		PRESET=5; RTX=2; SEED_EMISSIVE=1
+		EM="+set r_rtEmissiveLighting 1 +set r_rtEmissivePhysical 1 +set r_rtEmissiveSamples 1"
+		NAMES=( A B C )
+		DESC[A]="every emitter of the cell area-sampled (old)";  ARGS[A]="$EM +set r_rtgiBounceEmitterPick 0"
+		DESC[B]="one emitter by the oriented target";           ARGS[B]="$EM +set r_rtgiBounceEmitterPick 1"
+		DESC[C]="one emitter by the cell's stored importance";  ARGS[C]="$EM +set r_rtgiBounceEmitterPick 2"
+		;;
 	*)
-		sed -n '2,24p' "$0"
+		sed -n '2,34p' "$0"
 		exit 1
 		;;
 esac
@@ -87,6 +130,9 @@ if [ "${DRYRUN:-0}" != 1 ]; then
 	fi
 fi
 [ -r "$DUDE_CFG" ] || { echo "cannot read $DUDE_CFG (display settings source)" >&2; exit 1; }
+if [ "$SEED_EMISSIVE" = 1 ]; then
+	ls "$EMISSIVE_DIR"/game/*.cfg > /dev/null 2>&1 || { echo "no authored emissive setups in $EMISSIVE_DIR/game (set EMISSIVE_DIR)" >&2; exit 1; }
+fi
 SCHEMA="$( sed -n 's/^#define DUDE_CONFIG_SCHEMA[[:space:]]*\([0-9]*\).*/\1/p' "$REPO/neo/framework/Licensee.h" )"
 
 OUT="${OUT:-${XDG_DATA_HOME:-$HOME/.local/share}/dude/bench/$( date +%Y%m%d-%H%M%S )-$SET}"
@@ -98,6 +144,7 @@ mkdir -p "$OUT"
 	echo "display settings from $DUDE_CFG:"
 	grep -E '^seta (r_mode|r_fullscreen|r_fullscreenDesktop|r_fullscreenDisplay|r_fullscreenDisplayName|r_customWidth|r_customHeight|r_displayRefresh) ' "$DUDE_CFG" || true
 	for v in "${NAMES[@]}"; do echo "variant $v: ${DESC[$v]}  [${ARGS[$v]}]"; done
+	if [ "$SEED_EMISSIVE" = 1 ]; then echo "emissive setups from $EMISSIVE_DIR: $( cd "$EMISSIVE_DIR" && ls game/*.cfg | tr '\n' ' ' )"; fi
 	for v in "${NAMES[@]}"; do
 		if [ -n "${BINV[$v]:-}" ]; then echo "binary $v: ${BINV[$v]} ($( stat -c '%y' "${BINV[$v]}" 2> /dev/null || echo '?' ))"; fi
 	done
@@ -131,6 +178,10 @@ for item in "${order[@]}"; do
 		echo 'seta r_graphicsAPI "vulkan"'
 		grep -E '^seta (r_mode|r_fullscreen|r_fullscreenDesktop|r_fullscreenDisplay|r_fullscreenDisplayName|r_customWidth|r_customHeight|r_displayRefresh) ' "$DUDE_CFG" || true
 	} > "$SB/cfg/base/dude.cfg"
+	if [ "$SEED_EMISSIVE" = 1 ]; then
+		mkdir -p "$SB/save/base/emissive/game"
+		cp "$EMISSIVE_DIR"/game/*.cfg "$SB/save/base/emissive/game/"		# the setups only, never a .recovery copy
+	fi
 	# command-line order matters: every +command runs after init, in this order (preset, then the
 	# variant's overrides, then the demo)
 	# shellcheck disable=SC2206

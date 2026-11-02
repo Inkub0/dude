@@ -166,6 +166,15 @@ vec4 packNrdNormal( vec3 Nraw ) {
 	return vec4( r, 0.0 );										// w = materialID/3 = 0
 }
 
+// The plain gather's GI term per texel for the R3a boost (2026-11-02): the boost re-traced the whole bounce for every young
+// pixel to rebuild exactly this value (2.4 ms of a 3.8 ms boost in the demo1 timedemo). The plain gather stores the term it
+// added - the demodulated radiance and its SH1 share (direction x luminance), 6 floats - and the boost adds the same numbers
+// back: bit-identical to the re-trace (same seeds, same cache reads). u_texGen0T = ( address lo, hi, row stride, cells ),
+// all 0 = off (RB_RHI_ReStirDIPass: set only when the boost runs with the bounce combined); every index is checked
+// against the cell count.
+layout(buffer_reference, std430, buffer_reference_align = 4) buffer DiGiSide { float v[]; };
+const uint DI_GI_SIDE_FLOATS = 6u;
+
 // R3a: is this pixel YOUNG - does it get the boosted picks this frame? (header: u_tessParms, u_prevMvpMatrix, units 4/5/6/9/10)
 void main() {
 	vec2  frag = gl_FragCoord.xy;
@@ -455,6 +464,20 @@ void main() {
 	// remultiply is exact for both. Its own hit distance is NOT fed to NRD (the direct term's light distance
 	// drives the blur radius for both - the shared-denoise compromise).
 	if ( u_specularParms.x > 0.5 ) {
+		vec3 giRad = vec3( 0.0 );									// the bounce's demodulated contribution
+		vec3 giSh  = vec3( 0.0 );									// its SH1 share (direction x luminance)
+		const uvec4 giSide   = floatBitsToUint( u_texGen0T );		// the boost's GI side buffer (header above)
+		const uint  giCell   = uint( frag.y ) * giSide.z + uint( frag.x );
+		const bool  giSideOn = ( giSide.x | giSide.y ) != 0u && giSide.z != 0u && giCell < giSide.w;
+		DiGiSide giBuf = DiGiSide( giSide.xy );
+#if DI_BOOST
+		if ( giSideOn ) {											// the plain gather's term for this texel
+			const uint o = giCell * DI_GI_SIDE_FLOATS;
+			giRad = vec3( giBuf.v[ o + 0u ], giBuf.v[ o + 1u ], giBuf.v[ o + 2u ] );
+			giSh  = vec3( giBuf.v[ o + 3u ], giBuf.v[ o + 4u ], giBuf.v[ o + 5u ] );
+		} else
+#endif
+		{
 		RtgiBounceParms bp;
 		bp.tlas           = uvec2( floatBitsToUint( u_rtParms.x ), floatBitsToUint( u_rtParms.y ) );
 		bp.geoTable       = uvec2( floatBitsToUint( u_particleRadius.x ), floatBitsToUint( u_particleRadius.y ) );
@@ -538,14 +561,21 @@ void main() {
 			// (specReshade, B = 1), so albedo / D = 1 / ( 1 - metal * kd ) keeps rtgi_apply's albedo * gi without dividing by
 			// a near-zero albedo (r_pbrMetalDiffuse >= 0 keeps 1 - metal * kd in [1 - kd, 1]; kd = 1 is clamped)
 			vec3 giDemod = ( u_shadowFalloffS.z > 1.5 ) ? vec3( 1.0 / max( 1.0 - S.metal * S.kd, 0.05 ) ) : albedo / B;
-			vec3 giRad = max( gi * giDemod, vec3( 0.0 ) );
-			if ( shMode ) {
-				// the bounce keeps its cosine in the radiance (= the irradiance convention of the direct term); only its
-				// DIRECTION feeds SH1, so the apply's bump RATIO re-resolves the whole irradiance against the full-res normal
-				shDir += bounceDir * dot( giRad, vec3( 0.2126, 0.7152, 0.0722 ) );
-			}
-			outRad += giRad;
+			giRad = max( gi * giDemod, vec3( 0.0 ) );
+			// the bounce keeps its cosine in the radiance (= the irradiance convention of the direct term); only its
+			// DIRECTION feeds SH1, so the apply's bump RATIO re-resolves the whole irradiance against the full-res normal
+			giSh = bounceDir * dot( giRad, vec3( 0.2126, 0.7152, 0.0722 ) );
 		}
+#if !DI_BOOST
+		if ( giSideOn ) {											// for the boost pass (a miss stores 0: nothing to add)
+			const uint o = giCell * DI_GI_SIDE_FLOATS;
+			giBuf.v[ o + 0u ] = giRad.x;	giBuf.v[ o + 1u ] = giRad.y;	giBuf.v[ o + 2u ] = giRad.z;
+			giBuf.v[ o + 3u ] = giSh.x;		giBuf.v[ o + 4u ] = giSh.y;		giBuf.v[ o + 5u ] = giSh.z;
+		}
+#endif
+		}
+		if ( shMode ) { shDir += giSh; }
+		outRad += giRad;
 	}
 	if ( shMode ) {
 		// NRD SH1 for the direct term: direction * luminance (REBLUR_FrontEnd_PackSh: c1 = direction * Y)
