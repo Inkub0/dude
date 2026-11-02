@@ -13,6 +13,8 @@
 # Usage: tools/bench/timedemo-ab.sh <set> [rounds]
 #   set m1     : ReSTIR DI boost knob split at Path Tracing Nightmare (4 variants)
 #   set serial : the light-serial fix, two BINARIES at Path Tracing Nightmare - A = build/dude-noserialfix, B = build/dude
+#   set load   : the timeDemo's map load - A = like a level load (com_timeDemoLevelLoad 1, the default), B = the old
+#                first-sight streaming (0); Path Tracing Nightmare, emissive mode on
 #   (gather / boostgi / bounceem are HISTORY - 2026-11-02: their cvars only existed in those branches' builds)
 #   set gather : the ReSTIR DI gather's cost split in EMISSIVE MODE (needs the diag/di-gather-profile build: r_rtDiGatherProfile
 #                bits each remove one piece - timing only, the image is wrong) - 7 variants; your authored emissive setups are
@@ -32,8 +34,9 @@
 #      VARIANTS  run only these variants of the set, in this order (e.g. VARIANTS="A D")
 #      EMISSIVE_DIR  authored emissive setups copied into every sandbox for sets that need them (default
 #                ~/.local/share/dude/base/emissive: the plain ./build/dude save path; run.sh saves under the repo's base/)
-#      TWICE     1 (default) = `timeDemoQuit <demo> twice`: an un-timed precache pass first, so the timed pass measures play,
-#                not first-sight texture loading (a demo never does a level load); 0 = the old single pass
+#      TWICE     0 (default) = one timed pass after the engine's level-load emulation (com_timeDemoLevelLoad 1: the map,
+#                its entities and the player precached like a level load - play-like streaming); 1 = `timeDemoQuit <demo>
+#                twice`, an un-timed pass first (everything the demo shows warm)
 #      DRYRUN=1  print the command lines, launch nothing
 set -euo pipefail
 
@@ -42,7 +45,7 @@ BIN="${DUDE_BIN:-$REPO/build/dude}"
 DUDE_CFG="${DUDE_CFG:-$HOME/.config/dude/base/dude.cfg}"
 DEMO="${DEMO:-demo1}"
 COOLDOWN="${COOLDOWN:-30}"
-TWICE="${TWICE:-1}"
+TWICE="${TWICE:-0}"
 TWICE_ARG=""
 if [ "$TWICE" = 1 ]; then TWICE_ARG="twice"; fi
 WARMUPS="${WARMUPS:-2}"
@@ -110,8 +113,16 @@ case "$SET" in
 		DESC[B]="one emitter by the oriented target";           ARGS[B]="$EM +set r_rtgiBounceEmitterPick 1"
 		DESC[C]="one emitter by the cell's stored importance";  ARGS[C]="$EM +set r_rtgiBounceEmitterPick 2"
 		;;
+	load)
+		# 2026-11-02: com_timeDemoLevelLoad - the demo's map, entities and player precached like a level load vs first sight
+		PRESET=5; RTX=2; SEED_EMISSIVE=1
+		EM="+set r_rtEmissiveLighting 1 +set r_rtEmissivePhysical 1 +set r_rtEmissiveSamples 1"
+		NAMES=( A B )
+		DESC[A]="level load (com_timeDemoLevelLoad 1)";   ARGS[A]="$EM +set com_timeDemoLevelLoad 1"
+		DESC[B]="first sight (com_timeDemoLevelLoad 0)";  ARGS[B]="$EM +set com_timeDemoLevelLoad 0"
+		;;
 	*)
-		sed -n '2,34p' "$0"
+		sed -n '2,40p' "$0"
 		exit 1
 		;;
 esac
@@ -143,7 +154,7 @@ SCHEMA="$( sed -n 's/^#define DUDE_CONFIG_SCHEMA[[:space:]]*\([0-9]*\).*/\1/p' "
 OUT="${OUT:-${XDG_DATA_HOME:-$HOME/.local/share}/dude/bench/$( date +%Y%m%d-%H%M%S )-$SET}"
 mkdir -p "$OUT"
 {
-	echo "set: $SET  rounds: $ROUNDS  warm-ups: $WARMUPS  cooldown: ${COOLDOWN}s  demo: $DEMO  preset: $PRESET  dude_rtx: $RTX  precache pass (twice): $TWICE"
+	echo "set: $SET  rounds: $ROUNDS  warm-ups: $WARMUPS  cooldown: ${COOLDOWN}s  demo: $DEMO  preset: $PRESET  dude_rtx: $RTX  un-timed pass (twice): $TWICE"
 	echo "binary: $BIN ($( stat -c '%y' "$BIN" 2> /dev/null || echo '?' ))"
 	echo "repo: $( git -C "$REPO" rev-parse --short HEAD 2> /dev/null || echo '?' ) on $( git -C "$REPO" branch --show-current 2> /dev/null || echo '?' )"
 	echo "display settings from $DUDE_CFG:"

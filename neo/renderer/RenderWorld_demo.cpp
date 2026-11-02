@@ -86,6 +86,14 @@ void idRenderWorldLocal::StopWritingDemo() {
 //	writeDemo = NULL;
 }
 
+// DUDE: the map the last render demo loaded (DC_LOADMAP) and its header's allowNoSpecular - read by the timeDemo's
+// level-load emulation (Session.cpp TimeRenderDemo, com_timeDemoLevelLoad) through these engine-internal calls
+static idStr	s_demoMapName;
+static bool		s_demoAllowNoSpecular = false;
+const char *R_DemoMapName( void ) { return s_demoMapName.c_str(); }
+void R_DemoClearMapName( void ) { s_demoMapName.Clear(); }
+void R_DemoRestoreMapSettings( void ) { tr.allowNoSpecular = s_demoAllowNoSpecular; }
+
 /*
 ==============
 ProcessDemoCommand
@@ -138,6 +146,10 @@ bool		idRenderWorldLocal::ProcessDemoCommand( idDemoFile *readDemo, renderView_t
 
 		// DG: must be set after InitFromMap(), because that sets it to false as a default
 		tr.allowNoSpecular = (allowNoSpecular != 0);
+		// DUDE: the timeDemo's level-load emulation (Session.cpp com_timeDemoLevelLoad) precaches this map's entities and
+		// re-applies the header setting after its EndLevelLoad (which resets allowNoSpecular)
+		s_demoMapName = header.mapname;
+		s_demoAllowNoSpecular = tr.allowNoSpecular;
 
 		newMap = true;		// we will need to set demoTimeOffset
 
