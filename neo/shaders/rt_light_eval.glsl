@@ -28,7 +28,8 @@ const uint DUDE_LIGHT_DIFORWARD  = 32u;	// ReSTIR DI skips it (r_rtReStirDIDynam
 // E2 v3 (docs/rtx-experimental-lighting.md): an EMITTER row - an emissive surface of the RT emissive table standing in the
 // buffer as a light (rt_emissive.glsl rtEmissiveShadeRow samples it; RhiWorld.cpp RB_RHI_GatherSceneLights appends them
 // behind the fog rows). Its projection planes are NOT planes: projS.w = intensity, projT.xy = the table's address, projQ.xy
-// = first triangle / count (bits), projQ.z = the reach-boost knee. dudeLightAtten / dudeLightAttenTex return 0 for it, so a
+// = first triangle / count (bits), projQ.z = the reach-boost knee; pos = its emitting cone's unit AXIS (its centroid is cull.xyz),
+// projF.x / projF.w = sin / cos of the cone's half-angle. dudeLightAtten / dudeLightAttenTex return 0 for it, so a
 // consumer that has no emitter branch (reflections, volumetrics - they never receive these rows anyway) lights nothing.
 const uint DUDE_LIGHT_EMISSIVE   = 64u;
 const uint DUDE_LIGHT_BOUNCEONLY = 128u;	// emissive mode OFF, r_rtEmissiveBounce on: the DI gather skips the row, the GI bounce lights with it
