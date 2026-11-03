@@ -72,20 +72,21 @@
 //   u_tessParms           = ( K picks (0 = off), boost-ON NRD history (<= 0: trigger off), HOLD frames,
 //                             LAST frame's checkerboard parity: 0 = off, 1 / 2 = parity, -1 = NO side data this frame )
 //   u_prevMvpMatrix       = LAST frame's world -> view (the expected previous view z of this surface point)
-//   unit 4  = LAST frame's denoised DI: .w = NRD's accumulated history length in frames (ReLAX always; ReBLUR with
-//             returnHistoryLengthInsteadOfOcclusion), reprojected here through unit 10
-//   unit 5  = LAST frame's gather att1 copy ( viewZ, lum )         unit 6 = LAST frame's att2 copy (NRD-packed normal)
-//   unit 9  = LAST frame's att3 copy ( SH1, row + 1 [+ 0.5 = that pixel was boosted last frame] )
+//   u_texGen0T            = the boost's side record buffer ( address lo, hi, row stride, cells ), 0 = no boost (DI_BOOST_SIDE_FLOATS)
 //   unit 10 = velocity at the gather res (currUV - prevUV, +Y-up)
+//   unit 11 = THIS frame's young verdict ( reason / 4, age / 64 ), the gather's layout (restir_di_young.frag, which runs
+//             BEFORE the gather and reads last frame's denoised DI / side copies on units 4 / 5 / 6 / 9 - restir_di_boost.glsl)
 //   A YOUNG pixel - just revealed (a mover's wake, a screen edge while turning, a cut) or one whose history NRD still
-//   counts short - gets K independent reservoir picks from the same candidate weights (one light loop) and K visibility
+//   counts short - gets K independent reservoir picks from the same candidate weights (the plain gather's one light loop) and K visibility
 //   rays, averaged: 1/K the variance exactly where the denoiser would otherwise widen its filter and smear the adjacent
 //   shadow across the wake for the whole refill. Hysteresis (the stored bit): once boosted, a pixel stays boosted until
 //   its history reaches the OFF threshold, so the ray count never flips while the history hovers around the ON one
 //   (the confidence clamp makes it hover). RTXDI / Remix: numDisocclusionBoostSamples, without neighbour reservoirs.
-// DI_BOOST: the R3a disocclusion boost is a COMPILED VARIANT (restir_di_boost.frag = this file with DI_BOOST 1): its
-// K-pick arrays stay live for every pixel whether or not it is boosted and cost the whole gather ~0.7 ms of occupancy
-// (6.8 vs 6.1 ms standing still, 2026-10-12), so the plain gather must not carry them. The CPU picks the program.
+// DI_BOOST: the R3a disocclusion boost is a COMPILED VARIANT (restir_di_boost.frag = this file with DI_BOOST 1) and its own
+// pass after the plain gather: the K picks' shading and rays compiled into the one gather cost ~2.5 ms on every pixel, boosted
+// or not (2026-10-12). Since 2026-11-03 the PLAIN gather draws all K picks in its candidate loop (the young pass now runs
+// before it) and records them in the side record (DI_BOOST_SIDE_FLOATS); the boost shades them without a candidate loop
+// and without a bounce of its own.
 #ifndef DI_BOOST
 #define DI_BOOST 0
 #endif
@@ -115,14 +116,12 @@
 // the RTGI bounce (trace + hit shading), shared with rtgi_ray.frag, for the combined DI+GI buffer
 #include "rtgi_bounce.glsl"
 
-#if DI_BOOST
-// the young test + its inputs, shared with restir_di_young.glsl
-#include "restir_di_boost.glsl"
-#else
 // RT irradiance cache mover test (rtgi_cache.glsl rtgiCacheIsMover): the velocity at the gather res, bound whenever the
-// view has one (the boost include declares the same unit in the DI_BOOST variant); sampled only with cache flag 8
+// view has one; sampled only with cache flag 8
 SAMPLER_BINDING(10) uniform sampler2D u_velocity;
-#endif
+// R3a: THIS frame's young pass output ( reason / 4, age / 64 ), laid out exactly like this MRT (restir_di_young.frag runs
+// before the gather); black = nothing young. Read by both variants through diBoostCluster.
+SAMPLER_BINDING(11) uniform sampler2D u_youngIn;
 
 VARY(0) in vec2 var_TexCoord;
 
@@ -166,14 +165,42 @@ vec4 packNrdNormal( vec3 Nraw ) {
 	return vec4( r, 0.0 );										// w = materialID/3 = 0
 }
 
-// The plain gather's GI term per texel for the R3a boost (2026-11-02): the boost re-traced the whole bounce for every young
-// pixel to rebuild exactly this value (2.4 ms of a 3.8 ms boost in the demo1 timedemo). The plain gather stores the term it
-// added - the demodulated radiance and its SH1 share (direction x luminance), 6 floats - and the boost adds the same numbers
-// back: bit-identical to the re-trace (same seeds, same cache reads). u_texGen0T = ( address lo, hi, row stride, cells ),
-// all 0 = off (RB_RHI_ReStirDIPass: set only when the boost runs with the bounce combined); every index is checked
+// The R3a boost's SIDE RECORD per texel, written by the plain gather for CLUSTERED-YOUNG texels only and read back by the
+// boost pass. u_texGen0T = ( address lo, hi, row stride, cells ), all 0 = no boost this frame; every index is checked
 // against the cell count.
-layout(buffer_reference, std430, buffer_reference_align = 4) buffer DiGiSide { float v[]; };
-const uint DI_GI_SIDE_FLOATS = 6u;
+//   [0..5] the GI term the plain gather added (the demodulated radiance, its SH1 share): the boost adds the same numbers back,
+//          bit-identical to re-tracing the bounce (which was 2.4 ms of a 3.8 ms boost in the demo1 timedemo, 2026-11-02);
+//   [6]    the loop's RIS numerator wSum / (the candidate pdf normalisation): W = this / pHat for every pick;
+//   [7]    its own pick (row + 1, 0 = none) - the boost re-targets it (deterministic: the value the loop weighed);
+//   [8..9] the K - 1 EXTRA picks (rows + 1: two 16-bit halves, then one), drawn in the same loop from the same weights with
+//          their own random numbers - independent picks, as the boost's own loop drew them. The boost no longer runs the
+//          candidate loop, which was ~1.5 ms of its ~1.6 ms (demo1 timedemo, the 2026-11-02 profile).
+layout(buffer_reference, std430, buffer_reference_align = 4) buffer DiBoostSide { float v[]; };
+const uint DI_BOOST_SIDE_FLOATS = 10u;
+#define DI_BOOST_MAX 4
+
+// R3a: the boost reason of a CLUSTERED young pixel - young AND at least 5 of its 3x3 neighbours young - else 0. Isolated
+// specks (NRD's own edge resets, thin-geometry jitter) are never worth K rays, and - decisive for the cost - a warp with a
+// single surviving lane still runs the rays for all 32 lanes' time, so scattered specks along every edge priced the pass at
+// ~3 ms standing still (2026-10-12). Clusters (wakes, entry bands) keep whole warps alive together. The plain gather (it
+// draws the extra picks) and the boost pass (it shades them) take this verdict from the same texels. The view weapon is
+// never young (restir_di_young.frag): its DI is never displayed and its sway keeps its history short.
+int diBoostCluster( vec2 frag ) {
+	ivec2 ysz = textureSize( u_youngIn, 0 );
+	ivec2 yp  = clamp( ivec2( floor( frag ) ), ivec2( 0 ), ysz - 1 );
+	int   why = int( floor( texelFetch( u_youngIn, yp, 0 ).x * 4.0 + 0.5 ) );
+	if ( why != 0 ) {
+		int n = 0;
+		for ( int dy = -1; dy <= 1; dy++ ) {
+			for ( int dx = -1; dx <= 1; dx++ ) {
+				ivec2 q = clamp( yp + ivec2( dx, dy ), ivec2( 0 ), ysz - 1 );
+				if ( texelFetch( u_youngIn, q, 0 ).x > 0.125 ) { n++; }
+			}
+		}
+		if ( n < 5 ) { why = 0; }
+	}
+	return why;
+}
 
 // R3a: is this pixel YOUNG - does it get the boosted picks this frame? (header: u_tessParms, u_prevMvpMatrix, units 4/5/6/9/10)
 void main() {
@@ -245,51 +272,23 @@ void main() {
 	// A cheap bounding-sphere cull skips lights that cannot reach the point. The reservoir is TRANSIENT
 	// (this frame only) - NRD does the temporal accumulation downstream.
 	const bool shMode = u_shadowFalloffS.z > 0.5;
-	// R3a: how many independent picks (and visibility rays) this pixel gets - K where it is young, else 1 (diBoostWanted)
+	// R3a: how many independent picks (and visibility rays) this pixel gets - K where it is CLUSTERED young, else 1. The plain
+	// gather draws them all and records them (DI_BOOST_SIDE_FLOATS); this program's DI_BOOST variant, a second pass over the
+	// gather's targets (restir.di.boost), keeps only those pixels and shades the K picks - everyone else keeps the plain
+	// gather's output.
+	const uvec4 bSide   = floatBitsToUint( u_texGen0T );
+	const uint  bCell   = uint( frag.y ) * bSide.z + uint( frag.x );
+	const bool  bSideOn = ( bSide.x | bSide.y ) != 0u && bSide.z != 0u && bCell < bSide.w;
+	const uint  bOfs    = bCell * DI_BOOST_SIDE_FLOATS;
+	DiBoostSide bBuf    = DiBoostSide( bSide.xy );
+	const int   boostWhy = ( bSideOn && u_tessParms.x > 1.5 ) ? diBoostCluster( frag ) : 0;
+	const int   K        = ( boostWhy != 0 ) ? clamp( int( u_tessParms.x + 0.5 ), 2, DI_BOOST_MAX ) : 1;
 #if DI_BOOST
-	// SECOND PASS over the gather's targets (restir.di.boost): this program runs after the plain gather and only the
-	// YOUNG pixels survive the discard below - everyone else keeps the plain gather's output. The plain program carries
-	// none of this code: with the boost compiled into the one gather the whole pass cost ~2.5 ms more on EVERY pixel,
-	// boosted or not (2026-10-12), so the boost lives in its own program and its own (mostly discarded) pass.
-	#define DI_BOOST_MAX 4
-	// never the view weapon (nt.a < 0.5): its DI is shaded for the denoiser's continuity but never displayed, and its sway
-	// keeps its history short - K rays there would be pure waste (view 7 showed it solid red)
-	const int kMax = clamp( int( u_tessParms.x + 0.5 ), 2, DI_BOOST_MAX );
-	// CLUSTERED young only: the young pass wrote every pixel's reason; a pixel is boosted when it is young AND at least 5 of
-	// its 3x3 neighbours are. Isolated specks (NRD's own edge resets, thin-geometry jitter) are never worth K rays, and -
-	// decisive for the cost - a warp with a single surviving lane still runs the whole light loop and the rays for all 32
-	// lanes' time, so scattered specks along every edge priced the pass at ~3 ms standing still (2026-10-12). Clusters
-	// (wakes, entry bands) keep whole warps alive together; speck-only warps terminate as one.
-	int boostWhy = 0;
-	{
-		ivec2 ysz = textureSize( u_youngIn, 0 );							// the young pass's output for THIS frame ( reason / 4, age / 64 )
-		ivec2 yp  = clamp( ivec2( floor( frag ) ), ivec2( 0 ), ysz - 1 );			// the young pass is laid out exactly like this MRT
-		boostWhy = int( floor( texelFetch( u_youngIn, yp, 0 ).x * 4.0 + 0.5 ) );
-		if ( boostWhy != 0 ) {
-			int n = 0;
-			for ( int dy = -1; dy <= 1; dy++ ) {
-				for ( int dx = -1; dx <= 1; dx++ ) {
-					ivec2 q = clamp( yp + ivec2( dx, dy ), ivec2( 0 ), ysz - 1 );
-					if ( texelFetch( u_youngIn, q, 0 ).x > 0.125 ) { n++; }
-				}
-			}
-			if ( n < 5 ) { boostWhy = 0; }
-		}
-	}
 	if ( boostWhy == 0 ) { terminateInvocation; }								// not (clustered) young: the plain gather's result stands
-	const bool boostedNow = true;
-	const int K = kMax;
-	// the extra picks keep only their light INDEX (+1; 0 = none); the picked lights are re-shaded after the loop
-	// (deterministic, so pHat matches the loop's)
-	uint pickB[DI_BOOST_MAX];
-	for ( int k = 0; k < DI_BOOST_MAX; k++ ) { pickB[k] = 0u; }
-#else
-	const int  K = 1;
-	const bool boostedNow = false;
-	const int  boostWhy = 0;
 #endif
+	uint  pick1 = 0u, pick2 = 0u, pick3 = 0u;	// the extra picks (rows + 1, 0 = none): named registers, an indexed array is local memory
 
-	float wSum        = 0.0;
+	float wNum        = 0.0;					// the RIS weight's numerator: wSum / the candidate pdf normalisation (W = wNum / pHat)
 	float pHatChosen  = 0.0;					// the TARGET (cheap irradiance or full shade) of the chosen, for the RIS weight W
 	uint  rowChosen   = 0u;						// R1: chosen light's row + 1 (0 = none)
 	// DUDE (2026-10-27): the chosen candidate's loop shade, kept so it is never shaded again. diShadeLight is
@@ -308,6 +307,8 @@ void main() {
 	// (a cell holding all its in-range lights, <= slots, is exhaustive-equivalent). An empty cell or a point beyond the
 	// grid leaves useGrid false and the exhaustive / uniform path runs unchanged (never wrong, only maybe slower).
 	LgParms lgp    = lgParmsFromVec4( u_occlusionParms, u_modelViewMatrix[3].xyz );
+#if !DI_BOOST
+	float   wSum   = 0.0;
 	LgGrid  lgGrid = LgGrid( lgp.gridAddr );
 	int  lgBase = -1;
 	uint lgN    = 0u;
@@ -353,13 +354,49 @@ void main() {
 			visDirLoop  = g_rtEmVisDir;		// valid when this candidate's shade was an emitter's (the full-target loop)
 			visDistLoop = g_rtEmVisDist;
 		}
-#if DI_BOOST
-		// R3a: the extra independent picks share the candidate weights (same wSum), each with its own random draws
-		for ( int k = 1; k < K; k++ ) {
-			if ( w > 0.0 && rnd( rng ) * wSum < w ) { pickB[k] = li + 1u; }
+		// R3a: the boost's extra independent picks share the candidate weights (same wSum), each with its own random draws
+		if ( K > 1 && w > 0.0 ) {
+			if ( rnd( rng ) * wSum < w ) { pick1 = li + 1u; }
+			if ( K > 2 && rnd( rng ) * wSum < w ) { pick2 = li + 1u; }
+			if ( K > 3 && rnd( rng ) * wSum < w ) { pick3 = li + 1u; }
 		}
-#endif
 	}
+	wNum = wSum / ( pdfOne ? 1.0 : float( draws ) );
+	if ( boostWhy != 0 ) {													// the boost pass's record (bSideOn: the verdict needed it)
+		bBuf.v[ bOfs + 6u ] = wNum;
+		bBuf.v[ bOfs + 7u ] = uintBitsToFloat( rowChosen );
+		bBuf.v[ bOfs + 8u ] = uintBitsToFloat( pick1 | ( pick2 << 16u ) );
+		bBuf.v[ bOfs + 9u ] = uintBitsToFloat( pick3 );
+	}
+#else
+	// the plain gather's loop for this texel (its side record): the RIS numerator, its pick and the extra picks. Its pick is
+	// re-targeted here exactly as the loop weighed it (deterministic: same surface, same row, same emitter seed); a row past
+	// the buffer (never written as such) reads as no pick
+	wNum      = bBuf.v[ bOfs + 6u ];
+	rowChosen = floatBitsToUint( bBuf.v[ bOfs + 7u ] );
+	{
+		const uint p12 = floatBitsToUint( bBuf.v[ bOfs + 8u ] );
+		pick1 = p12 & 0xFFFFu;	pick2 = p12 >> 16u;	pick3 = floatBitsToUint( bBuf.v[ bOfs + 9u ] );
+		if ( pick1 > nLights ) { pick1 = 0u; }
+		if ( pick2 > nLights ) { pick2 = 0u; }
+		if ( pick3 > nLights ) { pick3 = 0u; }
+	}
+	if ( rowChosen > nLights ) { rowChosen = 0u; }
+	if ( rowChosen != 0u ) {
+		vec3  c, ld;
+		float dl, ndl;
+		if ( diTargetLight( lights, rowChosen - 1u, S, c, ld, dl, ndl, cheapTarget ) ) {
+			pHatChosen  = dot( c, vec3( 0.2126, 0.7152, 0.0722 ) );
+			tgtChosen   = c;
+			ldirLoop    = ld;
+			dlLoop      = dl;
+			ndlLoop     = ndl;
+			visDirLoop  = g_rtEmVisDir;		// valid when this shade was an emitter's (the full-target loop)
+			visDistLoop = g_rtEmVisDist;
+		}
+		if ( !( pHatChosen > 0.0 ) ) { rowChosen = 0u;	pHatChosen = 0.0; }
+	}
+#endif
 
 	if ( !( pHatChosen > 0.0 ) && u_specularParms.x < 0.5 ) {
 		outSh1.w = 0.25 * float( boostWhy );											// view 7: an unlit young pixel still ran the loop
@@ -394,7 +431,7 @@ void main() {
 
 	// unbiased contribution weight W = (1/pHat(y))·(wSum/M): pHat is the TARGET (cheap or full), f(y) = the full shade
 	// above, so rad(y)·W·vis stays unbiased. One visibility ray for the chosen light; NOSHADOWS lights skip it.
-	float W   = ( pHatChosen > 0.0 ) ? ( wSum / ( pdfOne ? 1.0 : float( draws ) ) ) / pHatChosen : 0.0;
+	float W   = ( pHatChosen > 0.0 ) ? wNum / pHatChosen : 0.0;
 	float occDist = dlChosen;
 	float vis = ( !( pHatChosen > 0.0 ) || ( flagsChosen & DUDE_LIGHT_NOSHADOWS ) != 0u )
 		? 1.0 : ( ( flagsChosen & DUDE_LIGHT_EMISSIVE ) != 0u
@@ -416,8 +453,9 @@ void main() {
 		vec3 sumRad = outRad;
 		vec3 sumSh  = shDirect;
 		for ( int k = 1; k < K; k++ ) {
-			if ( pickB[k] == 0u ) { continue; }
-			uint lk = pickB[k] - 1u;
+			const uint pk = ( k == 1 ) ? pick1 : ( ( k == 2 ) ? pick2 : pick3 );
+			if ( pk == 0u ) { continue; }
+			uint lk = pk - 1u;
 			vec3 c, ld; float dl, ndl;
 			// the TARGET pHat (cheap or full, consistent with wSum) for Wk, then the full shade for the radiance
 			if ( !diTargetLight( lights, lk, S, c, ld, dl, ndl, cheapTarget ) ) { continue; }
@@ -433,7 +471,7 @@ void main() {
 				if ( !diShadeLight( lights, lk, S, cF, ldF, dlF, ndlF, false ) ) { cF = vec3( 0.0 ); }
 			}
 			vec3  rk = cF / B;	// irradiance (cosine in), as radChosen above
-			float Wk = ( wSum / ( pdfOne ? 1.0 : float( draws ) ) ) / pH;
+			float Wk = wNum / pH;
 			float od;
 			uint  flagsK = lights.l[ lk ].flags;
 			const bool emK = ( flagsK & DUDE_LIGHT_EMISSIVE ) != 0u;		// an emitter: to the sampled point of its shade just above
@@ -468,17 +506,12 @@ void main() {
 	if ( u_specularParms.x > 0.5 ) {
 		vec3 giRad = vec3( 0.0 );									// the bounce's demodulated contribution
 		vec3 giSh  = vec3( 0.0 );									// its SH1 share (direction x luminance)
-		const uvec4 giSide   = floatBitsToUint( u_texGen0T );		// the boost's GI side buffer (header above)
-		const uint  giCell   = uint( frag.y ) * giSide.z + uint( frag.x );
-		const bool  giSideOn = ( giSide.x | giSide.y ) != 0u && giSide.z != 0u && giCell < giSide.w;
-		DiGiSide giBuf = DiGiSide( giSide.xy );
 #if DI_BOOST
-		if ( giSideOn ) {											// the plain gather's term for this texel
-			const uint o = giCell * DI_GI_SIDE_FLOATS;
-			giRad = vec3( giBuf.v[ o + 0u ], giBuf.v[ o + 1u ], giBuf.v[ o + 2u ] );
-			giSh  = vec3( giBuf.v[ o + 3u ], giBuf.v[ o + 4u ], giBuf.v[ o + 5u ] );
-		} else
-#endif
+		// the plain gather's term for this texel (side record [0..5]): bit-identical to re-tracing the bounce, so this program
+		// carries no bounce at all
+		giRad = vec3( bBuf.v[ bOfs + 0u ], bBuf.v[ bOfs + 1u ], bBuf.v[ bOfs + 2u ] );
+		giSh  = vec3( bBuf.v[ bOfs + 3u ], bBuf.v[ bOfs + 4u ], bBuf.v[ bOfs + 5u ] );
+#else
 		{
 		RtgiBounceParms bp;
 		bp.tlas           = uvec2( floatBitsToUint( u_rtParms.x ), floatBitsToUint( u_rtParms.y ) );
@@ -506,11 +539,10 @@ void main() {
 		const vec3 eyeW   = u_modelViewMatrix[3].xyz;
 		vec3 Li; float thit; vec3 bounceDir; vec3 LiCache;
 		const int hit = rtgiTraceBounce( bp, Pw, Nw, eyeW, d, sfrag, Li, thit, bounceDir, LiCache );
-#if !DI_BOOST
 		// UPDATE at the primary point (docs/rtx-irradiance-cache.md): this pixel's bounce estimate joins P's cell; a miss
 		// contributes 0 (open directions are part of the cell's cosine-lobe average); a hit on an unshadeable row (2: a
-		// mover / prop without attributes) is UNKNOWN, not dark, and teaches nothing. The boost variant re-shades young
-		// pixels the plain gather already taught, so it does not teach them twice. The view WEAPON (nt.a < 0.5: shaded
+		// mover / prop without attributes) is UNKNOWN, not dark, and teaches nothing. (The boost variant carries no bounce
+		// and teaches nothing: these pixels are taught here, once.) The view WEAPON (nt.a < 0.5: shaded
 		// here only for the denoiser's continuity) and MOVERS (an NPC, a door, a platform: told from the camera's own
 		// motion through the velocity) never teach - a moving mesh mints a thousand garbage world cells a frame.
 		// A surface with NO diffuse stage (G-buffer albedo exactly black: a mirror, chrome, a visor) teaches nothing either:
@@ -553,7 +585,6 @@ void main() {
 				rtgiCacheUpdate( bp.cache, Pw, Nw, eyeW, teach );
 			}
 		}
-#endif
 		if ( hit == 1 ) {
 			vec3 gi = Li * u_pbrParms2.w;
 			if ( u_specularParms.y > 0.0 ) {
@@ -568,14 +599,12 @@ void main() {
 			// DIRECTION feeds SH1, so the apply's bump RATIO re-resolves the whole irradiance against the full-res normal
 			giSh = bounceDir * dot( giRad, vec3( 0.2126, 0.7152, 0.0722 ) );
 		}
-#if !DI_BOOST
-		if ( giSideOn ) {											// for the boost pass (a miss stores 0: nothing to add)
-			const uint o = giCell * DI_GI_SIDE_FLOATS;
-			giBuf.v[ o + 0u ] = giRad.x;	giBuf.v[ o + 1u ] = giRad.y;	giBuf.v[ o + 2u ] = giRad.z;
-			giBuf.v[ o + 3u ] = giSh.x;		giBuf.v[ o + 4u ] = giSh.y;		giBuf.v[ o + 5u ] = giSh.z;
+		if ( boostWhy != 0 ) {										// for the boost pass (a miss stores 0: nothing to add)
+			bBuf.v[ bOfs + 0u ] = giRad.x;	bBuf.v[ bOfs + 1u ] = giRad.y;	bBuf.v[ bOfs + 2u ] = giRad.z;
+			bBuf.v[ bOfs + 3u ] = giSh.x;	bBuf.v[ bOfs + 4u ] = giSh.y;	bBuf.v[ bOfs + 5u ] = giSh.z;
+		}
 		}
 #endif
-		}
 		if ( shMode ) { shDir += giSh; }
 		outRad += giRad;
 	}

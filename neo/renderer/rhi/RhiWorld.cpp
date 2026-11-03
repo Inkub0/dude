@@ -9139,26 +9139,29 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	if ( rhiRtLightGrid.readyThisView && rhiRtLightGrid.filledThisFrame ) {	// never hand a consumer an UNFILLED grid (garbage indices)
 		RB_RHI_LightGridPack( parms, rhiRtLightGrid.parms );
 	}
-	// The R3a boost REUSES the plain gather's GI term (2026-11-02): it re-ran the whole GI bounce for every young pixel to
-	// rebuild the value the plain gather had just computed for it (2.4 ms of a 3.8 ms boost in the demo1 timedemo). The plain
-	// gather stores it per texel (rhiReStirDIGiBuf: the demodulated GI radiance + its SH1 share) and the boost
-	// adds it back (bit-identical). u_texGen0T = ( address lo, hi, row stride, cells ) bit-cast, all 0 = off (no buffer: the
-	// boost traces its own).
+	// The R3a boost's SIDE RECORD per texel (rhiReStirDIGiBuf, restir_di.frag DI_BOOST_SIDE_FLOATS): the plain gather writes it
+	// for the clustered-young texels - the GI term it added (2026-11-02: the boost re-traced the whole bounce to rebuild it,
+	// 2.4 ms of a 3.8 ms boost) and, since 2026-11-03, its candidate loop's result: the RIS numerator, its pick and the boost's
+	// K - 1 extra picks, drawn in that same loop (the boost's own candidate loop was ~1.5 ms of its ~1.6 ms). The boost shades
+	// the K picks from it: no candidate loop, no bounce. u_texGen0T = ( address lo, hi, row stride, cells ) bit-cast, all 0 =
+	// off; the boost needs the record, so no buffer = no boost this frame.
 	// FragmentStorageBarrier on both sides: this gather's writes after last frame's boost reads, the boost's reads after them.
 	bool diGiSide = false;
-	if ( boostWant && combineGI ) {
+	if ( boostWant ) {
 		const int cells = rw * rh;
 		if ( rhiReStirDIGiBuf != 0 && rhiReStirDIGiCells != cells ) {
 			r->DestroyBuffer( rhiReStirDIGiBuf );
 			rhiReStirDIGiBuf = 0;	rhiReStirDIGiAddr = 0;	rhiReStirDIGiCells = 0;
 		}
 		if ( rhiReStirDIGiBuf == 0 && cells > 0 ) {
-			rhiReStirDIGiBuf   = r->CreateBuffer( rhi::BU_STORAGE_DEVICE, cells * 24, NULL );	// restir_di.frag DI_GI_SIDE_FLOATS 6
+			rhiReStirDIGiBuf   = r->CreateBuffer( rhi::BU_STORAGE_DEVICE, cells * 40, NULL );	// restir_di.frag DI_BOOST_SIDE_FLOATS 10
 			rhiReStirDIGiAddr  = ( rhiReStirDIGiBuf != 0 ) ? r->GetBufferDeviceAddress( rhiReStirDIGiBuf ) : 0;
 			rhiReStirDIGiCells = ( rhiReStirDIGiAddr != 0 ) ? cells : 0;
 		}
 		diGiSide = rhiReStirDIGiAddr != 0 && rhiReStirDIGiCells == cells;
 	}
+	const bool boostRun = boostWant && diGiSide;
+	if ( !boostRun ) { rhiReStirDIYoungValid = false; }		// no young pass this frame: the age chain restarts
 	{
 		unsigned int gs[4] = { 0u, 0u, 0u, 0u };
 		if ( diGiSide ) {
@@ -9168,9 +9171,7 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		}
 		memcpy( parms.texGen0T, gs, sizeof( gs ) );
 	}
-	r->GpuScopeBegin( "restir.di.gather" );			// r_vkGpuTime 2: the 1-spp DI resample + visibility ray (+ R3a's K rays on young pixels)
-	if ( cbActive ) { r->SetNextTargetPassArea( 0, 0, rw / 2, rh ); }
-	r->BeginTargetPass( rhiReStirDIRT, NULL );
+	// the gather's inputs (units 0-10), bound once for the young pass and the gather alike (Vulkan binds are draw-time state)
 	RB_RHI_BindUnit( 0, diDepthImg );
 	RB_RHI_BindRTUnit( r, 1, rhiNormalResultRT );
 	backEnd.glState.tmu[1].current2DMap = -1;		// direct bind bypassed the tmu cache
@@ -9185,9 +9186,9 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	}
 	backEnd.glState.tmu[2].current2DMap = -1;
 	backEnd.glState.tmu[3].current2DMap = -1;
-	// R3a inputs on units 4 / 5 / 6 / 9 / 10 - never 7 / 8 / 12, the interaction draws' depth-compare shadow samplers that an
-	// unshadowed light inherits (the weapon-dark bug). White placeholders keep the descriptor set complete when the boost is
-	// off or has no side data; the shader samples them only when u_tessParms says so.
+	// R3a inputs on units 4 / 5 / 6 / 9 / 10 / 11 - never 7 / 8 / 12, the interaction draws' depth-compare shadow samplers that
+	// an unshadowed light inherits (the weapon-dark bug). White placeholders keep the descriptor set complete when the boost is
+	// off or has no side data; the shaders sample them only when u_tessParms says so.
 	{
 		const rhi::ImageHandle prevDen = ( boostWant && !boostAll ) ? r->GetRtgiOutputImage() : 0;
 		if ( prevDen ) { RB_RHI_BindRTImage( r, 4, prevDen ); } else { RB_RHI_BindUnit( 4, globalImages->whiteImage ); }
@@ -9203,16 +9204,13 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		backEnd.glState.tmu[4].current2DMap = -1;	backEnd.glState.tmu[5].current2DMap = -1;	backEnd.glState.tmu[6].current2DMap = -1;
 		backEnd.glState.tmu[9].current2DMap = -1;	backEnd.glState.tmu[10].current2DMap = -1;
 	}
-	RB_RHI_DrawFullscreen( r, prog, parms, 0 );
-	r->EndPass();
-	r->GpuScopeEnd();
-	if ( boostWant ) {
-		// R3a, two passes after the plain gather (which carries no boost code, so its cost is the same boost on or off):
-		// 1. the YOUNG pass writes every pixel's reason (cheap, uniform, no rays) into an R8 target of the gather's layout;
-		// 2. the BOOST pass reads it back CLUSTERED (young + >= 5 of 9 neighbours young) and only those pixels re-run the
-		//    light loop with K picks, overwriting their attachments (identical guides); isolated specks never trigger it,
-		//    which matters twice: they are not worth rays, and one surviving lane keeps a whole warp running.
-		const int yi = rhiReStirDIYoungIdx;
+	// R3a: the YOUNG pass writes every pixel's reason (cheap, uniform, no rays) into a target of the gather's layout, BEFORE
+	// the gather (its inputs are last frame's side data + this frame's G-buffer / velocity, nothing the gather writes): the
+	// plain gather reads the verdict back CLUSTERED (young + >= 5 of 9 neighbours young) to draw the boost's extra picks, and
+	// the boost pass after it shades them on exactly those pixels (isolated specks never trigger it, which matters twice: they
+	// are not worth rays, and one surviving lane keeps a whole warp running).
+	const int yi = rhiReStirDIYoungIdx;
+	if ( boostRun ) {
 		r->GpuScopeBegin( "restir.di.young" );		// r_vkGpuTime 2: the per-pixel young test (+ its age from last frame's)
 		if ( cbActive ) { r->SetNextTargetPassArea( 0, 0, rw / 2, rh ); }
 		r->BeginTargetPass( rhiReStirDIYoungRT[ yi ], NULL );
@@ -9224,7 +9222,22 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		r->GpuScopeEnd();
 		rhiReStirDIYoungValid = true;
 		rhiReStirDIYoungIdx = yi ^ 1;
-		if ( diGiSide ) { r->FragmentStorageBarrier(); }	// the plain gather's GI terms, visible to the boost
+	}
+	r->GpuScopeBegin( "restir.di.gather" );			// r_vkGpuTime 2: the 1-spp DI resample + visibility ray (+ R3a's K rays on young pixels)
+	if ( cbActive ) { r->SetNextTargetPassArea( 0, 0, rw / 2, rh ); }
+	r->BeginTargetPass( rhiReStirDIRT, NULL );
+	// unit 11: THIS frame's young verdict (the plain gather draws the boost's picks where it is clustered); black = none
+	if ( boostRun ) { RB_RHI_BindRTImage( r, 11, r->GetRenderTargetImage( rhiReStirDIYoungRT[ yi ] ) ); }
+	else { RB_RHI_BindUnit( 11, globalImages->blackImage ); }
+	backEnd.glState.tmu[11].current2DMap = -1;
+	RB_RHI_DrawFullscreen( r, prog, parms, 0 );
+	r->EndPass();
+	r->GpuScopeEnd();
+	if ( boostRun ) {
+		// R3a, the BOOST pass after the plain gather: only the clustered-young pixels survive (the same verdict the gather
+		// drew their extra picks by); they shade the K picks of their side record and overwrite their attachments (identical
+		// guides). The plain gather carries none of the K picks' shading or rays, so its cost stays the same boost on or off.
+		r->FragmentStorageBarrier();					// the plain gather's side records, visible to the boost
 		r->GpuScopeBegin( "restir.di.boost" );		// r_vkGpuTime 2: K picks + rays on the clustered young pixels only
 		if ( cbActive ) { r->SetNextTargetPassArea( 0, 0, rw / 2, rh ); }
 		r->SetNextTargetPassLoad();
