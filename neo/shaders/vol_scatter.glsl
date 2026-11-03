@@ -143,7 +143,7 @@ vec3 dudeVolInScatter( RtLights lights, uint idx[ DUDE_VOL_MAX_LIGHTS ], vec4 sp
 			// an animated glow's tint) and the omni scale of
 			// the point lights it replaced. Shadowed like a point light, the ray stopping OUTSIDE the fixture's bound sphere
 			// (a tube's or a bulb's own surface must not shadow its light).
-			vec3  toC  = lights.l[ li ].pos - p;
+			vec3  toC  = lights.l[ li ].cull.xyz - p;					// the centroid (an emitter row's pos is its cone axis)
 			float dc   = length( toC );
 			if ( !( dc > 1e-3 ) ) { continue; }
 			vec3  edir = toC / dc;

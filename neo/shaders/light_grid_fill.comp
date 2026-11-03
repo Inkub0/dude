@@ -141,7 +141,7 @@ void lgFillBlock() {
 			sCull[ at ]   = rcull;
 			sLum[ at ]    = dot( lights.l[ rli ].color, vec3( 0.2126, 0.7152, 0.0722 ) );
 			sRadius[ at ] = lights.l[ rli ].radius;
-			sPos[ at ]    = lights.l[ rli ].pos;
+			sPos[ at ]    = ( ( rflags & DUDE_LIGHT_EMISSIVE ) != 0u ) ? rcull.xyz : lights.l[ rli ].pos;	// an emitter row's centroid is its cull centre (its pos = the cone axis)
 		}
 		if ( lid == 63u ) { sCount = at + sPass[ 63 ]; }
 		memoryBarrierShared();

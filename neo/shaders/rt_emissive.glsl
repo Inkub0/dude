@@ -259,7 +259,7 @@ vec2 rtEmissiveST( RtEmissiveTri e, vec3 bary ) {
 }
 
 // --- E2 v3: an EMITTER ROW of the scene-light buffer (docs/rtx-experimental-lighting.md "E2 v3") -------------------------
-// RhiWorld.cpp RB_RHI_GatherSceneLights appends one DUDE_LIGHT_EMISSIVE row per emissive surface run: pos = centroid,
+// RhiWorld.cpp RB_RHI_GatherSceneLights appends one DUDE_LIGHT_EMISSIVE row per emissive surface run: cull.xyz = centroid (pos = the cone axis),
 // radius = REACH, cull = the bounding sphere + 2 x reach, colour = the irradiance proxy the light grid ranks by; the
 // projection planes carry projS.w = r_rtEmissiveIntensity, projT.xy = the table address, projQ.x/y = first triangle /
 // count (bits), projQ.z = the reach-boost knee (0 = pure inverse square), and the map's authored appearance (live, no table
@@ -313,12 +313,12 @@ bool rtEmissiveShadeRow( RtLights lights, uint li, vec3 P, vec3 N, uint seed, ui
 	bool  twoSided  = lights.l[ li ].projT.w > 0.5;		// authored: both faces emit
 	RtEmissiveTable t = rtEmissiveOpen( tAddr );
 	if ( !rtEmissivePresent( t ) || num == 0u || first >= t.count || num > t.count - first ) { return false; }
-	// the light direction (SH, the apply's bump re-resolve) and the visibility ray aim at the emitter's CENTROID (pos);
+	// the light direction (SH, the apply's bump re-resolve) and the visibility ray aim at the emitter's CENTROID (cull.xyz);
 	// the receiver cosine is taken per AREA SAMPLE below - a real area light. Until 2026-10-29 a paired row aimed at and
 	// cosined against the replaced light's AUTHORED ORIGIN (for walls under flush ceiling strips): that origin painted
 	// the old light's round hot spot on a wall right behind it, and wherever the receiver could not see it the whole
 	// emitter went dark (the Marine Command alcove neons).
-	vec3 cd = lights.l[ li ].pos - P;
+	vec3 cd = lights.l[ li ].cull.xyz - P;									// the centroid (an emitter row's pos is its cone axis)
 	dl   = length( cd );
 	if ( !( dl > 1e-3 ) ) { return false; }
 	ldir = cd / dl;
@@ -413,36 +413,31 @@ bool rtEmissiveShadeRow( RtLights lights, uint li, vec3 P, vec3 N, uint seed, ui
 // rtEmissiveShadeRow (r_rtEmissiveSamples area samples each), the gather's main cost in emissive mode (~1.75 ms per sample on
 // mars_city1). The row's colour is its irradiance proxy at its reach R, 16 L A / R^2 (RB_RHI_GatherSceneLights), so
 // L A = colour R^2 / 16 and the far-field irradiance is that / d^2 times the shade's own reach boost and fade, times the
-// receiver cosine bounded over the run's bounding sphere (below; gated like the shade by ndl > 0 toward the row's pos). Only
+// receiver cosine bounded over the run's bounding sphere (below; gated like the shade by ndl > 0 toward the row's centroid). Only
 // the winner is then area-sampled. Any positive target keeps
 // RIS unbiased as long as it is non-zero wherever the shade can be: the cull, the flags and the ndl gate are the shade's, and
 // the fade is taken at the emitter's NEAREST possible point (its bound sphere: cull.w - radius around the centroid), never
 // below the fade of any sample the shade could draw. The near field is floored at the bound radius (a solid angle cannot
-// exceed the hemisphere). ldir / dl / ndl are the shade's (toward pos).
-vec3 rtEmissiveOctDecode( vec2 o ) {
-	vec3 n = vec3( o, 1.0 - abs( o.x ) - abs( o.y ) );
-	if ( n.z < 0.0 ) { n.xy = ( 1.0 - abs( n.yx ) ) * vec2( n.x >= 0.0 ? 1.0 : -1.0, n.y >= 0.0 ? 1.0 : -1.0 ); }
-	return normalize( n );
-}
+// exceed the hemisphere). ldir / dl / ndl are the shade's (toward the centroid).
 
 // The ORIENTATION BOUND of emitter row li toward P (2026-11-02): the emission profile of the smallest angle any of its face
 // normals can make with the direction from any of its points to P - the light-BVH bound (Conty Estevez & Kulla 2018):
 // theta' = max( theta_w - theta_o - theta_b, 0 ), theta_w = the cone axis vs the direction centroid -> P, theta_o = the
 // cone's half-angle, theta_b = the half-angle the run's bounding sphere subtends from P. 0 ONLY when every triangle faces
 // away from P (one-sided), so the target keeps the shade's support; 1 = no bound (no cone - a tube, a bulb - or P inside
-// the bounding sphere). The cone rides projF.x (axis, octahedral snorm16 x2) and projF.w (cos theta_o, + 4 = the
-// material emits from both faces: theta_w folds to the nearer face).
-// toP = the unit direction centroid -> P (-ldir of the target: the row's pos IS its cull centre, the centroid); sb / cb = sin /
+// the bounding sphere). The cone rides the row's pos (the unit axis), projF.w (cos theta_o, + 4 = the material emits from both
+// faces: theta_w folds to the nearer face) and projF.x (sin theta_o).
+// toP = the unit direction centroid -> P (-ldir of the target, which aims at the cull centre = the centroid); sb / cb = sin /
 // cos of theta_b, taken once by the caller (the receiver-cosine bound uses the same angle); outside = P is outside the sphere.
 float rtEmissiveOrientBound( RtLights lights, uint li, vec3 toP, bool outside, float sb, float cb, uint prof, bool twoSided ) {
 	const float cw4  = lights.l[ li ].projF.w;
 	const bool  both = twoSided || cw4 > 2.0;
 	const float co   = ( cw4 > 2.0 ) ? cw4 - 4.0 : cw4;
 	if ( !( co > -1.0 ) || !outside ) { return 1.0; }
-	const vec3 a = rtEmissiveOctDecode( unpackSnorm2x16( floatBitsToUint( lights.l[ li ].projF.x ) ) );
+	const vec3 a = lights.l[ li ].pos;											// the unit axis (RB_RHI_GatherSceneLights)
 	float cw = dot( a, toP );
 	if ( both ) { cw = abs( cw ); }
-	const float so = sqrt( max( 1.0 - co * co, 0.0 ) );
+	const float so = lights.l[ li ].projF.x;									// sin theta_o, stored with it
 	if ( cb < -co ) { return 1.0; }												// theta_o + theta_b >= pi: every direction possible
 	const float cs = co * cb - so * sb, ss = so * cb + co * sb;					// cos / sin of theta_o + theta_b
 	if ( cw >= cs ) { return 1.0; }												// theta_w inside the widened cone
@@ -456,7 +451,7 @@ float rtEmissiveOrientBound( RtLights lights, uint li, vec3 toP, bool outside, f
 bool rtEmissiveTargetRow( RtLights lights, uint li, vec3 P, vec3 N, out vec3 contrib, out vec3 ldir, out float dl, out float ndl ) {
 	contrib = vec3( 0.0 );	ldir = vec3( 0.0, 0.0, 1.0 );	dl = 0.0;	ndl = 0.0;
 	if ( floatBitsToUint( lights.l[ li ].projQ.y ) == 0u ) { return false; }	// no triangles: the shade reaches nothing
-	vec3 cd = lights.l[ li ].pos - P;
+	vec3 cd = lights.l[ li ].cull.xyz - P;									// the centroid (an emitter row's pos is its cone axis)
 	// the horizon test on the raw vector first (the sign of N.ldir is the sign of N.cd): an emitter behind the receiver - about
 	// half of a wall pixel's candidates - costs no square root and no division
 	if ( !( dot( N, cd ) > 0.0 ) ) { return false; }

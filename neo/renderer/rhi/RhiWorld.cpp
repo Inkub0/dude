@@ -6655,7 +6655,7 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 	// what it actually delivers. The projection planes (unused by an emitter) carry: projS.w = intensity, projT.xy = the
 	// table's device address, projQ.x/y = first triangle / count (bits), projQ.z = the reach-boost knee (0 = off).
 	// pad0 = 0: not a lightDef (the gradient pass skips emissive rows outright); pad1 = row index + 1 (debugging).
-	// pos = the row's CENTROID: the light direction and the visibility ray aim at the fixture, the receiver cosine is per area
+	// cull.xyz = the row's CENTROID (pos carries its cone axis since 2026-11-03): the light direction and the visibility ray aim at the fixture, the receiver cosine is per area
 	// sample (rt_emissive.glsl). The paired placed light lends only its reach and power (2026-10-29: aiming at its authored
 	// origin painted its hot spot on the wall behind it and blacked the emitter out wherever that origin was hidden).
 	// With emissive mode OFF and r_rtEmissiveBounce on, the rows are BOUNCEONLY: the DI gather skips them (the placed
@@ -6770,7 +6770,9 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 				// the row occupies the VOLUME of the light it replaced: cut at ONE reach like a Doom light (the shade fades out
 				// over the last quarter). A 2 x reach sphere put eight times the volume - and several times the candidates - of
 				// the placed lights into every grid cell, which overflowed the cell's slots (the blocky shadows of 2026-10-20).
-				L.pos[0] = row.centroid.x; L.pos[1] = row.centroid.y; L.pos[2] = row.centroid.z;
+				// pos = the emitting normals' cone AXIS (unit; set with the cone below), NOT the centroid: an emitter row's centroid
+				// is its cull centre (cull.xyz, written below from the same row.centroid), which every emitter consumer reads instead
+				// (rt_emissive.glsl, vol_scatter.glsl, light_grid_fill.comp) - so the axis needs no per-candidate decode
 				// The row's radiance multiplier on its glow mean (the row's intensity field = the global intensity x it; the shade
 				// multiplies the triangle's own mean radiance by it): the authored radiance (physical), else the POWER MATCH - a Doom 3
 				// light of colour C and radius R delivers C/2 at d = R/2, this row (reach boost 2 there) 8 L A / R^2, so L = C R^2 /
@@ -6811,23 +6813,17 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 				L.proj[1][3] = ap.twoSided ? 1.0f : 0.0f;							// projT.w = both faces emit
 				L.proj[3][1] = flicker * animLum;									// the R1 gradient's "this emitter changed" factor
 				L.proj[3][2] = flicker;												// projF.z: the follow flicker alone (the haze; its colour already carries the animated tint)
-				// projF.x / projF.w: the emitting normals' cone for the DI target's orientation bound (rt_emissive.glsl
-				// rtEmissiveTargetRow): x = the axis, octahedral snorm16 x2 (bits), w = cos of the half-angle, + 4 when the
-				// material emits from both faces. Never a texture slot: no consumer can take it for a bindless index.
+				// The emitting normals' cone for the DI target's orientation bound (rt_emissive.glsl rtEmissiveOrientBound): pos =
+				// the unit axis (above), projF.w = cos of the half-angle (+ 4 when the material emits from both faces), projF.x = its
+				// sine - both stored, not decoded / derived for every candidate in the DI loop and the GI bounce (2026-11-03; the
+				// axis rode octahedral snorm16 in projF.x before). coneCos carries a 1e-3 margin (R_RtEmissiveBuildRows), so the bound
+				// stays conservative whatever the rounding.
 				{
 					const idVec3 &a = row.coneAxis;
-					const float l1 = idMath::Fabs( a.x ) + idMath::Fabs( a.y ) + idMath::Fabs( a.z );
-					float ox = ( l1 > 0.0f ) ? a.x / l1 : 0.0f, oy = ( l1 > 0.0f ) ? a.y / l1 : 0.0f;
-					if ( a.z < 0.0f ) {
-						const float fx = ( 1.0f - idMath::Fabs( oy ) ) * ( ox >= 0.0f ? 1.0f : -1.0f );
-						const float fy = ( 1.0f - idMath::Fabs( ox ) ) * ( oy >= 0.0f ? 1.0f : -1.0f );
-						ox = fx; oy = fy;
-					}
-					const int sx = idMath::ClampInt( -32767, 32767, (int)idMath::Rint( ox * 32767.0f ) );
-					const int sy = idMath::ClampInt( -32767, 32767, (int)idMath::Rint( oy * 32767.0f ) );
-					const unsigned int oct = ( (unsigned int)sx & 0xFFFFu ) | ( ( (unsigned int)sy & 0xFFFFu ) << 16 );	// GLSL unpackSnorm2x16
-					memcpy( &L.proj[3][0], &oct, sizeof( oct ) );
-					L.proj[3][3] = row.coneCos + ( row.twoSidedTris ? 4.0f : 0.0f );
+					L.pos[0] = a.x; L.pos[1] = a.y; L.pos[2] = a.z;
+					const float co = row.coneCos;
+					L.proj[3][0] = sqrtf( Max( 1.0f - co * co, 0.0f ) );
+					L.proj[3][3] = co + ( row.twoSidedTris ? 4.0f : 0.0f );
 				}
 				memcpy( &L.proj[1][0], &tLo, sizeof( tLo ) );
 				memcpy( &L.proj[1][1], &tHi, sizeof( tHi ) );
