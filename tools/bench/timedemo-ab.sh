@@ -19,6 +19,8 @@
 #                (build/dude); A / B emissive mode, C / D placed lights (emissive off). VARIANTS="A B" = the short run
 #   set boostpicks : A = master (build/dude-ref-master), B = boost picks in the gather + grid skip (build/dude-items13),
 #                C = B + candidate read-ahead (build/dude); emissive mode; NVIDIA register readout in each run's stdout.log
+#   set registers : A = master (build/dude-ref-master), B = the gather with fewer live registers (build/dude); emissive
+#                mode; NVIDIA register readout in each run's stdout.log
 #   set bounceprof : the GI bounce's cost split, 8 variants of build/dude-bounceprof (r_rtgiBounceProfile bits; the image is
 #                wrong - timing only); run it with 2 rounds
 #   (gather / boostgi / bounceem are HISTORY - 2026-11-02: their cvars only existed in those branches' builds)
@@ -151,6 +153,15 @@ case "$SET" in
 		DESC[A]="master";                                   ARGS[A]="$EM";   BINV[A]="$REPO/build/dude-ref-master"
 		DESC[B]="boost picks in the gather + grid skip";    ARGS[B]="$EM";   BINV[B]="$REPO/build/dude-items13"
 		DESC[C]="B + candidate read-ahead";                 ARGS[C]="$EM";   BINV[C]="$BIN"
+		;;
+	registers)
+		# 2026-11-03 (perf/restir-gather-registers): two BINARIES, emissive mode, the drivers' register readout in every run's
+		# stdout.log. A = master (build/dude-ref-master, its shaders embedded), B = the gather with fewer live registers (build/dude)
+		PRESET=5; RTX=2; SEED_EMISSIVE=1
+		EM="+set r_rtEmissiveLighting 1 +set r_rtEmissivePhysical 1 +set r_rtEmissiveSamples 1 +set r_vkPipelineStats restir_di"
+		NAMES=( A B )
+		DESC[A]="master";                    ARGS[A]="$EM";   BINV[A]="$REPO/build/dude-ref-master"
+		DESC[B]="fewer live registers";      ARGS[B]="$EM";   BINV[B]="$BIN"
 		;;
 	bounceprof)
 		# 2026-11-03: the GI bounce's cost split (diag/rtgi-bounce-profile, build/dude-bounceprof: r_rtgiBounceProfile bits each
