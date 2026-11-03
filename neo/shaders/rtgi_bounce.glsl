@@ -261,6 +261,9 @@ int rtgiTraceBounce( RtgiBounceParms bp, vec3 Pw, vec3 Nw, vec3 eyeW, float d, v
 				if ( lgRand( emRng ) * emWSum < w ) { emChosen = li; emWChosen = w; }
 				continue;
 			}
+			// the horizon on the raw vector first (as diShadeLight): a light behind H costs no square root and no division
+			const vec3 lv = lights.l[ li ].pos - hitWorld;
+			if ( dot( lv, lv ) > 1e-6 && !( dot( hitN, lv ) > 0.0 ) ) { continue; }
 			dudeLightDir( lights, li, hitWorld, ldir, dl );
 			ndl = max( dot( hitN, ldir ), 0.0 );
 			if ( ndl <= 0.0 ) { continue; }

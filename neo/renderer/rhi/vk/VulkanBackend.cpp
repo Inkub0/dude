@@ -215,6 +215,7 @@ public:
 	virtual unsigned long long	GetBufferDeviceAddress( BufferHandle b );
 	virtual ImageHandle		CreateImage( ImageFormat, int, int, const void * ) { return 0; }	// render-target era API; M7
 	virtual void			DestroyImage( ImageHandle h );
+	virtual bool			GetImageSize( ImageHandle h, int &w, int &hgt );
 	virtual ImageHandle		CreateTexture2D( int w, int h, const void *pixels,
 	                                         int textureFilter, int textureRepeat, bool allowMips,
 	                                         bool singleChannel = false );
@@ -9716,6 +9717,17 @@ void VulkanBackend::SyncBindlessSlot( ImageHandle h ) {
 	w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
 	w.pImageInfo = &ii;
 	vkUpdateDescriptorSets( device, 1, &w, 0, NULL );
+}
+
+// The base level extent CreateTexture2D / the prebuilt upload recorded - the view's level 0, so exactly what a shader's
+// textureSize( slot, 0 ) returns (the scene-light buffer carries it for rt_light_tex.glsl's cookie LOD).
+bool VulkanBackend::GetImageSize( ImageHandle h, int &w, int &hgt ) {
+	if ( h < 1 || h > (ImageHandle)imageTable.size() || !imageTable[h - 1].live ) {
+		return false;
+	}
+	w = imageTable[h - 1].width;
+	hgt = imageTable[h - 1].height;
+	return w > 0 && hgt > 0;
 }
 
 /*

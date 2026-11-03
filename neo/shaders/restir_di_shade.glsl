@@ -133,6 +133,11 @@ bool diShadeLight( RtLights lights, uint li, in DiSurface s, out vec3 contrib, o
 		}
 		return true;
 	}
+	// the horizon test on the raw vector first (dudeLightDir divides by the positive distance, so the sign is the same): a
+	// light behind the surface - about half of a wall pixel's candidates - costs no square root and no division. A light ON
+	// the point (dudeLightDir's fallback direction, dl <= 1e-3) takes the full path as before.
+	const vec3 lv = lights.l[ li ].pos - s.Pw;
+	if ( dot( lv, lv ) > 1e-6 && !( dot( s.Nw, lv ) > 0.0 ) ) { return false; }
 	dudeLightDir( lights, li, s.Pw, ldir, dl );
 	ndl = max( dot( s.Nw, ldir ), 0.0 );
 	if ( !( ndl > 0.0 ) ) { return false; }

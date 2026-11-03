@@ -154,12 +154,14 @@ bool rtEmissiveSampleSolidAngle( RtEmissiveTri e, vec3 P, vec2 rnd, out vec3 Pe,
 		nUnit = -nUnit;
 		o = -o;
 	}
-	vec3 A = normalize( v0 ), B = normalize( v1 ), C = normalize( v2 );
-	vec3 cross_BC = cross( B, C );
-	vec3 norm_AB = normalize( cross( A, B ) ), norm_BC = normalize( cross_BC ), norm_CA = normalize( cross( C, A ) );
+	float rA = inversesqrt( dot( v0, v0 ) ), rB = inversesqrt( dot( v1, v1 ) ), rC = inversesqrt( dot( v2, v2 ) );
+	vec3 A = v0 * rA, B = v1 * rB, C = v2 * rC;
+	vec3 norm_AB = normalize( cross( A, B ) ), norm_CA = normalize( cross( C, A ) );
 	float cos_c = dot( A, B );
 	float cos_alpha = dot( norm_AB, -norm_CA );
-	float area = 2.0 * atan( abs( dot( A, cross_BC ) ), 1.0 + cos_c + dot( B, C ) + dot( A, C ) );
+	// |A.( B x C )| = |v0.( v1 x v2 )| / ( |v0| |v1| |v2| ) and v0.( v1 x v2 ) = n.v0 = nl x o (rtEmissiveTriWeight): the same
+	// spherical area without a cross of two nearly parallel unit vectors (exact algebra; better conditioned far away)
+	float area = 2.0 * atan( abs( o ) * nl * ( rA * rB * rC ), 1.0 + cos_c + dot( B, C ) + dot( A, C ) );
 	if ( !( area > 1e-7 ) ) { return false; }
 	float new_area = rnd.x * area;
 	float sin_alpha = sqrt( max( 1.0 - cos_alpha * cos_alpha, 0.0 ) );
@@ -210,27 +212,37 @@ float rtEmissiveSolidAngle( RtEmissiveTri e, vec3 P, vec3 n, bool twoSided ) {
 // spherical area the sampler rejects - dividing by this pick's probability keeps the estimate unbiased. The reach boost rides
 // along (it only grows with distance); the fade does not (0 at the centroid is not 0 everywhere on the triangle). Reads the
 // first 48 bytes of the record (vertices, flux, flags): radiance = flux / area.
+// Evaluated WITHOUT unit vectors (2026-11-02, the same value up to rounding, ~15 % fewer ALU ops - it runs for every triangle
+// of a run, twice per pixel): every point q of the triangle's plane has the same g.( q - P ) = h, so
+//   the triple product v0.( v1 x v2 ) = g.v0 = h                     (v1 = v0 + e1, v2 = v0 + e2, g = e1 x e2)
+//   the emitter cosine toward q        |gn.( q - P )| / |q - P| = |h| / ( |g| |q - P| )
+// and the unit-vector dots of Van Oosterom & Strackee's solid angle are the raw dots times the inverse lengths. h is the
+// facing test's own dot( g, c ), and it is better conditioned than a cross of two nearly parallel unit vectors (a small far
+// triangle). Only the weight changes by rounding; the shade divides by the probability of the same weights (unbiased).
 float rtEmissiveTriWeight( RtEmissiveTable t, uint i, vec3 P, vec3 N, uint prof, bool twoSided, float knee ) {
 	RtEmissiveTris tris = RtEmissiveTris( rtEmissiveOffsetAddr( t.addr, RT_EMISSIVE_HEADER_BYTES ) );
 	const float flux = tris.t[ i ].flux;
 	if ( !( flux > 0.0 ) ) { return 0.0; }
 	const vec3 p0 = tris.t[ i ].p0, p1 = tris.t[ i ].p1, p2 = tris.t[ i ].p2;
 	const vec3 v0 = p0 - P, v1 = p1 - P, v2 = p2 - P;
-	if ( !( max( dot( N, v0 ), max( dot( N, v1 ), dot( N, v2 ) ) ) > 0.0 ) ) { return 0.0; }
+	const float n0 = dot( N, v0 ), n1 = dot( N, v1 ), n2 = dot( N, v2 );
+	if ( !( max( n0, max( n1, n2 ) ) > 0.0 ) ) { return 0.0; }
 	const vec3  g  = cross( p1 - p0, p2 - p0 );							// = -faceNormal, |g| = 2 x area
 	const vec3  c  = ( v0 + v1 + v2 ) * ( 1.0 / 3.0 );					// P -> the centroid
-	if ( !( dot( g, c ) > 0.0 ) && !twoSided && ( tris.t[ i ].emit & RT_EMIT_TWOSIDED ) == 0u ) { return 0.0; }
-	const float g2 = dot( g, g ), c2 = dot( c, c );
-	if ( !( g2 > 0.0 ) || !( c2 > 0.0 ) || !( dot( v0, v0 ) > 0.0 ) || !( dot( v1, v1 ) > 0.0 ) || !( dot( v2, v2 ) > 0.0 ) ) { return 0.0; }
-	const vec3  A = normalize( v0 ), B = normalize( v1 ), C = normalize( v2 ), M = c * inversesqrt( c2 );
-	const float omega = 2.0 * atan( abs( dot( A, cross( B, C ) ) ), 1.0 + dot( A, B ) + dot( B, C ) + dot( A, C ) );
+	const float h  = dot( g, c );										// = g.v0 = g.v1 = g.v2 = v0.( v1 x v2 )
+	if ( !( h > 0.0 ) && !twoSided && ( tris.t[ i ].emit & RT_EMIT_TWOSIDED ) == 0u ) { return 0.0; }
+	const float g2 = dot( g, g ), c2 = dot( c, c ), l0 = dot( v0, v0 ), l1 = dot( v1, v1 ), l2 = dot( v2, v2 );
+	if ( !( g2 > 0.0 ) || !( c2 > 0.0 ) || !( l0 > 0.0 ) || !( l1 > 0.0 ) || !( l2 > 0.0 ) ) { return 0.0; }
+	const float r0 = inversesqrt( l0 ), r1 = inversesqrt( l1 ), r2 = inversesqrt( l2 ), rM = inversesqrt( c2 );
+	const float r01 = r0 * r1, r12 = r1 * r2;
+	const float omega = 2.0 * atan( abs( h ) * ( r01 * r2 ), 1.0 + dot( v0, v1 ) * r01 + dot( v1, v2 ) * r12 + dot( v0, v2 ) * ( r0 * r2 ) );
 	if ( !( omega > 1e-7 ) ) { return 0.0; }								// rtEmissiveSampleSolidAngle rejects it too
 	const float invG = inversesqrt( g2 );
-	const vec3  gn   = g * invG;
-	const float cosR = max( max( max( dot( N, A ), dot( N, B ) ), max( dot( N, C ), dot( N, M ) ) ), 0.0 );	// > 0: a vertex is above the horizon
-	const float cosL = max( max( abs( dot( gn, A ) ), abs( dot( gn, B ) ) ), max( abs( dot( gn, C ) ), abs( dot( gn, M ) ) ) );
+	const float nc   = ( n0 + n1 + n2 ) * ( 1.0 / 3.0 );					// dot( N, c )
+	const float cosR = max( max( max( n0 * r0, n1 * r1 ), max( n2 * r2, nc * rM ) ), 0.0 );	// > 0: a vertex is above the horizon
+	const float cosL = abs( h ) * invG * max( max( r0, r1 ), max( r2, rM ) );	// the nearest of the corners and the centroid
 	const float emit = ( prof == 1u ) ? cosL : ( prof == 2u ) ? 1.0 : sqrt( cosL );
-	const float boost = ( knee > 0.0 ) ? max( c2 * inversesqrt( c2 ) / knee, 1.0 ) : 1.0;
+	const float boost = ( knee > 0.0 ) ? max( c2 * rM / knee, 1.0 ) : 1.0;
 	return ( 2.0 * flux * invG ) * boost * omega * emit * cosR;			// flux / area = the radiance
 }
 
@@ -411,15 +423,16 @@ vec3 rtEmissiveOctDecode( vec2 o ) {
 // away from P (one-sided), so the target keeps the shade's support; 1 = no bound (no cone - a tube, a bulb - or P inside
 // the bounding sphere). The cone rides projF.x (axis, octahedral snorm16 x2) and projF.w (cos theta_o, + 4 = the
 // material emits from both faces: theta_w folds to the nearer face).
-float rtEmissiveOrientBound( RtLights lights, uint li, vec3 P, float dc, float br, uint prof, bool twoSided ) {
+// toP = the unit direction centroid -> P (-ldir of the target: the row's pos IS its cull centre, the centroid); sb / cb = sin /
+// cos of theta_b, taken once by the caller (the receiver-cosine bound uses the same angle); outside = P is outside the sphere.
+float rtEmissiveOrientBound( RtLights lights, uint li, vec3 toP, bool outside, float sb, float cb, uint prof, bool twoSided ) {
 	const float cw4  = lights.l[ li ].projF.w;
 	const bool  both = twoSided || cw4 > 2.0;
 	const float co   = ( cw4 > 2.0 ) ? cw4 - 4.0 : cw4;
-	if ( !( co > -1.0 ) || !( dc > br ) ) { return 1.0; }
+	if ( !( co > -1.0 ) || !outside ) { return 1.0; }
 	const vec3 a = rtEmissiveOctDecode( unpackSnorm2x16( floatBitsToUint( lights.l[ li ].projF.x ) ) );
-	float cw = dot( a, ( P - lights.l[ li ].cull.xyz ) / dc );
+	float cw = dot( a, toP );
 	if ( both ) { cw = abs( cw ); }
-	const float sb = br / dc, cb = sqrt( max( 1.0 - sb * sb, 0.0 ) );
 	const float so = sqrt( max( 1.0 - co * co, 0.0 ) );
 	if ( cb < -co ) { return 1.0; }												// theta_o + theta_b >= pi: every direction possible
 	const float cs = co * cb - so * sb, ss = so * cb + co * sb;					// cos / sin of theta_o + theta_b
@@ -435,6 +448,9 @@ bool rtEmissiveTargetRow( RtLights lights, uint li, vec3 P, vec3 N, out vec3 con
 	contrib = vec3( 0.0 );	ldir = vec3( 0.0, 0.0, 1.0 );	dl = 0.0;	ndl = 0.0;
 	if ( floatBitsToUint( lights.l[ li ].projQ.y ) == 0u ) { return false; }	// no triangles: the shade reaches nothing
 	vec3 cd = lights.l[ li ].pos - P;
+	// the horizon test on the raw vector first (the sign of N.ldir is the sign of N.cd): an emitter behind the receiver - about
+	// half of a wall pixel's candidates - costs no square root and no division
+	if ( !( dot( N, cd ) > 0.0 ) ) { return false; }
 	dl   = length( cd );
 	if ( !( dl > 1e-3 ) ) { return false; }
 	ldir = cd / dl;
@@ -442,16 +458,21 @@ bool rtEmissiveTargetRow( RtLights lights, uint li, vec3 P, vec3 N, out vec3 con
 	if ( !( ndl > 0.0 ) ) { return false; }
 	float R      = max( lights.l[ li ].radius, 1.0 );
 	float br     = max( lights.l[ li ].cull.w - lights.l[ li ].radius, 0.0 );	// the run's bound radius around its centroid
-	float dc     = length( lights.l[ li ].cull.xyz - P );					// to the centroid
+	// to the centroid = the cull centre: RB_RHI_GatherSceneLights writes an emitter row's pos AND cull.xyz from the same
+	// row.centroid, so this distance is dl exactly (and centroid -> P is -ldir)
+	float dc     = dl;
 	float knee   = lights.l[ li ].projQ.z;
 	bool  noFade = lights.l[ li ].projQ.w > 0.5;
 	float boost  = ( knee > 0.0 ) ? max( dc / knee, 1.0 ) : 1.0;
 	float fade   = noFade ? 1.0 : 1.0 - smoothstep( 0.75 * R, R, max( dc - br, 0.0 ) );
 	if ( !( fade > 0.0 ) ) { return false; }
+	// the half-angle the bounding sphere subtends from P (sin, cos), shared by the orientation bound and the cosine bound below
+	const bool  outside = dc > br;
+	const float sb = br / dc, cb = sqrt( max( 1.0 - sb * sb, 0.0 ) );
 	{
 		const uint prof     = uint( clamp( lights.l[ li ].projT.z, 0.0, 2.0 ) + 0.5 );
 		const bool twoSided = lights.l[ li ].projT.w > 0.5;
-		fade *= rtEmissiveOrientBound( lights, li, P, dc, br, prof, twoSided );
+		fade *= rtEmissiveOrientBound( lights, li, -ldir, outside, sb, cb, prof, twoSided );
 		if ( !( fade > 0.0 ) ) { return false; }
 	}
 	float d2     = max( dc * dc, max( br * br, 1.0 ) );
@@ -465,8 +486,7 @@ bool rtEmissiveTargetRow( RtLights lights, uint li, vec3 P, vec3 N, out vec3 con
 	// unchanged (the shade's own gate, ndl > 0 toward the centroid, still decides), so RIS stays unbiased; the returned ndl
 	// stays the centroid's (the winner's material response and SH direction use it).
 	float cR = 1.0;
-	if ( dc > br ) {
-		const float sb = br / dc, cb = sqrt( max( 1.0 - sb * sb, 0.0 ) );
+	if ( outside ) {
 		cR = ( ndl >= cb ) ? 1.0 : ndl * cb + sqrt( max( 1.0 - ndl * ndl, 0.0 ) ) * sb;	// cos( theta_n - theta_b ), theta_n < pi/2
 	}
 	contrib = lights.l[ li ].color * ( ( R * R / 16.0 ) * boost * fade * cR / d2 );

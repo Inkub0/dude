@@ -15,6 +15,8 @@
 #   set serial : the light-serial fix, two BINARIES at Path Tracing Nightmare - A = build/dude-noserialfix, B = build/dude
 #   set load   : the timeDemo's map load - A = like a level load (com_timeDemoLevelLoad 1, the default), B = the old
 #                first-sight streaming (0); Path Tracing Nightmare, emissive mode on
+#   set shadermath : perf/restir-shader-math, two binaries - A / C = master (build/dude-ref-master), B / D = the branch
+#                (build/dude); A / B emissive mode, C / D placed lights (emissive off). VARIANTS="A B" = the short run
 #   (gather / boostgi / bounceem are HISTORY - 2026-11-02: their cvars only existed in those branches' builds)
 #   set gather : the ReSTIR DI gather's cost split in EMISSIVE MODE (needs the diag/di-gather-profile build: r_rtDiGatherProfile
 #                bits each remove one piece - timing only, the image is wrong) - 7 variants; your authored emissive setups are
@@ -120,6 +122,19 @@ case "$SET" in
 		NAMES=( A B )
 		DESC[A]="level load (com_timeDemoLevelLoad 1)";   ARGS[A]="$EM +set com_timeDemoLevelLoad 1"
 		DESC[B]="first sight (com_timeDemoLevelLoad 0)";  ARGS[B]="$EM +set com_timeDemoLevelLoad 0"
+		;;
+	shadermath)
+		# 2026-11-02 (perf/restir-shader-math): the same ReSTIR math, cheaper shaders - two BINARIES, each with its own
+		# SPIR-V: A / C = master (build/dude-ref-master, its shaders embedded), B / D = this branch (build/dude). A / B in
+		# emissive mode (your demo1 setup), C / D with emissive mode off (placed lights: the cookie-size path). Short run:
+		# VARIANTS="A B"
+		PRESET=5; RTX=2; SEED_EMISSIVE=1
+		EM="+set r_rtEmissiveLighting 1 +set r_rtEmissivePhysical 1 +set r_rtEmissiveSamples 1"
+		NAMES=( A B C D )
+		DESC[A]="master shaders, emissive mode";        ARGS[A]="$EM";                          BINV[A]="$REPO/build/dude-ref-master"
+		DESC[B]="refactored shaders, emissive mode";    ARGS[B]="$EM";                          BINV[B]="$BIN"
+		DESC[C]="master shaders, placed lights";        ARGS[C]="+set r_rtEmissiveLighting 0";  BINV[C]="$REPO/build/dude-ref-master"
+		DESC[D]="refactored shaders, placed lights";    ARGS[D]="+set r_rtEmissiveLighting 0";  BINV[D]="$BIN"
 		;;
 	*)
 		sed -n '2,40p' "$0"

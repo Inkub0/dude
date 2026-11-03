@@ -12,7 +12,8 @@
 // +1.5 ms - always read fields individually). projS/T/Q/F = the light's world-space lightProject planes:
 // s = S.p/Q.p, t = T.p/Q.p, falloff f = F.p, all in [0,1] inside the volume (a spot's pyramid, a point
 // light's BOX). projTex / falloffTex = bindless slot+1 of the light's projection cookie / falloff ramp
-// (0 = none); sampled by rt_light_tex.glsl (needs set 2) - this file stays sampler-free.
+// (0 = none); sampled by rt_light_tex.glsl (needs set 2) - this file stays sampler-free. projTex bits 16-24 carry the
+// cookie's size (RhiWorld.cpp RB_RHI_LightCookieWord): mask the slot with 0xFFFF.
 // pad0 = lightDef index + 1 (0 = not a light: fog rows), pad1 = the def's creation serial (ReSTIR DI gradient, Plan R1:
 // same slot + same serial = the same light; a freed slot is reused at once)
 struct RtLight { vec4 cull; vec3 pos; float radius; vec3 color; uint flags; vec4 projS; vec4 projT; vec4 projQ; vec4 projF; uint projTex; uint falloffTex; uint pad0; uint pad1; };
