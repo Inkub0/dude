@@ -138,13 +138,18 @@ vec3 rtEmissiveUniformPoint( RtEmissiveTri e, vec2 xi, out vec3 nUnnorm, out vec
 // directions missed the emitter - the sparse salt-and-pepper DI of 2026-10-20. The vertices are re-wound here so the
 // routine always sees its convention; nUnit is returned pointing AT P, and `front` says whether the emitter's FACE
 // (the side that emits, one-sided) looks at P.
+bool rtEmissiveSampleSolidAngleV( vec3 p0, vec3 p1, vec3 p2, vec3 P, vec2 rnd, out vec3 Pe, out vec3 nUnit, out float pdfw, out bool front );
 bool rtEmissiveSampleSolidAngle( RtEmissiveTri e, vec3 P, vec2 rnd, out vec3 Pe, out vec3 nUnit, out float pdfw, out bool front ) {
-	vec3 n = cross( e.p1 - e.p0, e.p2 - e.p0 );
+	return rtEmissiveSampleSolidAngleV( e.p0, e.p1, e.p2, P, rnd, Pe, nUnit, pdfw, front );
+}
+// The same from the three vertices alone (the shade reads the record's other fields after it: fewer live registers).
+bool rtEmissiveSampleSolidAngleV( vec3 p0, vec3 p1, vec3 p2, vec3 P, vec2 rnd, out vec3 Pe, out vec3 nUnit, out float pdfw, out bool front ) {
+	vec3 n = cross( p1 - p0, p2 - p0 );
 	float nl = length( n );
-	Pe = e.p0; nUnit = vec3( 0.0, 0.0, 1.0 ); pdfw = 0.0; front = false;
+	Pe = p0; nUnit = vec3( 0.0, 0.0, 1.0 ); pdfw = 0.0; front = false;
 	if ( !( nl > 1e-8 ) ) { return false; }
 	nUnit = n / nl;
-	vec3 v0 = e.p0 - P, v1 = e.p1 - P, v2 = e.p2 - P;
+	vec3 v0 = p0 - P, v1 = p1 - P, v2 = p2 - P;
 	float o = dot( nUnit, v0 );											// signed distance of the plane
 	if ( abs( o ) < 1e-3 ) { return false; }
 	// the face normal -n points at P exactly when o > 0: that is the emitting side facing the receiver
@@ -302,10 +307,8 @@ bool rtEmissiveShadeRow( RtLights lights, uint li, vec3 P, vec3 N, uint seed, ui
 	uint  first     = floatBitsToUint( lights.l[ li ].projQ.x );
 	uint  num       = floatBitsToUint( lights.l[ li ].projQ.y );
 	float knee      = lights.l[ li ].projQ.z;
-	float intensity = lights.l[ li ].projS.w;
-	float radius    = lights.l[ li ].radius;
-	bool  noFade    = lights.l[ li ].projQ.w > 0.5;		// physical rows: no reach fade
-	vec3  tint      = lights.l[ li ].projS.xyz;			// the authored tint (1 1 1 = none)
+	// (the row's intensity, radius, fade switch and tint are read where a sample is valued, after the triangle walk: held from
+	// here they occupied registers through it - this shade sets the DI gather's register peak, 2026-11-03)
 	uint  prof      = uint( clamp( lights.l[ li ].projT.z, 0.0, 2.0 ) + 0.5 );	// the authored emission profile
 	bool  twoSided  = lights.l[ li ].projT.w > 0.5;		// authored: both faces emit
 	RtEmissiveTable t = rtEmissiveOpen( tAddr );
@@ -370,12 +373,14 @@ bool rtEmissiveShadeRow( RtLights lights, uint li, vec3 P, vec3 N, uint seed, ui
 			ti = rtEmissiveSampleInGroup( t, first, num, rtEmissiveRand( rng ), pIn );
 		}
 		if ( ti < first || ti >= first + num || !( pIn > 0.0 ) ) { continue; }
-		RtEmissiveTri e = rtEmissiveFetch( t, ti );
-		if ( !( e.flux > 0.0 ) ) { continue; }
+		// the record's fields where they are used (the vertices for the sampler, the rest after it): loaded whole here, they
+		// all stayed live through the sampler - the DI gather's register peak (the GI bounce's emitter pick, 2026-11-03)
+		RtEmissiveTris tris = RtEmissiveTris( rtEmissiveOffsetAddr( t.addr, RT_EMISSIVE_HEADER_BYTES ) );
+		if ( !( tris.t[ ti ].flux > 0.0 ) ) { continue; }
 		vec3 Pe, nUnit; float pdfw; bool front;
 		vec2 xi = vec2( rtEmissiveRand( rng ), rtEmissiveRand( rng ) );
-		if ( !rtEmissiveSampleSolidAngle( e, P, xi, Pe, nUnit, pdfw, front ) ) { continue; }
-		if ( !front && !twoSided && ( e.emit & RT_EMIT_TWOSIDED ) == 0u ) { continue; }
+		if ( !rtEmissiveSampleSolidAngleV( tris.t[ ti ].p0, tris.t[ ti ].p1, tris.t[ ti ].p2, P, xi, Pe, nUnit, pdfw, front ) ) { continue; }
+		if ( !front && !twoSided && ( tris.t[ ti ].emit & RT_EMIT_TWOSIDED ) == 0u ) { continue; }
 		vec3  sd = Pe - P;
 		float sl = length( sd );
 		if ( !( sl > 1e-3 ) || !( pdfw > 0.0 ) ) { continue; }
@@ -383,8 +388,12 @@ bool rtEmissiveShadeRow( RtLights lights, uint li, vec3 P, vec3 N, uint seed, ui
 		if ( !( cosL > 0.0 ) ) { continue; }
 		float emit = ( prof == 1u ) ? cosL : ( prof == 2u ) ? 1.0 : sqrt( cosL );	// emission profile (the row's)
 		float boost = ( knee > 0.0 ) ? max( sl / knee, 1.0 ) : 1.0;
+		const float radius = lights.l[ li ].radius;
+		const bool  noFade = lights.l[ li ].projQ.w > 0.5;					// physical rows: no reach fade
 		float fade  = noFade ? 1.0 : 1.0 - smoothstep( 0.75 * radius, radius, sl );
-		vec3  L = rtEmissiveMeanRadiance( e ) * tint * ( e.scale * intensity * boost * fade );
+		// the authored tint (1 1 1 = none) and intensity
+		const vec3 meanL = vec3( unpackHalf2x16( tris.t[ ti ].meanRG ), unpackHalf2x16( tris.t[ ti ].meanB ).x );	// rtEmissiveMeanRadiance
+		vec3  L = meanL * lights.l[ li ].projS.xyz * ( tris.t[ ti ].scale * lights.l[ li ].projS.w * boost * fade );
 		float cosR = max( dot( N, sd / sl ), 0.0 );								// this sample's own receiver cosine
 		vec3  est = L * ( emit * cosR / ( pIn * pdfw ) );						// one Arvo estimate of the irradiance at P
 		Lsum += est;

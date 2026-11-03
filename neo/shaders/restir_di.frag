@@ -90,6 +90,17 @@
 #ifndef DI_BOOST
 #define DI_BOOST 0
 #endif
+// DI_FULL_TARGET (restir_di_full.frag / restir_di_boost_full.frag): a cheap RIS target is OFF (r_rtReStirDICheapTarget 0 or
+// r_rtEmissiveCheapTarget 0, the debug A/Bs) - the candidate loop shades with the material / the emitters' area samples. The
+// default program (DI_FULL_TARGET 0) carries neither path: compiled into the one program the loop's emitter area shade set its
+// register count for everybody (2026-11-03, ACO 144 -> 128 VGPRs without it), and its loop reads no material at all, so the
+// material is read after the loop (diSurfaceMaterial) instead of staying live through it. The CPU picks the program.
+#ifndef DI_FULL_TARGET
+#define DI_FULL_TARGET 0
+#endif
+#if !DI_FULL_TARGET
+#define DI_CHEAP_TARGETS	// restir_di_shade.glsl diTargetLight: emitters always analytic, placed lights by diShadePlaced
+#endif
 #extension GL_EXT_buffer_reference_uvec2 : require	// build the light-buffer pointer from u_color.xy (uvec2)
 #extension GL_EXT_ray_query : require				// one visibility ray for the chosen light
 #extension GL_EXT_nonuniform_qualifier : require		// bindless light textures (rt_light_tex.glsl)
@@ -179,6 +190,12 @@ layout(buffer_reference, std430, buffer_reference_align = 4) buffer DiBoostSide 
 const uint DI_BOOST_SIDE_FLOATS = 10u;
 #define DI_BOOST_MAX 4
 
+// An OPAQUE ZERO: u_texGen0S.w, always 0.0 (RB_RHI_ReStirDIPass) but unknown to the compiler. A value recomputed late through it
+// (d + diOpaqueZero == d, sfrag + diOpaqueZero == sfrag, bit for bit) is not merged with the original by common-subexpression
+// elimination, which would keep the original live in registers instead: how the gather re-derives its surface point and normal
+// after the bounce rather than holding them through it (the register peak, 2026-11-03).
+#define diOpaqueZero u_texGen0S.w
+
 // R3a: the boost reason of a CLUSTERED young pixel - young AND at least 5 of its 3x3 neighbours young - else 0. Isolated
 // specks (NRD's own edge resets, thin-geometry jitter) are never worth K rays, and - decisive for the cost - a warp with a
 // single surviving lane still runs the rays for all 32 lanes' time, so scattered specks along every edge priced the pass at
@@ -226,11 +243,16 @@ void main() {
 	const bool pbr       = u_localParam1.y > 0.5;
 	// cheap RIS target (r_rtReStirDICheapTarget): weigh the ~38 candidates with the unshadowed irradiance (no GGX) and
 	// full-shade only the winner. u_localParam1.w encodes it: 0 = debug/no-apply, 1 = apply + cheap target, 2 = apply + full.
+#if DI_FULL_TARGET
 	const bool cheapTarget = u_localParam1.w > 0.5 && u_localParam1.w < 1.5;
+#else
+	const bool cheapTarget = applyMode;			// the CPU loads this program only with the cheap targets on
+#endif
 	DiSurface S;
 	float raw;
 	vec4  nt;
-	const bool surfaceOk = diSurfaceAt( sfrag, applyMode, pbr, S, raw, nt );
+	// the default program reads the material after the candidate loop (diSurfaceMaterial below): its loop weighs without it
+	const bool surfaceOk = diSurfaceAt( sfrag, DI_FULL_TARGET != 0 && applyMode, pbr, S, raw, nt );
 	outViewZ  = vec4( S.vz, 0.0, 0.0, 1.0 );						// .y (gradient luminance) filled at the end
 	outNormal = packNrdNormal( nt.xyz * 2.0 - 1.0 );
 
@@ -243,8 +265,6 @@ void main() {
 	vec3  Pw = S.Pw;
 	vec3  Nw = S.Nw;
 	float d  = S.d;
-	vec3  albedo = S.albedo;
-	vec3  B      = S.B;
 
 	RtLights lights = RtLights( uvec2( floatBitsToUint( u_color.x ), floatBitsToUint( u_color.y ) ) );
 	uint nLights = uint( u_color.z );
@@ -425,6 +445,13 @@ void main() {
 		visDirLoop  = g_rtEmVisDir;			// the winner's own area samples
 		visDistLoop = g_rtEmVisDist;
 	}
+#if !DI_FULL_TARGET
+	// the material from here on (the winner's response, the demodulation, the GI): read only now, after the loop AND after an
+	// emitter winner's area shade above (target-only) - neither uses it, and held through them it set the register peak
+	if ( applyMode ) { diSurfaceMaterial( sfrag, S ); }
+#endif
+	const vec3 albedo = S.albedo;
+	const vec3 B      = S.B;
 	if ( pHatChosen > 0.0 ) {
 		ldirChosen    = ldirLoop;
 		dlChosen      = dlLoop;
@@ -490,12 +517,13 @@ void main() {
 		shDirect = sumSh / float( K );
 	}
 #endif
+	float gradLum = 0.0;										// R1 (outViewZ.y, written at the end)
 	// R1 side outputs for next frame's gradient pass: which light this pixel shaded (row + 1 in THIS frame's light
 	// buffer) and how bright its visible contribution was (fp16, restir_di_shade.glsl). The RIS weight W is left out:
 	// it multiplies both frames alike and cancels in the normalized gradient. R3a keeps its "boosted" bit in the row
 	// id's fraction (+0.25 x reason; att3 is RGBA32F since E2 v3, so thousands of rows stay exact); readers floor it off.
 	if ( pHatChosen > 0.0 ) {
-		outViewZ.y = diGradientLuminance( contribChosen, B, vis );
+		gradLum = diGradientLuminance( contribChosen, B, vis );
 	}
 	outSh1.w = float( rowChosen ) + 0.25 * float( boostWhy );			// fraction = the boost reason (0 = not boosted), row 0 = no light:
 																		// recorded for UNLIT young pixels too (they ran the loop; view 7 must show them)
@@ -541,8 +569,34 @@ void main() {
 		bp.cacheTail      = cacheOn && bp.cache.tail;	// C6: the hit reads the stored L_out; the update below stores L_out at P
 		bp.grid           = lgp;						// L3: the hit's light loop draws from its cell (lgp built above for the DI RIS)
 		const vec3 eyeW   = u_modelViewMatrix[3].xyz;
+		// formed BEFORE the bounce so their inputs (the winner's target, W, vis, the material) are dead across the ray and the
+		// hit shading - the register peak sits in there (2026-11-03): the tail's direct term (the cache update below) and the
+		// GI demodulation, the same expressions as before
+		vec3 tailEdir = vec3( 0.0 );
+		if ( pHatChosen > 0.0 ) {
+			// the TARGET-only shade: the loop's own when it shaded target-only (cheapTarget) or there is no material (not apply
+			// mode); only full-target apply mode still shades it here
+			vec3 cTO = tgtChosen;
+			if ( applyMode && !cheapTarget ) {
+				vec3 ldTO; float dlTO, ndlTO;
+				diShadeLight( lights, rowChosen - 1u, S, cTO, ldTO, dlTO, ndlTO, true );
+			}
+			tailEdir = cTO * ( W * vis * bp.lightScale );
+		}
+		// demodulated like the direct term: the apply multiplies by B (plain path) or by D = albedo * ( 1 - metal * kd )
+		// (specReshade, B = 1), so albedo / D = 1 / ( 1 - metal * kd ) keeps rtgi_apply's albedo * gi without dividing by
+		// a near-zero albedo (r_pbrMetalDiffuse >= 0 keeps 1 - metal * kd in [1 - kd, 1]; kd = 1 is clamped)
+		const vec3 giDemod = ( u_shadowFalloffS.z > 1.5 ) ? vec3( 1.0 / max( 1.0 - S.metal * S.kd, 0.05 ) ) : albedo / B;
+		// The bounce's LiCache (Li without the fast DIFORWARD lights) IS Li in this pass: bp.skipForwardLights = r_rtReStirDIDynamicForward,
+		// and only that cvar flags rows DIFORWARD (RhiWorld.cpp diFast) - so they are skipped, or there are none. The gather reads
+		// Li, and its direction is recomputed where the SH needs it (rtgiBounceDir): neither the cache copy nor the direction is
+		// then held through the hit shading, where the program's register peak is (the emitter pick, 2026-11-03).
 		vec3 Li; float thit; vec3 bounceDir; vec3 LiCache;
 		const int hit = rtgiTraceBounce( bp, Pw, Nw, eyeW, d, sfrag, Li, thit, bounceDir, LiCache );
+		// the surface point and normal again, for the cache update and the SH direction: re-derived through the opaque zero (the
+		// same numbers) instead of held across the bounce, where the program's register peak is
+		const vec3 PwH = diSurfacePw( sfrag, d + diOpaqueZero );
+		const vec3 NwH = diSurfaceNw( diNormalTexel( sfrag + diOpaqueZero ) );
 		// UPDATE at the primary point (docs/rtx-irradiance-cache.md): this pixel's bounce estimate joins P's cell; a miss
 		// contributes 0 (open directions are part of the cell's cosine-lobe average); a hit on an unshadeable row (2: a
 		// mover / prop without attributes) is UNKNOWN, not dark, and teaches nothing. (The boost variant carries no bounce
@@ -559,7 +613,7 @@ void main() {
 				vec2 uvc = sfrag * u_screenCorrection.xy;
 				vec2 vel = texture( u_velocity, uvc ).rg;
 				vel.y = ( u_windowCoord.z < 0.0 ) ? -vel.y : vel.y;
-				mover = rtgiCacheIsMover( uvc, vel, Pw, u_prevMvpMatrix, u_localParam0.xy, u_windowCoord.z, u_screenCorrection.xy );
+				mover = rtgiCacheIsMover( uvc, vel, PwH, u_prevMvpMatrix, u_localParam0.xy, u_windowCoord.z, u_screenCorrection.xy );
 			}
 			if ( !mover ) {
 				// indirect-only (C2): teach E_ind(P) = LiCache. TAIL (C6): teach the surface's OUTGOING radiance
@@ -570,23 +624,12 @@ void main() {
 				// live). The recursion L_out = albedo (E_dir + mean L_out(H)) converges (albedo < 1; the per-sample clamp).
 				vec3 teach;
 				if ( bp.cache.tail ) {
-					vec3 Edir = vec3( 0.0 );
-					if ( pHatChosen > 0.0 ) {
-						// the TARGET-only shade: the loop's own when it shaded target-only (cheapTarget) or there is no
-						// material (not apply mode); only full-target apply mode still shades it here
-						vec3 cTO = tgtChosen;
-						if ( applyMode && !cheapTarget ) {
-							vec3 ldTO; float dlTO, ndlTO;
-							diShadeLight( lights, rowChosen - 1u, S, cTO, ldTO, dlTO, ndlTO, true );
-						}
-						Edir = cTO * ( W * vis * bp.lightScale );
-					}
-					vec3 Eind = ( hit == 1 ) ? LiCache : vec3( 0.0 );
-					teach = max( S.albedo * ( Edir + Eind ), vec3( 0.0 ) );
+					vec3 Eind = ( hit == 1 ) ? Li : vec3( 0.0 );					// LiCache == Li here (see the bounce call)
+					teach = max( S.albedo * ( tailEdir + Eind ), vec3( 0.0 ) );		// tailEdir: formed before the bounce
 				} else {
-					teach = ( hit == 1 ) ? LiCache : vec3( 0.0 );
+					teach = ( hit == 1 ) ? Li : vec3( 0.0 );
 				}
-				rtgiCacheUpdate( bp.cache, Pw, Nw, eyeW, teach );
+				rtgiCacheUpdate( bp.cache, PwH, NwH, eyeW, teach );
 			}
 		}
 		if ( hit == 1 ) {
@@ -594,14 +637,10 @@ void main() {
 			if ( u_specularParms.y > 0.0 ) {
 				gi *= pow( exp( d * u_specularParms.z ), u_specularParms.y );		// rtgi_apply's fog transmittance
 			}
-			// demodulated like the direct term: the apply multiplies by B (plain path) or by D = albedo * ( 1 - metal * kd )
-			// (specReshade, B = 1), so albedo / D = 1 / ( 1 - metal * kd ) keeps rtgi_apply's albedo * gi without dividing by
-			// a near-zero albedo (r_pbrMetalDiffuse >= 0 keeps 1 - metal * kd in [1 - kd, 1]; kd = 1 is clamped)
-			vec3 giDemod = ( u_shadowFalloffS.z > 1.5 ) ? vec3( 1.0 / max( 1.0 - S.metal * S.kd, 0.05 ) ) : albedo / B;
-			giRad = max( gi * giDemod, vec3( 0.0 ) );
+			giRad = max( gi * giDemod, vec3( 0.0 ) );						// giDemod: formed before the bounce
 			// the bounce keeps its cosine in the radiance (= the irradiance convention of the direct term); only its
 			// DIRECTION feeds SH1, so the apply's bump RATIO re-resolves the whole irradiance against the full-res normal
-			giSh = bounceDir * dot( giRad, vec3( 0.2126, 0.7152, 0.0722 ) );
+			giSh = rtgiBounceDir( bp, NwH, sfrag ) * dot( giRad, vec3( 0.2126, 0.7152, 0.0722 ) );
 		}
 		if ( boostWhy != 0 ) {										// for the boost pass (a miss stores 0: nothing to add)
 			bBuf.v[ bOfs + 0u ] = giRad.x;	bBuf.v[ bOfs + 1u ] = giRad.y;	bBuf.v[ bOfs + 2u ] = giRad.z;
@@ -626,4 +665,8 @@ void main() {
 	float nhd = clamp( occDist / ( 0.5 * u_localParam0.w + d * 0.1 ), 0.0, 1.0 );
 	// R2: ReLAX takes linear radiance + the raw hit distance (RELAX_FrontEnd_PackRadianceAndHitDist); ReBLUR YCoCg + normalized
 	fragColor = ( u_shadowFalloffS.w > 0.5 ) ? vec4( outRad, min( occDist, 65504.0 ) ) : vec4( nrdLinearToYCoCg( outRad ), nhd );
+	// the NRD guides again, as the top wrote them for the early-outs: formed here, not held in registers through the loop and
+	// the bounce - the normal re-read from the same texel (bit-identical), the view z = -d (d = -vz exactly)
+	outViewZ  = vec4( -d, gradLum, 0.0, 1.0 );
+	outNormal = packNrdNormal( diNormalTexel( sfrag ).xyz * 2.0 - 1.0 );
 }

@@ -30,6 +30,29 @@ struct DiSurface {
 	float metal, kd, alpha2, NdotV, specGain;
 };
 
+void diSurfaceMaterial( vec2 sfrag, inout DiSurface s );
+
+// The normal-buffer texel under SCREEN pixel sfrag (nearest, never filtered - diSurfaceAt below); the gather re-reads it at the
+// end to write its normal guide instead of holding the packed normal in registers.
+vec4 diNormalTexel( vec2 sfrag ) {
+	ivec2 nsz = textureSize( u_normalBuffer, 0 );
+	return texelFetch( u_normalBuffer, clamp( ivec2( floor( sfrag * u_screenCorrection.xy * vec2( nsz ) ) ), ivec2( 0 ), nsz - 1 ), 0 );
+}
+
+// diSurfaceAt's world point of SCREEN pixel sfrag at positive linear view depth d (view z = -d exactly), and its world normal
+// from the normal-buffer texel (the caller has checked the texel's length) - shared, so a late re-derivation (the gather after
+// its bounce) compiles to the same numbers.
+vec3 diSurfacePw( vec2 sfrag, float d ) {
+	vec2  ndc = sfrag * ( u_screenCorrection.xy * 2.0 ) - 1.0;
+	vec3  P   = vec3( ndc.x * d * u_localParam0.x, ndc.y * u_windowCoord.z * d * u_localParam0.y, -d );
+	return ( u_modelViewMatrix * vec4( P, 1.0 ) ).xyz;							// u_modelViewMatrix = inverse view
+}
+vec3 diSurfaceNw( vec4 nt ) {
+	vec3  Nraw = nt.xyz * 2.0 - 1.0;
+	vec3  N    = Nraw * inversesqrt( dot( Nraw, Nraw ) );
+	return normalize( mat3( u_modelViewMatrix ) * N );
+}
+
 // Reconstruct the surface under SCREEN pixel sfrag (internal-res pixel centre, 0.5 offsets). Returns false for sky /
 // a degenerate normal (the caller zeroes its output). Mirrors the gather's original reconstruction exactly.
 bool diSurfaceAt( vec2 sfrag, bool applyMode, bool pbr, out DiSurface s, out float rawDepth, out vec4 nt ) {
@@ -39,9 +62,8 @@ bool diSurfaceAt( vec2 sfrag, bool applyMode, bool pbr, out DiSurface s, out flo
 	// (white edge bands in debug view 7, +1.5 ms of rays standing still, 2026-10-12). Nearest puts every point on a real
 	// surface, which the shadow ray origins want anyway; the R1 gradient's same-surface test is exact at edges too.
 	ivec2 dsz = textureSize( u_currentDepth, 0 );
-	ivec2 nsz = textureSize( u_normalBuffer, 0 );
 	rawDepth = texelFetch( u_currentDepth, clamp( ivec2( floor( sfrag * u_depthTexRecip.xy * vec2( dsz ) ) ), ivec2( 0 ), dsz - 1 ), 0 ).x;
-	nt = texelFetch( u_normalBuffer, clamp( ivec2( floor( sfrag * u_screenCorrection.xy * vec2( nsz ) ) ), ivec2( 0 ), nsz - 1 ), 0 );
+	nt = diNormalTexel( sfrag );
 	s.vz = 1.0 / ( min( rawDepth, 0.9994 ) * depth_consts.x + depth_consts.y );	// negative view z
 	s.applyMode = applyMode;
 	s.pbr = pbr;
@@ -49,16 +71,22 @@ bool diSurfaceAt( vec2 sfrag, bool applyMode, bool pbr, out DiSurface s, out flo
 	s.metal = 0.0;	s.kd = 0.0;	s.alpha2 = 1.0;	s.NdotV = 1.0;	s.specGain = 0.0;
 	s.Pw = vec3( 0.0 );	s.Nw = vec3( 0.0, 0.0, 1.0 );	s.d = 1.0;
 	if ( rawDepth >= 0.9994 ) { return false; }									// sky / no geometry
-	vec2  ndc = sfrag * ( u_screenCorrection.xy * 2.0 ) - 1.0;
 	s.d = -s.vz;
-	vec3  P   = vec3( ndc.x * s.d * u_localParam0.x, ndc.y * u_windowCoord.z * s.d * u_localParam0.y, s.vz );
 	vec3  Nraw = nt.xyz * 2.0 - 1.0;
 	float nl2  = dot( Nraw, Nraw );
 	if ( !( nl2 > 1e-4 ) ) { return false; }									// also catches NaN
-	vec3  N   = Nraw * inversesqrt( nl2 );
-	s.Pw = ( u_modelViewMatrix * vec4( P, 1.0 ) ).xyz;							// u_modelViewMatrix = inverse view
-	s.Nw = normalize( mat3( u_modelViewMatrix ) * N );
-	if ( applyMode ) {
+	s.Pw = diSurfacePw( sfrag, s.d );
+	s.Nw = diSurfaceNw( nt );
+	if ( applyMode ) { diSurfaceMaterial( sfrag, s ); }
+	return true;
+}
+
+// The apply-mode MATERIAL of the surface diSurfaceAt reconstructed (needs its Pw / Nw): albedo, the demodulation factor and the
+// GGX inputs. Split out so the gather's default program can read it AFTER its candidate loop, which weighs every candidate
+// without the material (the cheap targets): read before, its ~20 values stayed live in registers through the whole loop.
+void diSurfaceMaterial( vec2 sfrag, inout DiSurface s ) {
+	s.applyMode = true;
+	{
 		s.albedo = texture( u_albedoBuffer, sfrag * u_screenCorrection.xy ).rgb;
 		vec3 mt  = texture( u_materialBuffer, sfrag * u_screenCorrection.xy ).rgb;
 		float rough = clamp( mt.r, 0.03, 1.0 );
@@ -81,7 +109,6 @@ bool diSurfaceAt( vec2 sfrag, bool applyMode, bool pbr, out DiSurface s, out flo
 		s.specGain = mt.b * mix( u_diffuseModifier.y, 1.0, s.metal ) * 2.0;	// spec map * dielectric-weighted scale * vanilla 2x
 		s.envFloor = s.F0 * ( s.metal * u_diffuseModifier.w * ( 1.0 - 0.5 * rough ) ) * mt.b;	// Phase C.1 metal environment floor
 	}
-	return true;
 }
 
 // The UNSHADOWED, NOT-demodulated contribution of light li at surface s: colour * cookie/falloff * N.L, times the
@@ -116,6 +143,7 @@ vec3 diMaterialResponse( in DiSurface s, vec3 ldir, float ndl ) {
 	return f;
 }
 
+bool diShadePlaced( RtLights lights, uint li, in DiSurface s, out vec3 contrib, out vec3 ldir, out float dl, out float ndl, bool targetOnly );
 bool diShadeLight( RtLights lights, uint li, in DiSurface s, out vec3 contrib, out vec3 ldir, out float dl, out float ndl, bool targetOnly ) {
 	contrib = vec3( 0.0 );	ldir = vec3( 0.0, 0.0, 1.0 );	dl = 0.0;	ndl = 0.0;
 	if ( !dudeLightInRange( lights, li, s.Pw ) ) { return false; }				// cheap volume-sphere cull
@@ -133,6 +161,13 @@ bool diShadeLight( RtLights lights, uint li, in DiSurface s, out vec3 contrib, o
 		}
 		return true;
 	}
+	return diShadePlaced( lights, li, s, contrib, ldir, dl, ndl, targetOnly );
+}
+
+// diShadeLight for a PLACED light (not an emitter row), after its range cull and flag tests - the half the gather's default
+// program weighs its placed candidates with (diTargetLight), so the emitter area shade is not inlined into the loop.
+bool diShadePlaced( RtLights lights, uint li, in DiSurface s, out vec3 contrib, out vec3 ldir, out float dl, out float ndl, bool targetOnly ) {
+	contrib = vec3( 0.0 );	ldir = vec3( 0.0, 0.0, 1.0 );	dl = 0.0;	ndl = 0.0;
 	// the horizon test on the raw vector first (dudeLightDir divides by the positive distance, so the sign is the same): a
 	// light behind the surface - about half of a wall pixel's candidates - costs no square root and no division. A light ON
 	// the point (dudeLightDir's fallback direction, dl <= 1e-3) takes the full path as before.
@@ -156,16 +191,31 @@ bool diShadeLight( RtLights lights, uint li, in DiSurface s, out vec3 contrib, o
 // DUDE (2026-10-27): the RIS TARGET of candidate li - diShadeLight's, except an EMITTER row under r_rtEmissiveCheapTarget
 // (u_texGen0S.y), which is weighed analytically (rtEmissiveTargetRow: no area samples) and area-sampled only if it wins
 // (diTargetIsAnalytic tells the caller to shade the winner). Same culls and flags as diShadeLight, so the support matches.
+// DI_CHEAP_TARGETS (the gather's default program, restir_di.frag): both cheap targets are on (r_rtEmissiveCheapTarget,
+// r_rtReStirDICheapTarget - the CPU loads restir_di_full / restir_di_boost_full otherwise), so an emitter is always weighed
+// analytically and a placed light by diShadePlaced: the emitter area shade never enters the candidate loop. Inlined there with
+// the loop's live state it set the whole program's register count (2026-11-03: ACO 144 -> 128 VGPRs without it). Every other
+// includer keeps the uniform-driven choice.
 bool diTargetIsAnalytic( RtLights lights, uint li ) {
+#if defined( DI_CHEAP_TARGETS )
+	return ( lights.l[ li ].flags & DUDE_LIGHT_EMISSIVE ) != 0u;
+#else
 	return u_texGen0S.y > 0.5 && ( lights.l[ li ].flags & DUDE_LIGHT_EMISSIVE ) != 0u;
+#endif
 }
 bool diTargetLight( RtLights lights, uint li, in DiSurface s, out vec3 contrib, out vec3 ldir, out float dl, out float ndl, bool targetOnly ) {
+#if !defined( DI_CHEAP_TARGETS )
 	if ( !diTargetIsAnalytic( lights, li ) ) {
 		return diShadeLight( lights, li, s, contrib, ldir, dl, ndl, targetOnly );
 	}
+#endif
 	contrib = vec3( 0.0 );	ldir = vec3( 0.0, 0.0, 1.0 );	dl = 0.0;	ndl = 0.0;
 	if ( !dudeLightInRange( lights, li, s.Pw ) ) { return false; }
-	if ( ( lights.l[ li ].flags & ( DUDE_LIGHT_DIFORWARD | DUDE_LIGHT_FOGVOLUME | DUDE_LIGHT_BOUNCEONLY ) ) != 0u ) { return false; }
+	const uint lflags = lights.l[ li ].flags;
+	if ( ( lflags & ( DUDE_LIGHT_DIFORWARD | DUDE_LIGHT_FOGVOLUME | DUDE_LIGHT_BOUNCEONLY ) ) != 0u ) { return false; }
+#if defined( DI_CHEAP_TARGETS )
+	if ( ( lflags & DUDE_LIGHT_EMISSIVE ) == 0u ) { return diShadePlaced( lights, li, s, contrib, ldir, dl, ndl, targetOnly ); }
+#endif
 	return rtEmissiveTargetRow( lights, li, s.Pw, s.Nw, contrib, ldir, dl, ndl );
 }
 

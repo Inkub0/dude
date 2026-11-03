@@ -84,17 +84,9 @@ void onb( vec3 n, out vec3 t, out vec3 b ) {
 	b = vec3( c, s + n.y * n.y * a, -n.y );
 }
 
-// Trace + shade the bounce for the surface point Pw / normal Nw (world), seen from eyeW at view depth d, dithered
-// by the SCREEN pixel sfrag. Returns 0 = no bounce (miss / degenerate; Li = 0), 1 = shaded hit (Li = incoming
-// radiance, thit = hit distance), 2 = hit on an unshadeable row (Li = 0; rtgi_ray.frag keeps its alpha-1 output).
-// LiCache = the part of Li the irradiance cache may LEARN at the caller's primary point: everything but the direct
-// contribution of DUDE_LIGHT_DIFORWARD lights (flashlight, muzzle flashes, projectiles - fast lights whose bounce
-// would otherwise lag in the cache for Nmax frames). Equals Li when bp.skipForwardLights (the DI gather).
-int rtgiTraceBounce( RtgiBounceParms bp, vec3 Pw, vec3 Nw, vec3 eyeW, float d, vec2 sfrag, out vec3 Li, out float thit, out vec3 outDir, out vec3 LiCache ) {
-	Li = vec3( 0.0 );
-	LiCache = vec3( 0.0 );
-	thit = 0.0;
-	outDir = Nw;
+// The bounce's cosine-weighted direction for surface normal Nw at SCREEN pixel sfrag (rtgiTraceBounce's own; 0 = degenerate).
+// A caller that only needs it after the bounce recomputes it (the same numbers) instead of holding it through the hit shading.
+vec3 rtgiBounceDir( RtgiBounceParms bp, vec3 Nw, vec2 sfrag ) {
 	// one cosine-weighted hemisphere direction. r1/r2 = a Cranley-Patterson-rotated plastic-constant (Roberts) R2
 	// low-discrepancy sequence: each pixel gets its OWN R2 pair advanced by the frame index (low-discrepancy -> fast
 	// temporal convergence under NRD) phase-shifted by a per-pixel white-noise offset, so neighbouring pixels are
@@ -115,8 +107,23 @@ int rtgiTraceBounce( RtgiBounceParms bp, vec3 Pw, vec3 Nw, vec3 eyeW, float d, v
 	onb( Nw, T, B );
 	vec3 dir = T * ( cos( phi ) * sinT ) + B * ( sin( phi ) * sinT ) + Nw * cosT;
 	float dl2 = dot( dir, dir );
-	if ( !( dl2 > 1e-6 ) ) { return 0; }
-	dir *= inversesqrt( dl2 );
+	if ( !( dl2 > 1e-6 ) ) { return vec3( 0.0 ); }
+	return dir * inversesqrt( dl2 );
+}
+
+// Trace + shade the bounce for the surface point Pw / normal Nw (world), seen from eyeW at view depth d, dithered
+// by the SCREEN pixel sfrag. Returns 0 = no bounce (miss / degenerate; Li = 0), 1 = shaded hit (Li = incoming
+// radiance, thit = hit distance), 2 = hit on an unshadeable row (Li = 0; rtgi_ray.frag keeps its alpha-1 output).
+// LiCache = the part of Li the irradiance cache may LEARN at the caller's primary point: everything but the direct
+// contribution of DUDE_LIGHT_DIFORWARD lights (flashlight, muzzle flashes, projectiles - fast lights whose bounce
+// would otherwise lag in the cache for Nmax frames). Equals Li when bp.skipForwardLights (the DI gather).
+int rtgiTraceBounce( RtgiBounceParms bp, vec3 Pw, vec3 Nw, vec3 eyeW, float d, vec2 sfrag, out vec3 Li, out float thit, out vec3 outDir, out vec3 LiCache ) {
+	Li = vec3( 0.0 );
+	LiCache = vec3( 0.0 );
+	thit = 0.0;
+	outDir = Nw;
+	const vec3 dir = rtgiBounceDir( bp, Nw, sfrag );
+	if ( !( dot( dir, dir ) > 0.0 ) ) { return 0; }
 	outDir = dir;
 
 	// ray origin pulled toward the eye (rtao_ray.frag crease-leak fix) + a tiny normal lift
