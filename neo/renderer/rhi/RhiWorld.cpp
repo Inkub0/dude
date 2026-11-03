@@ -8839,7 +8839,11 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	// consumes it (L2). Default off = no-op. The fill guards itself to once per frame across passes.
 	RB_RHI_LightGridBegin( r, viewDef );
 	RB_RHI_LightGridFill( r, lightAddr, numLights );
-	rhi::ShaderHandle prog = r->LoadShader( "restir_di" );	// fresh 1-spp gather -> radiance
+	// the gather's DEFAULT program assumes both cheap RIS targets (restir_di.frag DI_FULL_TARGET): the full-target paths - the
+	// emitter area shade in the candidate loop, the material read before it - only compiled into restir_di_full, so the program
+	// everybody runs does not carry their registers (2026-11-03). Either debug A/B off -> the full-target program.
+	const bool diFullTarget = !r_rtEmissiveCheapTarget.GetBool() || !r_rtReStirDICheapTarget.GetBool();
+	rhi::ShaderHandle prog = r->LoadShader( diFullTarget ? "restir_di_full" : "restir_di" );	// fresh 1-spp gather -> radiance
 	if ( !prog ) {
 		return;
 	}
@@ -8931,6 +8935,7 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	parms.localParam1[0] = (float)( tr.frameCount & 0xFFFF );			// RNG decorrelation per frame
 	parms.texGen0S[0] = (float)idMath::ClampInt( 1, 16, r_rtEmissiveSamples.GetInteger() );	// emitter area samples averaged per shade (far-field, restir_di_shade.glsl)
 	parms.texGen0S[1] = r_rtEmissiveCheapTarget.GetBool() ? 1.0f : 0.0f;	// emitter candidates weighed analytically (diTargetLight)
+	parms.texGen0S[3] = 0.0f;	// restir_di.frag diOpaqueZero: ALWAYS 0 (an exact late re-derivation the shader compiler cannot merge away)
 	parms.localParam1[2] = cbParity;									// checkerboard parity (0 = off)
 	// gather runs at rw x rh: gl_FragCoord -> [0,1] uv is 1/rw, -> the full-res depth tc carries the (w/rw)
 	// stretch (mirrors RB_RHI_RtgiPass). At scale 1 + no checkerboard: 1/w, 1/uploadW (unchanged).
@@ -9073,7 +9078,7 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	const int  boostK    = ( r_rtReStirDIBoost.GetInteger() > 1 ) ? idMath::ClampInt( 2, 4, r_rtReStirDIBoost.GetInteger() ) : 0;
 	// the boost is a compiled VARIANT of the gather (restir_di_boost.frag): its K-pick arrays cost the plain gather ~0.7 ms
 	// of occupancy even with nothing boosted, so the plain program carries none of it
-	const rhi::ShaderHandle boostProg = ( boostK > 0 ) ? r->LoadShader( "restir_di_boost" ) : 0;
+	const rhi::ShaderHandle boostProg = ( boostK > 0 ) ? r->LoadShader( diFullTarget ? "restir_di_boost_full" : "restir_di_boost" ) : 0;
 	const rhi::ShaderHandle youngProg = ( boostK > 0 ) ? r->LoadShader( "restir_di_young" ) : 0;
 	// the per-pixel young reason (R8, gather layout) the boost pass reads back clustered (3x3 majority)
 	if ( boostK > 0 && youngProg != 0 ) {
