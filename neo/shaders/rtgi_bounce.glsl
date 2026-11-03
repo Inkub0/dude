@@ -238,8 +238,10 @@ int rtgiTraceBounce( RtgiBounceParms bp, vec3 Pw, vec3 Nw, vec3 eyeW, float d, v
 		uint  emRng     = lgPcg( uint( sfrag.x ) * 7919u + uint( sfrag.y ) * 104729u + uint( bp.sampleFrame ) * 15485863u + 0x632BE5ABu ) | 1u;
 		float emWSum    = 0.0, emWChosen = 0.0;
 		uint  emChosen  = 0xFFFFFFFFu;
+		uint liNext = lgUse ? lgSlotLight( lgG, lgBase, 0u ) : 0u;		// the next stored candidate, read ahead (as the DI gather)
 		for ( uint ii = 0u; ii < nIter; ii++ ) {
-			uint li = lgUse ? lgSlotLight( lgG, lgBase, ii ) : ii;
+			uint li = lgUse ? liNext : ii;
+			if ( lgUse && ii + 1u < nIter ) { liNext = lgSlotLight( lgG, lgBase, ii + 1u ); }
 			if ( li >= bp.nLights ) { continue; }										// a stale grid slot: never past the buffer
 			if ( gate && !dudeLightInRange( lights, li, hitWorld ) ) { continue; }
 			const uint lflags = lights.l[ li ].flags;

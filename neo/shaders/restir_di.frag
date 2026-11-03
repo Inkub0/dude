@@ -319,10 +319,14 @@ void main() {
 	bool useGrid = lgN > 0u;
 	if ( useGrid ) { draws = lgN; }
 	bool pdfOne = exhaustive || useGrid;		// candidate pdf 1 (enumeration) vs the uniform-M draw's 1/nLights
+	// the NEXT stored candidate is read while this one is weighed (software pipelining): its light row's loads then issue at
+	// once instead of waiting a memory round trip on the grid slot - the same candidates in the same order
+	uint liNext = useGrid ? lgSlotLight( lgGrid, lgBase, 0u ) : 0u;
 	for ( uint i = 0u; i < draws; i++ ) {
 		uint li;
 		if ( useGrid ) {
-			li = lgSlotLight( lgGrid, lgBase, i );			// the cell's i-th stored candidate
+			li = liNext;										// the cell's i-th stored candidate
+			if ( i + 1u < draws ) { liNext = lgSlotLight( lgGrid, lgBase, i + 1u ); }
 			if ( li >= nLights ) { continue; }				// a stale slot never walks past the buffer
 		} else {
 			li = i;
