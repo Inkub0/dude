@@ -143,28 +143,31 @@ exclusive until DI gets its own NRD instance (fine while DI is debug-only).
 | `r_rtReStirDICheckerboard` | 1 | trace a half-pixel checkerboard (packed left), NRD reconstructs via a full-res guide pass + IN_MV. |
 | `r_rtReStirDIBilateralUpscale` | 1 | depth+normal-aware upscale of a reduced-res gather (vs bilinear); inert at full res. |
 | `r_rtReStirDIDynamicForward` | 1 | **R6 bool:** 1 = first-person weapon lights stay forward (masked out of DI anyway), 0 = none (every light through DI). The gradient handles all other lights; the old mode-1 fast-light rules + handover crossfade were removed. |
-| `r_rtReStirDIHistory` | 16 | NRD history length (its own; no longer borrows `r_rtgiHistory`). 2..63. |
-| `r_rtReStirDIHistoryFix` | 0 | `historyFixFrameNum`; moving-part lever. 0 = NRD default (3). |
-| `r_rtReStirDIEdgeStop` | 4 | edge-stopping scale (ReLAX `lobeAngleFraction`); grate lever, costs detail. 0/1 = no scaling. |
-| `r_rtReStirDIHistoryMs` | 666 | **R0** history window in ms (0 = `r_rtReStirDIHistory` frames); converted per frame from a 0.2 s low-passed FPS. |
-| `r_rtReStirDIFastClamp` | 2.0 | **R0** NRD `fastHistoryClampingSigmaScale` [1;3] (also read by ReLAX). |
-| `r_rtReStirDIAntilag` | 1 | **R0** NRD built-in antilag; 0 = inert (NRD's recommended initial-integration baseline). |
+| `r_rtReStirDIHistory` | 2 | NRD history length (its own; no longer borrows `r_rtgiHistory`). 2..63. |
+| `r_rtReStirDIHistoryFix` | 4 | `historyFixFrameNum`; moving-part lever. 0 = NRD default (3). |
+| `r_rtReStirDIEdgeStop` | 1.3 | edge-stopping scale (ReLAX `lobeAngleFraction`); grate lever, costs detail. 0/1 = no scaling. |
+| `r_rtReStirDIHistoryMs` | 450 | **R0** history window in ms (0 = `r_rtReStirDIHistory` frames); converted per frame from a 0.2 s low-passed FPS. |
+| `r_rtReStirDIFastClamp` | 1.7 | **R0** NRD `fastHistoryClampingSigmaScale` [1;3] (also read by ReLAX). |
+| `r_rtReStirDIAntilag` | 0 | **R0** NRD built-in antilag; 0 = inert (NRD's recommended initial-integration baseline). |
 | `r_nrdSigma` | 0 | **R0** keep `SIGMA_SHADOW` in the NRD instance (never dispatched since H3); rebuilds NRD. |
 | `r_rtReStirDIGradient` | 1 | **R1** temporal gradient confidence -> NRD IN_DIFF_CONFIDENCE (re-shade last frame's light; RTXDI / Q2RTX recipe). |
-| `r_rtReStirDIGradientPower` | 8 | **R1** confidence sharpening power (RTXDI / Remix 8). |
-| `r_rtReStirDIGradientHistory` | 2 | **R1** rise-only temporal smoothing (frames); 2 bridges gradient flicker without trailing movers. |
-| `r_rtReStirDIGradientFloor` | 0.36 | **R1** minimum confidence (ReLAX applies it directly). |
-| `r_rtReStirDIGradientBias` | 0.01 | **R1** darkness bias in the change's denominator. |
-| `r_rtReStirDIGradientDeadzone` | 0.25 | **R1** relative per-light change below which nothing counts (authored flicker). |
-| `r_rtReStirDIGradientStatic` | 2.0 | **R1** static threshold (full-res px) for the exact previous-position re-shade. |
-| `r_rtReStirDIGradientStratum` | 3 | **R1** NxN stratum (3 = RTXDI 1/9; 5 = NRD's 1/5 res, ~1/3 the cost). |
+| `r_rtReStirDIGradientPower` | 13 | **R1** confidence sharpening power (RTXDI / Remix 8). |
+| `r_rtReStirDIGradientHistory` | 14 | **R1** rise-only temporal smoothing (frames); 2 bridges gradient flicker without trailing movers. |
+| `r_rtReStirDIGradientFloor` | 0.09 | **R1** minimum confidence (ReLAX applies it directly). |
+| `r_rtReStirDIGradientBias` | 0.012 | **R1** darkness bias in the change's denominator. |
+| `r_rtReStirDIGradientDeadzone` | 0.12 | **R1** relative per-light change below which nothing counts (authored flicker). |
+| `r_rtReStirDIGradientStatic` | 8 | **R1** static threshold (full-res px) for the exact previous-position re-shade. |
+| `r_rtReStirDIGradientStratum` | 2 | **R1** NxN stratum (3 = RTXDI 1/9; 5 = NRD's 1/5 res, ~1/3 the cost). |
 | `r_rtReStirDIGradientFilterPasses` | 1 | **R1** A-trous passes over the gradient (RTXDI 4); 1 hugs a change tightest (user-tuned). |
-| `r_rtReStirDIRelaxFast` / `RelaxPrepass` / `RelaxPhi` / `RelaxAtrous` / `RelaxVarianceHist` / `RelaxConfRelax` / `RelaxFirefly` | 3 / 18 / 0.7 / 3 / 2 / 0.75 / 1 | **R2** ReLAX settings (user-tuned 2026-10-13; started from the Remix direct-light preset + RTXDI sample). ReLAX is the only DI denoiser since R6. |
-| `r_rtReStirDIBoost` | 2 | **R3a** K picks + K rays on clustered YOUNG pixels (revealed from behind an occluder / entered the screen / held a few frames); 0 or 1 = off, 2..4 = K. Default 2 since 2026-10-12 (user decision). |
+| `r_rtReStirDIRelaxFast` / `RelaxPrepass` / `RelaxPhi` / `RelaxAtrous` / `RelaxVarianceHist` / `RelaxConfRelax` / `RelaxFirefly` | 8 / 12 / 0.6 / 4 / 2 / 0.35 / 0 | **R2** ReLAX settings (user-tuned, last 2026-11-03; started from the Remix direct-light preset + RTXDI sample). ReLAX is the only DI denoiser since R6. |
+| `r_rtReStirDIRelaxFastMs` | 75 | ReLAX fast history in ms (0 = `r_rtReStirDIRelaxFast` frames); bounds how long a change can trail. |
+| `r_rtReStirDIDisocclusion` | 0.012 | NRD `disocclusionThreshold` (relative depth); looser = fewer false resets on movers, more bleed. |
+| `r_rtReStirDIGradientReset` | 0.2 | **R1** exact relative change that resets ReLAX history outright (`IN_DISOCCLUSION_THRESHOLD_MIX`). |
+| `r_rtReStirDIBoost` | 3 | **R3a** K picks + K rays on clustered YOUNG pixels (revealed from behind an occluder / entered the screen / held a few frames); 0 or 1 = off, 2..4 = K. Default 3 since 2026-11-03 (user tuning; 2 since 2026-10-12). |
 | `r_rtReStirDIBoostHistory` | 2 | **R3a** NRD-history trigger: frames below which a pixel is boosted (stays until 2x, capped at `r_rtReStirDIHistory`); 0 = off, only true disocclusion + screen entry (held 4 frames). 0.9.7 shipped 4 (with `r_rtReStirDIBoostConfidence` 0.3, a low-confidence trigger) for the shadow-smear fix: +1.9 ms at Path Tracing for no visible gain once the gradient fix had stopped the smear. Back to 2 on 2026-10-29, the confidence trigger removed, configs on 4 migrated by config schema 4 (docs/rtx-sigma-shadows.md, M1). |
 
-Defaults are the user-tuned compromise (ReLAX / denoiser knobs re-tuned 2026-10-13; see the ReLAX row + History
-16 / HistoryMs 666 / HistoryFix 0 / EdgeStop 4 / Checkerboard 1). All `CVAR_ARCHIVE`, so a user's own values
+Defaults are the user-tuned compromise (the denoiser knobs of the Debugging -> DI Denoiser (ReLAX) section, last
+re-tuned 2026-11-03 from the user's dude.cfg). All `CVAR_ARCHIVE`, so a user's own values
 persist in config regardless of these source defaults (existing configs keep their values unless the schema is
 bumped). `hitDist` scale (1024) is in-source only.
 
