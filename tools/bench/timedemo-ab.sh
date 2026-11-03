@@ -17,6 +17,10 @@
 #                first-sight streaming (0); Path Tracing Nightmare, emissive mode on
 #   set shadermath : perf/restir-shader-math, two binaries - A / C = master (build/dude-ref-master), B / D = the branch
 #                (build/dude); A / B emissive mode, C / D placed lights (emissive off). VARIANTS="A B" = the short run
+#   set boostpicks : A = master (build/dude-ref-master), B = boost picks in the gather + grid skip (build/dude-items13),
+#                C = B + candidate read-ahead (build/dude); emissive mode; NVIDIA register readout in each run's stdout.log
+#   set bounceprof : the GI bounce's cost split, 8 variants of build/dude-bounceprof (r_rtgiBounceProfile bits; the image is
+#                wrong - timing only); run it with 2 rounds
 #   (gather / boostgi / bounceem are HISTORY - 2026-11-02: their cvars only existed in those branches' builds)
 #   set gather : the ReSTIR DI gather's cost split in EMISSIVE MODE (needs the diag/di-gather-profile build: r_rtDiGatherProfile
 #                bits each remove one piece - timing only, the image is wrong) - 7 variants; your authored emissive setups are
@@ -135,6 +139,34 @@ case "$SET" in
 		DESC[B]="refactored shaders, emissive mode";    ARGS[B]="$EM";                          BINV[B]="$BIN"
 		DESC[C]="master shaders, placed lights";        ARGS[C]="+set r_rtEmissiveLighting 0";  BINV[C]="$REPO/build/dude-ref-master"
 		DESC[D]="refactored shaders, placed lights";    ARGS[D]="+set r_rtEmissiveLighting 0";  BINV[D]="$BIN"
+		;;
+	boostpicks)
+		# 2026-11-03: three BINARIES, emissive mode (demo1 setup), the drivers' register readout in every run's stdout.log
+		# (r_vkPipelineStats restir_di: all variants alike, so the capture never favours one). A = master
+		# (build/dude-ref-master), B = the boost's picks drawn by the plain gather + the light-grid fill skipping covered cells
+		# (build/dude-items13), C = B + the candidate loops reading the next grid slot ahead (build/dude)
+		PRESET=5; RTX=2; SEED_EMISSIVE=1
+		EM="+set r_rtEmissiveLighting 1 +set r_rtEmissivePhysical 1 +set r_rtEmissiveSamples 1 +set r_vkPipelineStats restir_di"
+		NAMES=( A B C )
+		DESC[A]="master";                                   ARGS[A]="$EM";   BINV[A]="$REPO/build/dude-ref-master"
+		DESC[B]="boost picks in the gather + grid skip";    ARGS[B]="$EM";   BINV[B]="$REPO/build/dude-items13"
+		DESC[C]="B + candidate read-ahead";                 ARGS[C]="$EM";   BINV[C]="$BIN"
+		;;
+	bounceprof)
+		# 2026-11-03: the GI bounce's cost split (diag/rtgi-bounce-profile, build/dude-bounceprof: r_rtgiBounceProfile bits each
+		# remove one piece - timing only, the image is WRONG). Emissive mode as in boostpicks. 2 rounds are enough.
+		PRESET=5; RTX=2; SEED_EMISSIVE=1
+		EM="+set r_rtEmissiveLighting 1 +set r_rtEmissivePhysical 1 +set r_rtEmissiveSamples 1"
+		PB="$REPO/build/dude-bounceprof"
+		NAMES=( A B C D E F G H )
+		DESC[A]="everything (profile 0)";              ARGS[A]="$EM +set r_rtgiBounceProfile 0";   BINV[A]="$PB"
+		DESC[B]="no GI bounce at all";                 ARGS[B]="$EM +set r_rtgiBounceProfile 1";   BINV[B]="$PB"
+		DESC[C]="bounce trace only, no hit shading";   ARGS[C]="$EM +set r_rtgiBounceProfile 2";   BINV[C]="$PB"
+		DESC[D]="no placed lights at the hit";         ARGS[D]="$EM +set r_rtgiBounceProfile 4";   BINV[D]="$PB"
+		DESC[E]="no emitters at the hit";              ARGS[E]="$EM +set r_rtgiBounceProfile 8";   BINV[E]="$PB"
+		DESC[F]="no dominant shadow ray at the hit";   ARGS[F]="$EM +set r_rtgiBounceProfile 16";  BINV[F]="$PB"
+		DESC[G]="no cache at the hit";                 ARGS[G]="$EM +set r_rtgiBounceProfile 32";  BINV[G]="$PB"
+		DESC[H]="no cache update at the pixel";        ARGS[H]="$EM +set r_rtgiBounceProfile 64";  BINV[H]="$PB"
 		;;
 	*)
 		sed -n '2,40p' "$0"

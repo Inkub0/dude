@@ -47,6 +47,21 @@ shared vec3  sPos[ 64 ];
 shared uint  sPass[ 64 ];
 shared uint  sCount;
 
+// A cell of cascade c >= 1 that lies well inside cascade c - 1's box is NEVER looked up: every consumer resolves a point
+// to the SMALLEST cascade containing it (lgPickCascade - the DI gather, the GI bounce, the debug view, jittered or not),
+// and for every point of such a cell that is c - 1 or finer. Those are the coarse cascades' cells around the camera - the
+// ones whose light lists are fullest. The margin covers a consumer snapping differently: its camera is the inverse view's
+// translation, the fill's is vieworg, and where the two straddle a multiple of a cell size a cascade origin moves by one
+// cell - the c and c - 1 boxes then move against each other by at most one cell of c - 1 (both shift the same way). Two
+// cells of c - 1 of margin: the cell spans [ a, a + 2 ) in cells of c - 1 from c - 1's origin, a >= 2 and a + 4 <= res.
+// cellC = the first cell of a box of cells, span = that box's extent in cells of c (1: one cell, 4: a block).
+bool lgCoveredByFiner( vec3 camPos, int res, int c, ivec3 cellC, int span ) {
+	if ( c <= 0 ) { return false; }
+	const float csF = pc.cellBase * float( 1 << ( c - 1 ) );
+	const ivec3 a   = ivec3( round( ( lgCascadeOrigin( camPos, pc.cellBase, res, c ) - lgCascadeOrigin( camPos, pc.cellBase, res, c - 1 ) ) / csF ) ) + 2 * cellC;
+	return all( greaterThanEqual( a, ivec3( 2 ) ) ) && all( lessThanEqual( a + 2 * span + 2, ivec3( res ) ) );
+}
+
 void lgFillBlock() {
 	// the workgroup's block of 4 x 4 x 4 cells in cascade c; a cell past res (res not a multiple of 4) still joins the
 	// block's loads and barriers but writes nothing
@@ -67,6 +82,11 @@ void lgFillBlock() {
 	int      base   = int( cellIndex * lgStride( slots ) );
 
 	vec3  camPos = vec3( pc.camX, pc.camY, pc.camZ );
+	// never looked up (lgCoveredByFiner): no scan, written empty (a reader would fall back to the full light loop - never wrong).
+	// A block wholly covered skips the row stream and its barriers altogether (the same verdict for all its threads).
+	const bool blockCovered = cB < int( pc.cascades ) && all( lessThanEqual( blk + ivec3( 3 ), ivec3( res - 1 ) ) )
+	                       && lgCoveredByFiner( camPos, res, cB, blk, 4 );
+	const bool cellScan     = cellLive && !blockCovered && !lgCoveredByFiner( camPos, res, cB, cellC, 1 );
 	int   c;
 	vec3  center = lgCellCenter( cellIndex, camPos, pc.cellBase, int( pc.res ), c );
 	float cs     = pc.cellBase * float( 1 << c );
@@ -95,7 +115,8 @@ void lgFillBlock() {
 	vec3  boxLo  = origB + ( vec3( blk ) + 0.5 ) * csB;
 	vec3  boxHi  = origB + ( vec3( blk + ivec3( 3 ) ) + 0.5 ) * csB;
 	float halfDB = csB * 0.8660254;
-	for ( uint chunk = 0u; chunk < pc.nLights; chunk += 64u ) {			// uniform trip count: every barrier is reached by all
+	const uint nStream = blockCovered ? 0u : pc.nLights;				// (uniform across the workgroup)
+	for ( uint chunk = 0u; chunk < nStream; chunk += 64u ) {			// uniform trip count: every barrier is reached by all
 		uint  rli   = chunk + lid;
 		bool  pass  = false;
 		uint  rflags = 0u;
@@ -126,7 +147,7 @@ void lgFillBlock() {
 		memoryBarrierShared();
 		barrier();
 		uint n = min( sCount, 64u );
-		for ( uint t = 0u; t < n && cellLive; t++ ) {
+		for ( uint t = 0u; t < n && cellScan; t++ ) {
 			uint li    = sRow[ t ];
 			uint flags = sFlags[ t ];											// (fog / DIFORWARD rows never reach the list: the block filter skips them)
 			// (E2 v3: an EMITTER row ranks like any light - its colour is the irradiance proxy at its reach, its radius the
