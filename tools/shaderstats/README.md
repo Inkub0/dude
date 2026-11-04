@@ -2,7 +2,8 @@
 
 These tools measure what a shader edit costs, and check that it still computes the same thing, without launching the game.
 They compile the engine's shaders the way the build does, then hand them to **Mesa RADV**, the Vulkan driver of an AMD GPU.
-On this machine that is the CPU's integrated GPU. The NVIDIA card is never used, and nothing here renders a frame.
+On this machine that is the CPU's integrated GPU. Nothing here renders a frame; only `probe.py --nvidia` touches the NVIDIA
+card, and only to compile pipelines for its register counts.
 
 They answer two questions before a benchmark is worth running:
 
@@ -52,10 +53,16 @@ tools/shaderstats/probe.py --tree /tmp/master/neo/shaders restir_di
 **These are AMD numbers, used as a proxy.**
 
 - Instruction and VALU cuts usually carry over to NVIDIA. Register counts don't carry over exactly.
-- For the NVIDIA card's own figures:
-  1. In the console, run `r_vkPipelineStats restir_di`, then `vid_restart`.
-  2. Read the console when the DI gather first draws. The bench writes the same output to each run's `stdout.log`.
-  3. NVIDIA reports local memory (spills) with 2^36 added; subtract it.
+- For the NVIDIA card's own figures, run `probe.py --nvidia [program ...]`. It compiles the pipelines with the NVIDIA driver
+  and prints its register count and local memory (spills). The numbers match the in-game `r_vkPipelineStats restir_di`
+  readout. Don't run it during a benchmark.
+
+**Fewer instructions is not always faster.**
+
+- On 2026-11-03 a precomputed emitter-triangle normal cut 9% of the triangle weight's math on AMD, left NVIDIA's registers
+  unchanged (96), and still made the DI gather 11-15% slower on the 3080 Ti.
+- Its one extra 16-byte load per triangle cost more than the math it saved: the emitter triangle walk is limited by memory
+  loads there, not by math. Count a change's loads as well as its instructions.
 
 **`--nort` stubs every ray query.**
 
