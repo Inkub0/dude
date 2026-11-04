@@ -111,4 +111,19 @@ Q4BASE="/path/to/Quake 4/q4base" python3 tools/quake4/q4_inventory.py > /tmp/q4_
   the user's to start. Settings come from a copy of `~/.config/dude/q4base`, so the sweep's
   `+set`s never reach the real `dude.cfg`; `SHOTS=1` adds a screenshot per map.
 
+Release and licence tools ([docs/quake4-release-licensing.md](../../docs/quake4-release-licensing.md)):
+
+- `check_no_retail_data.py --retail <install> <archives or folders>` — release gate: no shipped
+  file (nested pk4/zip included) has the content of a retail file or replaces one by path in
+  the same game folder. Indexes the install by zip CRC, so it takes about a second.
+- `check_provenance.py --ref name[!]=<tree> ... [--interface <SDK tree>]` — runs of identical
+  code between DUDE's Quake 4-era changes and reference trees (24-token windows, everything
+  DUDE already had before the Quake 4 work removed); `!` refs (decompile-derived BSE trees)
+  fail the run, SDK interface text excepted.
+- `q4base_licence_audit.py --so <q4base.so> --sdk <SDK source/>` — which DUDE source lines
+  produce code in the game library (DWARF line tables) and whose they are (git blame): id code
+  also in the SDK, GPL-only id code, the DUDE author's, third parties' (per commit).
+- `package-q4.sh <version> <platform> <q4base library>` — the separate `dude-q4` release
+  archive (library, unmodified EULA, README, BUILDINFO from `q4base.buildinfo`), with the gates.
+
 Nothing here touches the install: the scripts only read the `.pk4` zip archives.
