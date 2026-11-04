@@ -96,15 +96,20 @@ cat > "$STAGE/README-QUAKE4.txt" <<EOF
 DUDE $VER - Quake 4 game library
 ================================
 
-This archive adds Quake 4 to DUDE $VER. Extract it into your DUDE folder, so that
-$LIBNAME sits next to the DUDE executable.
+This archive adds Quake 4 to DUDE $VER.
 
-You need your own copy of the full retail Quake 4 (Steam, GOG or disc). No Quake 4 game data
-is included, and DUDE never copies any: it reads your installed copy where it is. Start it with
+You need your own copy of the full retail Quake 4 (Steam, GOG or disc). The Quake 4 demo is
+not supported: DUDE refuses it, because the licence below lets this library run with the
+full version of Quake 4 only. No Quake 4 game data is included, and DUDE never copies any:
+it reads your installed copy where it is.
 
-    $EXE +set com_title quake4 +set fs_basepath "/path/to/Quake 4"
+Setup: extract DUDE $VER and this archive into your Quake 4 folder (the one that contains
+q4base/), so that $LIBNAME sits next to the DUDE executable, and start DUDE there. From
+another folder, start it with
 
-(the folder that contains q4base/).
+    $EXE +set fs_basepath "/path/to/Quake 4"
+
+If the folder holds Doom 3's game data as well, add +set com_title quake4.
 
 Licence - please read
 ---------------------

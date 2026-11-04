@@ -146,10 +146,14 @@ tools/quake4/check_provenance.py --interface ~/quake4-refs/q4sdk-frisk-initial \
     --ref 'openq4-bse!=~/quake4-refs/openq4/src/bse' \
     --ref 'idtech4a-bse!=~/quake4-refs/idtech4a/doom3/neo/raven/bse' \
     --ref q4sdk=~/quake4-refs/q4sdk-frisk-initial
-# both repositories committed and tagged vX.Y, then the library from those commits
-tools/quake4/build-q4game.sh            # (release build dir: DUDE_BUILD=<dir>)
-Q4DIR="/path/to/Quake 4" tools/quake4/package-q4.sh X.Y linux-x86_64 build/q4base.so
-# -> dist/release-X.Y/dude-q4-X.Y-linux-x86_64.tar.gz (win64: q4base.dll -> .zip)
+# both repositories committed and tagged vX.Y, then the library from those commits, with
+# the release binaries: build-linux-release.sh builds q4base.so in its sandbox (same glibc
+# floor as dude) when ~/dude-quake4-game exists (Q4GAME_DIR); Windows with MinGW, like dude.exe
+./build-linux-release.sh
+DUDE_BUILD=build-win tools/quake4/build-q4game.sh
+Q4DIR="/path/to/Quake 4" tools/quake4/package-q4.sh X.Y linux-x86_64 build-linux-release/q4base.so
+Q4DIR="/path/to/Quake 4" tools/quake4/package-q4.sh X.Y win64 build-win/q4base.dll
+# -> dist/release-X.Y/dude-q4-X.Y-linux-x86_64.tar.gz, dude-q4-X.Y-win64.zip
 # every archive of the release, DUDE's included: nothing from retail Quake 4
 python3 -I tools/quake4/check_no_retail_data.py --retail "/path/to/Quake 4" dist/release-X.Y/*.tar.gz dist/release-X.Y/*.zip
 # for the notes: the GPL code inside the library (record the class table)

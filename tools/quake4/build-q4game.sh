@@ -73,9 +73,10 @@ cp "$OUT/$LIB" "$BUILD/$LIB.new"
 mv -f "$BUILD/$LIB.new" "$BUILD/$LIB"
 # what it was built from, for the release package's BUILDINFO (tools/quake4/package-q4.sh): the
 # GPL source of the idlib inside it is DUDE at this commit
+# (safe.directory: in build-linux-release.sh's sandbox the checkouts belong to another uid)
 stamp() {
-	local rev; rev="$(git -C "$1" rev-parse HEAD)"
-	if [ -n "$(git -C "$1" status --porcelain --untracked-files=no -- $2)" ]; then rev="$rev (uncommitted changes)"; fi
+	local rev; rev="$(git -c safe.directory='*' -C "$1" rev-parse HEAD)"
+	if [ -n "$(git -c safe.directory='*' -C "$1" status --porcelain --untracked-files=no -- $2)" ]; then rev="$rev (uncommitted changes)"; fi
 	echo "$rev"
 }
 {
