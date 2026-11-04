@@ -1,0 +1,18 @@
+Additional permission under GNU GPL version 3 section 7
+
+The following applies only to the parts of DUDE whose copyright is held by
+Inkub0 - the code and text added or changed in this repository's history by
+commits authored as Inkub0. It does not apply to code by id Software, the
+dhewm3 contributors or any other author.
+
+If you modify DUDE, or any covered work, by linking or combining it with the
+game code of the Quake 4 Software Development Kit by Raven Software and
+id Software (or a modified version of that code), containing parts covered
+by the terms of the Quake 4 SDK End User License Agreement, the licensor of
+those parts of DUDE grants you additional permission to convey the resulting
+work. The parts of such a combination that come from the Quake 4 SDK remain
+under the terms of its End User License Agreement; the GNU GPL does not
+require you to provide them as Corresponding Source.
+
+You may remove this additional permission from your copy, or from works based
+on it, as section 7 of the GNU GPL version 3 allows.

@@ -36,7 +36,7 @@ rewritten (next section):
 |---|---|---|---|
 | id-sdk | id's GPL code whose text is also in the SDK (we hold it under the EULA too) | 22 582 (91.4 %) | 12 121 (87.0 %) |
 | id-gpl | id's GPL code not in the SDK | 697 (2.8 %) | 597 (4.3 %) |
-| own | DUDE author's code (the section 7 permission, [draft](quake4-gpl-section7-permission.md), would cover it) | 1 080 (4.4 %) | 1 120 (8.0 %) |
+| own | DUDE author's code (covered by the [section 7 permission](quake4-gpl-section7-permission.md)) | 1 080 (4.4 %) | 1 120 (8.0 %) |
 | third | dhewm3 and other contributors | 340 (1.4 %) | 100 (0.7 %) |
 
 Substantive code lines (braces and bare `return;` counted apart). Readings:
@@ -113,8 +113,6 @@ removed first, SDK interface text not held against the decompile-derived trees):
 
 ## Open
 
-- **The section 7 permission**: [draft](quake4-gpl-section7-permission.md), waiting for the
-  author's wording.
 - **id's GPL-only code** (597 lines, mostly the GCC SIMD paths): only id could permit it. The
   game could use only the generic SIMD processor, or the engine's, to drop most of it.
 - **What no step here resolves**: whether a GPL engine may load a non-GPL game library (the
@@ -125,4 +123,6 @@ removed first, SDK interface text not held against the decompile-derived trees):
 Done for 0.9.8: `--gc-sections`, the dhewm3 rewrites, a Windows `q4base.dll` (MinGW, the
 same toolchain as `dude.exe`), the game picked from the installed paks (both games in one
 folder: an error naming the `com_title` choices), and the demo refused (`GameTitle::
-RequireFullGame`: Quake 4 needs `maps/game/core2.proc` and `process2.proc`).
+RequireFullGame`: Quake 4 needs `maps/game/core2.proc` and `process2.proc`), and the
+[section 7 permission](quake4-gpl-section7-permission.md) for the DUDE author's code
+(`COPYING-QUAKE4-EXCEPTION.txt`, shipped in DUDE's and the `dude-q4` archives).
