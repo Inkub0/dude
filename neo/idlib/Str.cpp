@@ -34,17 +34,9 @@ If you have questions concerning this license or the applicable additional terms
 
 #include "idlib/Str.h"
 
-// DG: idDynamicBlockAlloc isn't thread-safe and idStr is used both in the main thread
-//     and the async thread! For some reason this seems to cause lots of problems on
-//     newer Linux distros if DUDE is built with GCC9 or newer (see #391).
-//     No idea why it apparently didn't cause that (noticeable) issues before..
-#if 0 // !defined( ID_REDIRECT_NEWDELETE ) && !defined( MACOS_X )
-	#define USE_STRING_DATA_ALLOCATOR
-#endif
-
-#ifdef USE_STRING_DATA_ALLOCATOR
-static idDynamicBlockAlloc<char, 1<<18, 128>	stringDataAllocator;
-#endif
+// String memory comes from the C heap (malloc / realloc / free), never from a pool: idStr is
+// used by the main and the async thread at once, and a string made in one module (the engine,
+// a game library) may be grown or freed in another, where only the C heap is common ground.
 
 idVec4	g_color_table[16] =
 {
@@ -87,48 +79,28 @@ idStr::ReAllocate
 ============
 */
 void idStr::ReAllocate( int amount, bool keepold ) {
-	char	*newbuffer;
-	int		newsize;
-	int		mod;
-
-	//assert( data );
 	assert( amount > 0 );
 
-	mod = amount % STR_ALLOC_GRAN;
-	if ( !mod ) {
-		newsize = amount;
-	}
-	else {
-		newsize = amount + STR_ALLOC_GRAN - mod;
-	}
+	// whole allocation granules: amount rounded up to the next multiple of STR_ALLOC_GRAN
+	const int newsize = ( ( amount + STR_ALLOC_GRAN - 1 ) / STR_ALLOC_GRAN ) * STR_ALLOC_GRAN;
 	alloced = newsize;
 
-#ifdef USE_STRING_DATA_ALLOCATOR
-	newbuffer = stringDataAllocator.Alloc( alloced );
-	if ( keepold && data ) {
-		data[ len ] = '\0';
-		strcpy( newbuffer, data );
+	const bool onHeap = ( data != NULL && data != baseBuffer );
+	if ( onHeap ) {
+		// already ours: realloc keeps the text, and dropping it is free
+		data = static_cast<char *>( realloc( data, newsize ) );
+		return;
 	}
 
-	if ( data && data != baseBuffer ) {
-		stringDataAllocator.Free( data );
+	// first heap buffer: leave the inline baseBuffer, taking the text along if asked
+	char *heap = static_cast<char *>( malloc( newsize ) );
+	int kept = 0;
+	if ( keepold && data != NULL ) {
+		kept = len;
+		memcpy( heap, data, kept );
 	}
-
-	data = newbuffer;
-#else
-	if ( data && data != baseBuffer ) {
-		data = (char *)realloc( data, newsize );
-	} else {
-		newbuffer = (char *)malloc( newsize );
-		if ( data && keepold ) {
-			memcpy( newbuffer, data, len );
-			newbuffer[ len ] = '\0';
-		} else {
-			newbuffer[ 0 ] = '\0';
-		}
-		data = newbuffer;
-	}
-#endif
+	heap[ kept ] = '\0';
+	data = heap;
 }
 
 /*
@@ -137,12 +109,8 @@ idStr::FreeData
 ============
 */
 void idStr::FreeData( void ) {
-	if ( data && data != baseBuffer ) {
-#ifdef USE_STRING_DATA_ALLOCATOR
-		stringDataAllocator.Free( data );
-#else
+	if ( data != NULL && data != baseBuffer ) {
 		free( data );
-#endif
 		data = baseBuffer;
 	}
 }
@@ -765,25 +733,28 @@ idStr &idStr::SetFileExtension( const char *extension ) {
 	return *this;
 }
 
-// DG: helper-function that returns true if the character c is a directory separator
-//     on the current platform
-static ID_INLINE bool isDirSeparator( int c )
-{
-	if ( c == '/' ) {
-		return true;
-	}
-#ifdef _WIN32
-	if ( c == '\\' ) {
-		return true;
-	}
-#elif defined(__AROS__)
-	if ( c == ':' ) {
-		return true;
-	}
+// A path separator on this platform: '/' everywhere, '\\' as well on Windows, and the
+// volume ':' on AROS.
+static ID_INLINE bool Str_IsPathSeparator( char c ) {
+#if defined( _WIN32 )
+	return c == '/' || c == '\\';
+#elif defined( __AROS__ )
+	return c == '/' || c == ':';
+#else
+	return c == '/';
 #endif
-	return false;
 }
-// DG end
+
+// Where the file extension of a path's last component starts (the index of its '.'), or -1
+// when that component has none - a dot in a folder name above it does not count.
+static int Str_ExtensionDot( const char *path, int length ) {
+	for ( int i = length - 1; i >= 0 && !Str_IsPathSeparator( path[ i ] ); i-- ) {
+		if ( path[ i ] == '.' ) {
+			return i;
+		}
+	}
+	return -1;
+}
 
 /*
 ============
@@ -791,18 +762,10 @@ idStr::StripFileExtension
 ============
 */
 idStr &idStr::StripFileExtension( void ) {
-	int i;
-
-	for ( i = len-1; i >= 0; i-- ) {
-		// DG: we're at a directory separator, nothing to strip at filename
-		if ( isDirSeparator( data[i] ) ) {
-			break;
-		} // DG end
-		if ( data[i] == '.' ) {
-			data[i] = '\0';
-			len = i;
-			break;
-		}
+	const int dot = Str_ExtensionDot( data, len );
+	if ( dot >= 0 ) {
+		data[ dot ] = '\0';
+		len = dot;
 	}
 	return *this;
 }
@@ -814,9 +777,7 @@ idStr::StripAbsoluteFileExtension
 */
 idStr &idStr::StripAbsoluteFileExtension( void ) {
 	int i;
-	// FIXME DG: seems like this is unused, but it probably doesn't do what's expected
-	//           (if you wanna strip .tar.gz this will fail with dots in path,
-	//            if you indeed wanna strip the first dot in *path* (even in some directory) this is right)
+	// cuts at the first '.' of the whole string, folder names included (no caller in DUDE)
 	for ( i = 0; i < len; i++ ) {
 		if ( data[i] == '.' ) {
 			data[i] = '\0';
@@ -834,17 +795,8 @@ idStr::DefaultFileExtension
 ==================
 */
 idStr &idStr::DefaultFileExtension( const char *extension ) {
-	int i;
-
-	// do nothing if the string already has an extension
-	for ( i = len-1; i >= 0; i-- ) {
-		// DG: we're at a directory separator, there was no file extension
-		if ( isDirSeparator( data[i] ) ) {
-			break;
-		} // DG end
-		if ( data[i] == '.' ) {
-			return *this;
-		}
+	if ( Str_ExtensionDot( data, len ) >= 0 ) {
+		return *this;	// it has one already
 	}
 	if ( *extension != '.' ) {
 		Append( '.' );
@@ -859,7 +811,7 @@ idStr::DefaultPath
 ==================
 */
 idStr &idStr::DefaultPath( const char *basepath ) {
-	if ( isDirSeparator( ( *this )[ 0 ] ) ) {
+	if ( Str_IsPathSeparator( ( *this )[ 0 ] ) ) {
 		// absolute path location
 		return *this;
 	}
@@ -882,12 +834,12 @@ void idStr::AppendPath( const char *text ) {
 		EnsureAlloced( len + strlen( text ) + 2 );
 
 		if ( pos ) {
-			if ( !isDirSeparator( data[ pos-1 ] ) ) {
+			if ( !Str_IsPathSeparator( data[ pos-1 ] ) ) {
 				data[ pos++ ] = '/';
 			}
 		}
 
-		if ( isDirSeparator( text[ i ] ) ) {
+		if ( Str_IsPathSeparator( text[ i ] ) ) {
 			i++;
 		}
 
@@ -912,7 +864,7 @@ idStr &idStr::StripFilename( void ) {
 	int pos;
 
 	pos = Length() - 1;
-	while( ( pos > 0 ) && !isDirSeparator( ( *this )[ pos ] ) ) {
+	while( ( pos > 0 ) && !Str_IsPathSeparator( ( *this )[ pos ] ) ) {
 		pos--;
 	}
 
@@ -933,7 +885,7 @@ idStr &idStr::StripPath( void ) {
 	int pos;
 
 	pos = Length();
-	while( ( pos > 0 ) && !isDirSeparator( ( *this )[ pos - 1 ] ) ) {
+	while( ( pos > 0 ) && !Str_IsPathSeparator( ( *this )[ pos - 1 ] ) ) {
 		pos--;
 	}
 
@@ -953,7 +905,7 @@ void idStr::ExtractFilePath( idStr &dest ) const {
 	// back up until a \ or the start
 	//
 	pos = Length();
-	while( ( pos > 0 ) &&  !isDirSeparator( ( *this )[ pos - 1 ] ) ) {
+	while( ( pos > 0 ) &&  !Str_IsPathSeparator( ( *this )[ pos - 1 ] ) ) {
 		pos--;
 	}
 
@@ -972,7 +924,7 @@ void idStr::ExtractFileName( idStr &dest ) const {
 	// back up until a \ or the start
 	//
 	pos = Length() - 1;
-	while( ( pos > 0 ) && !isDirSeparator( ( *this )[ pos - 1 ] ) ) {
+	while( ( pos > 0 ) && !Str_IsPathSeparator( ( *this )[ pos - 1 ] ) ) {
 		pos--;
 	}
 
@@ -992,7 +944,7 @@ void idStr::ExtractFileBase( idStr &dest ) const {
 	// back up until a \ or the start
 	//
 	pos = Length() - 1;
-	while( ( pos > 0 ) && !isDirSeparator( ( *this )[ pos - 1 ] ) ) {
+	while( ( pos > 0 ) && !Str_IsPathSeparator( ( *this )[ pos - 1 ] ) ) {
 		pos--;
 	}
 
@@ -1010,25 +962,12 @@ idStr::ExtractFileExtension
 ====================
 */
 void idStr::ExtractFileExtension( idStr &dest ) const {
-	int pos;
-
-	//
-	// back up until a . or the start
-	//
-	pos = Length() - 1;
-	while( ( pos > 0 ) && ( ( *this )[ pos - 1 ] != '.' ) ) {
-		pos--;
-		if( isDirSeparator( ( *this )[ pos ] ) ) { // DG: check for directory separator
-			// no extension in the whole filename
-			dest.Empty();
-		} // DG end
-	}
-
-	if ( !pos ) {
-		// no extension
+	// the text after the last component's '.', or nothing when it has none
+	const int dot = Str_ExtensionDot( data, len );
+	if ( dot < 0 ) {
 		dest.Empty();
 	} else {
-		Right( Length() - pos, dest );
+		Right( len - dot - 1, dest );
 	}
 }
 
@@ -1520,13 +1459,8 @@ int idStr::snPrintf( char *dest, int size, const char *fmt, ...) {
 	len = D3_vsnprintfC99(dest, size, fmt, argptr);
 	va_end( argptr );
 	if ( len >= 32000 ) {
-		// TODO: Previously this function used a 32000 byte buffer to write into
-		//       with vsprintf(), and raised this error if that was overflowed
-		//       (more likely that'd have lead to a crash..).
-		//       Technically we don't have that restriction anymore, so I'm unsure
-		//       if this error should really still be raised to preserve
-		//       the old intended behavior, maybe for compat with mod DLLs using
-		//       the old version of the function or something?
+		// id's version formatted into a fixed 32000-byte buffer and stopped here when the
+		// text did not fit; that limit no longer exists, the error is kept as id had it
 		idLib::common->Error( "idStr::snPrintf: overflowed buffer" );
 	}
 	if ( len >= size ) {
@@ -1663,9 +1597,6 @@ idStr::InitMemory
 ================
 */
 void idStr::InitMemory( void ) {
-#ifdef USE_STRING_DATA_ALLOCATOR
-	stringDataAllocator.Init();
-#endif
 }
 
 /*
@@ -1674,9 +1605,6 @@ idStr::ShutdownMemory
 ================
 */
 void idStr::ShutdownMemory( void ) {
-#ifdef USE_STRING_DATA_ALLOCATOR
-	stringDataAllocator.Shutdown();
-#endif
 }
 
 /*
@@ -1685,9 +1613,6 @@ idStr::PurgeMemory
 ================
 */
 void idStr::PurgeMemory( void ) {
-#ifdef USE_STRING_DATA_ALLOCATOR
-	stringDataAllocator.FreeEmptyBaseBlocks();
-#endif
 }
 
 /*
@@ -1696,11 +1621,7 @@ idStr::ShowMemoryUsage_f
 ================
 */
 void idStr::ShowMemoryUsage_f( const idCmdArgs &args ) {
-#ifdef USE_STRING_DATA_ALLOCATOR
-	idLib::common->Printf( "%6d KB string memory (%d KB free in %d blocks, %d empty base blocks)\n",
-		stringDataAllocator.GetBaseBlockMemory() >> 10, stringDataAllocator.GetFreeBlockMemory() >> 10,
-			stringDataAllocator.GetNumFreeBlocks(), stringDataAllocator.GetNumEmptyBaseBlocks() );
-#endif
+	idLib::common->Printf( "string memory: C heap (no pool to report)\n" );
 }
 
 /*
@@ -1827,50 +1748,36 @@ idStr idStr::VFormat( const char* format, va_list argptr )
 
 }
 
-// behaves like C99's vsnprintf() by returning the amount of bytes that
-// *would* have been written into a big enough buffer, even if that's > size
-// unlike idStr::vsnPrintf() which returns -1 in that case
+// vsnprintf as C99 defines it, on every compiler: writes at most size bytes, always
+// '\0'-terminated when size > 0, and returns the length the whole text needs (which may be
+// size or more), not -1 on truncation. idStr::vsnPrintf instead returns -1 when it truncates.
 int D3_vsnprintfC99(char *dst, size_t size, const char *format, va_list ap)
 {
-	// before VS2015, it didn't have a standards-conforming (v)snprintf()-implementation
-	// same might be true for other windows compilers if they use old CRT versions, like MinGW does
 #if defined(_WIN32) && (!defined(_MSC_VER) || _MSC_VER < 1900)
+	// The older Windows C runtimes (MSVC before 2015, msvcrt.dll as MinGW uses it) have only
+	// _vsnprintf: on truncation it leaves the text unterminated and returns -1. So the length
+	// is measured separately, on its own copy of the arguments, and the end is terminated here.
   #undef _vsnprintf
-	// based on DG_vsnprintf() from https://github.com/DanielGibson/Snippets/blob/master/DG_misc.h
-	int ret = -1;
-	if(dst != NULL && size > 0)
-	{
-#if defined(_MSC_VER) && _MSC_VER >= 1400
-		// I think MSVC2005 introduced _vsnprintf_s().
-		// this shuts up _vsnprintf() security/deprecation warnings.
-		ret = _vsnprintf_s(dst, size, _TRUNCATE, format, ap);
-#else
-		ret = _vsnprintf(dst, size, format, ap);
-		dst[size-1] = '\0'; // ensure '\0'-termination
-#endif
+	va_list measure;
+	va_copy( measure, ap );
+	const int needed = _vscprintf( format, measure );
+	va_end( measure );
+	if ( dst != NULL && size > 0 ) {
+		_vsnprintf( dst, size, format, ap );
+		dst[ size - 1 ] = '\0';
 	}
-
-	if(ret == -1)
-	{
-		// _vsnprintf() returns -1 if the output is truncated
-		// it's also -1 if dst or size were NULL/0, so the user didn't want to write
-		// we want to return the number of characters that would've been
-		// needed, though.. fortunately _vscprintf() calculates that.
-		ret = _vscprintf(format, ap);
-	}
-	return ret;
+	return needed;
   #define _vsnprintf	use_idStr_vsnPrintf
-#else // other operating systems and VisualC++ >= 2015 should have a proper vsnprintf()
+#else
+	// a conforming C99 runtime
   #undef vsnprintf
 	return vsnprintf(dst, size, format, ap);
   #define vsnprintf	use_idStr_vsnPrintf
 #endif
 }
 
-// behaves like C99's snprintf() by returning the amount of bytes that
-// *would* have been written into a big enough buffer, even if that's > size
-// unlike idStr::snPrintf() which returns the written bytes in that case
-// and also calls common->Warning() in case of overflows
+// snprintf as C99 defines it (see D3_vsnprintfC99); idStr::snPrintf instead returns what it
+// wrote and warns when it truncates
 int D3_snprintfC99(char *dst, size_t size, const char *format, ...)
 {
 	int ret = 0;

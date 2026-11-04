@@ -323,27 +323,28 @@ idHeap::Allocate16
 ================
 */
 void *idHeap::Allocate16( const dword bytes ) {
-	byte *ptr, *alignedPtr;
+	// One malloc'd block holds the caller's 16-byte aligned memory with the block's own
+	// address stored in the pointer-sized slot right below it, which Free16 reads back.
+	// That slot is shared knowledge with every game library (Doom 3 mods included) that
+	// frees memory the engine allocated or the other way round: keep it where it is.
+	const size_t blockSize = (size_t) bytes + 15 + sizeof( void * );
 
-	ptr = (byte *) malloc( bytes + 16 + sizeof(intptr_t) );
-	if ( !ptr ) {
-		if ( defragBlock ) {
-			idLib::common->Printf( "Freeing defragBlock on alloc of %i.\n", bytes );
-			free( defragBlock );
-			defragBlock = NULL;
-			ptr = (byte *) malloc( bytes + 16 + sizeof(intptr_t) );
-			AllocDefragBlock();
-		}
-		if ( !ptr ) {
-			common->FatalError( "malloc failure for %i", bytes );
-		}
+	void *block = malloc( blockSize );
+	if ( block == NULL && defragBlock != NULL ) {
+		idLib::common->Printf( "Freeing defragBlock on alloc of %i.\n", bytes );
+		free( defragBlock );
+		defragBlock = NULL;
+		block = malloc( blockSize );
+		AllocDefragBlock();
 	}
-	alignedPtr = (byte *) ( ( ( (intptr_t) ptr ) + 15) & ~15 );
-	if ( alignedPtr - ptr < sizeof(intptr_t) ) {
-		alignedPtr += 16;
+	if ( block == NULL ) {
+		common->FatalError( "malloc failure for %i", bytes );
 	}
-	*((intptr_t *)(alignedPtr - sizeof(intptr_t))) = (intptr_t) ptr;
-	return (void *) alignedPtr;
+
+	const uintptr_t firstFree = (uintptr_t) block + sizeof( void * );
+	void **user = (void **) ( ( firstFree + 15 ) & ~(uintptr_t) 15 );
+	user[-1] = block;
+	return user;
 }
 
 /*
@@ -352,7 +353,9 @@ idHeap::Free16
 ================
 */
 void idHeap::Free16( void *p ) {
-	free( (void *) *((intptr_t *) (( (byte *) p ) - sizeof(intptr_t))) );
+	// the block's own address sits right below the aligned memory (Allocate16)
+	void *block = static_cast<void **>( p )[-1];
+	free( block );
 }
 
 /*
