@@ -110,10 +110,18 @@ the pk4s next to the executable. Writable data (configs, saves, screenshots) liv
 its own "dude folder" (`~/.local/share/dude` on Linux, `Documents/My Games/dude` on
 Windows).
 
-**Quake 4 (in development).** The same executable is learning to run the retail _Quake 4_
-from your own install ([docs/quake4-port.md](docs/quake4-port.md)). `./run-q4.sh` finds a
-Steam install (or takes `Q4DIR=/path/to/Quake 4`) and boots its data; until the Quake 4
-game library exists it runs a spectator-only "null game" with no gameplay.
+**Quake 4.** The same executable runs the retail _Quake 4_ from your own install
+([docs/quake4-port.md](docs/quake4-port.md)). `./run-q4.sh` finds a Steam install (or takes
+`Q4DIR=/path/to/Quake 4`). The Quake 4 game library (`q4base.so` / `q4base.dll`) is a separate
+download and a separate project, [dude-q4](https://github.com/Inkub0/dude-q4): it is built from
+Raven Software's Quake 4 SDK and is under the SDK's licence, not the GPL - non-commercial,
+free copies only, the licence file always attached, full retail Quake 4 required. No Quake 4
+game data is included anywhere. Without the library DUDE runs a spectator-only "null game".
+Licence details: [docs/quake4-release-licensing.md](docs/quake4-release-licensing.md).
+
+Quake and Quake 4 are trademarks of their owners (id Software / ZeniMax Media). DUDE is an
+independent, non-commercial project, not affiliated with, endorsed or sponsored by id Software,
+ZeniMax Media, Microsoft, Raven Software or Activision.
 
 # Upstream: dhewm3
 

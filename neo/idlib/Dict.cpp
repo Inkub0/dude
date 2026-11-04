@@ -576,16 +576,23 @@ const char *idDict::RandomPrefix( const char *prefix, idRandom &random ) const {
 }
 
 const char *idDict::RandomPrefix( const char *prefix, idRandom &random, const char *defaultValue ) const {
-	int count;
-	const int MAX_RANDOM_KEYS = 2048;
-	const char *list[MAX_RANDOM_KEYS];
-	const idKeyValue *kv;
-
-	list[0] = defaultValue;
-	for ( count = 0, kv = MatchPrefix( prefix ); kv && count < MAX_RANDOM_KEYS; kv = MatchPrefix( prefix, kv ) ) {
-		list[count++] = kv->GetValue().c_str();
+	// the value of one key starting with prefix, every such key equally likely (only the first
+	// 2048 take part, as in retail); defaultValue when there is none. One RandomInt( matches )
+	// call either way - with no match it is RandomInt( 0 ), which draws nothing.
+	const int pickLimit = 2048;
+	int matches = 0;
+	for ( const idKeyValue *kv = MatchPrefix( prefix ); kv != NULL && matches < pickLimit; kv = MatchPrefix( prefix, kv ) ) {
+		matches++;
 	}
-	return list[random.RandomInt( count )];
+	int pick = random.RandomInt( matches );
+	if ( matches == 0 ) {
+		return defaultValue;
+	}
+	const idKeyValue *chosen = MatchPrefix( prefix );
+	while ( pick-- > 0 ) {
+		chosen = MatchPrefix( prefix, chosen );
+	}
+	return chosen->GetValue().c_str();
 }
 
 /*

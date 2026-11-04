@@ -53,4 +53,17 @@ cmake --build "$OUT" -j"$(nproc)"
 # its mapped copy (cp truncates it in place -> SIGBUS in the running game)
 cp "$OUT/q4base.so" "$BUILD/q4base.so.new"
 mv -f "$BUILD/q4base.so.new" "$BUILD/q4base.so"
+# what it was built from, for the release package's BUILDINFO (tools/quake4/package-q4.sh): the
+# GPL source of the idlib inside it is DUDE at this commit
+stamp() {
+	local rev; rev="$(git -C "$1" rev-parse HEAD)"
+	if [ -n "$(git -C "$1" status --porcelain --untracked-files=no -- $2)" ]; then rev="$rev (uncommitted changes)"; fi
+	echo "$rev"
+}
+{
+	echo "DUDE commit:     $(stamp "$DUDE" neo)"
+	echo "dude-q4 commit:  $(stamp "$Q4GAME_DIR" "source CMakeLists.txt")"
+	echo "built:           $(date -u '+%Y-%m-%d %H:%M UTC') in $(basename "$BUILD")"
+	echo "compiler:        $(readelf -p .comment "$BUILD/q4base.so" | grep -m1 -o 'GCC: .*' || echo unknown)"
+} > "$BUILD/q4base.buildinfo"
 echo "build-q4game.sh: $BUILD/q4base.so"

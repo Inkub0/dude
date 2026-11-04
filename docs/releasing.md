@@ -134,6 +134,32 @@ files resolved from `base/pak000.pk4` via the d3xp→base search fallback, so th
 ship. `zz_` sorts after `zWideGuis_RoE.pk4` (lowercase `z` > uppercase `W`) so it wins the
 search-path priority. Test on a clean-sandbox launch that the RoE Options screen loads.
 
+### Quake 4 game library — its own archive (since 0.9.8)
+
+The Quake 4 game library is under the Quake 4 SDK licence, not the GPL, so it never goes in
+the platform archives above; it gets its own per platform. Rules and reasons:
+[quake4-release-licensing.md](quake4-release-licensing.md).
+
+```
+# gates first (exit 1 = stop)
+tools/quake4/check_provenance.py --interface ~/quake4-refs/q4sdk-frisk-initial \
+    --ref 'openq4-bse!=~/quake4-refs/openq4/src/bse' \
+    --ref 'idtech4a-bse!=~/quake4-refs/idtech4a/doom3/neo/raven/bse' \
+    --ref q4sdk=~/quake4-refs/q4sdk-frisk-initial
+# both repositories committed and tagged vX.Y, then the library from those commits
+tools/quake4/build-q4game.sh            # (release build dir: DUDE_BUILD=<dir>)
+Q4DIR="/path/to/Quake 4" tools/quake4/package-q4.sh X.Y linux-x86_64 build/q4base.so
+# -> dist/release-X.Y/dude-q4-X.Y-linux-x86_64.tar.gz (win64: q4base.dll -> .zip)
+# every archive of the release, DUDE's included: nothing from retail Quake 4
+python3 -I tools/quake4/check_no_retail_data.py --retail "/path/to/Quake 4" dist/release-X.Y/*.tar.gz dist/release-X.Y/*.zip
+# for the notes: the GPL code inside the library (record the class table)
+tools/quake4/q4base_licence_audit.py --so build/q4base.so --sdk <pristine SDK source/> --game-repo ~/dude-quake4-game
+```
+
+- The Quake 4 part of the notes and the dude-q4 release page carry **no donation link**.
+- Name Quake 4 only as what DUDE runs ("runs Quake 4 — not included"); no Quake 4 logo or art.
+- Never attach baked AO, env probes or other data generated from Quake 4 maps.
+
 ## 4. Release notes + publish (user action, never the agent)
 
 Notes template: `dist/release-0.9/notes.md` (highlights, bring-your-own-game-data —
@@ -148,3 +174,6 @@ gh release create vX.Y dist/release-X.Y/*.zip dist/release-X.Y/*.tar.gz \
 ```
 
 (`gh repo set-default Inkub0/dude` once per clone — two remotes exist.)
+
+Quake 4 (since 0.9.8): tag `vX.Y` in the dude-q4 repository too, push it, and attach the
+`dude-q4-X.Y-*` archives to the DUDE release (or a dude-q4 release) — the same user action.
