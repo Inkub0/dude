@@ -79,6 +79,18 @@ def parse_report( run ):
 	return r
 
 
+def merge_order( order, seq ):
+	"""Merge the scope names of one printed window (seq, in print order) into order: a name not seen yet goes right after the
+	name printed before it, so a scope missing from the base order still lands next to its neighbours, not at the end
+	(2026-11-04: rt.animblas.blas was listed under post)."""
+	prev = None
+	for k in seq:
+		if k not in order:
+			order.insert( order.index( prev ) + 1 if prev in order else len( order ), k )
+		prev = k
+	return order
+
+
 def parse_scopes( run ):
 	"""Sample-weighted ms/frame per scope over the full windows of one run, the window count, and the full windows themselves
 	({scope: ms}, in demo order - window i of every run covers the same stretch of the real-time demo)."""
@@ -102,11 +114,15 @@ def parse_scopes( run ):
 	if not total:
 		return None, 0, []
 	res = { "frame (r_vkGpuTime)": sum( w["frame"] * w["n"] for w in full ) / total }
-	names = []
+	# the base order = the window order seen most often: the backend prints a window's scopes in the order they FIRST RAN in
+	# it, so a scope that only started mid-window (the first animated character) is printed last in that one window
+	orders = {}
 	for w in full:
-		for k in w["scopes"]:
-			if k not in names:
-				names.append( k )
+		key = tuple( w["scopes"] )
+		orders[key] = orders.get( key, 0 ) + 1
+	names = list( max( orders, key=lambda o: ( orders[o], len( o ) ) ) ) if orders else []
+	for w in full:
+		merge_order( names, list( w["scopes"] ) )
 	for k in names:
 		res[k] = sum( w["scopes"].get( k, 0.0 ) * w["n"] for w in full ) / total
 	per_window = [ dict( w["scopes"], **{ "frame (r_vkGpuTime)": w["frame"] } ) for w in full ]
@@ -370,9 +386,7 @@ def main():
 		for v in names:
 			for r in measured:
 				if r["variant"] == v:
-					for k in r["scopes"]:
-						if k not in scope_names:
-							scope_names.append( k )
+					merge_order( scope_names, list( r["scopes"] ) )
 		base = names[0]
 		print( f"\nr_vkGpuTime 3 scopes, ms/frame (delta vs {base}):" )
 		head = f"  {'scope':<30}" + "".join( f"{v:>18}" for v in names )
