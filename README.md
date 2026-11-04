@@ -1,12 +1,15 @@
 # DUDE — Doom3 Unified Development Engine
 
 **DUDE** is a fork of [dhewm3](https://github.com/dhewm/dhewm3) (itself the GPL source
-port of _DOOM 3_) that modernizes the renderer while keeping the classic _DOOM 3_ look
-and gameplay faithful. The stock renderer's ARB assembly shaders are translated to a
-shared GLSL source tree serving two new backends — **OpenGL 3.3 core** and **Vulkan**
-(1.4, with hardware ray tracing where available) — selectable via the `r_graphicsAPI`
-cvar, with the original ARB renderer kept intact as the faithful reference. All visual
-enhancements are **opt-in**, driven by in-game quality presets whose floor is the
+port of _DOOM 3_) that modernizes the renderer while keeping the classic look and
+gameplay faithful. It runs _DOOM 3_, _Resurrection of Evil_, _The Lost Mission_ and, since
+0.9.8, the retail _Quake 4_ campaign, all from one executable.
+
+The stock renderer's ARB assembly shaders are translated to a shared GLSL source tree
+serving two new backends — **OpenGL 3.3 core** and **Vulkan 1.4** — selectable via the
+`r_graphicsAPI` cvar, with the original ARB renderer kept intact as the faithful reference.
+On ray-tracing GPUs the Vulkan backend goes all the way to a **path-traced lighting tier**.
+All visual enhancements are **opt-in**, driven by in-game quality presets whose floor is the
 unmodified classic look.
 
 **License note:** DUDE is a modified version of [dhewm3](https://github.com/dhewm/dhewm3),
@@ -14,65 +17,92 @@ based on id Software's Doom 3 GPL source release. All DUDE-authored source in th
 repository — including every file under `neo/shaders/` and files without an explicit
 license header — is licensed under the GNU GPLv3 (see COPYING.txt), with an additional
 permission for linking with the Quake 4 SDK game code (COPYING-QUAKE4-EXCEPTION.txt). Third-party
-components (Dear ImGui, VMA, FSR2, SMAA, stb) keep their original licenses, stated in
-their files. **No game assets are included or redistributable here**: the `base/*.pk4`
-game data is proprietary id/Bethesda content — bring your own Doom 3 installation.
+components (Dear ImGui, VMA, FSR2, NRD, SMAA, stb) keep their original licenses, stated in
+their files. **No game assets are included or redistributable here**: the game data is
+proprietary id/Bethesda content — bring your own copy of the game.
 
 ## Features
 
 **Renderers** (`r_graphicsAPI opengl | opengl3 | vulkan`)
 - Legacy **OpenGL/ARB** path (`opengl`, the default) — untouched, the faithful reference.
 - **OpenGL 3.3 core** — the stock look re-expressed in GLSL, plus the enhancement suite.
-- **Vulkan 1.4** — same enhancement suite, plus Vulkan-only features below. VMA-managed
-  memory, persistent scene buffers, GPU timestamps (`r_vkGpuTime`).
+- **Vulkan 1.4** — the same enhancement suite, plus ray tracing and the Vulkan-only features
+  below. VMA-managed memory, persistent scene buffers, GPU timestamps (`r_vkGpuTime`).
 
-**Opt-in enhancement suite** (GL3 + Vulkan; presets *Potato → Nightmare* in the classic
-System menu, "Potato" = unmodified classic rendering)
-- Shadow maps: cube shadows with rotated-Vogel PCF, sun/parallel-light shadow maps
-  (stencil shadows remain the fallback and the faithful default).
-- HDR pipeline, SSAO, PBR (GGX) with screen-space reflections, parallax occlusion
-  mapping, soft particles, baked per-material AO maps.
-- Anti-aliasing: SMAA 1x / FXAA, and **AMD FSR2** in Native-AA mode (motion vectors +
-  jittered projection) on Vulkan.
+**Quality presets.** Two independent axes, in the classic System menu and the F10 settings
+menu:
+- **Quality** (`dude_preset`): *Potato → Low → Medium → High → Ultra → Nightmare*. "Potato"
+  is the unmodified classic rendering.
+- **Ray tracing** (`dude_rtx`, Vulkan on an RT-capable GPU): *RTX Off*, *RTX On* (hybrid:
+  ray-traced shadows, reflections, AO and GI over the raster renderer) and *Path Tracing*.
+
+**Ray tracing** (Vulkan, `VK_KHR_ray_query`)
+- **Path Tracing tier**: direct light from every light in the scene, sampled with **ReSTIR
+  DI** and a **ReGIR light grid**, denoised with **NVIDIA NRD** (ReLAX), with per-texel bump
+  detail restored after the denoise.
+- **Ray-traced global illumination** with a multi-bounce **irradiance cache**; Doom 3's
+  ambient lights add only what the traced bounce falls short of (`r_rtgiAmbient`).
+- **Ray-traced shadows** for every light (soft, with grates and fences casting their pattern),
+  **ray-traced reflections** and **ray-traced AO**.
+- Animated and GPU-skinned characters are in the acceleration structures every frame,
+  with per-bone motion vectors for the denoiser and FSR2.
+- **Volumetric lighting** (`r_volumetrics`): light shafts and lit haze from the scene's
+  real lights.
+- **Emissive Mode** (experimental, off by default): glowing surfaces become real area lights,
+  set up per map in the in-game **Light Editor** (`editLights`).
+
+**Raster enhancement suite** (GL3 + Vulkan)
+- Shadow maps: cube shadows with rotated-Vogel PCF, sun/parallel-light shadow maps,
+  contact shadows (stencil shadows remain the fallback and the faithful default).
+- HDR pipeline, GTAO/SSAO, PBR (GGX) with screen-space reflections, parallax occlusion
+  mapping, subsurface skin and flesh shading, soft particles, baked per-material AO maps.
+- Anti-aliasing and upscaling: SMAA 1x / FXAA, and **AMD FSR2** (native AA or sub-native
+  upscaling, `r_fsrScale`) on Vulkan.
+- **GPU tessellation** for characters and monsters (Vulkan), GPU skinning.
 - Smaller touches: depth-of-field on weapon reload, self-lit pickup glow, emissive GUI
-  surfaces casting light, smoke-in-darkness blending, hi-res GUI font atlases.
+  surfaces casting light, smoke-in-darkness blending, hi-res GUI font atlases, anisotropic
+  filtering.
+
+**Quake 4**
+- The retail single-player campaign on the GL3, Vulkan and RT tiers, with DUDE's presets.
+- Quake 4's own formats (maps, collision, AAS, materials, GUIs, sound shaders, fonts) read by
+  the engine, and **BSE**, Raven's particle and effects system, reimplemented from the effect
+  files and the SDK interface.
+- The game code is a separate library from a separate project (see
+  [Running Quake 4](#running-quake-4)).
+
+**Games and mods**
+- _Resurrection of Evil_ and _The Lost Mission_ with their own game libraries; the stock
+  HUDs stay correctly proportioned on wide screens without any pack.
+- Binary compatibility with dhewm3 1.5.5 mod libraries, runtime ARB→SPIR-V compilation so
+  classic mod shaders work on the new backends, and a cvar-translation shim for old mods.
+- Savegames from retail Doom 3, dhewm3 and every DUDE 0.9.x release load.
 
 **Gameplay**
 - **Ultra Nightmare** difficulty (unlocked with Nightmare): Nightmare rules plus permadeath —
   one checkpoint per run written at map starts only, no manual saves, erased when you die
-  (docs/ultra-nightmare.md).
-
-**Vulkan-only**
-- **Ray-traced sun shadows** (`r_rtSunShadows`) via `VK_KHR_ray_query` on RT-capable GPUs.
-- **GPU tessellation** for characters/monsters (PN triangles + displacement), GPU skinning.
-- Parallel image decode on level load, buffer-device-address batched indirect depth
-  prepass, and other GPU-driven experiments (see [docs/gpu-offload-plan.md](docs/gpu-offload-plan.md)).
+  ([docs/ultra-nightmare.md](docs/ultra-nightmare.md)).
 
 **Engine quality-of-life**
 - `com_interpolate` — render above 60 fps while the game simulates at its native 60 Hz.
 - `com_classicTics` — Doom 3's original 62.5 Hz game tic (16 ms, as 1.3.1 ran) instead of
   60 Hz, for speedrunners; pair it with `com_interpolate` (see [Configuration.md](Configuration.md)).
-- `com_maxFPS` frame limiter, SSE4.1 SIMD baseline, runtime ARB→SPIR-V compilation so
-  classic mod shaders work on the new backends, cvar-translation shim for old mods.
+- VRR / adaptive sync (`r_vrr`), `com_maxFPS` frame limiter, SSE4.1 SIMD baseline.
+- Fast level loads: parallel image and sound decoding, a binary model cache.
+- In-game benchmark: `com_timeDemoRealTime 1` then `timeDemo demo1` reports average and
+  percentile frame times with a CPU/GPU split ([docs/benchmark.md](docs/benchmark.md)).
 
-## Future development — the RTX pipeline
+## Ray tracing: where it stands
 
-The long-term goal is to progressively **replace the raster rendering pipeline with ray
-tracing** on RT-capable hardware. The foundation is already shipped: acceleration-structure
-infrastructure over the live game scene, `VK_KHR_ray_query` shading, ray-traced sun
-shadows, a GPU compute lane, and per-frame GPU-resident deformed geometry for animated
-models. From there the roadmap ([docs/rtx-shadow-roadmap.md](docs/rtx-shadow-roadmap.md))
-climbs tier by tier:
+The long-term goal was to **replace the raster lighting pipeline with ray tracing** on
+RT-capable hardware, tier by tier. That path is now complete up to the Path Tracing tier:
+shadows, reflections, AO, global illumination and finally direct lighting are traced and
+denoised ([docs/rtx-hybrid-roadmap.md](docs/rtx-hybrid-roadmap.md),
+[docs/rtx-restir-di.md](docs/rtx-restir-di.md)). The current work is making it faster and
+finishing **Emissive Mode**, where a level's glowing fixtures light the scene themselves
+instead of the placed lights.
 
-1. **Ray-traced shadows for all lights** — replacing shadow maps and stencil volumes
-   with per-pixel traced visibility (the sun tier already works).
-2. **Ray-traced reflections** — replacing screen-space reflections and their
-   off-screen blind spots.
-3. **Ray-traced ambient occlusion and indirect lighting**, converging on a fully
-   ray-traced (path-traced) lighting pipeline in the spirit of the classic-game RTX
-   remasters.
-
-As with everything else in DUDE, the RTX path is additive: the faithful raster
+As with everything else in DUDE, the ray-traced path is additive: the faithful raster
 renderers remain, both as the default look and as the path for GPUs without ray
 tracing support.
 
@@ -81,7 +111,7 @@ tracing support.
 If you enjoy DUDE, you can support development at
 **[buymeacoffee.com/Inkub0](https://buymeacoffee.com/Inkub0)** ☕ — donations go
 toward new hardware needed to build and test **real HDR output support** and the
-**RTX pipeline** above.
+**ray-tracing pipeline** above.
 
 ## Building
 
@@ -98,20 +128,30 @@ Windows (cross-compiled from Linux with mingw-w64):
 ./build-win.sh --no-vulkan
 ```
 
+Quake 4 game library (needs a checkout of [dude-q4](https://github.com/Inkub0/dude-q4), by
+default in `~/dude-quake4-game`), built against the DUDE build above:
+```
+tools/quake4/build-q4game.sh                      # -> build/q4base.so
+DUDE_BUILD=build-win tools/quake4/build-q4game.sh # -> q4base.dll (MinGW)
+```
+
 Dependencies: CMake, GCC or Clang (C++17 for the Vulkan backend), SDL2 (SDL3 works as a
 fallback), OpenAL; Vulkan headers + `glslangValidator` for the Vulkan backend; optional
 `shaderc` for runtime mod-shader compilation on Vulkan.
 
 ## Running
 
-DUDE needs the original _DOOM 3_ / _Resurrection of Evil_ game data (`base/*.pk4`,
-`d3xp/*.pk4`) from your own copy of the game (the Steam/GOG classic version, not the
-BFG edition). Point the engine at it with `+set fs_basepath /path/to/doom3`, or place
-the pk4s next to the executable. Writable data (configs, saves, screenshots) lives in
-its own "dude folder" (`~/.local/share/dude` on Linux, `Documents/My Games/dude` on
-Windows).
+DUDE needs the original game data from your own copy of the game.
 
-**Quake 4.** The same executable runs the retail _Quake 4_ from your own install
+**Doom 3.** _DOOM 3_, _Resurrection of Evil_ and _The Lost Mission_ (`base/*.pk4`,
+`d3xp/*.pk4`, `d3le/*.pk4`) from the Steam/GOG classic version, not the BFG edition. Point the
+engine at it with `+set fs_basepath /path/to/doom3`, or place the pk4s next to the executable.
+Writable data (configs, saves, screenshots) lives in its own "dude folder"
+(`~/.local/share/dude` on Linux, `Documents/My Games/dude` on Windows).
+
+### Running Quake 4
+
+The same executable runs the retail _Quake 4_ from your own install
 ([docs/quake4-port.md](docs/quake4-port.md)). The Quake 4 game library (`q4base.so` /
 `q4base.dll`) is a separate download, `dude-q4-<version>-<platform>`, from a separate project,
 [dude-q4](https://github.com/Inkub0/dude-q4): it is built from Raven Software's Quake 4 SDK and
@@ -129,7 +169,7 @@ message: start with `+set com_title doom3` or `+set com_title quake4` to choose.
 
 **Full retail Quake 4 only.** DUDE needs the full game (Steam, GOG or disc) and refuses the
 Quake 4 demo, or an install missing its map paks: the Quake 4 SDK licence lets the game library
-run with the full version of Quake 4 only.
+run with the full version of Quake 4 only. Multiplayer is not supported yet.
 
 Quake and Quake 4 are trademarks of their owners (id Software / ZeniMax Media). DUDE is an
 independent, non-commercial project, not affiliated with, endorsed or sponsored by id Software,
@@ -146,4 +186,5 @@ compile instructions, mod support, FAQ) applies to DUDE's faithful baseline too:
 
 DUDE-specific documentation lives in this repo under [docs/](docs/) —
 [port architecture](docs/port-architecture.md), [Vulkan backend](docs/vulkan-backend.md),
-and per-feature plans.
+[Quake 4 port](docs/quake4-port.md), [Quake 4 effects (BSE)](docs/quake4-bse.md), and
+per-feature plans.
