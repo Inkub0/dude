@@ -21,6 +21,9 @@
 #                C = B + candidate read-ahead (build/dude); emissive mode; NVIDIA register readout in each run's stdout.log
 #   set animsig : A = master (build/dude-ref-master), B = the animated BLAS signature from the base model + surface ids/counts
 #                (build/dude); emissive mode - compare rt.animblas and the "pre-scene per frame" builds
+#   set v097   : the 0.9.8 release notes - A = the published 0.9.7 binary (dist/release-0.9.7), B = current master as a
+#                RELEASE build (./build-linux-release.sh -> build-linux-release/dude); Path Tracing, Emissive Mode off
+#   set v097em : the same with Emissive Mode on (each binary's own emissive defaults; the authored setups seeded)
 #   set memcheck : one run of build/dude, emissive mode - its stdout.log lists GPU-read buffers that landed in system RAM
 #                (WARMUPS=0 ... memcheck 1)
 #   set emitteraxis : A = master (build/dude-ref-master), B = emitter rows with a plain cone axis (build/dude); emissive mode
@@ -67,6 +70,7 @@ ROUNDS="${2:-3}"
 
 declare -a NAMES
 declare -A DESC ARGS BINV		# BINV: a variant's own binary (default: \$BIN) - for A/B of two builds
+declare -A SCHEMAV				# SCHEMAV: a variant's own config schema (default: this tree's) - for a binary of an older release
 SEED_EMISSIVE=0					# 1 = copy the authored emissive/<map>.cfg files into every sandbox
 EMISSIVE_DIR="${EMISSIVE_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/dude/base/emissive}"
 case "$SET" in
@@ -167,6 +171,19 @@ case "$SET" in
 		NAMES=( A B )
 		DESC[A]="master";                                ARGS[A]="$EM";   BINV[A]="$REPO/build/dude-ref-master"
 		DESC[B]="animated BLAS: stable signature";       ARGS[B]="$EM";   BINV[B]="$BIN"
+		;;
+	v097|v097em)
+		# 2026-11-04: 0.9.7 vs now for the 0.9.8 release notes. Same assets for both (the repo's base, fs_basepath), so only the
+		# engine differs; each binary keeps its own defaults (fresh config, 0.9.7's at its schema 3 - no one-time reset).
+		# Master's timedemo streams on first sight like 0.9.7's (com_timeDemoLevelLoad 0: 0.9.7 has no level-load
+		# emulation), so frame times and 1% lows compare the renderers, not the demo loader. B must be a release build:
+		# build/dude is -O0 (the CPU side would not compare).
+		PRESET=5; RTX=2
+		EMV=""
+		if [ "$SET" = v097em ]; then SEED_EMISSIVE=1; EMV="+set r_rtEmissiveLighting 1"; fi
+		NAMES=( A B )
+		DESC[A]="0.9.7 release";                ARGS[A]="$EMV";                                 BINV[A]="$REPO/dist/release-0.9.7/dude-0.9.7-linux-x86_64/dude"; SCHEMAV[A]=3
+		DESC[B]="master, release build";        ARGS[B]="$EMV +set com_timeDemoLevelLoad 0";    BINV[B]="$REPO/build-linux-release/dude"
 		;;
 	memcheck)
 		# 2026-11-04: ONE run of build/dude in emissive mode for the Vulkan memory-placement warnings (a GPU-read buffer that
@@ -278,7 +295,7 @@ for item in "${order[@]}"; do
 	echo "$round" > "$RUN/round"
 	# fresh config: current schema (no one-time reset), Vulkan, your display settings - nothing else
 	{
-		echo "seta dude_cfgSchema \"$SCHEMA\""
+		echo "seta dude_cfgSchema \"${SCHEMAV[$v]:-$SCHEMA}\""
 		echo 'seta r_graphicsAPI "vulkan"'
 		grep -E '^seta (r_mode|r_fullscreen|r_fullscreenDesktop|r_fullscreenDisplay|r_fullscreenDisplayName|r_customWidth|r_customHeight|r_displayRefresh) ' "$DUDE_CFG" || true
 	} > "$SB/cfg/base/dude.cfg"
