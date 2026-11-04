@@ -54,7 +54,7 @@ Staging layout (`dist/release-X.Y/`), one folder per platform, then zip/tar it:
 | `base/gamepad.cfg`, `base/gamepad-d3xp.cfg`, `base/mods-cvar-translation.cfg` | ✓ | ✓ |
 | `base/pbr/pbr_materials.cfg`, `base/pbr/pbr_overrides.cfg` (else PBR classifies nothing) | ✓ | ✓ |
 | `base/def/*.def`, `d3xp/def/*.def`, `d3le/def/*.def` — the `g_extraLights` def overrides (since 0.9.7), **loose** (see below) | ✓ | ✓ |
-| `COPYING.txt`, `README.md` | ✓ | ✓ |
+| `COPYING.txt`, `COPYING-QUAKE4-EXCEPTION.txt`, `README.md` | ✓ | ✓ |
 
 Shaders (GLSL + SPIR-V) are **embedded in the binary** since 0.9.1
 (`shaders/embed_shaders.py`, loaders fall back VFS → dev tree → embedded) — no

@@ -7,9 +7,11 @@
 #     EULA.Development Kit.rtf         the Quake 4 SDK licence, byte for byte as Raven shipped it
 #     README-QUAKE4.txt                what this is, its terms, where the source is
 #     BUILDINFO.txt                    the exact DUDE and dude-q4 commits it was built from
+#     COPYING.txt                      the GPLv3, for the DUDE idlib parts inside q4base
+#     COPYING-QUAKE4-EXCEPTION.txt     DUDE's section 7 permission to combine them with the SDK
 #
-# DUDE's own archives stay GPL-only and never carry these files; this one carries no DUDE (GPL)
-# file except inside q4base itself, whose GPL parts are DUDE's idlib at the commit in BUILDINFO.
+# DUDE's own archives stay GPL-only and never carry the SDK files; this one carries no DUDE (GPL)
+# code except inside q4base itself, whose GPL parts are DUDE's idlib at the commit in BUILDINFO.
 #
 # Usage:  tools/quake4/package-q4.sh <version> <linux-x86_64|win64> <path to q4base.so|.dll>
 # Env:    Q4GAME_DIR  the game repository (default ~/dude-quake4-game)
@@ -90,6 +92,10 @@ rm -rf "$STAGE"
 mkdir -p "$STAGE"
 cp "$LIB" "$STAGE/$LIBNAME"
 cp "$Q4GAME_DIR/$EULA" "$STAGE/$EULA"
+# the GPL parts inside the library (DUDE's idlib) travel with the GPL text and DUDE's section 7
+# permission for combining them with the SDK game code
+cp "$DUDE/COPYING.txt" "$STAGE/COPYING.txt"
+cp "$DUDE/COPYING-QUAKE4-EXCEPTION.txt" "$STAGE/COPYING-QUAKE4-EXCEPTION.txt"
 
 if [ "$PLAT" = win64 ]; then EXE=dude.exe; else EXE=./dude; fi
 cat > "$STAGE/README-QUAKE4.txt" <<EOF
@@ -122,7 +128,11 @@ must go with every copy; it works only with the full version of Quake 4.
 DUDE itself (the engine, in DUDE's own archive) is GPLv3. The two are separate programs that
 meet only through the game library interface (GetGameAPI); nothing of the SDK is in DUDE.
 $LIBNAME also contains parts of DUDE's idlib (GPLv3), built from the DUDE commit in
-BUILDINFO.txt; DUDE's source for it is at https://github.com/Inkub0/dude (tag $TAG).
+BUILDINFO.txt; DUDE's source for it is at https://github.com/Inkub0/dude (tag $TAG). Those parts
+are GPLv3 (COPYING.txt); the DUDE author's code among them comes with an additional permission
+under GPLv3 section 7 to be combined with the Quake 4 SDK game code
+(COPYING-QUAKE4-EXCEPTION.txt). id Software's and other contributors' GPL code is not covered
+by that permission.
 
 Source of this library: https://github.com/Inkub0/dude-q4 (tag $TAG).
 

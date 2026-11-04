@@ -12,7 +12,8 @@ unmodified classic look.
 **License note:** DUDE is a modified version of [dhewm3](https://github.com/dhewm/dhewm3),
 based on id Software's Doom 3 GPL source release. All DUDE-authored source in this
 repository — including every file under `neo/shaders/` and files without an explicit
-license header — is licensed under the GNU GPLv3 (see COPYING.txt). Third-party
+license header — is licensed under the GNU GPLv3 (see COPYING.txt), with an additional
+permission for linking with the Quake 4 SDK game code (COPYING-QUAKE4-EXCEPTION.txt). Third-party
 components (Dear ImGui, VMA, FSR2, SMAA, stb) keep their original licenses, stated in
 their files. **No game assets are included or redistributable here**: the `base/*.pk4`
 game data is proprietary id/Bethesda content — bring your own Doom 3 installation.
@@ -116,7 +117,8 @@ Windows).
 [dude-q4](https://github.com/Inkub0/dude-q4): it is built from Raven Software's Quake 4 SDK and
 is under the SDK's licence, not the GPL - non-commercial, free copies only, the licence file
 always attached. No Quake 4 game data is included anywhere. Without the library DUDE runs a
-spectator-only "null game". Licence details:
+spectator-only "null game". The library links parts of DUDE's idlib; the DUDE author's code
+in it is covered by the section 7 permission in COPYING-QUAKE4-EXCEPTION.txt. Licence details:
 [docs/quake4-release-licensing.md](docs/quake4-release-licensing.md).
 
 Setup: extract DUDE and the `dude-q4` archive into your Quake 4 folder (the one that contains
