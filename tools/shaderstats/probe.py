@@ -8,6 +8,8 @@
          register pressure - stubbed, the numbers are a better proxy for GPUs with hardware traversal (NVIDIA)
 --peaks  also print the N basic blocks with the highest VGPR demand (ACO_DEBUG=liveinfo) and their dominant instructions,
          to find which inlined code sets the register count
+--nvidia the NVIDIA driver's own counts instead (registers, local memory; compile only, nothing is submitted - not during a
+         bench). They match the in-game `r_vkPipelineStats` readout; --nort and --peaks do not apply
 Programs default to the ReSTIR set below. Statistics: VGPRs (allocated), waves (per SIMD), Instructions, VALU, VMEM, Latency
 (ACO's static estimate), Scratch. AMD numbers, a proxy: NVIDIA's own count comes from `+set r_vkPipelineStats restir_di`.
 """
@@ -65,16 +67,22 @@ def main():
     ap.add_argument("--tree", default=str(SHADERS))
     ap.add_argument("--nort", action="store_true")
     ap.add_argument("--peaks", type=int, default=0)
+    ap.add_argument("--nvidia", action="store_true")
     ap.add_argument("programs", nargs="*")
     a = ap.parse_args()
     out = Path(tempfile.mkdtemp(prefix="shaderstats-"))
     for prog in (a.programs or list(PROGRAMS)):
         vert = PROGRAMS.get(prog, prog)
-        tr = stub_rt if a.nort else None
+        tr = stub_rt if a.nort and not a.nvidia else None
         if vert is None:
             spvs = [compile_engine_shader(a.tree, prog, out, tr)]
         else:
             spvs = [compile_engine_shader(a.tree, vert + ".vert", out), compile_engine_shader(a.tree, prog + ".frag", out, tr)]
+        if a.nvidia:
+            st = stats(spvs, nvidia=True)
+            lmem = int(st.get("Local Memory Size", "0")) & ((1 << 36) - 1)
+            print(f"{prog:24s} registers={st.get('Register Count', '?')}  local memory={lmem} B  binary={st.get('Binary Size', '?')} B")
+            continue
         st = stats(spvs)
         print(f"{prog:24s} " + "  ".join(f"{short}={st.get(k, '?')}" for k, short in KEYS))
         if a.peaks:

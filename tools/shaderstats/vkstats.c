@@ -1,6 +1,6 @@
 // Offline shader cost probe: compiles SPIR-V pipelines with Mesa RADV (the Ryzen iGPU's driver - nothing is submitted, the
 // NVIDIA card is never touched) and prints VK_KHR_pipeline_executable_properties statistics (VGPRs, instructions, ACO latency).
-// Usage: vkstats <vert.spv> <frag.spv> [isa-out.txt]     (graphics)
+// Usage: vkstats <vert.spv> <frag.spv> [isa-out.txt]     (graphics)  - VKSTATS_DEVICE picks another device (default RADV)
 //        vkstats <comp.spv> [isa-out.txt]                (compute; the file name must contain ".comp")
 // Run with: VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/radeon_icd.json
 #include <vulkan/vulkan.h>
@@ -93,9 +93,12 @@ int main(int argc, char **argv) {
 	VkInstanceCreateInfo ici = { VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, 0, 0, &app };
 	VkInstance inst; CHECK(vkCreateInstance(&ici, 0, &inst));
 	uint32_t nPd = 8; VkPhysicalDevice pds[8]; CHECK(vkEnumeratePhysicalDevices(inst, &nPd, pds));
+	// VKSTATS_DEVICE = a substring of the device name (default RADV; e.g. NVIDIA, with VK_ICD_FILENAMES pointing at its driver:
+	// pipelines are only COMPILED, nothing is submitted)
+	const char *want = getenv("VKSTATS_DEVICE") ? getenv("VKSTATS_DEVICE") : "RADV";
 	VkPhysicalDevice pd = VK_NULL_HANDLE;
-	for (uint32_t i = 0; i < nPd; i++) { VkPhysicalDeviceProperties p; vkGetPhysicalDeviceProperties(pds[i], &p); if (strstr(p.deviceName, "RADV")) { pd = pds[i]; fprintf(stderr, "device: %s\n", p.deviceName); } }
-	if (!pd) { fprintf(stderr, "no RADV device\n"); return 1; }
+	for (uint32_t i = 0; i < nPd; i++) { VkPhysicalDeviceProperties p; vkGetPhysicalDeviceProperties(pds[i], &p); if (strstr(p.deviceName, want)) { pd = pds[i]; fprintf(stderr, "device: %s\n", p.deviceName); } }
+	if (!pd) { fprintf(stderr, "no device matching '%s'\n", want); return 1; }
 	void *chain = NULL;
 	chain = chainAlloc(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_EXECUTABLE_PROPERTIES_FEATURES_KHR, sizeof(VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR), chain);
 	chain = chainAlloc(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR, sizeof(VkPhysicalDeviceRayQueryFeaturesKHR), chain);

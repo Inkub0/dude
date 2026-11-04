@@ -11,6 +11,9 @@ SHADERS = REPO / "neo" / "shaders"
 BIN = HERE / "bin"
 # Mesa RADV only: the Ryzen's integrated GPU. The NVIDIA card (and the game) are never touched.
 RADV_ENV = dict(os.environ, VK_ICD_FILENAMES="/usr/share/vulkan/icd.d/radeon_icd.json")
+# The NVIDIA driver, for its OWN register / local-memory counts (stats(..., nvidia=True)): pipelines are only compiled on the
+# card, nothing is submitted - safe while nothing else needs it, but never during a user bench.
+NVIDIA_ENV = dict(os.environ, VK_ICD_FILENAMES="/usr/share/vulkan/icd.d/nvidia_icd.json", VKSTATS_DEVICE="NVIDIA")
 
 
 def tool(name):
@@ -64,10 +67,11 @@ def compile_engine_shader(d, name, out_dir, transform=None):
     return compile_glsl(full, f.suffix, out)
 
 
-def stats(spvs, isa_out=None):
-    """Run vkstats on (vert, frag) or (comp,) SPIR-V; returns {statistic name: value string}."""
+def stats(spvs, isa_out=None, nvidia=False):
+    """Run vkstats on (vert, frag) or (comp,) SPIR-V; returns {statistic name: value string}. nvidia = the NVIDIA driver's
+    statistics (Register Count, Local Memory Size = bytes + 2^36) instead of RADV's."""
     args = [str(tool("vkstats"))] + [str(s) for s in spvs] + ([str(isa_out)] if isa_out else [])
-    r = subprocess.run(args, capture_output=True, text=True, env=RADV_ENV, timeout=900)
+    r = subprocess.run(args, capture_output=True, text=True, env=NVIDIA_ENV if nvidia else RADV_ENV, timeout=900)
     st = {}
     for line in r.stdout.splitlines():
         if line.startswith("  "):
