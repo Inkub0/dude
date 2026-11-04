@@ -359,7 +359,9 @@ and stored in saves) and the engine-selected loading screens (`guis/loading/gene
 library stem: `base.so` for Doom 3, `q4base.so` for Quake 4, so no separate name is needed),
 a probe file for autodetection (`base/pak000.pk4`, `q4base/pak001.pk4`), whether the Doom 3
 `base/` + `d3xp/` + `demo/` conventions apply (RoE detection, the demo fallback, the mod
-list), whether a missing game library falls back to the null game (Quake 4: yes, Doom 3: no),
+list), where the title's game library comes from when it is not part of DUDE's download (Quake 4:
+the dude-q4 project - a missing one is a dialog naming the archive and opening its release page,
+`GameTitle::GameLibraryMissing`; this replaced the early null-game fallback),
 and the engine-owned asset names that differ per title: console charset (`textures/bigchars`
 vs `gfx/2d/bigchars`), splash (`splashScreen` vs `gfx/splashScreen`), GUI fill
 (`guis/assets/white.tga` vs `_white`), GUI cursor/scrollbar art (`ui/assets/` vs `gfx/guis/`),

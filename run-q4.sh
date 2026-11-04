@@ -12,8 +12,9 @@
 #   3. a few common GOG / manual install locations
 # Extra args are forwarded, e.g.:  ./run-q4.sh +set r_graphicsAPI opengl3
 #
-# Until the Quake 4 game library (q4base.so) is built, DUDE runs the null game: a
-# free-flying spectator with no gameplay, enough to bring up the engine side.
+# The Quake 4 game library (q4base.so, tools/quake4/build-q4game.sh) must be next to the
+# binary; without it DUDE says where to get it and quits. +set fs_game nullgame runs the
+# null game instead: a free-flying spectator with no gameplay, for engine-side testing.
 set -e
 DIR="$(cd "$(dirname "$0")" && pwd)"
 

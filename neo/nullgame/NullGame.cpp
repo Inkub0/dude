@@ -16,8 +16,8 @@ Doom 3 GPL Source Code (see ArbProgram.h for license header)
 // (file loaders, decls, materials, GUIs, effects) for a game title whose own game code
 // is not built yet, which is how Quake 4 support starts (docs/quake4-port.md section 5.7).
 //
-// Selected automatically when the active title's game library is missing and the title
-// allows it (GameTitle nullGameFallback), or explicitly with  +set fs_game nullgame.
+// Selected with  +set fs_game nullgame  (a missing title game library is a startup
+// dialog and an error now, GameTitle::GameLibraryMissing - never this).
 //
 // Console commands: getviewpos, setviewpos x y z [yaw [pitch]], listDressing.
 

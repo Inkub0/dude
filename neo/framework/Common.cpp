@@ -3464,7 +3464,7 @@ void idCommonLocal::LoadGameDLL( void ) {
 
 	// DUDE: the null game speaks Doom 3's game interface whatever the title; the Quake 4
 	// title's own library speaks Quake 4's (quake4/GameLoaderQ4.h)
-	bool nullGame = idStr::Icmp( fs_game, GAME_NULL_LIBRARY ) == 0;
+	const bool nullGame = idStr::Icmp( fs_game, GAME_NULL_LIBRARY ) == 0;
 
 	sys->DLL_GetFileName(fs_game, dll, sizeof(dll));
 	LoadGameDLLbyName(dll, fs_game, s);
@@ -3490,20 +3490,12 @@ void idCommonLocal::LoadGameDLL( void ) {
 			LoadGameDLLbyName(dll, title.baseGameDir, s);
 		}
 
-		// DUDE: a title whose own game library is not built yet still boots, with the
-		// spectator-only null game, so the engine side (loaders, decls, GUIs, effects)
-		// can be brought up and tested ahead of the game code.
-		if ( !gameDLL && title.nullGameFallback ) {
-			common->Warning( "%s game library %s is not available - running the null game "
-							 "(free-fly spectator, no gameplay)\n", title.displayName, dll );
-			sys->DLL_GetFileName(GAME_NULL_LIBRARY, dll, sizeof(dll));
-			LoadGameDLLbyName(dll, NULL, s);
-			nullGame = true;
-		}
 	}
 
 	if ( !gameDLL ) {
-		common->FatalError( "couldn't load game dynamic library '%s'", dll );
+		// DUDE: a title whose library is a separate download (Quake 4) says which archive
+		// to get and where it goes; otherwise the usual fatal error
+		GameTitle::GameLibraryMissing( dll, false );
 		return;
 	}
 
@@ -3521,7 +3513,8 @@ void idCommonLocal::LoadGameDLL( void ) {
 		if ( !GameQ4_Load( (void *)GetGameAPI, &game, &gameEdit ) ) {
 			Sys_DLL_Unload( gameDLL );
 			gameDLL = 0;
-			common->FatalError( "'%s' is not a Quake 4 game library for this engine", s.c_str() );
+			common->Printf( "'%s' is not a Quake 4 game library for this engine\n", s.c_str() );
+			GameTitle::GameLibraryMissing( dll, true );
 			return;
 		}
 		gameIsQuake4 = true;

@@ -34,7 +34,6 @@ typedef struct gameTitleProfile_s {
 	const char *	baseGameDir;		// base game folder under fs_basepath; also the base game library stem
 	const char *	probeFile;			// a file only this title ships, relative to baseGameDir (autodetection)
 	bool			doom3Layout;		// base/ + d3xp/ + demo/ conventions: RoE detection, demo fallback, mod list
-	bool			nullGameFallback;	// run the null game when the title's own game library is not built yet
 	bool			recursiveDeclFolders;	// decl files also live in subfolders (Quake 4: materials/effects/...)
 	bool			entityFilters;		// "map <map> <filter>" picks one of the levels a .map holds (Quake 4: si_entityFilter, mapDef <map>_<filter>)
 
@@ -60,11 +59,18 @@ typedef struct gameTitleProfile_s {
 	// them the title refuses to start - the Quake 4 game library's licence (the SDK EULA)
 	// allows the full retail game only, not the demo
 	const char *	fullGameFiles;
+
+	// The title's game library when it is not part of DUDE's own download (Quake 4's is built
+	// from the SDK, under the SDK's licence, so it is a separate project and archive). NULL
+	// project = the library ships with DUDE, and a missing one is a plain fatal error.
+	const char *	gameLibraryProject;	// project page; release pages at <project>/releases/tag/v<version>
+	const char *	gameLibraryArchive;	// release archive stem: <stem>-<version>-<platform>
+	const char *	gameLibraryTerms;	// what the player must know before using it: whose code, which licence
 } gameTitleProfile_t;
 
 // Stem of the null game library (nullgame.so / nullgame.dll): a spectator-only idGame
-// that loads and renders any title's maps without gameplay. Used as the fallback for a
-// title whose own game library is not built yet, and on request with +set fs_game nullgame.
+// that loads and renders any title's maps without gameplay, on request with
+// +set fs_game nullgame (a development tool; not in the release downloads).
 #define GAME_NULL_LIBRARY		"nullgame"
 
 namespace GameTitle {
@@ -81,6 +87,13 @@ void						Select( const char *basePath );
 // After the filesystem is up: a fatal error when the active title's fullGameFiles are
 // missing (the Quake 4 demo, or an incomplete install).
 void						RequireFullGame( void );
+
+// The active title's game library is missing (incompatible = it is there but built for
+// another DUDE version). For a title whose library is a separate download
+// (gameLibraryProject), shows a dialog naming the archive for this DUDE version and
+// platform, its terms and where to put it, with a button that opens the release page in
+// the browser; then, for every title, a fatal error. Never returns.
+void						GameLibraryMissing( const char *libraryName, bool incompatible );
 
 // The active profile. Doom 3 until Select() has run.
 const gameTitleProfile_t &	Get( void );

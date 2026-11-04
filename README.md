@@ -156,8 +156,9 @@ The same executable runs the retail _Quake 4_ from your own install
 `q4base.dll`) is a separate download, `dude-q4-<version>-<platform>`, from a separate project,
 [dude-q4](https://github.com/Inkub0/dude-q4): it is built from Raven Software's Quake 4 SDK and
 is under the SDK's licence, not the GPL - non-commercial, free copies only, the licence file
-always attached. No Quake 4 game data is included anywhere. Without the library DUDE runs a
-spectator-only "null game". The library links parts of DUDE's idlib; the DUDE author's code
+always attached. No Quake 4 game data is included anywhere. Without the library DUDE stops with a
+message naming the archive for your version and platform and where to extract it, with a
+button that opens the download page. The library links parts of DUDE's idlib; the DUDE author's code
 in it is covered by the section 7 permission in COPYING-QUAKE4-EXCEPTION.txt. Licence details:
 [docs/quake4-release-licensing.md](docs/quake4-release-licensing.md).
 

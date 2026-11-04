@@ -110,6 +110,13 @@ removed first, SDK interface text not held against the decompile-derived trees):
    multiplayer (later) must never bypass the CD-key check (§3(m)).
 7. **SDK notices kept** (EULA §3(l)): `package-q4.sh` fails if a copyright line was removed from
    `source/` since the import.
+8. **The player fetches the library, DUDE never does**: with Quake 4 found and no `q4base`, the
+   engine stops with a dialog (`GameTitle::GameLibraryMissing`) that names the archive for its
+   version and platform, states the SDK licence terms and where to extract it, and offers to
+   open the release page in the browser. No download or install code: an engine that fetched
+   and loaded the SDK library itself would blur the separate-programs posture above, hide the
+   EULA from the player, and run network-delivered native code. The same holds for any later
+   title whose game code is under its own SDK licence (a profile's `gameLibrary*` fields).
 
 ## Open
 
@@ -123,6 +130,7 @@ removed first, SDK interface text not held against the decompile-derived trees):
 Done for 0.9.8: `--gc-sections`, the dhewm3 rewrites, a Windows `q4base.dll` (MinGW, the
 same toolchain as `dude.exe`), the game picked from the installed paks (both games in one
 folder: an error naming the `com_title` choices), and the demo refused (`GameTitle::
-RequireFullGame`: Quake 4 needs `maps/game/core2.proc` and `process2.proc`), and the
+RequireFullGame`: Quake 4 needs `maps/game/core2.proc` and `process2.proc`), the missing-
+library dialog (rule 8), and the
 [section 7 permission](quake4-gpl-section7-permission.md) for the DUDE author's code
 (`COPYING-QUAKE4-EXCEPTION.txt`, shipped in DUDE's and the `dude-q4` archives).
