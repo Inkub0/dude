@@ -450,6 +450,7 @@ private:
 	int							gpuScopeDepth[FRAMES_IN_FLIGHT] = {};		// how many scopes are open right now
 	int							gpuScopeCount[FRAMES_IN_FLIGHT] = {};
 	bool						gpuScopesActive = false;	// this frame records scopes
+	bool						gpuScopesBeginFrame = false;	// BeginFrame's pre-scene AS builds open a scope before frameOpen ("rt.frameas")
 	struct GpuScopeAccum { const char *name; double ms; int calls; int depth; };
 	std::vector<GpuScopeAccum>	gpuScopeAccum;
 	uint32_t					GpuScopeQuery( int slot, int pair ) const { return (uint32_t)( 2 * FRAMES_IN_FLIGHT + ( slot * GPU_SCOPE_MAX_PAIRS + pair ) * 2 ); }
@@ -2917,7 +2918,7 @@ void VulkanBackend::DumpQueueCheckpoints( FILE *f ) {
 
 void VulkanBackend::GpuScopeBegin( const char *name ) {
 	CheckpointMark( name, false );
-	if ( !gpuScopesActive || !frameOpen || skipFrame
+	if ( !gpuScopesActive || !( frameOpen || gpuScopesBeginFrame ) || skipFrame
 			|| gpuScopeCount[frameIndex] >= GPU_SCOPE_MAX_PAIRS
 			|| gpuScopeDepth[frameIndex] >= GPU_SCOPE_MAX_DEPTH ) {
 		return;
@@ -3342,6 +3343,10 @@ void VulkanBackend::BeginFrame( int windowWidth, int windowHeight ) {
 	// BLAS — traversal over a structure being rewritten wedges the channel (NVRM Xid 109
 	// CTX SWITCH TIMEOUT). RTAO exposed it by tracing every pixel of every frame; the fix
 	// protects every ray consumer. Recorded only on frames that actually build.
+	// r_vkGpuTime 2: the per-frame monster BLAS + TLAS builds below, before any draw (2026-11-04: this pre-scene work had no
+	// scope - ~1.1 ms of a demo1 frame was outside every pass)
+	gpuScopesBeginFrame = true;
+	GpuScopeBegin( "rt.frameas" );
 	if ( ( rtDynPendingSlot == frameIndex && rtFrameDynBlas[frameIndex] != VK_NULL_HANDLE )
 			|| ( rtPendingSlot == frameIndex && rtFrameTlas[frameIndex] != VK_NULL_HANDLE ) ) {
 		VkMemoryBarrier preBuild = {};
@@ -3379,6 +3384,8 @@ void VulkanBackend::BeginFrame( int windowWidth, int windowHeight ) {
 		rtCurrentAddr = 0;
 		rtCurrentGeoAddr = 0;
 	}
+	GpuScopeEnd();
+	gpuScopesBeginFrame = false;
 
 	boundPipeline = VK_NULL_HANDLE;
 	boundTexKey = TexSetKey{};
