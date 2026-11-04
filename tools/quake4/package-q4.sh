@@ -40,6 +40,12 @@ g() { git -C "$Q4GAME_DIR" "$@"; }
 # --- the game library: it is a game library
 if [ "$PLAT" = linux-x86_64 ]; then
 	nm -D --defined-only "$LIB" | grep -q ' GetGameAPI$' || die "$LIB exports no GetGameAPI"
+else
+	x86_64-w64-mingw32-objdump -p "$LIB" | grep -qE '\] +[0-9a-f]+ +GetGameAPI$' || die "$LIB exports no GetGameAPI"
+	# the C++ runtime is linked in, as in DUDE's own game DLLs: nothing the archive lacks
+	if x86_64-w64-mingw32-objdump -p "$LIB" | grep -qE 'DLL Name: (libstdc\+\+|libgcc)'; then
+		die "$LIB needs libstdc++/libgcc DLLs - build it with tools/quake4/build-q4game.sh (static C++ runtime)"
+	fi
 fi
 
 # --- the game repository: committed, licence file pristine, no notice removed
