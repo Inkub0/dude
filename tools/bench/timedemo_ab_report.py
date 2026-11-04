@@ -174,6 +174,21 @@ def parse_clocks( run ):
 
 
 PAIRED_MIN_MS = 0.05	# scopes below this (in both windows) neither get a line nor vote in a window's reference shift
+AGREE_MIN_MS = 0.5		# run-agreement check: scopes at least this big whose runs of ONE variant differ (clock-independent) by
+AGREE_MAX = 0.08		# more than this AND by AGREE_FACTOR x the other variants' own worst run-to-run difference on that scope
+AGREE_FACTOR = 3.0		# (the boost, FSR2 and the denoiser differ 5-20 % run to run anyway; the gather ~1 %)
+
+
+def paired_change( wins_a, wins_b, k, leaves ):
+	"""Per demo window: scope k's ratio b / a over the median ratio of the window's leaf scopes, minus 1 (a list)."""
+	out = []
+	for wa, wb in zip( wins_a, wins_b ):
+		if wa.get( k, 0.0 ) < PAIRED_MIN_MS or wb.get( k, 0.0 ) < PAIRED_MIN_MS:
+			continue
+		ref = [ wb[j] / wa[j] for j in wa if j in leaves and wa[j] >= PAIRED_MIN_MS and wb.get( j, 0.0 ) >= PAIRED_MIN_MS ]
+		if len( ref ) >= 5:
+			out.append( ( wb[k] / wa[k] ) / statistics.median( ref ) - 1.0 )
+	return out
 
 
 def paired_section( measured, names, scope_names ):
@@ -189,8 +204,30 @@ def paired_section( measured, names, scope_names ):
 	           and not ( i + 1 < len( scope_names ) and depth( scope_names[i + 1] ) > depth( k ) ) }
 	base_runs = [ r for r in measured if r["variant"] == base and r["windows"] ]
 	others = [ v for v in names[1:] ]
+	warnings = []
+	# RUN AGREEMENT: two runs of the SAME binary and settings must agree clock-independently. A run that drifts mid-way
+	# (2026-11-04 trinormal: two of three B runs stepped up +20 % in the gather after ~20 s - a runtime buffer reallocation
+	# landing in slower memory? - while the third matched master) is not the variant's speed: it made a neutral change look 14 %
+	# slower. Checked per variant, before any A/B reading.
+	worst = {}
+	for v in names:
+		rs = [ r for r in measured if r["variant"] == v and r["windows"] ]
+		for k in scope_names:
+			if k not in leaves or not rs or statistics.mean( r["scopes"].get( k, 0.0 ) for r in rs ) < AGREE_MIN_MS:
+				continue
+			for i in range( len( rs ) ):
+				for j in range( i + 1, len( rs ) ):
+					ch = paired_change( rs[i]["windows"], rs[j]["windows"], k, leaves )
+					if ch and ( ( v, k ) not in worst or abs( statistics.median( ch ) ) > abs( worst[v, k][0] ) ):
+						worst[v, k] = ( statistics.median( ch ), rs[i]["tag"], rs[j]["tag"] )
+	for ( v, k ), ( w, ta, tb ) in worst.items():
+		others_worst = max( ( abs( worst[u, k][0] ) for u in names if u != v and ( u, k ) in worst ), default=0.0 )
+		if abs( w ) > AGREE_MAX and abs( w ) > AGREE_FACTOR * others_worst:
+			warnings.append( f"variant {v}: its own runs disagree on {k.strip()} by {w * 100:+.0f}% ({tb} vs {ta}, clock-independent; the other "
+			                 f"variants' runs within {others_worst * 100:.0f}%) - a run changed mid-way, not the code: read the per-window data "
+			                 "before trusting the A/B" )
 	if not base_runs or not others:
-		return
+		return warnings
 	print( f"\nclock-independent change vs {base}: each scope vs the median shift of the leaf scopes in the same demo window,"
 	       f" paired over every {base} x variant run pair (median, p10..p90; * = the whole p10..p90 range on one side of 0):" )
 	print( f"  {'scope':<30}{base + ' ms':>10}" + "".join( f"{v:>34}" for v in others ) )
@@ -203,12 +240,7 @@ def paired_section( measured, names, scope_names ):
 			adj = []
 			for a in base_runs:
 				for b in ( r for r in measured if r["variant"] == v and r["windows"] ):
-					for wa, wb in zip( a["windows"], b["windows"] ):
-						if wa.get( k, 0.0 ) < PAIRED_MIN_MS or wb.get( k, 0.0 ) < PAIRED_MIN_MS:
-							continue
-						ref = [ wb[j] / wa[j] for j in wa if j in leaves and wa[j] >= PAIRED_MIN_MS and wb.get( j, 0.0 ) >= PAIRED_MIN_MS ]
-						if len( ref ) >= 5:
-							adj.append( ( wb[k] / wa[k] ) / statistics.median( ref ) - 1.0 )
+					adj += paired_change( a["windows"], b["windows"], k, leaves )
 			if len( adj ) < 5:
 				cells.append( f"{'-':>34}" )
 				continue
@@ -216,6 +248,7 @@ def paired_section( measured, names, scope_names ):
 			sure = "*" if lo > 0 or hi < 0 else " "
 			cells.append( f"{med * 100:+6.1f}% ({lo * 100:+5.1f}..{hi * 100:+5.1f}) {med * base_ms:+6.2f} ms{sure}" )
 		print( f"  {k:<30}{base_ms:>10.3f}" + "".join( cells ) )
+	return warnings
 
 
 def fmt_clocks( c ):
@@ -362,7 +395,7 @@ def main():
 					cells.append( f"{x:>9.3f} ({x - vals[base]:+.3f})" )
 			print( f"  {k:<30}" + "".join( cells ) )
 
-		paired_section( measured, names, scope_names )
+		problems += paired_section( measured, names, scope_names )
 
 	print()
 	if problems:
