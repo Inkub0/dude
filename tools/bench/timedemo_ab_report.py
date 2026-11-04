@@ -2,9 +2,11 @@
 """Summarise a tools/bench/timedemo-ab.sh result directory.
 
 Per run: the benchmark report (fps, frame time, 1% low, GPU ms, cvar dump), the r_vkGpuTime 3
-windows from stdout (per-pass scopes, sample-weighted) and the nvidia-smi clock log. Per variant
-(warm-up excluded): mean and spread over the rounds, scope table with deltas against the first
-variant, and a check that every run really had the variant's cvars (from the report's cvar dump).
+windows from stdout (per-pass scopes, sample-weighted) and the nvidia-smi clock log (loaded samples
+only: clock, temperature, power, throttle reasons). Per variant (warm-up excluded): mean and spread
+over the rounds, scope table with deltas against the first variant, the CLOCK-INDEPENDENT change of
+every scope (paired demo windows against the median shift of the untouched passes - the number to
+trust on a card that throttles), and a check that every run really had the variant's cvars.
 
 Usage: timedemo_ab_report.py <result dir>
 """
@@ -78,7 +80,8 @@ def parse_report( run ):
 
 
 def parse_scopes( run ):
-	"""Sample-weighted ms/frame per scope over the full windows of one run."""
+	"""Sample-weighted ms/frame per scope over the full windows of one run, the window count, and the full windows themselves
+	({scope: ms}, in demo order - window i of every run covers the same stretch of the real-time demo)."""
 	windows = []
 	cur = None
 	for line in read( os.path.join( run, "stdout.log" ) ).splitlines():
@@ -97,7 +100,7 @@ def parse_scopes( run ):
 	full = [ w for w in windows if w["n"] >= MIN_WINDOW_SAMPLES ]
 	total = sum( w["n"] for w in full )
 	if not total:
-		return None, 0
+		return None, 0, []
 	res = { "frame (r_vkGpuTime)": sum( w["frame"] * w["n"] for w in full ) / total }
 	names = []
 	for w in full:
@@ -106,12 +109,23 @@ def parse_scopes( run ):
 				names.append( k )
 	for k in names:
 		res[k] = sum( w["scopes"].get( k, 0.0 ) * w["n"] for w in full ) / total
-	return res, len( full )
+	per_window = [ dict( w["scopes"], **{ "frame (r_vkGpuTime)": w["frame"] } ) for w in full ]
+	return res, len( full ), per_window
+
+
+# nvidia-smi clocks_throttle_reasons.active bits (the clock log's last column)
+THROTTLE_POWER   = 0x4				# SW power cap
+THROTTLE_HW      = 0x8 | 0x80		# HW slowdown, HW power brake
+THROTTLE_THERMAL = 0x20 | 0x40		# SW thermal slowdown, HW thermal slowdown
+THROTTLE_REPORT_FRACTION = 0.10		# a reason active in more of a run's loaded samples than this is reported
 
 
 def parse_clocks( run ):
-	gr = []
-	limited = 0
+	"""The nvidia-smi log of one run, restricted to the samples the GPU was LOADED: power >= 60 % of the run's 90th-percentile
+	power (loading screens and the shell draw far less). Not a fixed clock floor: a hot or capped card runs the demo at
+	400-700 MHz (2026-11-04: a 600 MHz floor dropped half the loaded samples and hid the thermal throttling). Without a power
+	column, a clock >= 50 % of the run's 90th percentile."""
+	rows = []
 	path = os.path.join( run, "clocks.csv" )
 	if not os.path.exists( path ):
 		return None
@@ -123,19 +137,98 @@ def parse_clocks( run ):
 				mhz = float( row[1].strip().split()[0] )
 			except ( ValueError, IndexError ):
 				continue
-			if mhz < 600:	# idle (loading, between frames of the shell)
-				continue
-			gr.append( mhz )
-			reasons = row[5].strip()
 			try:
-				bits = int( reasons, 16 )
+				watts = float( row[4].strip().split()[0] )
+			except ( ValueError, IndexError ):
+				watts = None
+			try:
+				temp = float( row[3].strip() )
+			except ValueError:
+				temp = None
+			try:
+				bits = int( row[5].strip(), 16 )
 			except ValueError:
 				bits = 0
-			if bits & ~0x1:	# anything but "GPU idle"
-				limited += 1
-	if not gr:
+			rows.append( ( mhz, watts, temp, bits ) )
+	if not rows:
 		return None
-	return { "mean": statistics.mean( gr ), "min": min( gr ), "limited": limited / len( gr ) }
+	def p90( xs ):
+		xs = sorted( xs )
+		return xs[ int( 0.9 * ( len( xs ) - 1 ) ) ]
+	powered = [ r for r in rows if r[1] is not None ]
+	if len( powered ) >= 0.8 * len( rows ):
+		floor = 0.6 * p90( [ r[1] for r in powered ] )
+		loaded = [ r for r in powered if r[1] >= floor ]
+	else:
+		floor = 0.5 * p90( [ r[0] for r in rows ] )
+		loaded = [ r for r in rows if r[0] >= floor ]
+	if not loaded:
+		return None
+	n = len( loaded )
+	frac = lambda mask: sum( 1 for r in loaded if r[3] & mask ) / n
+	temps = [ r[2] for r in loaded if r[2] is not None ]
+	watts = [ r[1] for r in loaded if r[1] is not None ]
+	return { "mean": statistics.mean( r[0] for r in loaded ), "min": min( r[0] for r in loaded ), "n": n,
+	         "temp_max": max( temps ) if temps else None, "watts": statistics.mean( watts ) if watts else None,
+	         "thermal": frac( THROTTLE_THERMAL ), "power": frac( THROTTLE_POWER ), "hw": frac( THROTTLE_HW ) }
+
+
+PAIRED_MIN_MS = 0.05	# scopes below this (in both windows) neither get a line nor vote in a window's reference shift
+
+
+def paired_section( measured, names, scope_names ):
+	"""Clock-independent change of every scope vs the first variant. For each (base run, variant run) pair and each demo window
+	in both, a scope's ratio variant / base is divided by the MEDIAN ratio of the window's leaf scopes: heat, the power cap and
+	the clock slow every pass alike, a change only the passes it touches. Robust while most passes are untouched (the
+	median ignores the changed ones); a change that moves most passes shows up as 'everything else' moving instead."""
+	base = names[0]
+	quant = lambda xs, q: sorted( xs )[ int( q * ( len( xs ) - 1 ) ) ]
+	# only LEAF scopes vote in the reference: a parent (frame, world, post) moves with whatever changed inside it
+	depth = lambda k: len( k ) - len( k.lstrip( " " ) )
+	leaves = { k for i, k in enumerate( scope_names ) if k != "frame (r_vkGpuTime)"
+	           and not ( i + 1 < len( scope_names ) and depth( scope_names[i + 1] ) > depth( k ) ) }
+	base_runs = [ r for r in measured if r["variant"] == base and r["windows"] ]
+	others = [ v for v in names[1:] ]
+	if not base_runs or not others:
+		return
+	print( f"\nclock-independent change vs {base}: each scope vs the median shift of the leaf scopes in the same demo window,"
+	       f" paired over every {base} x variant run pair (median, p10..p90; * = the whole p10..p90 range on one side of 0):" )
+	print( f"  {'scope':<30}{base + ' ms':>10}" + "".join( f"{v:>34}" for v in others ) )
+	for k in scope_names:
+		base_ms = statistics.mean( r["scopes"].get( k, 0.0 ) for r in base_runs )
+		if base_ms < PAIRED_MIN_MS:
+			continue
+		cells = []
+		for v in others:
+			adj = []
+			for a in base_runs:
+				for b in ( r for r in measured if r["variant"] == v and r["windows"] ):
+					for wa, wb in zip( a["windows"], b["windows"] ):
+						if wa.get( k, 0.0 ) < PAIRED_MIN_MS or wb.get( k, 0.0 ) < PAIRED_MIN_MS:
+							continue
+						ref = [ wb[j] / wa[j] for j in wa if j in leaves and wa[j] >= PAIRED_MIN_MS and wb.get( j, 0.0 ) >= PAIRED_MIN_MS ]
+						if len( ref ) >= 5:
+							adj.append( ( wb[k] / wa[k] ) / statistics.median( ref ) - 1.0 )
+			if len( adj ) < 5:
+				cells.append( f"{'-':>34}" )
+				continue
+			med, lo, hi = statistics.median( adj ), quant( adj, 0.1 ), quant( adj, 0.9 )
+			sure = "*" if lo > 0 or hi < 0 else " "
+			cells.append( f"{med * 100:+6.1f}% ({lo * 100:+5.1f}..{hi * 100:+5.1f}) {med * base_ms:+6.2f} ms{sure}" )
+		print( f"  {k:<30}{base_ms:>10.3f}" + "".join( cells ) )
+
+
+def fmt_clocks( c ):
+	if not c:
+		return "no clock log"
+	out = f"{c['mean']:.0f} MHz (min {c['min']:.0f})"
+	if c["temp_max"] is not None:
+		out += f" {c['temp_max']:.0f} C"
+	if c["watts"] is not None:
+		out += f" {c['watts']:.0f} W"
+	why = [ f"{name} {c[k] * 100:.0f}%" for k, name in ( ( "thermal", "thermal" ), ( "power", "power cap" ), ( "hw", "HW slowdown" ) )
+	        if c[k] > THROTTLE_REPORT_FRACTION ]
+	return out + ( f"  throttled: {', '.join( why )}" if why else "" )
 
 
 def fmt( vals, digits=2 ):
@@ -159,7 +252,7 @@ def main():
 		v = read( os.path.join( run, "variant" ) ).strip()
 		rnd = read( os.path.join( run, "round" ) ).strip()
 		rep = parse_report( run )
-		scopes, nwin = parse_scopes( run )
+		scopes, nwin, wins = parse_scopes( run )
 		clocks = parse_clocks( run )
 		tag = os.path.basename( run )
 		if rep is None:
@@ -181,7 +274,8 @@ def main():
 					problems.append( f"{tag}: emissive mode on but the demo's map is UNAUTHORED (no setup in the sandbox)" )
 		if scopes is None:
 			problems.append( f"{tag}: no r_vkGpuTime windows with >= {MIN_WINDOW_SAMPLES} samples" )
-		runs.append( { "tag": tag, "variant": v, "round": rnd, "rep": rep, "scopes": scopes or {}, "nwin": nwin, "clocks": clocks } )
+		runs.append( { "tag": tag, "variant": v, "round": rnd, "rep": rep, "scopes": scopes or {}, "nwin": nwin, "clocks": clocks,
+		               "windows": wins } )
 
 	# the GPU clock drifts with heat (the 3080 Ti: 1340 MHz warm-up -> ~1120 MHz settled, 2026-10-31): rescale every run's
 	# GPU time to the MEDIAN clock of the measured runs (assumes time scales with the core clock - memory-bound passes don't)
@@ -195,8 +289,7 @@ def main():
 	print( "per run:" )
 	for r in runs:
 		rep = r["rep"] or {}
-		c = r["clocks"]
-		clk = f"{c['mean']:.0f} MHz (min {c['min']:.0f}, limited {c['limited'] * 100:.0f}%)" if c else "no clock log"
+		clk = fmt_clocks( r["clocks"] )
 		warm = "  (warm-up)" if r["round"] == "w" else ""
 		norm = f"  @median clock {r['gpu_norm']:6.2f} ms" if r.get( "gpu_norm" ) else ""
 		print( f"  {r['tag']:<14} fps {rep.get('fps') or 0:6.1f}  GPU {rep.get('gpu_avg') or 0:6.2f} ms{norm}  "
@@ -206,6 +299,20 @@ def main():
 		for r in runs:
 			if r["clocks"] and r["round"] != "w" and abs( r["clocks"]["mean"] - ref_clock ) > 0.05 * ref_clock:
 				problems.append( f"{r['tag']}: mean clock {r['clocks']['mean']:.0f} MHz is more than 5% off the median ({ref_clock:.0f}) - compare it with care" )
+	# throttling: one line per reason over the measured runs (the card's limits, not the variants', set the clock then - A/B stays
+	# comparable while every variant ran throttled alike; the per-run lines above show each run's share)
+	measured_clk = [ r for r in runs if r["clocks"] and r["round"] != "w" ]
+	for key, name in ( ( "thermal", "thermal slowdown (the card's temperature limit)" ), ( "power", "the power cap" ),
+	                   ( "hw", "HW slowdown / power brake" ) ):
+		hit = [ r for r in measured_clk if r["clocks"][key] > THROTTLE_REPORT_FRACTION ]
+		if hit:
+			lo = min( r["clocks"][key] for r in hit ) * 100
+			hi = max( r["clocks"][key] for r in hit ) * 100
+			temps = [ r["clocks"]["temp_max"] for r in hit if r["clocks"]["temp_max"] is not None ]
+			tmax = f", up to {max( temps ):.0f} C" if temps and key == "thermal" else ""
+			problems.append( f"{len( hit )} of {len( measured_clk )} measured runs limited by {name} in {lo:.0f}-{hi:.0f}% of their loaded "
+			                 f"samples{tmax}; clocks {min( r['clocks']['mean'] for r in measured_clk ):.0f}-"
+			                 f"{max( r['clocks']['mean'] for r in measured_clk ):.0f} MHz - compare variants that ran in the same phase" )
 	display = sorted( { ( r["rep"] or {} ).get( "display", "?" ) for r in runs } )
 	print( f"\ndisplay: {' | '.join( display )}" )
 
@@ -255,13 +362,16 @@ def main():
 					cells.append( f"{x:>9.3f} ({x - vals[base]:+.3f})" )
 			print( f"  {k:<30}" + "".join( cells ) )
 
+		paired_section( measured, names, scope_names )
+
 	print()
 	if problems:
 		print( "CHECK:" )
 		for p in problems:
 			print( f"  ! {p}" )
 	else:
-		print( "checks: all runs real-time, variant cvars confirmed in every report, no throttled run" )
+		print( "checks: all runs real-time, variant cvars confirmed in every report, clocks within 5% of the median, no throttle reason "
+		       f"in more than {THROTTLE_REPORT_FRACTION * 100:.0f}% of any measured run's loaded samples" )
 	return 0
 
 
