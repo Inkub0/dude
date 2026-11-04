@@ -71,11 +71,6 @@ typedef struct {
 	float				range;		// spiral: one turn per this much x
 } bseDomain_t;
 
-static const idVec3 bseCubeNormals[6] = {
-	idVec3( -1.0f, 0.0f, 0.0f ), idVec3( 0.0f, -1.0f, 0.0f ), idVec3( 0.0f, 0.0f, -1.0f ),
-	idVec3( 1.0f, 0.0f, 0.0f ), idVec3( 0.0f, 1.0f, 0.0f ), idVec3( 0.0f, 0.0f, 1.0f )
-};
-
 static bseDomain_t BSE_MakeDomain( const effectDomain_t &domain, int components, float defaultValue ) {
 	bseDomain_t d;
 	d.type = domain.type;
@@ -86,14 +81,16 @@ static bseDomain_t BSE_MakeDomain( const effectDomain_t &domain, int components,
 	return d;
 }
 
+// scales v to unit length; a zero vector stays zero
 static void BSE_NormalizeOrKeep( idVec3 &v ) {
-	const float lengthSqr = v.LengthSqr();
-	if ( lengthSqr != 0.0f ) {
-		v *= idMath::InvSqrt( lengthSqr );
+	const float lenSqr = v.LengthSqr();
+	if ( lenSqr == 0.0f ) {
+		return;
 	}
+	v *= idMath::InvSqrt( lenSqr );
 }
 
-// the normal of a volume sample points away from the centre (from the origin without one)
+// sample normals face outward: away from the given centre, or away from the origin
 static void BSE_SampleNormal( idVec3 *normal, const idVec3 &sample, const idVec3 *centre ) {
 	if ( normal != NULL ) {
 		*normal = centre != NULL ? sample - *centre : sample;
@@ -174,7 +171,9 @@ static void BSE_SampleDomain( const bseDomain_t &d, float seed, idVec3 &out, idV
 					}
 				}
 				if ( normal != NULL && centre != NULL ) {
-					*normal = bseCubeNormals[face];
+					// the face's own axis, pointing out of the box
+					normal->Zero();
+					( *normal )[face % 3] = face < 3 ? -1.0f : 1.0f;
 					return;
 				}
 				BSE_SampleNormal( normal, out, NULL );
@@ -208,16 +207,16 @@ static void BSE_SampleDomain( const bseDomain_t &d, float seed, idVec3 &out, idV
 				out.z = mid.z + BSE_RandomRange( 0.0f, radius.z * taper ) * dir.y;
 				break;
 			}
-			const float edgeY = radius.y * dir.x;
-			const float edgeZ = radius.z * dir.y;
-			out.y = mid.y + edgeY * taper;
-			out.z = mid.z + edgeZ * taper;
+			// the full-radius rim point in this direction; the cone's taper pulls it in
+			const idVec2 rim( radius.y * dir.x, radius.z * dir.y );
+			out.y = mid.y + rim.x * taper;
+			out.z = mid.z + rim.y * taper;
 			if ( normal != NULL && centre != NULL ) {
 				if ( taper == 1.0f ) {
-					normal->Set( 0.0f, dir.x, dir.y );		// straight out from the axis
+					normal->Set( 0.0f, dir.x, dir.y );		// a cylinder wall: radial
 				} else {
-					// a cone's side leans back towards its apex
-					normal->Set( -( edgeY * edgeY + edgeZ * edgeZ ), edgeY * length, edgeZ * length );
+					// a cone wall tilts towards -x by the slope rim / length
+					normal->Set( -rim.LengthSqr(), rim.x * length, rim.y * length );
 					BSE_NormalizeOrKeep( *normal );
 				}
 				return;
@@ -227,16 +226,19 @@ static void BSE_SampleDomain( const bseDomain_t &d, float seed, idVec3 &out, idV
 
 		case EFFECT_DOMAIN_SPIRAL: {
 			out.x = ( d.flags & EFFECT_DOMAIN_LINEAR_SPACING ) ? d.mins.x + ( d.maxs.x - d.mins.x ) * seed : BSE_RandomRange( d.mins.x, d.maxs.x );
-			const float radiusY = BSE_RandomRange( d.mins.y, d.maxs.y );
-			const float radiusZ = BSE_RandomRange( d.mins.z, d.maxs.z );
-			if ( d.range != 0.0f ) {
-				float s, c;
-				idMath::SinCos( idMath::TWO_PI * out.x / d.range, s, c );
-				out.y = c * radiusY - s * radiusZ;
-				out.z = c * radiusZ + s * radiusY;
+			idVec2 arm;		// drawn y first, then z
+			arm.x = BSE_RandomRange( d.mins.y, d.maxs.y );
+			arm.y = BSE_RandomRange( d.mins.z, d.maxs.z );
+			if ( d.range == 0.0f ) {
+				out.y = arm.x;
+				out.z = arm.y;
 			} else {
-				out.y = radiusY;
-				out.z = radiusZ;
+				// the arm turns about x: one full turn per 'range' along x
+				const float turn = idMath::TWO_PI * out.x / d.range;
+				float sinT, cosT;
+				idMath::SinCos( turn, sinT, cosT );
+				out.y = arm.x * cosT - arm.y * sinT;
+				out.z = arm.y * cosT + arm.x * sinT;
 			}
 			if ( normal != NULL ) {
 				normal->Set( centre != NULL ? 0.0f : out.x, out.y, out.z );
@@ -483,14 +485,11 @@ float idBseSegment::AttenuatedInterval( idBseEffect *effect ) const {
 	if ( !( tmpl->flags & ( EFFECT_SEGMENT_ATTENUATE_EMITTER | EFFECT_SEGMENT_INVERSE_ATTENUATE_EMITTER ) ) ) {
 		return interval;
 	}
-	float attenuation = effect->SegmentAttenuation( *tmpl );
-	if ( tmpl->flags & EFFECT_SEGMENT_INVERSE_ATTENUATE_EMITTER ) {
-		attenuation = 1.0f - attenuation;
-	}
-	if ( attenuation < 0.002f ) {
-		return 1.0f;
-	}
-	return Max( 1.1920929e-7f, interval / attenuation );
+	const float atten = effect->SegmentAttenuation( *tmpl );
+	const float rate = ( tmpl->flags & EFFECT_SEGMENT_INVERSE_ATTENUATE_EMITTER ) ? 1.0f - atten : atten;
+	// retail: a (nearly) fully attenuated emitter waits one second; otherwise the interval
+	// stretches by 1 / rate, never below float epsilon
+	return rate < 0.002f ? 1.0f : Max( idMath::FLT_EPSILON, interval / rate );
 }
 
 // spawner: how many at once, by bse_scale and the distance attenuation
@@ -1767,14 +1766,16 @@ public:
 	void					Branch( const idVec3 &start, const idVec3 &end );
 };
 
-// the bolt's sideways axis: level and square to it, +x when it is vertical
+// the bolt's sideways axis: forward turned a quarter left in the xy plane, unit length;
+// a vertical bolt has no such turn and takes +x
 static idVec3 BSE_BoltLeft( const idVec3 &forward ) {
-	const float planar = forward.x * forward.x + forward.y * forward.y;
-	if ( planar == 0.0f ) {
+	const idVec2 side( -forward.y, forward.x );
+	const float lenSqr = side.LengthSqr();
+	if ( lenSqr == 0.0f ) {
 		return idVec3( 1.0f, 0.0f, 0.0f );
 	}
-	const float inv = idMath::InvSqrt( planar );
-	return idVec3( -forward.y * inv, forward.x * inv, 0.0f );
+	const float scale = idMath::InvSqrt( lenSqr );
+	return idVec3( side.x * scale, side.y * scale, 0.0f );
 }
 
 static int BSE_BoltCount( float length ) {
