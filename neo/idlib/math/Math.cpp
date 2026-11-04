@@ -138,17 +138,18 @@ idMath::Lerp
 ================
 */
 float idMath::Lerp( float start, float end, float frac ) {
-	if ( frac >= 1.0f ) {
-		return end;
-	}
+	// clamped: at or past either end the result is that end, exactly
 	if ( frac <= 0.0f ) {
 		return start;
 	}
-	return start + ( end - start ) * frac;
+	if ( frac >= 1.0f ) {
+		return end;
+	}
+	return start + frac * ( end - start );
 }
 
 float idMath::Lerp( const idVec2 &range, float frac ) {
-	return Lerp( range[0], range[1], frac );
+	return Lerp( range.x, range.y, frac );
 }
 
 /*
@@ -157,10 +158,8 @@ idMath::MidPointLerp
 ================
 */
 float idMath::MidPointLerp( float start, float mid, float end, float frac ) {
-	if ( frac < 0.5f ) {
-		return Lerp( start, mid, 2.0f * frac );
-	}
-	return Lerp( mid, end, 2.0f * ( frac - 0.5f ) );
+	// two clamped halves: start -> mid while frac runs 0 -> 0.5, mid -> end for 0.5 -> 1
+	return frac < 0.5f ? Lerp( start, mid, frac * 2.0f ) : Lerp( mid, end, ( frac - 0.5f ) * 2.0f );
 }
 
 /*
