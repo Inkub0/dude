@@ -60,6 +60,7 @@ for name in "${MAPS[@]}"; do
 	# shellcheck disable=SC2086
 	timeout -k 10 "$TIMEOUT" "$ROOT/run-q4.sh" \
 		+set fs_configpath "$CONFIG" \
+		+set fs_game nullgame \
 		+set r_graphicsAPI "$API" \
 		+set r_vkCrashLogging 1 \
 		+map "game/$file" $filter \

@@ -1420,19 +1420,22 @@ void GLimp_Shutdown() {
 	windowIsVulkan = false;
 }
 
-#ifdef DHEWM3_VULKAN
 /*
 ===================
 GLimp_GetSDLWindow
 
-The live SDL window as void* (tr_local.h can't know SDL types); the Vulkan
-backend creates its VkSurfaceKHR from it.
+The live SDL window as void* (tr_local.h can't know SDL types): the Vulkan
+backend creates its VkSurfaceKHR from it, and startup dialogs hide it
+(GameTitle::GameLibraryMissing). NULL on SDL 1.2.
 ===================
 */
 void *GLimp_GetSDLWindow( void ) {
+#if SDL_VERSION_ATLEAST(2, 0, 0)
 	return window;
-}
+#else
+	return NULL;
 #endif
+}
 
 /*
 ===================

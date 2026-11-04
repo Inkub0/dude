@@ -1625,10 +1625,10 @@ idStr		GLimp_DisplayKey( const char *sdlDisplayName );
 // pre-gate before selecting the Vulkan backend, so unsupported systems fall
 // back to GL instead of wedging on the archived cvar.
 bool		GLimp_VulkanProbe( void );
-// the live SDL window (as void* to keep SDL types out of this header) — the
-// Vulkan backend creates its VkSurfaceKHR from it
-void *		GLimp_GetSDLWindow( void );
 #endif
+// the live SDL window (as void* to keep SDL types out of this header) — the
+// Vulkan backend creates its VkSurfaceKHR from it; NULL on SDL 1.2
+void *		GLimp_GetSDLWindow( void );
 // If the desired mode can't be set satisfactorily, false will be returned.
 // The renderer will then reset the glimpParms to "safe mode" of 640x480
 // fullscreen and try again.  If that also fails, the error will be fatal.
