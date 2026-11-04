@@ -23,35 +23,52 @@ advice; only a written OK from the rights holders settles the questions listed a
 | `tools/quake4/check_provenance.py` | DUDE code written since the Quake 4 work began has no runs of code from the decompile-derived BSE trees (OpenQ4 `src/bse`, idTech4A++ `raven/bse`) or from the SDK beyond the interface | before every release; exit 1 = stop |
 | `tools/quake4/q4base_licence_audit.py` | which DUDE source lines produce code in `q4base` (DWARF line tables) and whose they are (git blame) | before every release; numbers go in the notes below |
 | `tools/quake4/package-q4.sh` | builds the separate `dude-q4-<ver>-<platform>` archive: library + unmodified EULA + README + BUILDINFO; refuses an uncommitted build, a changed EULA file or removed SDK copyright notices | release packaging ([releasing.md](releasing.md)) |
-| `tools/quake4/build-q4game.sh` | now also writes `q4base.buildinfo` (DUDE and dude-q4 commits, compiler) next to the library | every build |
+| `tools/quake4/build-q4game.sh` | writes `q4base.buildinfo` (DUDE and dude-q4 commits, compiler) next to the library; `DUDE_BUILD=build-win` builds `q4base.dll` with MinGW | every build |
 
 ## Measured: the GPL code inside q4base (2026-11-04)
 
-`q4base_licence_audit.py` on the library as built today (DUDE's default flags, all of every
-idlib object the linker pulls in), and on a trial link with `-ffunction-sections` idlib +
-`--gc-sections` (only the functions the game reaches):
+`q4base_licence_audit.py` on the library as first built (all of every idlib object the linker
+pulls in), and as built now: idlib with one section per function and object, the library
+linked with `--gc-sections` (only the functions the game reaches), and the dhewm3 fixes
+rewritten (next section):
 
-| Class | Meaning | Today | gc-sections trial |
+| Class | Meaning | First build | Now |
 |---|---|---|---|
-| id-sdk | id's GPL code whose text is also in the SDK (we hold it under the EULA too) | 22 582 (91.4 %) | 12 161 (87.2 %) |
+| id-sdk | id's GPL code whose text is also in the SDK (we hold it under the EULA too) | 22 582 (91.4 %) | 12 121 (87.0 %) |
 | id-gpl | id's GPL code not in the SDK | 697 (2.8 %) | 597 (4.3 %) |
-| own | DUDE author's code (a GPLv3 §7 permission can cover it) | 1 080 (4.4 %) | 1 050 (7.5 %) |
-| third | dhewm3 and other contributors | 340 (1.4 %) | 140 (1.0 %) |
+| own | DUDE author's code (the section 7 permission, [draft](quake4-gpl-section7-permission.md), would cover it) | 1 080 (4.4 %) | 1 120 (8.0 %) |
+| third | dhewm3 and other contributors | 340 (1.4 %) | 100 (0.7 %) |
 
 Substantive code lines (braces and bare `return;` counted apart). Readings:
 
-- **third**: 340 lines from 58 dhewm3 commits; with gc-sections 140 lines from 42, the largest being dhewg's
-  x86_64 heap fix (19), Daniel Gibson's `idParser` date/time fix (12) and paths-with-dots fix (12),
-  then small 64-bit renames (`ReadLong` -> `ReadInt` and the like). Daniel Gibson's UTF-8
-  functions (89 lines) drop out completely with gc-sections.
+- **third**: the 100 lines left (`q4base_licence_audit.py --all-third` lists them) are one-line
+  64-bit casts and widenings (`intptr_t`), signatures whose types the frozen dhewm3 game ABI
+  fixes (`ReadInt`, `WriteDeltaInt`, `GetUnsignedIntValue`, the idTimer fields), zero
+  initialisations for compiler warnings, and single conditions (`if ( numPlanes > 0 )`,
+  `if ( &text == this )`). Each has one way to be written.
 - **id-gpl** is mostly SIMD: the GCC paths of `Simd_SSE.cpp` / `Simd_SSE2.cpp` (id wrote them
   for the Linux port, after Raven's fork) and `Simd_Generic.cpp` signatures that differ from
   Raven's. Part of it is cosmetic (`Curve.h` `this->` for GCC templates).
-- **own**: the Quake 4 interface layer and Raven-method ports in idlib. Six of its commits name
-  OpenQ4 / idTech4A++; all six say "consulted, our own code" (read 2026-11-04).
-- The dude-q4 repository's 14 dhewm3-carrying commits: `bcff329` (64-bit event and script
-  system, +712/-680, much of it the regenerated callback table) is the substantial one; the
-  rest are 1 to 48 lines.
+- **own**: the Quake 4 interface layer, Raven-method ports in idlib and the rewrites. Six of
+  its commits name OpenQ4 / idTech4A++; all six say "consulted, our own code".
+- **dude-q4**: of the dhewm3 code `bcff329` applied (64-bit events and scripts), 110 lines
+  remain, all `int` -> `intptr_t` / `long` -> `int` widenings. The generated callback switch
+  (2 600 lines) is replaced by a template table, the script stack pushes and vector storage
+  are rewritten. The other dhewm3-credited commits are our own code for fixes dhewm3 found.
+
+## dhewm3 fixes rewritten (2026-11-04)
+
+Rewritten from what each fix does, not reworded; old against new compiled side by side:
+
+- **DUDE idlib** (`5f7391a0`): `idHeap::Allocate16/Free16`, `idParser` `__DATE__`/`__TIME__`,
+  `idStr` allocation (the disabled string pool removed) and path helpers, `D3_vsnprintfC99`,
+  `idLangDict::GetHashKey`. Identical output except `ExtractFileExtension` on two inputs it
+  got wrong: a name without an extension inside a dotted folder (it returned text across the
+  separator, now nothing) and a name ending in `.`.
+- **dude-q4**: event dispatch through a compiler-built table (139 argument patterns compared,
+  -O0, -O2 and Win64 under Wine: identical); `idInterpreter::Push( int )`, `PushVector`,
+  `EVENT_VEC3_SIZE`; script vector storage (`AllocVectorComponents`); `FrameLengthMs`; the
+  projectile fit test.
 
 ## Provenance findings, fixed 2026-11-04
 
@@ -88,24 +105,24 @@ removed first, SDK interface text not held against the decompile-derived trees):
    on the player's machine.
 5. **Trademarks**: the product is DUDE; Quake 4 is named only to say what it runs ("runs
    Quake 4, not included"); no Quake 4 logo or art; the non-affiliation line in every README.
-6. **Full retail game only** (EULA §2 excludes "any demo, test, or other version"); multiplayer
-   (later) must never bypass the CD-key check (§3(m)).
+6. **Full retail game only** (EULA §2 excludes "any demo, test, or other version"): the engine
+   refuses a Quake 4 install without the last levels (the demo), and the READMEs say so;
+   multiplayer (later) must never bypass the CD-key check (§3(m)).
 7. **SDK notices kept** (EULA §3(l)): `package-q4.sh` fails if a copyright line was removed from
    `source/` since the import.
 
 ## Open
 
-- **Shrinking the GPL code in the binary** (in order of cost): link with `--gc-sections` and a
-  `-ffunction-sections` idlib (measured above: third-party code 340 -> 140 lines); a GPLv3 §7
-  additional permission for the DUDE author's own code; ask the dhewm3 maintainers for
-  permission covering the remaining hunks (idlib list from the audit, plus the 14 dude-q4
-  commits) or rewrite them from the bug descriptions; for the SIMD id-gpl code, give the game
-  only the generic SIMD processor or the engine's. Full independence (the game on the SDK's
-  own idlib, "option 2") only if those leave too much.
-- **Demo refusal**: needs the Quake 4 demo's file layout, not checked yet.
-- **Not licence work, needed for "out of the box"**: a Windows `q4base.dll`, the install
-  detection of `run-q4.sh` inside the engine, a Quake 4 entry in the menu.
+- **The section 7 permission**: [draft](quake4-gpl-section7-permission.md), waiting for the
+  author's wording.
+- **id's GPL-only code** (597 lines, mostly the GCC SIMD paths): only id could permit it. The
+  game could use only the generic SIMD processor, or the engine's, to drop most of it.
 - **What no step here resolves**: whether a GPL engine may load a non-GPL game library (the
   `GetGameAPI` boundary is the best available posture, not a guarantee), and whether "shall
   operate only with QUAKE 4" covers a replacement engine (read as yes: the library is a mod
   for Quake 4's data).
+
+Done for 0.9.8: `--gc-sections`, the dhewm3 rewrites, a Windows `q4base.dll` (MinGW, the
+same toolchain as `dude.exe`), the game picked from the installed paks (both games in one
+folder: an error naming the `com_title` choices), and the demo refused (`GameTitle::
+RequireFullGame`: Quake 4 needs `maps/game/core2.proc` and `process2.proc`).

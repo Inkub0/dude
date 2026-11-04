@@ -111,13 +111,23 @@ its own "dude folder" (`~/.local/share/dude` on Linux, `Documents/My Games/dude`
 Windows).
 
 **Quake 4.** The same executable runs the retail _Quake 4_ from your own install
-([docs/quake4-port.md](docs/quake4-port.md)). `./run-q4.sh` finds a Steam install (or takes
-`Q4DIR=/path/to/Quake 4`). The Quake 4 game library (`q4base.so` / `q4base.dll`) is a separate
-download and a separate project, [dude-q4](https://github.com/Inkub0/dude-q4): it is built from
-Raven Software's Quake 4 SDK and is under the SDK's licence, not the GPL - non-commercial,
-free copies only, the licence file always attached, full retail Quake 4 required. No Quake 4
-game data is included anywhere. Without the library DUDE runs a spectator-only "null game".
-Licence details: [docs/quake4-release-licensing.md](docs/quake4-release-licensing.md).
+([docs/quake4-port.md](docs/quake4-port.md)). The Quake 4 game library (`q4base.so` /
+`q4base.dll`) is a separate download, `dude-q4-<version>-<platform>`, from a separate project,
+[dude-q4](https://github.com/Inkub0/dude-q4): it is built from Raven Software's Quake 4 SDK and
+is under the SDK's licence, not the GPL - non-commercial, free copies only, the licence file
+always attached. No Quake 4 game data is included anywhere. Without the library DUDE runs a
+spectator-only "null game". Licence details:
+[docs/quake4-release-licensing.md](docs/quake4-release-licensing.md).
+
+Setup: extract DUDE and the `dude-q4` archive into your Quake 4 folder (the one that contains
+`q4base/`) and start `dude` there; DUDE sees Quake 4's paks and runs Quake 4. From anywhere
+else, start it with `+set fs_basepath "/path/to/Quake 4"`; on Linux `./run-q4.sh` finds a Steam
+install by itself. A folder that holds both Doom 3's and Quake 4's game data stops with a
+message: start with `+set com_title doom3` or `+set com_title quake4` to choose.
+
+**Full retail Quake 4 only.** DUDE needs the full game (Steam, GOG or disc) and refuses the
+Quake 4 demo, or an install missing its map paks: the Quake 4 SDK licence lets the game library
+run with the full version of Quake 4 only.
 
 Quake and Quake 4 are trademarks of their owners (id Software / ZeniMax Media). DUDE is an
 independent, non-commercial project, not affiliated with, endorsed or sponsored by id Software,

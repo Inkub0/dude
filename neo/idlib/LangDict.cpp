@@ -339,22 +339,19 @@ idLangDict::GetHashKey
 ============
 */
 int idLangDict::GetHashKey( const char *str ) const {
+	// Doom 3's ids are "#str_" and digits, and the key is that number. Some data (the Lost
+	// Mission string tables) has ids with letters after "#str_": they still hash, just not to
+	// their number, and still resolve; say so once per run instead of asserting.
+	static bool reportedLetters = false;
+	const char *digits = str + STRTABLE_ID_LENGTH;
 	int hashKey = 0;
-	// DG: Replace assertion for invalid entries with a warning that's shown only once
-	//     (for D3LE mod that seems to have lots of entries like #str_adil_exis_pda_01_audio_info)
-	const char* strbk = str;
-	static bool warnedAboutInvalidKey = false;
-	for ( str += STRTABLE_ID_LENGTH; str[0] != '\0'; str++ ) {
-		// assert( str[0] >= '0' && str[0] <= '9' );
-		if(!warnedAboutInvalidKey && (str[0] < '0' || str[0] > '9')) {
-			// The "hash" code here very obviously expects numbers, but apparently it still somehow works,
-			// so just warn about it and otherwise accept those entries, seems to work for D3LE?
-			idLib::common->Warning( "We have at least one invalid key in a language dict: %s\n"
-			                        " (might still work, but Doom3 really wants #str_01234, i.e. only a number after '#str_')\n", strbk );
-			warnedAboutInvalidKey = true;
+	for ( const char *c = digits; *c != '\0'; c++ ) {
+		const bool isDigit = ( *c >= '0' && *c <= '9' );
+		if ( !isDigit && !reportedLetters ) {
+			reportedLetters = true;
+			idLib::common->Warning( "string table id '%s' is not '#str_' and digits; it works, but ids are meant to be numbers\n", str );
 		}
-		// DG end
-		hashKey = hashKey * 10 + str[0] - '0';
+		hashKey = hashKey * 10 + ( *c - '0' );
 	}
 	return hashKey;
 }

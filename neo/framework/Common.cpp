@@ -3452,6 +3452,10 @@ void idCommonLocal::LoadGameDLL( void ) {
 	// (base.so for Doom 3, q4base.so for Quake 4) - see GameTitle
 	const gameTitleProfile_t &title = GameTitle::Get();
 
+	// DUDE: a title whose game library may only run with the full game (Quake 4's SDK licence)
+	// stops here on a demo or incomplete install, before any game library is loaded
+	GameTitle::RequireFullGame();
+
 	fs_game = cvarSystem->GetCVarString("fs_game");
 	if (!fs_game || !fs_game[0])
 		fs_game = title.baseGameDir;

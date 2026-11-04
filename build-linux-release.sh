@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Build the PORTABLE Linux release binary in a rootless Ubuntu 22.04 sandbox
-# (bubblewrap). Result: build-linux-release/{dude,base.so,d3xp.so} with
+# (bubblewrap). Result: build-linux-release/{dude,base.so,d3xp.so} - and q4base.so when the
+# dude-q4 repository is at $Q4GAME_DIR (default ~/dude-quake4-game) - with
 #   - glibc floor 2.34/2.35 (works on Ubuntu 22.04+/Debian 12+/all gaming distros)
 #   - libstdc++/libgcc/shaderc linked statically
 #   - RUNPATH $ORIGIN/lib for the bundled Vulkan-loader fallback
@@ -19,11 +20,13 @@ SHADERC_TAG=v2025.4
 
 [ "${1:-}" = "-c" ] && rm -rf "$ROOT/build-linux-release"
 
+EXTRA_BINDS=()
 enter() { # run a command as mapped-root inside the sandbox
 	bwrap \
 		--bind "$ROOTFS" / \
 		--proc /proc --dev /dev --tmpfs /tmp \
 		--bind "$ROOT" /work \
+		"${EXTRA_BINDS[@]}" \
 		--ro-bind /etc/resolv.conf /etc/resolv.conf \
 		--unshare-user --uid 0 --gid 0 \
 		--setenv HOME /root \
@@ -83,6 +86,16 @@ fi
 
 echo ">> building"
 enter cmake --build /work/build-linux-release -j"$(nproc)"
+
+# ---- the Quake 4 game library, in the same sandbox: the same compiler and glibc floor as
+# dude, and DUDE's release idlib (docs/releasing.md, docs/quake4-release-licensing.md)
+Q4GAME_DIR="${Q4GAME_DIR:-$HOME/dude-quake4-game}"
+if [ -f "$Q4GAME_DIR/CMakeLists.txt" ]; then
+	echo ">> building q4base.so from $Q4GAME_DIR"
+	EXTRA_BINDS=(--bind "$Q4GAME_DIR" /q4game --setenv Q4GAME_DIR /q4game --setenv DUDE_BUILD build-linux-release)
+	enter /work/tools/quake4/build-q4game.sh
+	EXTRA_BINDS=()
+fi
 
 echo ">> done: $ROOT/build-linux-release/dude"
 echo "   bundle-loader fallback: copy the sandbox's libvulkan.so.1 into <staging>/lib/"

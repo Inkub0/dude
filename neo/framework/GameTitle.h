@@ -55,6 +55,11 @@ typedef struct gameTitleProfile_s {
 	const char *	loadingGui;			// map loading screen
 	const char *	noLevelShot;		// load / server menu picture when a save or map has none
 	const char *	noMapLevelShot;		// the map browser's picture when a map has none
+
+	// files only the full game ships (space-separated VFS paths), or NULL for no check: without
+	// them the title refuses to start - the Quake 4 game library's licence (the SDK EULA)
+	// allows the full retail game only, not the demo
+	const char *	fullGameFiles;
 } gameTitleProfile_t;
 
 // Stem of the null game library (nullgame.so / nullgame.dll): a spectator-only idGame
@@ -66,9 +71,16 @@ namespace GameTitle {
 
 // Resolve the active title. Called once from idFileSystemLocal::Init, after the
 // fs_* startup variables and com_title have been read and before fs_basepath is
-// auto-located, so basePath may be empty. Order: explicit com_title, then the
-// first profile whose probe file exists under basePath, then Doom 3.
+// auto-located, so basePath may be empty. Order: an explicit com_title; else the
+// titles whose probe file (their retail pak) is in basePath, or - with no basePath -
+// in the first of these folders that holds any: the executable's, its parent, the
+// working directory. One title found: that one. Two: a fatal error naming both and
+// how to choose. None: Doom 3.
 void						Select( const char *basePath );
+
+// After the filesystem is up: a fatal error when the active title's fullGameFiles are
+// missing (the Quake 4 demo, or an incomplete install).
+void						RequireFullGame( void );
 
 // The active profile. Doom 3 until Select() has run.
 const gameTitleProfile_t &	Get( void );

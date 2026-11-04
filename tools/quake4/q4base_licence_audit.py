@@ -178,6 +178,8 @@ def main():
 	ap.add_argument("--game-repo")
 	ap.add_argument("--own", action="append", default=None, help="author name(s) of DUDE's own code")
 	ap.add_argument("--json")
+	ap.add_argument("--all-third", action="store_true",
+		help="list every third-party line, not three samples per commit (rewrite work lists)")
 	a = ap.parse_args()
 	own = set(a.own or ["Inkub0"])
 
@@ -226,7 +228,7 @@ def main():
 			per_file[rel][cls] += 1
 			if cls in ("third", "id-gpl"):
 				per_commit[(cls, c)][rel] += 1
-				if len(samples[(cls, c)]) < 3:
+				if a.all_third or len(samples[(cls, c)]) < 3:
 					samples[(cls, c)].append(f"{rel}:{ln}: {t[:100]}")
 				if cls == "id-gpl":
 					idgpl[rel].append(f"{ln}: {t[:120]}")
