@@ -1603,6 +1603,12 @@ else()
 		set_target_properties(idlib PROPERTIES COMPILE_FLAGS "-fPIC")
 	endif()
 endif()
+# DUDE: one section per function and per object, so a library linked with --gc-sections
+# (the Quake 4 game library, docs/quake4-release-licensing.md) carries only the idlib code
+# it reaches. Without --gc-sections nothing changes: every section is still linked.
+if(D3_COMPILER_IS_GCC_OR_CLANG)
+	target_compile_options(idlib PRIVATE -ffunction-sections -fdata-sections)
+endif()
 
 source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} PREFIX neo FILES ${src_idlib})
 
