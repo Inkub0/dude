@@ -323,7 +323,12 @@ def main():
 					problems.append( f"{tag}: emissive mode on but the demo's map is UNAUTHORED (no setup in the sandbox)" )
 		if scopes is None:
 			problems.append( f"{tag}: no r_vkGpuTime windows with >= {MIN_WINDOW_SAMPLES} samples" )
-		runs.append( { "tag": tag, "variant": v, "round": rnd, "rep": rep, "scopes": scopes or {}, "nwin": nwin, "clocks": clocks,
+		# the GPU the game actually used (2026-11-04: a broken NVIDIA driver after an update - every run fell back to the iGPU)
+		m = re.search( r'^VK: backend up - (.*?), \d+ MB VRAM', read( os.path.join( run, "stdout.log" ) ), re.M )
+		gpu = m.group( 1 ) if m else "?"
+		if clocks is None and rnd != "w":
+			problems.append( f"{tag}: no clock log - nvidia-smi gave nothing (a broken driver? the run used: {gpu})" )
+		runs.append( { "tag": tag, "variant": v, "round": rnd, "rep": rep, "scopes": scopes or {}, "nwin": nwin, "clocks": clocks, "gpu": gpu,
 		               "windows": wins } )
 
 	# the GPU clock drifts with heat (the 3080 Ti: 1340 MHz warm-up -> ~1120 MHz settled, 2026-10-31): rescale every run's
@@ -364,6 +369,10 @@ def main():
 			                 f"{max( r['clocks']['mean'] for r in measured_clk ):.0f} MHz - compare variants that ran in the same phase" )
 	display = sorted( { ( r["rep"] or {} ).get( "display", "?" ) for r in runs } )
 	print( f"\ndisplay: {' | '.join( display )}" )
+	gpus = sorted( { r["gpu"] for r in runs } )
+	print( f"GPU: {' | '.join( gpus )}" )
+	if len( gpus ) > 1:
+		problems.append( f"the runs used different GPUs: {', '.join( gpus )}" )
 
 	measured = [ r for r in runs if r["round"] != "w" and r["rep"] ]
 	names = [ v for v in order if any( r["variant"] == v for r in measured ) ]

@@ -257,6 +257,17 @@ fi
 SCHEMA="$( sed -n 's/^#define DUDE_CONFIG_SCHEMA[[:space:]]*\([0-9]*\).*/\1/p' "$REPO/neo/framework/Licensee.h" )"
 
 OUT="${OUT:-${XDG_DATA_HOME:-$HOME/.local/share}/dude/bench/$( date +%Y%m%d-%H%M%S )-$SET}"
+# the NVIDIA driver must work: after a driver update without a reboot (2026-11-04: CachyOS update, "Driver/library version
+# mismatch") its Vulkan driver fails and the game silently runs on the CPU's integrated GPU at 1-3 fps
+if command -v nvidia-smi > /dev/null && [ "${DRYRUN:-0}" != 1 ]; then
+	if ! smi_out="$( nvidia-smi --query-gpu=name,driver_version --format=csv,noheader 2>&1 )"; then
+		echo "nvidia-smi fails: $smi_out" >&2
+		echo "the NVIDIA driver is not usable (after a driver update: reboot) - the game would run on another GPU; not starting" >&2
+		exit 1
+	fi
+	echo "GPU: $smi_out"
+fi
+
 mkdir -p "$OUT"
 {
 	echo "set: $SET  rounds: $ROUNDS  warm-ups: $WARMUPS  cooldown: ${COOLDOWN}s  demo: $DEMO  preset: $PRESET  dude_rtx: $RTX  un-timed pass (twice): $TWICE"
