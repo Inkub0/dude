@@ -57,12 +57,15 @@ tools/shaderstats/probe.py --tree /tmp/master/neo/shaders restir_di
   and prints its register count and local memory (spills). The numbers match the in-game `r_vkPipelineStats restir_di`
   readout. Don't run it during a benchmark.
 
-**Fewer instructions is not always faster.**
+**Check that a variant's own runs agree before reading an A/B.**
 
-- On 2026-11-03 a precomputed emitter-triangle normal cut 9% of the triangle weight's math on AMD, left NVIDIA's registers
-  unchanged (96), and still made the DI gather 11-15% slower on the 3080 Ti.
-- Its one extra 16-byte load per triangle cost more than the math it saved: the emitter triangle walk is limited by memory
-  loads there, not by math. Count a change's loads as well as its instructions.
+- On 2026-11-03 a precomputed emitter-triangle normal seemed to make the DI gather 14% slower on the 3080 Ti, with NVIDIA's
+  registers unchanged. The opposite change, one load fewer per triangle (16-bit edges, 2026-11-04), was exactly neutral.
+- The per-window data explained it: two of the three runs of the "slower" binary matched master for ~20 s, then stepped up
+  by 20% and stayed there; the third matched master all the way. A run changed mid-way (likely a buffer recreated during
+  play landing in slower memory - Resizable BAR is off on this PC), not the code.
+- The bench report now flags a variant whose own runs disagree far more than the other variant's do. Neither change
+  measurably moved the triangle walk: there it is neither the loads nor the maths that limit it.
 
 **`--nort` stubs every ray query.**
 
