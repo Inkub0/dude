@@ -1532,10 +1532,13 @@ void RB_RHI_AddSkinJob( unsigned int shader, unsigned int outVB, int numOutVerts
 	rbSkinJobs.Append( j );
 }
 
+static int rbStatSkinJobs = 0, rbStatSkinEntities = 0;	// running totals for the r_vkGpuTime pre-scene count line
+
 void RB_RHI_FlushSkinJobs( void ) {
 	if ( rbSkinJobs.Num() == 0 ) {
 		return;
 	}
+	rbStatSkinJobs += rbSkinJobs.Num();
 	rhi::RHI *r = rhi::GetRHI();
 	if ( r ) {
 		// The joint palette is per-ENTITY: UpdateSurface hands every sub-mesh job of an entity the SAME
@@ -1556,6 +1559,7 @@ void RB_RHI_FlushSkinJobs( void ) {
 					jointsBuf = 0;
 				}
 				jointsBuf = r->CreateBuffer( rhi::BU_STORAGE, j.numJoints * (int)sizeof( idJointMat ), j.jointData );
+				rbStatSkinEntities++;			// one joint palette per entity (its jobs run contiguously)
 				curJointData = j.jointData;
 				curNumJoints = j.numJoints;
 			}
@@ -4173,6 +4177,23 @@ void RB_RHI_ExecuteBackEndCommands( const emptyCommand_t *cmds ) {
 	r->GpuScopeBegin( "rt.animblas" );		// the per-entity animated BLAS builds / refits (+ the TLAS build they defer to here)
 	r->RefreshAnimBlas();
 	r->GpuScopeEnd();
+	// r_vkGpuTime 2+: every 5 s, how many characters were skinned vs how many animated BLASes were refit / built per frame
+	// (2026-11-04: is a refit ever redundant - a pose that did not change?)
+	if ( cvarSystem->GetCVarInteger( "r_vkGpuTime" ) >= 2 ) {
+		static int lastMs = 0, frames = 0, j0 = 0, e0 = 0, b0 = 0, rf0 = 0;
+		int b, rf, ret, live;
+		r->AnimBlasStats( b, rf, ret, live );
+		const int now = Sys_Milliseconds();
+		frames++;
+		if ( lastMs == 0 ) {
+			lastMs = now; frames = 0; j0 = rbStatSkinJobs; e0 = rbStatSkinEntities; b0 = b; rf0 = rf;
+		} else if ( now - lastMs >= 5000 && frames > 0 ) {
+			common->Printf( "pre-scene per frame (%.1f s): %.1f skinned entities (%.1f skin jobs), %.1f animated BLAS refits + %.2f builds, %d live\n",
+				( now - lastMs ) / 1000.0f, ( rbStatSkinEntities - e0 ) / (float)frames, ( rbStatSkinJobs - j0 ) / (float)frames,
+				( rf - rf0 ) / (float)frames, ( b - b0 ) / (float)frames, live );
+			lastMs = now; frames = 0; j0 = rbStatSkinJobs; e0 = rbStatSkinEntities; b0 = b; rf0 = rf;
+		}
+	}
 
 	rbBerserkFrame = false;	// set when the berserk material is seen (crop overlay), read at the _scratch blit
 	rbHelltimeFrame = false;	// set when a bloodorbN hell-time material is seen, read at its cr_draw blit

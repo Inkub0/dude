@@ -6176,6 +6176,7 @@ void VulkanBackend::RefreshAnimBlas() {
 	}
 
 	bool anyWrite = false;
+	GpuScopeBegin( "rt.animblas.blas" );		// r_vkGpuTime 2: the per-entity builds / refits below (nested in rt.animblas)
 	for ( size_t i = 0; i < animStaged.size(); i++ ) {
 		const AnimCasterStaged &s = animStaged[i];
 		const BlasGeometry *geoms = animStagedGeoms.data() + s.geomFirst;
@@ -6232,6 +6233,7 @@ void VulkanBackend::RefreshAnimBlas() {
 			VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
 			0, 1, &mb, 0, NULL, 0, NULL );
 	}
+	GpuScopeEnd();
 	// retire entries not seen this frame beyond the grace window (fence-safe deferred destroy)
 	for ( size_t i = 0; i < animBlasCache.size(); i++ ) {
 		AnimBlas &e = animBlasCache[i];
@@ -6279,7 +6281,9 @@ void VulkanBackend::RefreshAnimBlas() {
 			rtFrameGeoRows[slot] = gRow;
 			rtReflStatRows = (int)gRow;
 			rtReflStatMonsterRows = (int)monsterRows;
+			GpuScopeBegin( "rt.animblas.tlas" );	// r_vkGpuTime 2: the deferred whole-scene TLAS build (nested in rt.animblas)
 			RecordFrameTlasBuild( cb, slot );
+			GpuScopeEnd();
 			rtFrameBuilt[slot] = true;
 		}
 		rtAnimTlasDeferredSlot = -1;
