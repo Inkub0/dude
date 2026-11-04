@@ -19,6 +19,8 @@
 #                (build/dude); A / B emissive mode, C / D placed lights (emissive off). VARIANTS="A B" = the short run
 #   set boostpicks : A = master (build/dude-ref-master), B = boost picks in the gather + grid skip (build/dude-items13),
 #                C = B + candidate read-ahead (build/dude); emissive mode; NVIDIA register readout in each run's stdout.log
+#   set animsig : A = master (build/dude-ref-master), B = the animated BLAS signature from the base model + surface ids/counts
+#                (build/dude); emissive mode - compare rt.animblas and the "pre-scene per frame" builds
 #   set memcheck : one run of build/dude, emissive mode - its stdout.log lists GPU-read buffers that landed in system RAM
 #                (WARMUPS=0 ... memcheck 1)
 #   set emitteraxis : A = master (build/dude-ref-master), B = emitter rows with a plain cone axis (build/dude); emissive mode
@@ -156,6 +158,15 @@ case "$SET" in
 		DESC[A]="master";                                   ARGS[A]="$EM";   BINV[A]="$REPO/build/dude-ref-master"
 		DESC[B]="boost picks in the gather + grid skip";    ARGS[B]="$EM";   BINV[B]="$REPO/build/dude-items13"
 		DESC[C]="B + candidate read-ahead";                 ARGS[C]="$EM";   BINV[C]="$BIN"
+		;;
+	animsig)
+		# 2026-11-04 (perf/animblas-stable-signature): two BINARIES, emissive mode. A = master (build/dude-ref-master), B = the
+		# animated BLAS topology signature without the snapshot model pointer / gpuSkinVB handles (build/dude): fewer rebuilds
+		PRESET=5; RTX=2; SEED_EMISSIVE=1
+		EM="+set r_rtEmissiveLighting 1 +set r_rtEmissivePhysical 1 +set r_rtEmissiveSamples 1"
+		NAMES=( A B )
+		DESC[A]="master";                                ARGS[A]="$EM";   BINV[A]="$REPO/build/dude-ref-master"
+		DESC[B]="animated BLAS: stable signature";       ARGS[B]="$EM";   BINV[B]="$BIN"
 		;;
 	memcheck)
 		# 2026-11-04: ONE run of build/dude in emissive mode for the Vulkan memory-placement warnings (a GPU-read buffer that

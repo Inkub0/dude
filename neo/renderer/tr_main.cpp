@@ -2044,10 +2044,15 @@ static void R_RtStageAnimCasters( void ) {
 		}
 		const idRenderModel *dm = def->dynamicModel;
 		const int gStart = gi;
-		// topology signature: model + each surface's gpuSkinVB handle + counts. A change (model swap /
-		// LOD / gpuSkinVB realloc) forces a rebuild instead of refitting a mismatched AS.
+		// topology signature: what a REFIT needs unchanged - the same geometries, in order, with the same vertex / index
+		// counts and the same index VALUES. An MD5 surface's triangles are its base mesh's (surface id = mesh index), so the
+		// BASE model + each included surface's id and counts decide it; the buffers do not (a refit reads the current
+		// addresses). Until 2026-11-04 the signature hashed the snapshot model pointer and the gpuSkinVB handles, which
+		// are new whenever the entity def is re-created: demo1 rebuilt 0.4-1.6 animated BLASes per frame from scratch (with
+		// fresh allocations) next to 1-3 refits. A model swap, a skin that hides or shows a surface, or a resized mesh still
+		// changes it and rebuilds.
 		unsigned long long sig = 1469598103934665603ULL;			// FNV-1a basis
-		const void *modelPtr = dm;
+		const void *modelPtr = def->parms.hModel;
 		sig = R_RtHashBytes( sig, &modelPtr, sizeof( modelPtr ) );
 		for ( int s = 0; s < dm->NumSurfaces() && ( gi - gStart ) < 64; s++ ) {
 			const srfTriangles_t *tri = dm->Surface( s )->geometry;
@@ -2072,7 +2077,8 @@ static void R_RtStageAnimCasters( void ) {
 			geoms[gi].texIndex = R_RtMaterialTexIndex( dm->Surface( s )->shader );	// RR4: diffuse bindless slot
 			geoms[gi].emitIndex = R_RtMaterialEmitIndex( dm->Surface( s )->shader );	// RR16g: self-illum glow bindless slot
 
-			sig = R_RtHashBytes( sig, &tri->gpuSkinVB, sizeof( tri->gpuSkinVB ) );
+			const int surfId = dm->Surface( s )->id;
+			sig = R_RtHashBytes( sig, &surfId, sizeof( surfId ) );
 			sig = R_RtHashBytes( sig, &tri->numVerts, sizeof( tri->numVerts ) );
 			sig = R_RtHashBytes( sig, &tri->numIndexes, sizeof( tri->numIndexes ) );
 			gi++;
