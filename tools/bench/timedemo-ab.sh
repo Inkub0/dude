@@ -19,6 +19,8 @@
 #                (build/dude); A / B emissive mode, C / D placed lights (emissive off). VARIANTS="A B" = the short run
 #   set boostpicks : A = master (build/dude-ref-master), B = boost picks in the gather + grid skip (build/dude-items13),
 #                C = B + candidate read-ahead (build/dude); emissive mode; NVIDIA register readout in each run's stdout.log
+#   set memcheck : one run of build/dude, emissive mode - its stdout.log lists GPU-read buffers that landed in system RAM
+#                (WARMUPS=0 ... memcheck 1)
 #   set emitteraxis : A = master (build/dude-ref-master), B = emitter rows with a plain cone axis (build/dude); emissive mode
 #   set registers : A = master (build/dude-ref-master), B = the gather with fewer live registers (build/dude); emissive
 #                mode; NVIDIA register readout in each run's stdout.log
@@ -154,6 +156,13 @@ case "$SET" in
 		DESC[A]="master";                                   ARGS[A]="$EM";   BINV[A]="$REPO/build/dude-ref-master"
 		DESC[B]="boost picks in the gather + grid skip";    ARGS[B]="$EM";   BINV[B]="$REPO/build/dude-items13"
 		DESC[C]="B + candidate read-ahead";                 ARGS[C]="$EM";   BINV[C]="$BIN"
+		;;
+	memcheck)
+		# 2026-11-04: ONE run of build/dude in emissive mode for the Vulkan memory-placement warnings (a GPU-read buffer that
+		# landed in system RAM - Resizable BAR off), read from the run's stdout.log: WARMUPS=0 tools/bench/timedemo-ab.sh memcheck 1
+		PRESET=5; RTX=2; SEED_EMISSIVE=1
+		NAMES=( A )
+		DESC[A]="build/dude, emissive mode";  ARGS[A]="+set r_rtEmissiveLighting 1 +set r_rtEmissivePhysical 1 +set r_rtEmissiveSamples 1"
 		;;
 	emitteraxis)
 		# 2026-11-03 (perf/rtgi-bounce-emitter-micro): two BINARIES, emissive mode. A = master (build/dude-ref-master, its shaders

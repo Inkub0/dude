@@ -72,6 +72,9 @@ Doom 3 GPL Source Code (see ArbProgram.h for license header)
 #include "vk/ffx_fsr2_vk.h"					// FSR2 Vulkan backend init (against our VkDevice)
 #include "NRD.h"							// vendored NVIDIA NRD v4.18 (H2 denoiser framework, docs/rtx-nrd.md)
 #include "framework/CmdSystem.h"              // cmdSystem for registering console commands
+#ifndef _WIN32
+#include <dlfcn.h>								// dladdr: the caller of a buffer that landed in system RAM (vkMemReport)
+#endif
 #include "sys/sys_public.h"                     // Sys_DLL_Load (portable NVML load), Sys_Milliseconds
 
 // auto-reactive mask flags (R1/D): CPU/shader ABI values from the vendored
@@ -159,6 +162,9 @@ static void VkSampleTelemetry();		// advance the NVML telemetry ring (impl near 
 
 // Console command: force a CPU-only crash dump to disk. Useful to manually capture engine
 // state without waiting for an actual device-lost. Usage: vk_dump_state [label]
+static void Vk_MemReport_f( const idCmdArgs &args );	// vkMemReport (impl after CreateBuffer)
+static const char *Vk_BufferUsageName( BufferUsage u );
+
 static void Vk_ForceCrashDump_f( const idCmdArgs &args ) {
 	const char *label = ( args.Argc() > 1 ) ? args.Argv(1) : "manual";
 	char what[256];
@@ -1012,6 +1018,18 @@ private:
 	void			RefreshAnimBlas() override;
 	void			AnimBlasStats( int &builds, int &refits, int &retires, int &live ) override;
 	bool			GetDeviceLocalMemory( uint64_t &usageBytes, uint64_t &budgetBytes ) override;
+	// Buffers that landed in SYSTEM RAM although the GPU reads them (2026-11-04): with Resizable BAR off the CPU-visible
+	// VRAM window is ~256 MB, and an upload / vertex / index buffer created once it is full silently goes to host memory -
+	// read over PCIe. CreateBuffer warns (rate-limited per usage) and vkMemReport lists them. BU_STORAGE is host memory by
+	// design (CPU read-back) and only counted.
+	struct HostPlacedBuf { BufferUsage usage; int size; };
+	std::unordered_map<uint32_t, HostPlacedBuf> hostPlaced;			// buffer slot -> what landed there
+	int				hostPlacedWarnings[16] = {};
+	void			CpuVisibleVram( uint64_t &usedBytes, uint64_t &sizeBytes, bool &resizableBar );
+	void			WarnHostPlaced( BufferUsage usage, int size, void *caller );
+ public:
+	void			MemReport();									// vkMemReport
+ private:
 	void			RtReflStats( int &geoRows, int &geoMonsterRows ) override;
 	unsigned long long	GetRtGeoTableAddress() override { return (unsigned long long)rtCurrentGeoAddr; }
 
@@ -1377,6 +1395,7 @@ compiled for the Windows cross-build). `suffix` distinguishes the forced dump's 
 ====================
 */
 class VulkanBackend;
+static VulkanBackend *s_vkMemReportBackend = NULL;		// vkMemReport's backend, set once it is up
 static VulkanBackend *s_vkCheckpointBackend = NULL;	// set once the device is up; NULL = no checkpoint support
 static void WriteVulkanCrashDumpBody( const char *what, VkResult res, const char *suffix ) {
 	const char *savePath = cvarSystem->GetCVarString( "fs_savepath" );
@@ -2729,6 +2748,8 @@ bool VulkanBackend::Init() {
 	// Register developer console command to force a Vulkan crash-state dump into the save path.
 	// Registered here (after successful backend bring-up) so cmdSystem is available.
 	cmdSystem->AddCommand( "vk_dump_state", Vk_ForceCrashDump_f, CMD_FL_RENDERER, "Force a Vulkan crash-state dump to dudelog-crash-*.txt (dev)" );
+	s_vkMemReportBackend = this;
+	cmdSystem->AddCommand( "vkMemReport", Vk_MemReport_f, CMD_FL_RENDERER, "Vulkan memory heaps, the CPU-visible VRAM window (Resizable BAR) and the GPU-read buffers that landed in system RAM" );
 
 	return true;
 }
@@ -2749,6 +2770,17 @@ void VulkanBackend::Shutdown() {
 	if ( device != VK_NULL_HANDLE ) {
 		vkDeviceWaitIdle( device );
 		SavePipelineCache();		// persist this session's compiles before teardown
+	}
+	{	// the session's buffers that went to system RAM (CreateBuffer's warnings), one line for logs and benches
+		idStr spilled;
+		for ( int u = 0; u < 16; u++ ) {
+			if ( u != BU_STORAGE && hostPlacedWarnings[u] > 0 ) {
+				spilled += va( "%s%d %s", spilled.Length() ? ", " : "", hostPlacedWarnings[u], Vk_BufferUsageName( (BufferUsage)u ) );
+			}
+		}
+		if ( spilled.Length() ) {
+			common->Printf( "VK: this session placed %s buffer(s) in system RAM instead of VRAM (see the warnings above; vkMemReport)\n", spilled.c_str() );
+		}
 	}
 
 	// FSR2 (R1/C2): the context owns device pipelines/images; free while the device lives
@@ -4182,6 +4214,7 @@ void VulkanBackend::DestroyM2Resources() {
 	bufferAllocs.clear();
 	bufferMapped.clear();
 	bufferAddr.clear();
+	hostPlaced.clear();
 	// the mode-2 batch buffers lived in the table just cleared; drop the stale handles so
 	// DrawZfillBatch reallocates rather than resolving a reused slot (Phase 3.2b).
 	for ( int i = 0; i < FRAMES_IN_FLIGHT; i++ ) {
@@ -4520,7 +4553,142 @@ BufferHandle VulkanBackend::CreateBuffer( BufferUsage usage, int size, const voi
 		bufferMapped.push_back( (byte *)info.pMappedData );
 		bufferAddr.push_back( addr );
 	}
+	VkMemoryPropertyFlags memFlags = 0;
+	vmaGetAllocationMemoryProperties( vma, alloc, &memFlags );
+	if ( !( memFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT ) ) {
+		hostPlaced[idx] = { usage, size };
+		if ( usage != BU_STORAGE ) {
+			WarnHostPlaced( usage, size, __builtin_return_address( 0 ) );
+		}
+	}
 	return (BufferHandle)( idx + 1 );
+}
+
+static const char *Vk_BufferUsageName( BufferUsage u ) {
+	switch ( u ) {
+		case BU_VERTEX:			return "vertex";
+		case BU_INDEX:			return "index";
+		case BU_UNIFORM:		return "uniform";
+		case BU_STORAGE:		return "storage (CPU read-back)";
+		case BU_SKIN:			return "skinning output";
+		case BU_STORAGE_DEVICE:	return "GPU-only storage";
+		case BU_STORAGE_UPLOAD:	return "upload storage";
+		default:				return "other";
+	}
+}
+
+// The CPU-visible VRAM window: the device-local heaps holding a HOST_VISIBLE memory type. Resizable BAR = that window is
+// (nearly) the whole VRAM; without it NVIDIA exposes a separate 256 MB heap.
+void VulkanBackend::CpuVisibleVram( uint64_t &usedBytes, uint64_t &sizeBytes, bool &resizableBar ) {
+	usedBytes = sizeBytes = 0;
+	resizableBar = false;
+	if ( vma == NULL || physical == VK_NULL_HANDLE ) {
+		return;
+	}
+	VkPhysicalDeviceMemoryProperties mp;
+	vkGetPhysicalDeviceMemoryProperties( physical, &mp );
+	VmaBudget budgets[VK_MAX_MEMORY_HEAPS];
+	vmaGetHeapBudgets( vma, budgets );
+	uint64_t largestDevice = 0;
+	bool counted[VK_MAX_MEMORY_HEAPS] = {};
+	for ( uint32_t h = 0; h < mp.memoryHeapCount; h++ ) {
+		if ( mp.memoryHeaps[h].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT ) { largestDevice = Max( largestDevice, (uint64_t)mp.memoryHeaps[h].size ); }
+	}
+	for ( uint32_t t = 0; t < mp.memoryTypeCount; t++ ) {
+		const VkMemoryPropertyFlags f = mp.memoryTypes[t].propertyFlags;
+		const uint32_t h = mp.memoryTypes[t].heapIndex;
+		if ( ( f & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT ) && ( f & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT ) && !counted[h] ) {
+			counted[h] = true;
+			usedBytes += budgets[h].usage;
+			sizeBytes += mp.memoryHeaps[h].size;
+		}
+	}
+	resizableBar = sizeBytes > 0 && sizeBytes * 10 >= largestDevice * 9;
+}
+
+void VulkanBackend::WarnHostPlaced( BufferUsage usage, int size, void *caller ) {
+	int &n = hostPlacedWarnings[ (int)usage & 15 ];
+	n++;
+	if ( n > 10 && ( n % 100 ) != 0 ) {
+		return;
+	}
+	char from[160];
+#ifndef _WIN32
+	Dl_info di;
+	if ( dladdr( caller, &di ) && di.dli_fname ) {
+		const char *mod = strrchr( di.dli_fname, '/' ) ? strrchr( di.dli_fname, '/' ) + 1 : di.dli_fname;
+		if ( di.dli_sname ) {
+			idStr::snPrintf( from, sizeof( from ), "%s %s", mod, di.dli_sname );
+		} else {	// a static function: resolve offline with addr2line -f -C -e <binary> 0x<offset>
+			idStr::snPrintf( from, sizeof( from ), "%s+0x%llx", mod, (unsigned long long)( (const char *)caller - (const char *)di.dli_fbase ) );
+		}
+	} else
+#endif
+	{
+		idStr::snPrintf( from, sizeof( from ), "%p", caller );
+	}
+	uint64_t used, total;
+	bool rebar;
+	CpuVisibleVram( used, total, rebar );
+	common->Warning( "VK: a %s buffer (%d KB, created from %s) is in SYSTEM RAM, not VRAM - the GPU reads it over PCIe. "
+		"CPU-visible VRAM: %d of %d MB used (Resizable BAR %s)%s", Vk_BufferUsageName( usage ), Max( size >> 10, 1 ), from,
+		(int)( used >> 20 ), (int)( total >> 20 ), rebar ? "on" : "off", n > 10 ? va( " [%d such %s buffers so far]", n, Vk_BufferUsageName( usage ) ) : "" );
+}
+
+// vkMemReport: the heaps (VMA usage / budget) and the buffers that live in system RAM right now.
+void VulkanBackend::MemReport() {
+	if ( vma == NULL || physical == VK_NULL_HANDLE ) {
+		common->Printf( "vkMemReport: no Vulkan device\n" );
+		return;
+	}
+	VkPhysicalDeviceMemoryProperties mp;
+	vkGetPhysicalDeviceMemoryProperties( physical, &mp );
+	VmaBudget budgets[VK_MAX_MEMORY_HEAPS];
+	vmaGetHeapBudgets( vma, budgets );
+	common->Printf( "Vulkan memory heaps:\n" );
+	for ( uint32_t h = 0; h < mp.memoryHeapCount; h++ ) {
+		bool hostVisible = false;
+		for ( uint32_t t = 0; t < mp.memoryTypeCount; t++ ) {
+			if ( mp.memoryTypes[t].heapIndex == h && ( mp.memoryTypes[t].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT ) ) { hostVisible = true; }
+		}
+		const bool dev = ( mp.memoryHeaps[h].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT ) != 0;
+		common->Printf( "  heap %u: %-18s %6d MB, %6d MB used by this process, budget %6d MB\n", h,
+			dev ? ( hostVisible ? "VRAM, CPU-visible" : "VRAM" ) : "system RAM", (int)( mp.memoryHeaps[h].size >> 20 ),
+			(int)( budgets[h].usage >> 20 ), (int)( budgets[h].budget >> 20 ) );
+	}
+	uint64_t used, total;
+	bool rebar;
+	CpuVisibleVram( used, total, rebar );
+	common->Printf( "  CPU-visible VRAM window: %d of %d MB used - Resizable BAR %s\n", (int)( used >> 20 ), (int)( total >> 20 ), rebar ? "on" : "off" );
+	int count[16] = {};
+	int64_t bytes[16] = {};
+	for ( const auto &kv : hostPlaced ) {
+		count[ (int)kv.second.usage & 15 ]++;
+		bytes[ (int)kv.second.usage & 15 ] += kv.second.size;
+	}
+	common->Printf( "Buffers in system RAM now (the GPU reads them over PCIe):\n" );
+	bool any = false;
+	for ( int u = 0; u < 16; u++ ) {
+		if ( count[u] == 0 && hostPlacedWarnings[u] == 0 ) { continue; }
+		any = true;
+		if ( u == BU_STORAGE ) {
+			common->Printf( "  %-24s %5d buffers, %8.2f MB (host memory by design)\n", Vk_BufferUsageName( (BufferUsage)u ), count[u], bytes[u] / ( 1024.0 * 1024.0 ) );
+		} else {
+			common->Printf( "  %-24s %5d buffers, %8.2f MB  (%d placed there since start)\n", Vk_BufferUsageName( (BufferUsage)u ), count[u],
+				bytes[u] / ( 1024.0 * 1024.0 ), hostPlacedWarnings[u] );
+		}
+	}
+	if ( !any ) {
+		common->Printf( "  none\n" );
+	}
+}
+
+static void Vk_MemReport_f( const idCmdArgs &args ) {
+	if ( s_vkMemReportBackend ) {
+		s_vkMemReportBackend->MemReport();
+	} else {
+		common->Printf( "vkMemReport: the Vulkan backend is not running\n" );
+	}
 }
 
 void VulkanBackend::UpdateBuffer( BufferHandle b, int offset, int size, const void *data ) {
@@ -4538,6 +4706,7 @@ void VulkanBackend::DestroyBuffer( BufferHandle b ) {
 		return;
 	}
 	uint32_t idx = (uint32_t)( b - 1 );
+	hostPlaced.erase( idx );
 	if ( bufferAllocs[idx] ) {		// only persistent buffers are ours to destroy
 		// defer the vmaDestroy until in-flight frames that may reference it retire
 		retiredBuffers.push_back( { bufferTable[idx], bufferAllocs[idx], FRAMES_IN_FLIGHT + 1 } );
