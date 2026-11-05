@@ -1765,6 +1765,28 @@ void idActor::RemoveAttachments( void ) {
 
 /*
 ================
+idActor::ExtinguishAttachedLights
+
+DUDE: switch off any light bound to this actor (e.g. the g_extraLights lost-soul fire light)
+WITHOUT hiding the actor. idActor::Hide() already does this, but a monster that dies into a
+model_death particle - the lost soul - is never hidden and does not ragdoll, so its attached light
+would stay lit until the body is removed seconds later. idAI::Killed's model_death path calls this.
+================
+*/
+void idActor::ExtinguishAttachedLights( void ) {
+	idEntity *ent, *next;
+
+	for ( ent = GetNextTeamEntity(); ent != NULL; ent = next ) {
+		next = ent->GetNextTeamEntity();
+		if ( ent->GetBindMaster() == this && ent->IsType( idLight::Type ) ) {
+			ent->Hide();
+			static_cast<idLight *>( ent )->Off();
+		}
+	}
+}
+
+/*
+================
 idActor::Attach
 ================
 */
