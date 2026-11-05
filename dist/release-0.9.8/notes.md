@@ -1,7 +1,6 @@
-# DUDE 0.9.8 — Quake 4, faster Path Tracing, and emissive lights you author
+# DUDE 0.9.8 — Welcome to Stroggos
 
-A Path Tracing and emissive-lighting release on top of [0.9.7](https://github.com/Inkub0/dude/releases/tag/v0.9.7).
-The Path Tracing tier runs about 14 % faster than 0.9.7 (45 % faster in Emissive Mode), and the experimental Emissive Mode — the map's glowing surfaces as real area lights — stops guessing: it now does exactly what is authored for each map, with an in-game Light Editor to author it. And the same executable now runs the retail **Quake 4** campaign, with its game library as a separate download (see *Quake 4* below).
+A Path Tracing and emissive-lighting release on top of [0.9.7](https://github.com/Inkub0/dude/releases/tag/v0.9.7). The Path Tracing tier runs about 14 % faster than 0.9.7 (45 % faster in Emissive Mode), and the experimental Emissive Mode shifted to a custom file with an in-game Light Editor to author it. The same executable now runs the retail **Quake 4** campaign, with its game library as a separate download (see *Quake 4* below).
 
 ## Changed since 0.9.7
 
@@ -20,8 +19,7 @@ Measured against 0.9.7 (both release builds, demo1 timedemo, 1440p, Path Tracing
 
 Most of it is the pass that gives newly revealed pixels extra light samples (about 85 % cheaper), then the direct-light pass (a third cheaper in Emissive Mode). The figures include the retuned denoiser and, in Emissive Mode, the emitters lighting the haze, which both cost time (below). A GPU that is not power-limited runs the new code at a higher clock than 0.9.7's and gains nearer the clock-for-clock figures.
 
-- **The 0.9.7 boost settings are reverted, the largest single gain; existing configs are updated automatically (config schema 4).**
-  0.9.7's fix for shadow smear behind moving characters also gave newly revealed pixels much stronger fresh sampling. That part cost about 2 ms per frame at 1440p (13.97 → 12.02 ms GPU in a Path Tracing Nightmare timedemo on an RTX 3080 Ti) and turned out not to be needed: detecting a shadow *leaving* a surface is what removed the smear, and that stays. Only that one setting is migrated; nothing else in your config is reset.
+- **The 0.9.7 boost settings are reverted, the largest single gain; existing configs are updated automatically (config schema 4).** 0.9.7's fix for shadow smear behind moving characters also gave newly revealed pixels much stronger fresh sampling. That part cost about 2 ms per frame at 1440p (13.97 → 12.02 ms GPU in a Path Tracing Nightmare timedemo on an RTX 3080 Ti) and turned out not to be needed: detecting a shadow *leaving* a surface is what removed the smear, and that stays. Only that one setting is migrated; nothing else in your config is reset.
 - **Rooms near a small fog volume keep their bounce light.** The fade that stops ray-traced GI washing out fog took its fog distance from any fog volume in view — the mist inside a fridge was enough to black out a whole room's bounce light (and its ceiling) as soon as the fridge came into view. It now only uses fog the camera is standing in.
 - **Ray-traced GI cheaper while you move.** Pixels that just came into view get extra direct-light samples; that pass also re-traced their GI bounce from scratch, rebuilding exactly what the main pass had just computed. It now reuses it (the same image): about 2.4 ms less per frame while moving in a Path Tracing Nightmare timedemo at 1440p.
 - **Steadier lighting around lights that move.** A light the game moves or re-parms every frame (on a lift or door, a projectile, a scripted fade) counted as a brand-new light each frame, which reset the denoiser's history around it every frame. It now keeps its identity for as long as it exists.
@@ -95,7 +93,13 @@ Emissive Mode (*Path Tracing tier, Vulkan, off by default*) lets the map's self-
 - While moving in the Light Editor's look mode, its markers smear slightly under the temporal upscaler.
 - A light whose material ignores the light colour cannot be recoloured in the Light Editor; its brightness still can.
 
-## Quake 4 — new in this release
+## Setup for Doom 3 (same as 0.9.7)
+
+You need the original _DOOM 3_ / _Resurrection of Evil_ game data (`base/*.pk4`, `d3xp/*.pk4`) from your own copy (Steam/GOG classic, **not** the BFG Edition).
+- **Windows (64-bit)**: unzip and copy the **contents** of `dude-0.9.8-win64` into your Doom 3 directory, next to `base/` (the included pk4/config files merge into `base/` and `d3xp/`). Or run from anywhere with `+set fs_basepath "C:\path\to\Doom 3"`.
+- **Linux (x86_64)**: untar and copy the contents into your Doom 3 directory the same way, run `./dude`.
+
+## Setup for Quake 4 — new in this release
 
 DUDE now runs the retail **Quake 4** single-player campaign out of the box, from your own install: the same `dude` executable, on the OpenGL 3.3 and Vulkan renderers and the ray-traced tiers, with DUDE's quality presets. Quake 4's effects (BSE) are drawn by DUDE's own reimplementation. Multiplayer is not supported yet.
 
@@ -105,12 +109,6 @@ DUDE now runs the retail **Quake 4** single-player campaign out of the box, from
 - **Forgot the game library?** DUDE stops with a message naming the archive for your version and platform, its licence terms and where to extract it, with a button that opens the download page.
 
 Quake and Quake 4 are trademarks of their owners (id Software / ZeniMax Media). DUDE is an independent, non-commercial project, not affiliated with, endorsed or sponsored by id Software, ZeniMax Media, Microsoft, Raven Software or Activision.
-
-## Setup for Doom 3 (same as 0.9.7)
-
-You need the original _DOOM 3_ / _Resurrection of Evil_ game data (`base/*.pk4`, `d3xp/*.pk4`) from your own copy (Steam/GOG classic, **not** the BFG Edition).
-- **Windows (64-bit)**: unzip and copy the **contents** of `dude-0.9.8-win64` into your Doom 3 directory, next to `base/` (the included pk4/config files merge into `base/` and `d3xp/`). Or run from anywhere with `+set fs_basepath "C:\path\to\Doom 3"`.
-- **Linux (x86_64)**: untar and copy the contents into your Doom 3 directory the same way, run `./dude`.
 
 Renderer selection: `+set r_graphicsAPI opengl|opengl3|vulkan` or the in-game menu. For the ray-traced tiers pick the **Vulkan** renderer and turn ray tracing up. Configs/saves live in `~/.local/share/dude` (Linux) / `Documents/My Games/dude` (Windows).
 
