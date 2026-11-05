@@ -5739,50 +5739,8 @@ windowDef OptionsMenuParent {
 					forecolor	0.6, 0.8, 0.8, 1
 				}
 			}
-			windowDef ADV8 {
-				rect		0, 161, 320, 16
-				windowDef ADV8L {
-					rect		0, 0, 8, 16
-					background	"gui/mainmenu/select_edge"
-					matcolor	0, 0, 0, 1
-					noevents	1
-				}
-				windowDef ADV8M {
-					rect		8, 0, 304, 16
-					background	"gui/mainmenu/select_border"
-					matcolor	0, 0, 0, 1
-					noevents	1
-				}
-				windowDef ADV8R {
-					rect		312, 0, 8, 16
-					background	"gui/mainmenu/select_angle"
-					matcolor	0, 0, 0, 1
-					noevents	1
-				}
-				windowDef ADV8Title {
-					rect		1, 1, 205, 14
-					text		"HDR"
-					font		"fonts/bank"
-					textscale	0.25
-					textalign	0
-					textaligny	-6
-					forecolor	1, 1, 1, 1
-				}
-				choiceDef ADV8Primary {
-					rect		213, 1, 99, 14
-					choices		"Off;On"
-					values		"0;1"
-					cvar		"r_hdr"
-					choiceType	1
-					font		"fonts/bank"
-					textscale	0.25
-					textalign	0
-					textaligny	-6
-					forecolor	0.6, 0.8, 0.8, 1
-				}
-			}
 			windowDef ADV10 {
-				rect		0, 184, 320, 16
+				rect		0, 161, 320, 16
 				windowDef ADV10L {
 					rect		0, 0, 8, 16
 					background	"gui/mainmenu/select_edge"
@@ -5824,7 +5782,7 @@ windowDef OptionsMenuParent {
 				}
 			}
 			windowDef ADV11 {
-				rect		0, 207, 320, 16
+				rect		0, 184, 320, 16
 				windowDef ADV11L {
 					rect		0, 0, 8, 16
 					background	"gui/mainmenu/select_edge"
@@ -5866,7 +5824,7 @@ windowDef OptionsMenuParent {
 				}
 			}
 			windowDef ADV12 {
-				rect		0, 230, 320, 16
+				rect		0, 207, 320, 16
 				windowDef ADV12L {
 					rect		0, 0, 8, 16
 					background	"gui/mainmenu/select_edge"
@@ -5911,7 +5869,7 @@ windowDef OptionsMenuParent {
 			// shadow-cache VRAM budget, halve the farthest cubes until they fit (softer distant
 			// shadows instead of re-rendering the overflow every frame). Off = full resolution.
 			windowDef ADV13 {
-				rect		0, 253, 320, 16
+				rect		0, 230, 320, 16
 				windowDef ADV13L {
 					rect		0, 0, 8, 16
 					background	"gui/mainmenu/select_edge"
@@ -6093,6 +6051,48 @@ windowDef OptionsMenuParent {
 					step		0.01
 					thumbShader	"guis/assets/mainmenu/slider_bar"
 					cvar		"r_postChromaticAberration"
+				}
+			}
+			windowDef PP4 {
+				rect		0, 69, 320, 16
+				windowDef PP4L {
+					rect		0, 0, 8, 16
+					background	"gui/mainmenu/select_edge"
+					matcolor	0, 0, 0, 1
+					noevents	1
+				}
+				windowDef PP4M {
+					rect		8, 0, 304, 16
+					background	"gui/mainmenu/select_border"
+					matcolor	0, 0, 0, 1
+					noevents	1
+				}
+				windowDef PP4R {
+					rect		312, 0, 8, 16
+					background	"gui/mainmenu/select_angle"
+					matcolor	0, 0, 0, 1
+					noevents	1
+				}
+				windowDef PP4Title {
+					rect		1, 1, 205, 14
+					text		"HDR"
+					font		"fonts/bank"
+					textscale	0.25
+					textalign	0
+					textaligny	-6
+					forecolor	1, 1, 1, 1
+				}
+				choiceDef PP4Primary {
+					rect		213, 1, 99, 14
+					choices		"Off;On"
+					values		"0;1"
+					cvar		"r_hdr"
+					choiceType	1
+					font		"fonts/bank"
+					textscale	0.25
+					textalign	0
+					textaligny	-6
+					forecolor	0.6, 0.8, 0.8, 1
 				}
 			}
 		}
