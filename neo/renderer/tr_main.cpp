@@ -3649,18 +3649,26 @@ static void R_RtEmissiveBuild( const idRenderWorldLocal *world, rhi::RHI *r ) {
 	R_RtEmissiveReport( "r_rtEmissiveTable: %d emissive triangles (%d world, %d from %d static entities = mover-tracked groups), %d materials (%d register-driven), %d screen surfaces excluded, total flux %.1f (mean %.2f), %d KB, %d ms%s\n",
 		n, worldTris, entityTris, entities, census.Num(), animatedMats, screens, s_rtEmissiveTotalFlux, meanFlux, bytes >> 10,
 		Sys_Milliseconds() - msStart, overflow ? va( " - TABLE FULL: %d triangles dropped (raise RT_EMISSIVE_MAX_TRIS)", overflow ) : "" );
-	const int show = census.Num() < 64 ? census.Num() : 64;													// every material (a level has a few dozen): each painted tint gets a name
-	for ( int i = 0; i < show; i++ ) {
-		int rgb[3]; const char *hue = "";
-		R_RtEmissiveDebugTint( census[i].slot, rgb, &hue );
-		R_RtEmissiveReport( "    %6.1f%%  %6d tris  %-46s view1 %-10s #%02X%02X%02X%s%s%s\n", 100.0f * census[i].flux / s_rtEmissiveTotalFlux, census[i].tris,
-			census[i].mat->GetName(), hue, rgb[0], rgb[1], rgb[2], census[i].animated ? "  (animated colour)" : "", census[i].texMatrix ? "  (texture matrix baked)" : "",
-			census[i].clipped ? "  (clipped to the glow's extents)" : "" );
+	// DUDE: the per-material census and the excluded-material list run tens to ~250 lines; print the
+	// full breakdown only with r_rtEmissiveTableDebug. A normal build keeps just the one-line summary
+	// above (plus the excluded COUNT below), which is all that matters when you are not inspecting.
+	if ( r_rtEmissiveTableDebug.GetInteger() > 0 ) {
+		const int show = census.Num() < 64 ? census.Num() : 64;												// every material (a level has a few dozen): each painted tint gets a name
+		for ( int i = 0; i < show; i++ ) {
+			int rgb[3]; const char *hue = "";
+			R_RtEmissiveDebugTint( census[i].slot, rgb, &hue );
+			R_RtEmissiveReport( "    %6.1f%%  %6d tris  %-46s view1 %-10s #%02X%02X%02X%s%s%s\n", 100.0f * census[i].flux / s_rtEmissiveTotalFlux, census[i].tris,
+				census[i].mat->GetName(), hue, rgb[0], rgb[1], rgb[2], census[i].animated ? "  (animated colour)" : "", census[i].texMatrix ? "  (texture matrix baked)" : "",
+				census[i].clipped ? "  (clipped to the glow's extents)" : "" );
+		}
 	}
 	if ( excluded.Num() > 0 ) {
-		R_RtEmissiveReport( "r_rtEmissiveTable: %d self-illuminated materials EXCLUDED:\n", excluded.Num() );
-		for ( int i = 0; i < excluded.Num(); i++ ) {
-			R_RtEmissiveReport( "    %-38s %s\n", excluded[i].why, excluded[i].mat->GetName() );
+		R_RtEmissiveReport( "r_rtEmissiveTable: %d self-illuminated materials excluded%s\n", excluded.Num(),
+			r_rtEmissiveTableDebug.GetInteger() > 0 ? ":" : " (r_rtEmissiveTableDebug 1 lists them)" );
+		if ( r_rtEmissiveTableDebug.GetInteger() > 0 ) {
+			for ( int i = 0; i < excluded.Num(); i++ ) {
+				R_RtEmissiveReport( "    %-38s %s\n", excluded[i].why, excluded[i].mat->GetName() );
+			}
 		}
 	}
 	// emitter mode: the FLARE sprites of emitting fixtures (a light entity's flare model: a sprite-deformed additive
@@ -4311,8 +4319,13 @@ static void R_RtEmissiveUpdate( const idRenderWorldLocal *world, rhi::RHI *r ) {
 	}
 	// the full report: a new map, a cvar the user changed, or the debug overlay; a rebuild the map asked for itself
 	// (a fixture changed which surfaces glow, a new emissive entity, a glow image now resident) prints one line
-	s_rtEmissiveReport = s_rtEmissiveReportedMap.Icmp( world->mapName ) != 0 || r_rtEmissiveTable.IsModified()
-		|| r_rtEmissiveLighting.IsModified() || r_rtEmissiveScale.IsModified() || r_rtEmissiveTableDebug.GetInteger() > 0;
+	// DUDE: stay silent when the table is built but nothing consumes it - r_rtEmissiveTable pinned on
+	// with Emissive Mode and the GI-bounce rows off, and no one debugging. The build still runs (so the
+	// debug overlay can be toggled), it just does not print the census on every map load when emissive
+	// is effectively off. The report is for when emissive is actually in use, or you are inspecting it.
+	const bool emissiveInUse = r_rtEmissiveLighting.GetBool() || r_rtEmissiveBounce.GetBool() || r_rtEmissiveTableDebug.GetInteger() > 0;
+	s_rtEmissiveReport = emissiveInUse && ( s_rtEmissiveReportedMap.Icmp( world->mapName ) != 0 || r_rtEmissiveTable.IsModified()
+		|| r_rtEmissiveLighting.IsModified() || r_rtEmissiveScale.IsModified() || r_rtEmissiveTableDebug.GetInteger() > 0 );
 	r_rtEmissiveTable.ClearModified();
 	r_rtEmissiveLighting.ClearModified();
 	r_rtEmissiveScale.ClearModified();
@@ -4323,7 +4336,7 @@ static void R_RtEmissiveUpdate( const idRenderWorldLocal *world, rhi::RHI *r ) {
 	if ( s_rtEmissiveBuf != 0 ) {
 		R_RtEmissiveBuildRows();				// E2 v3: the emitter rows the scene-light gather appends
 	}
-	if ( !s_rtEmissiveReport ) {
+	if ( !s_rtEmissiveReport && emissiveInUse ) {		// a self-triggered rebuild while emissive is in use: one timed line; silent when emissive is off
 		common->Printf( "r_rtEmissiveTable: rebuilt in %.1f ms (%d emissive triangles)\n", Sys_MillisecondsPrecise() - buildStart, s_rtEmissiveTris.Num() );
 	}
 	s_rtEmissiveReport = true;				// the console commands' own output is never muted
