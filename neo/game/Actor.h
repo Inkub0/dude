@@ -268,6 +268,8 @@ protected:
 
 							// removes attachments with "remove" set for when character dies
 	void					RemoveAttachments( void );
+							// DUDE: switch off lights bound to this actor without hiding it (the model_death pop death path)
+	void					ExtinguishAttachedLights( void );
 
 							// copies animation from body to head joints
 	void					CopyJointsFromBodyToHead( void );

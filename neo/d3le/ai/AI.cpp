@@ -3465,6 +3465,10 @@ void idAI::Killed( idEntity *inflictor, idEntity *attacker, int damage, const id
 		physicsObj.SetLinearVelocity( vec3_zero );
 		physicsObj.PutToRest();
 		physicsObj.DisableImpact();
+		// DUDE: a model_death pop (the lost soul) never calls Hide() and does not ragdoll, so its
+		// attached lights (the g_extraLights lost-soul fire light) would stay lit until the body is
+		// removed seconds later. Switch them off now so the light dies with the pop.
+		ExtinguishAttachedLights();
 #ifdef _D3XP
 		// No grabbing if "model_death"
 		noGrab = true;
