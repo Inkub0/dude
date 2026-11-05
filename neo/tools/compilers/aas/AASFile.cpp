@@ -1306,7 +1306,10 @@ bool idAASFileLocal::Load( const idStr &fileName, unsigned int mapFileCRC ) {
 	// as current (refusing it would leave the AI without navigation)
 	c = token.GetUnsignedIntValue();
 	if ( mapFileCRC && c != mapFileCRC && !quake4File ) {
-		common->Warning( "AAS file '%s' is out of date", name.c_str() );
+		// DUDE: print both CRCs so the mismatch self-diagnoses. The file CRC is the map geometry
+		// the .aas was built against; the map CRC is the map as loaded now. A stray .reg (loaded
+		// before the .map), an edited/loose .map, or a map-carrying pak above pak000 shifts it.
+		common->Warning( "AAS file '%s' is out of date (file CRC %u, map CRC %u)", name.c_str(), c, mapFileCRC );
 		return false;
 	}
 
