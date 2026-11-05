@@ -71,14 +71,20 @@ the working tree.
 `arbtool.exe`, `vulkan-1.dll` (ships with GPU drivers), the dev `base`/`d3xp` symlinks
 from `dist-win/`.
 
-**Separate optional assets — the baked-AO zips:** the generated AO packs attach to every
-release as their own downloads (the sanctioned release-attachment channel for generated
-assets — they never go in the repo or the platform archives), one zip per game, same drop-in
-layout:
-- `dude-X.Y-baked-ao.zip` — `base/z_baked_ao.pk4`, `_props`, `_weapons`
-- `dude-X.Y-baked-ao-roe.zip` — `d3xp/z_baked_ao_roe.pk4`, `_props_roe`, `_weapons_roe` (since 0.9.7)
-- `dude-X.Y-baked-ao-lm.zip` — `d3le/z_baked_ao_lm.pk4` (since 0.9.7). Never merged into the
-  others: a `d3le/` folder holding a pk4 shows up as a mod for players without Lost Mission.
+**Separate optional assets — the baked-AO packs (decoupled since 0.9.8):** baked AO is no
+longer attached to each version release. It is a standalone, independently-versioned artifact on
+its own `vN` axis, re-published only when the baker changes (algorithm, parameters or format) —
+one pack serves many DUDE releases. It never goes in the repo or the platform archives. Each
+pack is a single drop-in `.pk4`:
+- Doom 3 family — one merged `z_baked_ao.pk4` into `base/` (covers Doom 3, RoE and LM via the
+  d3xp/d3le → base search fallback; one pack in `base/` means `d3le/` never gets a pk4, so it
+  cannot show up as a mod for players without Lost Mission). Built by `pack_ao_d3.sh vN`.
+  Published as a dedicated **Baked AO** GitHub release on `Inkub0/dude`, on the AO `vN` axis.
+- Quake 4 — `z_baked_ao.pk4` into `q4base/`. Built by `pack_ao_q4.sh vN`. Published on
+  `Inkub0/dude-q4`. Never attach AO (or any data) generated from Quake 4 maps to a DUDE release.
+
+Each version's release notes link to the current recommended pack with a one-line drop-in note;
+the packs are not rebuilt or re-uploaded per version.
 
 ### zz_dude_menu.pk4 — rebuild from the repo every release
 
