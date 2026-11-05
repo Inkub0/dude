@@ -302,6 +302,7 @@ public:
 	bool					forcedReady;
 	bool					wantSpectate;		// from userInfo
 	bool					weaponGone;			// force stop firing
+	bool					weaponRaiseAttackBuffered;	// DUDE: a fire pressed during the weapon raise, replayed when ready (transient, not saved)
 	bool					useInitialSpawns;	// toggled by a map restart to be active for the first game spawn
 	int						latchedTeam;		// need to track when team gets changed
 	int						tourneyRank;		// for tourney cycling - the higher, the more likely to play next - server

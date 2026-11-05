@@ -1416,6 +1416,7 @@ idPlayer::idPlayer() {
 	lastSpectateTeleport	= 0;
 	tourneyLine				= 0;
 	hiddenWeapon			= false;
+	weaponRaiseAttackBuffered = false;	// DUDE: raise-buffer attack (transient, not saved)
 	tipUp					= false;
 	objectiveUp				= false;
 	teleportEntity			= NULL;
@@ -4918,6 +4919,26 @@ void idPlayer::Weapon_Combat( void ) {
 	// check for attack
 	AI_WEAPON_FIRED = false;
 	if ( !influenceActive ) {
+		// DUDE: a fire pressed while the weapon is still raising (e.g. a tap the instant a level
+		// finishes loading) is dropped by vanilla, because FireWeapon ignores input until the
+		// weapon is ready. Remember that press and replay it for one tic once the weapon becomes
+		// ready, so the normal BeginAttack/EndAttack path fires exactly one shot. A press held into
+		// readiness needs no help (it fires itself).
+		{
+			idWeapon *bufWeapon = weapon.GetEntity();
+			if ( bufWeapon && !weaponGone && !hiddenWeapon ) {
+				if ( ( usercmd.buttons & BUTTON_ATTACK ) && !bufWeapon->IsReady() ) {
+					weaponRaiseAttackBuffered = true;
+				} else if ( weaponRaiseAttackBuffered && bufWeapon->IsReady() ) {
+					if ( !( usercmd.buttons & BUTTON_ATTACK ) ) {
+						usercmd.buttons |= BUTTON_ATTACK;	// replay the tap on the first ready tic
+					}
+					weaponRaiseAttackBuffered = false;
+				}
+			} else {
+				weaponRaiseAttackBuffered = false;
+			}
+		}
 		if ( ( usercmd.buttons & BUTTON_ATTACK ) && !weaponGone ) {
 			FireWeapon();
 		} else if ( oldButtons & BUTTON_ATTACK ) {
