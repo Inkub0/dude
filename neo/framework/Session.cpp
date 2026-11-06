@@ -3669,10 +3669,12 @@ void idSessionLocal::RunGameTic() {
 
 	// run the game logic every player move
 	int	start = Sys_Milliseconds();
+	const double startF = Sys_MillisecondsPrecise();
 	gameReturn_t	ret = game->RunFrame( &cmd );
 
 	int end = Sys_Milliseconds();
 	time_gameFrame += end - start;	// note time used for com_speeds
+	time_gameFrameMs += Sys_MillisecondsPrecise() - startF;
 
 	// check for constency failure from a recorded command
 	if ( cmdDemoFile ) {

@@ -2441,8 +2441,10 @@ void idAsyncServer::RunFrame( void ) {
 		// duplicate usercmds for clients if no new ones are available
 		DuplicateUsercmds( gameFrame, gameTime );
 
-		// advance game
+		// advance game (DUDE: timed for com_speeds' gfr, as the single-player tic in idSessionLocal::RunGameTic)
+		const double gameStartF = Sys_MillisecondsPrecise();
 		gameReturn_t ret = game->RunFrame( userCmds[gameFrame & ( MAX_USERCMD_BACKUP - 1 ) ] );
+		time_gameFrameMs += Sys_MillisecondsPrecise() - gameStartF;
 
 		idAsyncNetwork::ExecuteSessionCommand( ret.sessionCommand );
 
