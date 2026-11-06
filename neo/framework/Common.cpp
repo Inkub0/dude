@@ -130,7 +130,8 @@ idCVar com_asyncSound( "com_asyncSound", "1", CVAR_INTEGER|CVAR_SYSTEM, ASYNCSOU
 idCVar com_forceGenericSIMD( "com_forceGenericSIMD", "0", CVAR_BOOL | CVAR_SYSTEM | CVAR_NOCHEAT, "force generic platform independent SIMD" );
 idCVar com_developer( "developer", "0", CVAR_BOOL|CVAR_SYSTEM|CVAR_NOCHEAT, "developer mode" );
 idCVar com_allowConsole( "com_allowConsole", "0", CVAR_BOOL | CVAR_SYSTEM | CVAR_NOCHEAT, "allow toggling console with the tilde key" );
-idCVar com_speeds( "com_speeds", "0", CVAR_BOOL|CVAR_SYSTEM|CVAR_NOCHEAT, "show engine timings" );
+idCVar com_speeds( "com_speeds", "0", CVAR_BOOL|CVAR_SYSTEM|CVAR_NOCHEAT, "print engine timings every frame, in ms: all = the whole frame, "
+	"gfr = game logic (0 on frames without a game tic), rf = renderer frontend, bk = renderer backend (the previous frame's; on Vulkan and GL3 it includes waiting for the GPU), gpu = GPU time of the latest finished frame" );
 idCVar com_showFPS( "com_showFPS", "0", CVAR_INTEGER|CVAR_SYSTEM|CVAR_ARCHIVE|CVAR_NOCHEAT, "show frames rendered per second" );
 idCVar com_showMemoryUsage( "com_showMemoryUsage", "0", CVAR_BOOL|CVAR_SYSTEM|CVAR_NOCHEAT, "show total and per frame memory usage" );
 idCVar com_showAsyncStats( "com_showAsyncStats", "0", CVAR_BOOL|CVAR_SYSTEM|CVAR_NOCHEAT, "show async network stats" );
@@ -186,6 +187,7 @@ int				time_gameFrame;
 int				time_gameDraw;
 int				time_frontend;			// renderSystem frontend time
 int				time_backend;			// renderSystem backend time
+double			time_gameFrameMs;		// DUDE: precise game logic time (com_speeds)
 
 int				com_frameTime;			// time (since start) for the current frame in milliseconds
 int				com_frameNumber;		// variable frame number
@@ -3169,15 +3171,43 @@ void idCommonLocal::Frame( void ) {
 		}
 
 		// report timing information
-		if ( com_speeds.GetBool() ) {
-			static int	lastTime;
-			int		nowTime = Sys_Milliseconds();
-			int		com_frameMsec = nowTime - lastTime;
-			lastTime = nowTime;
-			Printf( "frame:%i all:%3i gfr:%3i rf:%3i bk:%3i\n", com_frameNumber, com_frameMsec, time_gameFrame, time_frontend, time_backend );
-			time_gameFrame = 0;
-			time_gameDraw = 0;
+		// DUDE: precise times. id's whole-ms ints printed a 0.3 ms frontend as 0, and bk was always 0 on the RHI
+		// (a sub-ms float truncated to int). The frame clock and the game-time sum also run while com_speeds is
+		// off, so the first line after enabling it covers one frame, not everything since the map loaded.
+		static double	lastFrameTime = 0.0;
+		const double	nowFrameTime = Sys_MillisecondsPrecise();
+		const double	frameMs = lastFrameTime > 0.0 ? nowFrameTime - lastFrameTime : 0.0;
+		lastFrameTime = nowFrameTime;
+		static bool		speedsWasOn = false;
+		if ( com_speeds.GetBool() != speedsWasOn ) {
+			// gpu column: the RHI GPU timer runs while com_speeds is on (a timeDemo owns it while it plays)
+			speedsWasOn = com_speeds.GetBool();
+			if ( speedsWasOn || sessLocal.timeDemo == TD_NO ) {
+				renderSystem->SetGpuTimerRequested( speedsWasOn );
+			}
 		}
+		if ( speedsWasOn ) {
+			renderFrameStats_t fs;
+			renderSystem->GetFrameStats( fs );
+			// the GPU sample is a frame or two old (query readback); show it while it is still being refreshed
+			static int	lastGpuSerial = 0;
+			static int	lastGpuSerialFrame = 0;
+			if ( fs.gpuValid && fs.gpuSerial != lastGpuSerial ) {
+				lastGpuSerial = fs.gpuSerial;
+				lastGpuSerialFrame = com_frameNumber;
+			}
+			char gpu[32];
+			if ( fs.gpuValid && com_frameNumber - lastGpuSerialFrame <= 8 ) {
+				idStr::snPrintf( gpu, sizeof( gpu ), "%5.2f", fs.gpuMs );
+			} else {
+				idStr::Copynz( gpu, "    -", sizeof( gpu ) );
+			}
+			Printf( "frame:%i all:%6.2f gfr:%5.2f rf:%5.2f bk:%5.2f gpu:%s\n", com_frameNumber, frameMs, time_gameFrameMs,
+				fs.frontEndMs, fs.backEndMs, gpu );
+		}
+		time_gameFrame = 0;
+		time_gameDraw = 0;
+		time_gameFrameMs = 0.0;
 
 		com_frameNumber++;
 

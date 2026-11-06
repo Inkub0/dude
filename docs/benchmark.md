@@ -72,6 +72,14 @@ Sound stays muted in both modes, as before.
 The RHI executor (`RB_RHI_ExecuteBackEndCommands`) never timed itself before, so `com_speeds`'s
 `bk:` column was always 0 on opengl3/Vulkan. It is filled now.
 
+`com_speeds 1` (2026-11-06) prints the same precise numbers for live play, one line per frame:
+`frame:N all:<frame ms> gfr:<game logic ms> rf:<frontend ms> bk:<backend ms> gpu:<GPU ms>`, two decimals.
+id's whole-millisecond ints printed a 0.3 ms frontend as 0, and the int `bk` truncated the RHI's sub-ms
+float to 0 again. `gfr` is 0 on frames without a game tic (62.5 or 60 per second), `bk` is the previous
+frame's and includes the backend's GPU fence wait, and `gpu` keeps the GPU timer running while `com_speeds`
+is on (`-` while no fresh sample arrives). A timedemo is demo playback: it runs no game logic, so `com_speeds`
+in real play is the way to see `gfr`.
+
 `renderFrameStats_t` / `idRenderSystem::GetFrameStats` are appended at the end of the
 `idRenderSystem` interface so game DLLs built against the older vtable keep working.
 
