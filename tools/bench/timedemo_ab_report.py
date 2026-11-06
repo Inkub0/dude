@@ -64,6 +64,8 @@ def parse_report( run ):
 		"low1": r'1% low: ([0-9.]+) fps',
 		"gpu_avg": r'GPU \(ms/frame\): avg ([0-9.]+)',
 		"cpu_total": r'CPU renderer \(ms/frame\): frontend [0-9.]+\s+backend [0-9.]+\s+total ([0-9.]+)',
+		"cpu_fe": r'CPU renderer \(ms/frame\): frontend ([0-9.]+)',
+		"cpu_be": r'CPU renderer \(ms/frame\): frontend [0-9.]+\s+backend ([0-9.]+)',
 	}
 	for key, pat in pats.items():
 		m = re.search( pat, text )
@@ -385,7 +387,8 @@ def main():
 			print( f"  {v}: {variants.get( v, {} ).get( 'desc', '' )}  ({len( rs )} runs)" )
 			print( f"     fps {fmt( [ r['rep']['fps'] for r in rs ], 1 )}   frame avg {fmt( [ r['rep']['frame_avg'] for r in rs ] )} ms"
 			       f"   1% low {fmt( [ r['rep']['low1'] for r in rs ], 1 )} fps   GPU {fmt( [ r['rep']['gpu_avg'] for r in rs ] )} ms"
-			       f"   CPU {fmt( [ r['rep']['cpu_total'] for r in rs ] )} ms" )
+			       f"   CPU {fmt( [ r['rep']['cpu_total'] for r in rs ] )} ms"
+			       f" (frontend {fmt( [ r['rep']['cpu_fe'] for r in rs ] )} / backend {fmt( [ r['rep']['cpu_be'] for r in rs ] )})" )
 			if ref_clock:
 				print( f"     GPU at the median clock {ref_clock:.0f} MHz: {fmt( [ r.get( 'gpu_norm' ) for r in rs ] )} ms"
 				       "   (each run's GPU time x its clock / the median - assumes time scales with the core clock)" )

@@ -39,6 +39,11 @@
 #                emissive mode as in 'gather' - A = the old re-trace, B = the reuse
 #   set bounceem : the GI bounce hit's emitters (perf/rtgi-bounce-emitter-sampling, r_rtgiBounceEmitterPick), emissive mode as
 #                in 'gather' - A = every emitter area-sampled (old), B = one picked by the oriented target, C = by stored importance
+#   set cpusplit : where the RENDERER's CPU time goes (frontend vs backend), for the multi-core decision (docs: SMP /
+#                parallel frontend, 2026-11-06). The RELEASE build (build-linux-release/dude: build/dude is -O0, its CPU side
+#                means nothing). A = Path Tracing as played (emissive on), B = the same at FSR2 0.5 render scale (towards
+#                CPU-bound), C = raster Medium on Vulkan, D = raster Medium on GL3 (vsync off, no fps cap: C / D are the
+#                CPU-bound probes - there the backend figure is real CPU work, not a GPU wait). 2 rounds are enough
 #   rounds : alternating rounds after the warm-up (default 3)
 # Env: DUDE_BIN  binary (default <repo>/build/dude)
 #      DUDE_CFG  your config, source of the display settings (default ~/.config/dude/base/dude.cfg)
@@ -225,6 +230,19 @@ case "$SET" in
 		DESC[F]="no dominant shadow ray at the hit";   ARGS[F]="$EM +set r_rtgiBounceProfile 16";  BINV[F]="$PB"
 		DESC[G]="no cache at the hit";                 ARGS[G]="$EM +set r_rtgiBounceProfile 32";  BINV[G]="$PB"
 		DESC[H]="no cache update at the pixel";        ARGS[H]="$EM +set r_rtgiBounceProfile 64";  BINV[H]="$PB"
+		;;
+	cpusplit)
+		# 2026-11-06: the renderer's CPU split for the multi-core decision. The backend timer includes the Vulkan frame-fence
+		# wait (RB_RHI_ExecuteBackEndCommands times r->BeginFrame): in a GPU-bound run (A) "backend" is mostly waiting, in the
+		# CPU-bound probes (C, D) it is real work. Release build for every variant.
+		PRESET=5; RTX=2; SEED_EMISSIVE=1
+		RB="$REPO/build-linux-release/dude"
+		EM="+set r_rtEmissiveLighting 1 +set r_rtEmissivePhysical 1"
+		NAMES=( A B C D )
+		DESC[A]="Path Tracing Nightmare, emissive mode (as played)";        ARGS[A]="$EM";                                              BINV[A]="$RB"
+		DESC[B]="the same at FSR2 0.5 render scale (towards CPU-bound)";    ARGS[B]="$EM +set r_fsr 1 +set r_fsrScale 0.5";             BINV[B]="$RB"
+		DESC[C]="raster Medium, Vulkan (CPU-bound probe)";                  ARGS[C]="+set dude_rtx 0 +dudePreset 2";                     BINV[C]="$RB"
+		DESC[D]="raster Medium, GL3 (CPU-bound probe)";                     ARGS[D]="+set r_graphicsAPI opengl3 +set dude_rtx 0 +dudePreset 2"; BINV[D]="$RB"
 		;;
 	*)
 		sed -n '2,40p' "$0"
