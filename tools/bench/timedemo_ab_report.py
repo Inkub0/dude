@@ -323,11 +323,14 @@ def main():
 				log = read( os.path.join( run, "stdout.log" ) )
 				if "emissive authoring:" in log and not re.search( r'^emissive authoring: \S+ - .*: \d+ lights,', log, re.M ):
 					problems.append( f"{tag}: emissive mode on but the demo's map is UNAUTHORED (no setup in the sandbox)" )
-		if scopes is None:
-			problems.append( f"{tag}: no r_vkGpuTime windows with >= {MIN_WINDOW_SAMPLES} samples" )
 		# the GPU the game actually used (2026-11-04: a broken NVIDIA driver after an update - every run fell back to the iGPU)
-		m = re.search( r'^VK: backend up - (.*?), \d+ MB VRAM', read( os.path.join( run, "stdout.log" ) ), re.M )
-		gpu = m.group( 1 ) if m else "?"
+		log = read( os.path.join( run, "stdout.log" ) )
+		m = re.search( r'^VK: backend up - (.*?), \d+ MB VRAM', log, re.M )
+		gl = None if m else re.search( r'^OpenGL renderer: ([^/\n]*)', log, re.M )
+		gpu = m.group( 1 ) if m else ( gl.group( 1 ).strip() if gl else "?" )
+		# r_vkGpuTime is Vulkan-only: a GL3 run has no scope windows by design
+		if scopes is None and not gl:
+			problems.append( f"{tag}: no r_vkGpuTime windows with >= {MIN_WINDOW_SAMPLES} samples" )
 		if clocks is None and rnd != "w":
 			problems.append( f"{tag}: no clock log - nvidia-smi gave nothing (a broken driver? the run used: {gpu})" )
 		runs.append( { "tag": tag, "variant": v, "round": rnd, "rep": rep, "scopes": scopes or {}, "nwin": nwin, "clocks": clocks, "gpu": gpu,

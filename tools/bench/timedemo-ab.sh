@@ -43,7 +43,10 @@
 #                parallel frontend, 2026-11-06). The RELEASE build (build-linux-release/dude: build/dude is -O0, its CPU side
 #                means nothing). A = Path Tracing as played (emissive on), B = the same at FSR2 0.5 render scale (towards
 #                CPU-bound), C = raster Medium on Vulkan, D = raster Medium on GL3 (vsync off, no fps cap: C / D are the
-#                CPU-bound probes - there the backend figure is real CPU work, not a GPU wait). 2 rounds are enough
+#                CPU-bound probes - there the backend figure is real CPU work, not a GPU wait). 2 rounds are enough.
+#                E-H = the Potato preset (the vanilla floor: stencil shadows built on the CPU), for a GPU held at a low
+#                power limit: E / F native resolution (Vulkan / GL3), G / H 1280x720 windowed (Vulkan / GL3) - the GPU
+#                nearly idle, so the CPU is the limit: VARIANTS="E F G H"
 #   rounds : alternating rounds after the warm-up (default 3)
 # Env: DUDE_BIN  binary (default <repo>/build/dude)
 #      DUDE_CFG  your config, source of the display settings (default ~/.config/dude/base/dude.cfg)
@@ -243,6 +246,13 @@ case "$SET" in
 		DESC[B]="the same at FSR2 0.5 render scale (towards CPU-bound)";    ARGS[B]="$EM +set r_fsr 1 +set r_fsrScale 0.5";             BINV[B]="$RB"
 		DESC[C]="raster Medium, Vulkan (CPU-bound probe)";                  ARGS[C]="+set dude_rtx 0 +dudePreset 2";                     BINV[C]="$RB"
 		DESC[D]="raster Medium, GL3 (CPU-bound probe)";                     ARGS[D]="+set r_graphicsAPI opengl3 +set dude_rtx 0 +dudePreset 2"; BINV[D]="$RB"
+		# 2026-11-06: the GPU stays at a 160 W limit (it needs repasting): Potato, and a small window, keep it out of the way
+		LOWRES="+set r_fullscreen 0 +set r_mode -1 +set r_customWidth 1280 +set r_customHeight 720"
+		NAMES=( A B C D E F G H )
+		DESC[E]="Potato, Vulkan, native resolution";                        ARGS[E]="+set dude_rtx 0 +dudePreset 0";                     BINV[E]="$RB"
+		DESC[F]="Potato, GL3, native resolution";                           ARGS[F]="+set r_graphicsAPI opengl3 +set dude_rtx 0 +dudePreset 0"; BINV[F]="$RB"
+		DESC[G]="Potato, Vulkan, 1280x720 window (CPU-bound)";              ARGS[G]="$LOWRES +set dude_rtx 0 +dudePreset 0";             BINV[G]="$RB"
+		DESC[H]="Potato, GL3, 1280x720 window (CPU-bound)";                 ARGS[H]="$LOWRES +set r_graphicsAPI opengl3 +set dude_rtx 0 +dudePreset 0"; BINV[H]="$RB"
 		;;
 	*)
 		sed -n '2,40p' "$0"
