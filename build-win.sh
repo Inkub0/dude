@@ -76,8 +76,20 @@ ensure_vulkan_deps() {
 	if [ ! -s "$VKDEPS/vulkan-1.exports" ]; then
 		echo ">> Vulkan deps: no exports parsed from $winedll"; rm -rf "$VKDEPS"; return 1; fi
 	{ echo "LIBRARY vulkan-1.dll"; echo "EXPORTS"; cat "$VKDEPS/vulkan-1.exports"; } > "$VKDEPS/vulkan-1.def"
-	"${PREFIX}-dlltool" -d "$VKDEPS/vulkan-1.def" -l "$VKDEPS/lib/libvulkan-1.dll.a" -D vulkan-1.dll
+	vk_import_lib
 }
+
+# The import library's symbols are named after the path dlltool writes it to, and they end up in
+# dude.exe: generate it from inside the prefix so no build machine folder is in a shipped binary.
+vk_import_lib() {
+	( cd "$VKDEPS" && "${PREFIX}-dlltool" -d vulkan-1.def -l lib/libvulkan-1.dll.a -D vulkan-1.dll )
+}
+# an import library generated before that (absolute path in its symbol names): regenerate it once
+if [ -f "$VKDEPS/vulkan-1.def" ] && [ -f "$VKDEPS/lib/libvulkan-1.dll.a" ] &&
+   ! "${PREFIX}-nm" "$VKDEPS/lib/libvulkan-1.dll.a" 2>/dev/null | grep -q '_head_lib_libvulkan_1_dll_a'; then
+	echo ">> Vulkan deps: regenerating the import library without the build folder in its symbol names"
+	vk_import_lib
+fi
 
 if [ ! -f "$BUILD/CMakeCache.txt" ]; then
 	VK_FLAGS=(-DDHEWM3_VULKAN=OFF)

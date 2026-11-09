@@ -282,7 +282,11 @@ set(vulkan_libs "")
 # (base/shaders/, pk4s), read it straight from the source tree so editing +
 # `reloadShaders` works without an install/copy step. Installs/releases ship
 # the shaders via VFS and never hit this path.
-add_definitions(-DDUDE_SHADER_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/shaders")
+# DUDE: development configurations only. A release build must not look for files in the folder
+# it was built in on the player's machine (it falls back to the shaders embedded in the binary),
+# nor carry that path. The release configurations are the ones that define NDEBUG.
+set(dude_release_config "$<OR:$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>,$<CONFIG:MinSizeRel>>")
+add_compile_definitions("$<$<NOT:${dude_release_config}>:DUDE_SHADER_SOURCE_DIR=\"${CMAKE_CURRENT_SOURCE_DIR}/shaders\">")
 
 if(DHEWM3_VULKAN)
 	# built-in FindVulkan: headers + loader, and locates glslangValidator/glslc
@@ -317,7 +321,7 @@ if(DHEWM3_VULKAN)
 		set(spv_compiler ${Vulkan_GLSLC_EXECUTABLE})
 	endif()
 	set(spv_dir ${CMAKE_BINARY_DIR}/shaders/spv)
-	add_definitions(-DDUDE_SHADER_SPV_DIR="${spv_dir}")
+	add_compile_definitions("$<$<NOT:${dude_release_config}>:DUDE_SHADER_SPV_DIR=\"${spv_dir}\">")
 	file(GLOB shader_spv_sources
 		${CMAKE_CURRENT_SOURCE_DIR}/shaders/*.vert
 		${CMAKE_CURRENT_SOURCE_DIR}/shaders/*.frag
@@ -540,6 +544,11 @@ if(D3_COMPILER_IS_GCC_OR_CLANG)
 		   add_compile_options (-fcolor-diagnostics)
 		endif ()
 	endif ()
+
+	# DUDE: release builds record source paths relative to the checkout (neo/d3xp/Foo.cpp), in
+	# __FILE__ (assert messages) and in the debug info, never the build machine's own folders.
+	get_filename_component(dude_checkout "${CMAKE_SOURCE_DIR}/.." ABSOLUTE)
+	add_compile_options("$<${dude_release_config}:-ffile-prefix-map=${dude_checkout}/=>")
 
 	if(cpu STREQUAL "e2k" AND CMAKE_COMPILER_IS_GNUCC)
 		# O3 on E2K mcst-lcc approximately equal to O2 at X86/ARM gcc
