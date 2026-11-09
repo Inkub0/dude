@@ -6849,7 +6849,7 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 		const unsigned long long table = mode ? R_RtEmissiveTableAddress( NULL, NULL, NULL ) : 0;
 		const unsigned int gen = R_EmAuthGeneration();
 		if ( mode && ( !lastMode || table != lastTable || gen != lastGen ) && table != 0 ) {
-			common->Printf( "emissive mode (authored): %d placed lights deleted in this view, %d kept; %d emitter rows (%d authored fixtures in reach of the view; %d glowing fixtures in the map; cap %d)%s\n",
+			R_RtEmissiveLog( "emissive mode (authored): %d placed lights deleted in this view, %d kept; %d emitter rows (%d authored fixtures in reach of the view; %d glowing fixtures in the map; cap %d)%s\n",
 				s_diSkipEmissiveDrop, n, nEm, nEmCandidates, nEmTotal, Min( r_rtEmissiveMaxRows.GetInteger(), RT_SCENE_MAX_ROWS - n - nFog ),
 				( nEmCandidates > nEm ) ? " - CAP HIT: the weakest fixtures at the eye are missing" : "" );
 		}

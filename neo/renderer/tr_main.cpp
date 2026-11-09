@@ -3964,7 +3964,7 @@ static bool R_RtEmissiveRegatherGroup( rtEmissiveGroup_t &g, const idRenderEntit
 	}
 	if ( scratch.Num() != g.numTris ) {
 		if ( Sys_Milliseconds() - s_rtEmissiveLastRebuildMs > 2000 ) {
-			common->Printf( "r_rtEmissiveTable: entity %d '%s' changed which surfaces glow (%d -> %d tris) - rebuilding the table\n", g.entityIndex, model->Name(), g.numTris, scratch.Num() );
+			R_RtEmissiveLog( "r_rtEmissiveTable: entity %d '%s' changed which surfaces glow (%d -> %d tris) - rebuilding the table\n", g.entityIndex, model->Name(), g.numTris, scratch.Num() );
 			s_rtEmissiveMap.Clear();											// stale next frame: a full rebuild (throttled: a flipping entity must not rebuild every frame)
 		}
 		return false;
@@ -4062,7 +4062,7 @@ static void R_RtEmissiveRefreshMoversBody( const idRenderWorldLocal *world, rhi:
 		memcpy( g.lastMatrix, mm, sizeof( mm ) );
 		if ( !g.reported ) {													// name each mover the first time it moves (the E1e test aid)
 			g.reported = true;
-			common->Printf( "r_rtEmissiveTable: mover re-baked: entity %d '%s' (%d emissive tris, origin %.0f %.0f %.0f)\n",
+			R_RtEmissiveLog( "r_rtEmissiveTable: mover re-baked: entity %d '%s' (%d emissive tris, origin %.0f %.0f %.0f)\n",
 				g.entityIndex, g.model->Name(), g.numTris, def->parms.origin.x, def->parms.origin.y, def->parms.origin.z );
 		}
 		for ( int t = 0; t < g.numTris; t++ ) {
@@ -4202,7 +4202,7 @@ static bool R_RtEmissiveAppendEntity( const idRenderWorldLocal *world, rhi::RHI 
 	}
 	R_RtEmissiveBuildRows();
 	const idRenderModel *model = world->entityDefs[i]->parms.hModel;
-	common->Printf( "r_rtEmissiveTable: entity %d '%s' appeared - %d emissive tris appended (%d fixtures; %d in the table, %d KB), %.1f ms%s\n",
+	R_RtEmissiveLog( "r_rtEmissiveTable: entity %d '%s' appeared - %d emissive tris appended (%d fixtures; %d in the table, %d KB), %.1f ms%s\n",
 		i, model ? model->Name() : "?", added, fixtures, s_rtEmissiveTris.Num(), bytes >> 10, Sys_MillisecondsPrecise() - t0,
 		overflow ? va( " - TABLE FULL: %d triangles dropped", overflow ) : "" );
 	return true;
@@ -4299,7 +4299,7 @@ static void R_RtEmissiveUpdate( const idRenderWorldLocal *world, rhi::RHI *r ) {
 				appended = R_RtEmissiveAppendEntity( world, r, newEntities[k] );
 			}
 			if ( !appended && Sys_Milliseconds() - s_rtEmissiveLastRebuildMs > 5000 ) {
-				common->Printf( "r_rtEmissiveTable: a new emissive entity appeared and could not be appended - rebuilding the table\n" );
+				R_RtEmissiveLog( "r_rtEmissiveTable: a new emissive entity appeared and could not be appended - rebuilding the table\n" );
 				s_rtEmissiveMap.Clear();
 				return;
 			}
@@ -4309,7 +4309,7 @@ static void R_RtEmissiveUpdate( const idRenderWorldLocal *world, rhi::RHI *r ) {
 		if ( s_rtEmissiveNotResident.Num() > 0 && ( tr.frameCount % 90 ) == 0 ) {
 			for ( int i = 0; i < s_rtEmissiveNotResident.Num(); i++ ) {
 				if ( s_rtEmissiveNotResident[i]->rhiHandle != 0 ) {
-					common->Printf( "r_rtEmissiveTable: glow image '%s' is now resident - rebuilding the table\n", s_rtEmissiveNotResident[i]->imgName.c_str() );
+					R_RtEmissiveLog( "r_rtEmissiveTable: glow image '%s' is now resident - rebuilding the table\n", s_rtEmissiveNotResident[i]->imgName.c_str() );
 					s_rtEmissiveMap.Clear();			// stale next frame
 					break;
 				}
@@ -4337,11 +4337,29 @@ static void R_RtEmissiveUpdate( const idRenderWorldLocal *world, rhi::RHI *r ) {
 		R_RtEmissiveBuildRows();				// E2 v3: the emitter rows the scene-light gather appends
 	}
 	if ( !s_rtEmissiveReport && emissiveInUse ) {		// a self-triggered rebuild while emissive is in use: one timed line; silent when emissive is off
-		common->Printf( "r_rtEmissiveTable: rebuilt in %.1f ms (%d emissive triangles)\n", Sys_MillisecondsPrecise() - buildStart, s_rtEmissiveTris.Num() );
+		R_RtEmissiveLog( "r_rtEmissiveTable: rebuilt in %.1f ms (%d emissive triangles)\n", Sys_MillisecondsPrecise() - buildStart, s_rtEmissiveTris.Num() );
 	}
 	s_rtEmissiveReport = true;				// the console commands' own output is never muted
 	s_rtEmissiveReportedMap = world->mapName;
 	s_rtEmissiveMap = world->mapName;		// the latch: an empty map builds nothing but is not retried every frame
+}
+
+/*
+====================
+R_RtEmissiveLog
+====================
+*/
+void R_RtEmissiveLog( const char *fmt, ... ) {
+	char text[MAX_STRING_CHARS];
+	va_list argptr;
+	va_start( argptr, fmt );
+	idStr::vsnPrintf( text, sizeof( text ), fmt, argptr );
+	va_end( argptr );
+	if ( r_rtEmissiveTableDebug.GetInteger() > 0 ) {
+		common->Printf( "%s", text );
+	} else {
+		common->DPrintf( "%s", text );
+	}
 }
 
 unsigned long long R_RtEmissiveTableAddress( int *numTris, float *totalFlux, float *meanFlux ) {
