@@ -175,7 +175,7 @@ ol.steps > li::before {
   background: var(--bg-2); border: 1px solid var(--line); border-radius: var(--radius);
   padding: 8px 24px 16px; margin: 0 0 24px; scroll-margin-top: 72px;
 }
-.scenario > h2 { margin-top: 20px; }
+.scenario > h3 { margin-top: 20px; }
 
 /* ---------- tables ---------- */
 .table-wrap { overflow-x: auto; margin: 0 0 18px; }
