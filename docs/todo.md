@@ -70,6 +70,8 @@ Design decisions taken:
 | RT reflection trace resolution (r_rtReflResScale) | — | — | — | — | — | 1/2 (RTX) |
 | volumetric lighting (r_volumetrics) | — | — | — | — | — | on (RTX) |
 | reflection scale | 1.0 | 1.0 | 0.7 | 0.7 | 0.7 | 0.7 |
+| texture compression (GL only; VK always uncompressed) | DXT | DXT | DXT | off | off | off |
+| texture size (downsize / ignoreHighQuality reset) | full | full | full | full | full | full |
 
 (Potato/Low carry the cheap Medium SSAO/shadow sub-params under the off toggles so a
 manual feature flip from those tiers stays affordable. `*` = inert on that tier (stencil
