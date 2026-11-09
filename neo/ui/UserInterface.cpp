@@ -1086,6 +1086,16 @@ bool idUserInterfaceLocal::RestoreState( idFile *savefile, int end, int pointerS
 	guiRestore.pointerSized = false;
 	guiRestore.reason.Clear();
 
+	// DUDE: the anchors AnchorHud gave this GUI's layout when it was loaded from its file; the
+	// savegame overwrites them below with the ones it holds (none, in a save made before the HUD
+	// had them). Not re-derived from the restored state: its rects are where the game's animations
+	// left them - the PDA download bars rest beside the PDA icon at the bottom left after a pickup,
+	// and anchored from there they drew off centre at the next pickup.
+	idList<idWindow::cstAnchorState_t> layoutAnchors;
+	if ( hudAnchors != 0 ) {
+		desktop->GetCstAnchors( layoutAnchors );
+	}
+
 	ReadValuesFromSaveGame( savefile );
 	if ( !guiRestore.failed ) {
 		desktop->ReadFromSaveGame( savefile );
@@ -1104,10 +1114,10 @@ bool idUserInterfaceLocal::RestoreState( idFile *savefile, int end, int pointerS
 	guiRestore.active = false;
 	guiRestore.failed = false;
 
-	if ( ok ) {
-		// DUDE: the anchors come from the layout, not the game's state - a save made before
-		// the HUD had them holds none
-		AnchorHud( desktop, source, hudAnchors );
+	if ( ok && hudAnchors != 0 ) {
+		// DUDE: the anchors come from the layout, not the game's state
+		int index = 0;
+		desktop->SetCstAnchors( layoutAnchors, index );
 	}
 	return ok;
 }

@@ -359,6 +359,15 @@ public:
 	bool		SetChildCstAnchor	( const char *childName, int anchor );
 	// DUDE: this window or one below it has a CST anchor (an anchored GUI file)
 	bool		HasCstAnchors		( void );
+	// DUDE: the CST anchors of this window and every one below it, in draw order, and putting them
+	// back (a savegame overwrites them with the ones it was written with); index runs through out
+	struct cstAnchorState_t {
+		int		anchor;
+		int		anchorTo;
+		float	factor;
+	};
+	void		GetCstAnchors		( idList<cstAnchorState_t> &out );
+	void		SetCstAnchors		( const idList<cstAnchorState_t> &in, int &index );
 
 	bool		UpdateFromDictionary ( idDict& dict );
 
