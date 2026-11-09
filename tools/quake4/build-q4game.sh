@@ -33,6 +33,11 @@ value() { sed -n "s/^$1 = //p" "$FLAGS"; }
 DEFINES="$(value CXX_DEFINES | sed 's/-Dbase_EXPORTS//')"
 # DUDE's flags; the colour switch only matters to a terminal
 CXXFLAGS="$(value CXX_FLAGS | sed 's/-fdiagnostics-color=always//')"
+# a release build records DUDE's source paths relative to its checkout; the game's sources live in
+# their own checkout, so map that one too (no build machine folder in q4base's asserts or debug info)
+case "$CXXFLAGS" in
+	*-ffile-prefix-map=*) CXXFLAGS="$CXXFLAGS -ffile-prefix-map=$(cd "$Q4GAME_DIR" && pwd)/=dude-q4/" ;;
+esac
 # only the system include paths (SDL, OpenAL): DUDE's own neo/ and build/ the game CMake adds itself,
 # and neo/game - the Doom 3 game - must never be visible to the Quake 4 game
 INCLUDES=""
