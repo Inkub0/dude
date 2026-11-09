@@ -1545,17 +1545,28 @@ void RB_RHI_FlushSkinJobs( void ) {
 		// run's buffer once its jobs are recorded is safe. A non-shared pointer simply starts a new run —
 		// worst case this is the old per-job behaviour, never wrong. INPUT palette only; the per-surface
 		// gpuSkinVB output each job writes is untouched (BDA/RTX-facing geometry stays per surface).
+		// DUDE: the palette is a slice of this frame's storage ring (AllocStorage) - a CreateBuffer + DestroyBuffer
+		// per animated entity per frame was ~330 buffers a second in a Quake 4 fight. A backend without the ring
+		// (handle 0) keeps the buffer of its own.
 		const void *curJointData = NULL;
 		int curNumJoints = 0;
 		rhi::BufferHandle jointsBuf = 0;
+		int jointsOfs = 0, jointsBytes = 0;
+		bool jointsOwned = false;				// a CreateBuffer of our own (no storage ring), destroyed after its run
 		for ( int i = 0; i < rbSkinJobs.Num(); i++ ) {
 			const rbSkinJob_t &j = rbSkinJobs[i];
 			if ( jointsBuf == 0 || j.jointData != curJointData || j.numJoints != curNumJoints ) {
-				if ( jointsBuf ) {
+				if ( jointsBuf && jointsOwned ) {
 					r->DestroyBuffer( jointsBuf );	// prior run fully recorded; deferred/fence-retired
-					jointsBuf = 0;
 				}
-				jointsBuf = r->CreateBuffer( rhi::BU_STORAGE, j.numJoints * (int)sizeof( idJointMat ), j.jointData );
+				jointsBytes = j.numJoints * (int)sizeof( idJointMat );
+				jointsOfs = r->AllocStorage( j.jointData, jointsBytes, &jointsBuf );
+				jointsOwned = false;
+				if ( jointsBuf == 0 ) {
+					jointsBuf = r->CreateBuffer( rhi::BU_STORAGE, jointsBytes, j.jointData );
+					jointsOfs = 0;
+					jointsOwned = true;
+				}
 				curJointData = j.jointData;
 				curNumJoints = j.numJoints;
 			}
@@ -1567,6 +1578,8 @@ void RB_RHI_FlushSkinJobs( void ) {
 			rhi::ComputeArgs ca = {};
 			ca.shader = j.shader;
 			ca.storage[0] = jointsBuf;
+			ca.storageOffset[0] = jointsOfs;
+			ca.storageRange[0] = jointsBytes;
 			ca.storage[1] = j.weights;
 			ca.storage[2] = j.wdesc;
 			ca.storage[3] = j.wstart;
@@ -1579,7 +1592,7 @@ void RB_RHI_FlushSkinJobs( void ) {
 			ca.deferBarrier = true;				// one barrier for the whole batch, below
 			r->Dispatch( ca );					// records on the frame cb, no trailing barrier; buffer reused across the entity's jobs
 		}
-		if ( jointsBuf ) {
+		if ( jointsBuf && jointsOwned ) {
 			r->DestroyBuffer( jointsBuf );		// last run's palette buffer (recorded; deferred destroy)
 		}
 		// Barrier after the position pass. With no derive jobs this is the final compute->vertex/compute
@@ -1659,11 +1672,18 @@ void RB_RHI_FlushTessJobs( void ) {
 		for ( int i = 0; i < rbTessJobs.Num(); i++ ) {
 			const rbTessJob_t &j = rbTessJobs[i];
 			rhi::BufferHandle srcBuf = j.srcVB;
+			int srcOfs = 0, srcBytes = 0;
 			bool ownSrc = false;
 			if ( srcBuf == 0 && j.srcCpu ) {
-				// CPU source (gpuSkinning off): upload this frame's deformed verts as a storage buffer
-				srcBuf = r->CreateBuffer( rhi::BU_STORAGE, j.numSrcVerts * (int)sizeof( idDrawVert ), j.srcCpu );
-				ownSrc = true;
+				// CPU source (gpuSkinning off): this frame's deformed verts, a slice of the frame's storage ring
+				// (DUDE; a buffer of its own where the backend has no ring)
+				srcBytes = j.numSrcVerts * (int)sizeof( idDrawVert );
+				srcOfs = r->AllocStorage( j.srcCpu, srcBytes, &srcBuf );
+				if ( srcBuf == 0 ) {
+					srcBuf = r->CreateBuffer( rhi::BU_STORAGE, srcBytes, j.srcCpu );
+					srcOfs = 0;
+					ownSrc = true;
+				}
 			}
 			if ( srcBuf == 0 ) {
 				continue;
@@ -1672,6 +1692,8 @@ void RB_RHI_FlushTessJobs( void ) {
 			rhi::ComputeArgs ca = {};
 			ca.shader = j.shader;
 			ca.storage[0] = srcBuf;
+			ca.storageOffset[0] = srcOfs;
+			ca.storageRange[0] = srcBytes;		// 0 (whole buffer) for the gpuSkinVB source
 			ca.storage[1] = j.barySeam;
 			ca.storage[2] = j.srcTri;
 			ca.storage[3] = j.height;
