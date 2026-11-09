@@ -1185,6 +1185,10 @@ int  R_RtGatherPerforatedBoxes( const idBounds &b, idBounds *out, int maxOut );	
 // the current map (0 = none / off), with its triangle count and total flux; and the lazily built debug geometry
 // (one idDrawVert per table vertex + an index list) for r_rtEmissiveTableDebug.
 unsigned long long R_RtEmissiveTableAddress( int *numTris, float *totalFlux, float *meanFlux );
+// The emissive table's status lines while a map plays (a mover re-baked, an entity appeared, a
+// rebuild): developer-only (developer 1), or printed with the r_rtEmissiveTableDebug overlay on -
+// they went to the console on every change, and a busy map changes all the time.
+void R_RtEmissiveLog( const char *fmt, ... ) id_attribute((format(printf,1,2)));
 // E2 v3: one emitter ROW per emissive surface run - what RB_RHI_GatherSceneLights turns into a DUDE_LIGHT_EMISSIVE row
 // of the scene-light buffer (centroid, bounding radius, flux, flux-weighted mean linear radiance x material scale, total
 // area, the inherited reach of the placed light it replaces (0 = none), its triangle range in the table). dark = every
