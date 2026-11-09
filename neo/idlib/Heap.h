@@ -394,6 +394,13 @@ void idDynamicAlloc<type, baseBlockSize, minBlockSize>::Clear( void ) {
 
 //#define DYNAMIC_BLOCK_ALLOC_CHECK
 
+// DUDE: ID_DYNAMIC_BLOCK_ALLOC_SYSTEM (set by the ASAN build, neo/CMakeLists.txt) gives every
+// allocation its own system block (Mem_Alloc16 = malloc) instead of carving it out of a base
+// block, so AddressSanitizer sees each one: a write past its end, a use after its free or a
+// second free is reported where it happens, with the allocation and free stacks - inside the
+// pool those only show up later as a corrupted block list (GitHub #10). Every caller keeps the
+// same code path; CheckMemory can no longer tell a freed block, so a double free reaches ASAN.
+
 template<class type>
 class idDynamicBlock {
 public:
@@ -488,6 +495,11 @@ template<class type, int baseBlockSize, int minBlockSize>
 void idDynamicBlockAlloc<type, baseBlockSize, minBlockSize>::Shutdown( void ) {
 	idDynamicBlock<type> *block;
 
+#ifdef ID_DYNAMIC_BLOCK_ALLOC_SYSTEM
+	Clear();
+	return;			// no base blocks; live allocations belong to their owners
+#endif
+
 	for ( block = firstBlock; block != NULL; block = block->next ) {
 		if ( block->node == NULL ) {
 			FreeInternal( block );
@@ -511,6 +523,10 @@ void idDynamicBlockAlloc<type, baseBlockSize, minBlockSize>::Shutdown( void ) {
 template<class type, int baseBlockSize, int minBlockSize>
 void idDynamicBlockAlloc<type, baseBlockSize, minBlockSize>::SetFixedBlocks( int numBlocks ) {
 	idDynamicBlock<type> *block;
+
+#ifdef ID_DYNAMIC_BLOCK_ALLOC_SYSTEM
+	return;
+#endif
 
 	for ( int i = numBaseBlocks; i < numBlocks; i++ ) {
 		block = ( idDynamicBlock<type> * ) Mem_Alloc16( baseBlockSize );
@@ -549,6 +565,10 @@ void idDynamicBlockAlloc<type, baseBlockSize, minBlockSize>::SetLockMemory( bool
 template<class type, int baseBlockSize, int minBlockSize>
 void idDynamicBlockAlloc<type, baseBlockSize, minBlockSize>::FreeEmptyBaseBlocks( void ) {
 	idDynamicBlock<type> *block, *next;
+
+#ifdef ID_DYNAMIC_BLOCK_ALLOC_SYSTEM
+	return;
+#endif
 
 	for ( block = firstBlock; block != NULL; block = next ) {
 		next = block->next;
@@ -603,6 +623,17 @@ type *idDynamicBlockAlloc<type, baseBlockSize, minBlockSize>::Alloc( const int n
 		return NULL;
 	}
 
+#ifdef ID_DYNAMIC_BLOCK_ALLOC_SYSTEM
+	// one system block: the usual header, then exactly num elements
+	block = ( idDynamicBlock<type> * ) Mem_Alloc16( (int)sizeof( idDynamicBlock<type> ) + num * (int)sizeof( type ) );
+	block->SetSize( num * (int)sizeof( type ), false );
+	block->prev = block->next = NULL;
+	block->node = NULL;
+	numUsedBlocks++;
+	usedBlockMemory += block->GetSize();
+	return block->GetMemory();
+#endif
+
 	block = AllocInternal( num );
 	if ( block == NULL ) {
 		return NULL;
@@ -638,6 +669,18 @@ type *idDynamicBlockAlloc<type, baseBlockSize, minBlockSize>::Resize( type *ptr,
 
 	idDynamicBlock<type> *block = ( idDynamicBlock<type> * ) ( ( (byte *) ptr ) - (int)sizeof( idDynamicBlock<type> ) );
 
+#ifdef ID_DYNAMIC_BLOCK_ALLOC_SYSTEM
+	{
+		type *newPtr = Alloc( num );
+		const int keep = Min( block->GetSize(), num * (int)sizeof( type ) );
+		memcpy( newPtr, ptr, keep );
+		Free( ptr );
+		numAllocs--;		// counted as a resize, not an allocation + free
+		numFrees--;
+		return newPtr;
+	}
+#endif
+
 	usedBlockMemory -= block->GetSize();
 
 	block = ResizeInternal( block, num );
@@ -667,6 +710,11 @@ void idDynamicBlockAlloc<type, baseBlockSize, minBlockSize>::Free( type *ptr ) {
 
 	numUsedBlocks--;
 	usedBlockMemory -= block->GetSize();
+
+#ifdef ID_DYNAMIC_BLOCK_ALLOC_SYSTEM
+	Mem_Free16( block );
+	return;
+#endif
 
 	FreeInternal( block );
 
