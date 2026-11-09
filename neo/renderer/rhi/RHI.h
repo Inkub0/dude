@@ -164,6 +164,10 @@ struct ClearArgs {
 struct ComputeArgs {
 	ShaderHandle	shader;				// from CreateComputeShader (0 = skip, no-op)
 	BufferHandle	storage[8];			// storage-buffer bindings 0..7 (0 = unbound)
+	// byte offset / range of each binding inside its buffer (0 / 0 = the whole buffer). A slice of this
+	// frame's storage ring (AllocStorage) sets both; the offset honours the device's storage alignment.
+	int				storageOffset[8] = {};
+	int				storageRange[8] = {};
 	const void *	pushConstants;		// params bound at push-constant offset 0 (NULL = none)
 	int				pushConstantSize;	// bytes, <= 128
 	unsigned int	groupsX, groupsY, groupsZ;
@@ -525,6 +529,10 @@ public:
 	// Returned offsets are in bytes.
 	virtual int				AllocVertices( const void *data, int size, BufferHandle *buffer ) = 0;
 	virtual int				AllocIndices( const void *data, int size, BufferHandle *buffer ) = 0;
+	// Frame-temporary compute input (DUDE): copies `data` into this frame's storage ring and returns its byte
+	// offset, for ComputeArgs::storageOffset / storageRange. Valid for dispatches recorded this frame. *buffer = 0
+	// where there is no such ring (GL3): the caller then creates a buffer of its own.
+	virtual int				AllocStorage( const void *data, int size, BufferHandle *buffer ) { *buffer = 0; return 0; }
 
 	// bumped whenever a ring orphans its storage (new frame or mid-frame
 	// wrap); previously returned offsets are invalid for NEW draws once this

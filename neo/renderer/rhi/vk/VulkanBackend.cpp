@@ -267,6 +267,7 @@ public:
 	virtual int		AllocUniforms( const void *data, int size, BufferHandle *buffer );
 	virtual int		AllocVertices( const void *data, int size, BufferHandle *buffer );
 	virtual int		AllocIndices( const void *data, int size, BufferHandle *buffer );
+	virtual int		AllocStorage( const void *data, int size, BufferHandle *buffer );
 	virtual int		StreamGeneration() { return streamGen; }
 
 	// ---- drawing ----
@@ -495,6 +496,7 @@ private:
 	static const int IDX_RING_SIZE  = 8 << 20;
 	static const int STAGING_RING_SIZE = 2 << 20;	// mid-frame texture updates (cinematics)
 	static const int INDIRECT_RING_SIZE = 1 << 20;	// r_vkIndirectTest 1-command-per-draw ring (~52k draws; grows)
+	static const int STORAGE_RING_SIZE = 1 << 20;	// AllocStorage: per-frame compute inputs (GPU-skin joint palettes; grows)
 	static const int MAX_FRAME_SETS = 4096;			// per-draw texture sets per frame
 	// set-1 combined image samplers: units 0-7, shadow cube 8, SSAO 9, occlusion 10,
 	// parallax 11, dynamic shadow cube 12, blurred RT shadow mask 13 (r_rtShadowBlur)
@@ -520,8 +522,12 @@ private:
 	// (host-visible+INDIRECT). A per-frame-in-flight partition (like the geometry rings) so a
 	// draw's command survives until its frame's fence, unread by the next frame's writes.
 	RingBuf						indirectRing[FRAMES_IN_FLIGHT];
+	// DUDE: per-frame compute inputs (AllocStorage) - the GPU skinner's joint palette per animated entity was a
+	// CreateBuffer + DestroyBuffer each frame (~330 a second in a Quake 4 fight). Same lifetime rules as the rings above.
+	RingBuf						storageRing[FRAMES_IN_FLIGHT];
 	int							streamGen = 0;
 	int							uboAlign = 256;
+	int							storageAlign = 256;		// minStorageBufferOffsetAlignment
 	bool						ringOverflowWarned = false;
 	// geometry rings grow on mid-frame overflow instead of wrapping (a wrap
 	// stomps data in-flight draws still read — M4's "flying triangles"). The
@@ -3367,6 +3373,7 @@ void VulkanBackend::BeginFrame( int windowWidth, int windowHeight ) {
 	idxRing[frameIndex].offset = 0;
 	stagingRing[frameIndex].offset = 0;
 	indirectRing[frameIndex].offset = 0;
+	storageRing[frameIndex].offset = 0;
 	streamGen++;
 	// refresh VMA's OS-level VRAM budget once per frame (only does work with the EXT budget bit set),
 	// so GetDeviceLocalMemory / the auto shadow-cache budget see current free VRAM rather than a value
@@ -3803,6 +3810,10 @@ bool VulkanBackend::CreateM2Resources() {
 	if ( uboAlign < 4 ) {
 		uboAlign = 256;
 	}
+	storageAlign = (int)physProps.limits.minStorageBufferOffsetAlignment;	// a power of two (spec), <= 256
+	if ( storageAlign < 4 ) {
+		storageAlign = 4;
+	}
 
 	// GPU timer query pool (r_vkGpuTime). Gated on the graphics queue's
 	// timestampValidBits; timestampPeriod is ns/tick. If unsupported the cvar just
@@ -3841,14 +3852,15 @@ bool VulkanBackend::CreateM2Resources() {
 		VkBufferUsageFlags usage;
 	};
 	for ( int slot = 0; slot < FRAMES_IN_FLIGHT; slot++ ) {
-		const ringSetup_t setups[5] = {
+		const ringSetup_t setups[6] = {
 			{ &uboRing[slot],  UBO_RING_SIZE,  VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT },
 			{ &vertRing[slot], VERT_RING_SIZE, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT },
 			{ &idxRing[slot],  IDX_RING_SIZE,  VK_BUFFER_USAGE_INDEX_BUFFER_BIT },
 			{ &stagingRing[slot], STAGING_RING_SIZE, VK_BUFFER_USAGE_TRANSFER_SRC_BIT },
 			{ &indirectRing[slot], INDIRECT_RING_SIZE, VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT },
+			{ &storageRing[slot], STORAGE_RING_SIZE, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT },
 		};
-		for ( int i = 0; i < 5; i++ ) {
+		for ( int i = 0; i < 6; i++ ) {
 			VkBufferCreateInfo bci = {};
 			bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
 			bci.size = (VkDeviceSize)setups[i].size;
@@ -4246,8 +4258,8 @@ void VulkanBackend::DestroyM2Resources() {
 	for ( int slot = 0; slot < FRAMES_IN_FLIGHT; slot++ ) {
 		DrainRetiredRings( slot );		// device is idle here
 		DrainRetiredImages( slot );
-		RingBuf *rings[5] = { &uboRing[slot], &vertRing[slot], &idxRing[slot], &stagingRing[slot], &indirectRing[slot] };
-		for ( int i = 0; i < 5; i++ ) {
+		RingBuf *rings[6] = { &uboRing[slot], &vertRing[slot], &idxRing[slot], &stagingRing[slot], &indirectRing[slot], &storageRing[slot] };
+		for ( int i = 0; i < 6; i++ ) {
 			if ( rings[i]->buffer ) {
 				vmaDestroyBuffer( vma, rings[i]->buffer, rings[i]->alloc );
 			}
@@ -4466,6 +4478,9 @@ int VulkanBackend::AllocVertices( const void *data, int size, BufferHandle *buff
 }
 int VulkanBackend::AllocIndices( const void *data, int size, BufferHandle *buffer ) {
 	return AllocFromRing( idxRing[frameIndex], data, size, 4, 0, buffer );
+}
+int VulkanBackend::AllocStorage( const void *data, int size, BufferHandle *buffer ) {
+	return AllocFromRing( storageRing[frameIndex], data, size, storageAlign, 0, buffer );
 }
 
 /*
@@ -5375,8 +5390,8 @@ VkDescriptorSet VulkanBackend::RecordDispatch( VkCommandBuffer cb, const Compute
 			continue;
 		}
 		bi[n].buffer = bufferTable[args.storage[i] - 1];
-		bi[n].offset = 0;
-		bi[n].range = VK_WHOLE_SIZE;
+		bi[n].offset = (VkDeviceSize)args.storageOffset[i];						// a storage-ring slice (AllocStorage), else 0
+		bi[n].range = args.storageRange[i] > 0 ? (VkDeviceSize)args.storageRange[i] : VK_WHOLE_SIZE;
 		w[n].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
 		w[n].dstSet = set;
 		w[n].dstBinding = (uint32_t)i;
