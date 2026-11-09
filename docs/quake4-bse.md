@@ -189,8 +189,14 @@ Domains (count, values): `point` 11835 (n), `box` 11531 (2n), `line` 4862 (2n), 
    is a snapshot of those segments (it receives lights, casts no shadow - S3); debris becomes game
    entities (S5).
 4. **Time:** spawning and physics advance on game frames (`UpdateEffectDef`); particle state is
-   evaluated analytically at each view's time, so effects stay smooth with `com_interpolate`
-   (the same curves, sampled more often — no fidelity change).
+   evaluated analytically at each view's time. With `com_interpolate` the game draws each frame
+   at the instant between its last two tics that the rest of the scene is blended to (the view's
+   time, restored after rendering), and hands each effect the frame its owner is drawn at that
+   instant (`SetEffectDefDrawFrame` → `BSE_SetEffectDrawFrame`: an effect bound to an entity keeps
+   its place on the entity as drawn, a loose one blends its last two tic transforms). That frame is
+   for drawing only — entity placement, particles, lights — and lasts one render frame; spawning,
+   physics and sounds keep the serviced frame. The same curves, sampled more often: no fidelity
+   change, and none at all without `com_interpolate`.
 5. **Requests to the game** (impact / timeout child effects, debris, view effects) are queued
    and delivered at the game's `bse->StartFrame / EndFrame`, never in the middle of a render.
 6. **FSR2:** translucent effect surfaces write no motion vectors (as Doom 3's particles) and

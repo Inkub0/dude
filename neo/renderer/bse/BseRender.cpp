@@ -468,6 +468,45 @@ static void BSE_ServiceForView( idBseEffect *effect, const viewDef_t *view ) {
 	}
 }
 
+/*
+================
+idBseDrawFrame
+
+DUDE com_interpolate: while one is in scope, the effect's frame is the one the game draws it at this
+render frame (BSE_SetEffectDrawFrame), so its entities, particles and lights are built there: locked
+particles follow the owner as drawn, unlocked ones stay where they were born. Spawning, physics and
+sounds never run inside one - they keep the serviced frame.
+================
+*/
+class idBseDrawFrame {
+public:
+	// placed: only when the effect's entities were placed at the draw frame (geometry built in their frame)
+	idBseDrawFrame( idBseEffect *e, bool placed ) : effect( e ), swapped( false ) {
+		if ( effect->drawFrameCount == tr.frameCount && ( !placed || effect->drawFrameSynced == tr.frameCount ) ) {
+			savedOrigin = effect->currentOrigin;
+			savedAxis = effect->currentAxis;
+			effect->currentOrigin = effect->drawOrigin;
+			effect->currentAxis = effect->drawAxis;
+			swapped = true;
+		}
+	}
+	~idBseDrawFrame( void ) {
+		if ( swapped ) {
+			effect->currentOrigin = savedOrigin;
+			effect->currentAxis = savedAxis;
+		}
+	}
+	bool			Swapped( void ) const { return swapped; }
+	const idVec3 &	ServicedOrigin( void ) const { return savedOrigin; }
+	const idMat3 &	ServicedAxis( void ) const { return savedAxis; }
+
+private:
+	idBseEffect *	effect;
+	bool			swapped;
+	idVec3			savedOrigin;
+	idMat3			savedAxis;
+};
+
 // the viewer of view in the frame of an entity at origin, axis
 static bseView_t BSE_EffectView( const viewDef_t *view, const idVec3 &origin, const idMat3 &axis ) {
 	bseView_t v;
@@ -508,6 +547,7 @@ idRenderModel *idRenderModelBseLit::InstantiateDynamicModel( const struct render
 		return NULL;
 	}
 	BSE_ServiceForView( effect, view );
+	idBseDrawFrame drawFrame( effect, true );		// DUDE com_interpolate
 
 	// its vertices in this frame's temp space, as Doom 3's particle snapshots (idRenderModelFrameSnapshot): not a
 	// static vertex-cache block per segment per frame (on Vulkan an RHI buffer created and destroyed each time)
@@ -654,14 +694,34 @@ static void BSE_FillEntity( const idBseEffect *effect, renderEntity_t &ent, bool
 	memcpy( ent.shaderParms, parms.shaderParms, sizeof( ent.shaderParms ) );
 }
 
+// DUDE com_interpolate: the entity's bounds, taken in the serviced frame, as seen from the draw frame
+static void BSE_DrawFrameBounds( const idBseDrawFrame &drawFrame, const idBseEffect *effect, renderEntity_t &ent ) {
+	if ( !drawFrame.Swapped() || ent.bounds.IsCleared() ) {
+		return;
+	}
+	const idBounds serviced = ent.bounds;
+	const idMat3 drawAxisT = effect->drawAxis.Transpose();
+	ent.bounds.Clear();
+	for ( int i = 0; i < 8; i++ ) {
+		const idVec3 corner( serviced[i & 1].x, serviced[( i >> 1 ) & 1].y, serviced[( i >> 2 ) & 1].z );
+		const idVec3 world = drawFrame.ServicedOrigin() + drawFrame.ServicedAxis() * corner;
+		ent.bounds.AddPoint( drawAxisT * ( world - effect->drawOrigin ) );
+	}
+}
+
 static void BSE_SyncEntity( idBseEffect *effect ) {
+	idBseDrawFrame drawFrame( effect, false );		// DUDE com_interpolate: placed where the game draws it this frame
+	effect->drawFramePlaced = drawFrame.Swapped();
+	effect->drawFrameSynced = drawFrame.Swapped() ? tr.frameCount : -1;
 	renderEntity_t ent;
 	if ( BSE_EntityDef( effect, effect->entityHandle, bseModel ) != NULL ) {
 		BSE_FillEntity( effect, ent, false );
+		BSE_DrawFrameBounds( drawFrame, effect, ent );
 		effect->world->UpdateEntityDef( effect->entityHandle, &ent );
 	}
 	if ( BSE_EntityDef( effect, effect->litHandle, bseLitModel ) != NULL ) {
 		BSE_FillEntity( effect, ent, true );
+		BSE_DrawFrameBounds( drawFrame, effect, ent );
 		effect->world->UpdateEntityDef( effect->litHandle, &ent );
 	}
 }
@@ -686,6 +746,9 @@ idBseEffect *BSE_PlayEffect( idRenderWorld *world, const bseEffectParms_t &parms
 	effect->litHandle = -1;
 	effect->entityDirty = false;
 	effect->serviceTime = timeMs - 1;		// the frame's first view services it
+	effect->drawFrameCount = -1;			// DUDE com_interpolate
+	effect->drawFrameSynced = -1;
+	effect->drawFramePlaced = false;
 	effect->Init( parms, MS2SEC( timeMs ) );
 	if ( BSE_Debug() ) {
 		static int plays = 0;
@@ -761,8 +824,14 @@ void BSE_SyncWorld( idRenderWorld *world, int timeMs ) {
 			effect->UpdateBounds();
 			BSE_SyncEntity( effect );
 			effect->entityDirty = false;
+		} else if ( effect->drawFrameCount == tr.frameCount ? effect->drawFrameSynced != tr.frameCount : effect->drawFramePlaced ) {
+			// DUDE com_interpolate: a new draw frame to place it at, or back where it was serviced
+			BSE_SyncEntity( effect );
 		}
-		BSE_SyncLights( effect, time );
+		{
+			idBseDrawFrame drawFrame( effect, false );		// DUDE com_interpolate
+			BSE_SyncLights( effect, time );
+		}
 		// bse_showBounds: the effect's bounds (yellow: what the renderer culls it by), 2: and its live
 		// particles' (cyan)
 		const int showBounds = bse_showBounds != NULL ? bse_showBounds->GetInteger() : 0;
@@ -773,6 +842,24 @@ void BSE_SyncWorld( idRenderWorld *world, int timeMs ) {
 			}
 		}
 	}
+}
+
+/*
+================
+BSE_SetEffectDrawFrame
+
+DUDE com_interpolate: the game draws the effect's owner between two game tics this render frame, at
+origin / axis; the effect's entities, particles and lights are drawn there (idBseDrawFrame) until the
+frame ends. Placed before the frame's first scene (BSE_SyncWorld).
+================
+*/
+void BSE_SetEffectDrawFrame( idBseEffect *effect, const idVec3 &origin, const idMat3 &axis ) {
+	if ( effect == NULL ) {
+		return;
+	}
+	effect->drawOrigin = origin;
+	effect->drawAxis = axis;
+	effect->drawFrameCount = tr.frameCount;
 }
 
 void BSE_StopEffect( idBseEffect *effect ) {
@@ -911,6 +998,7 @@ static void R_AddBseEffectSurfaces( viewEntity_t *vEntity ) {
 	if ( !BSE_Render() ) {
 		return;
 	}
+	idBseDrawFrame drawFrame( effect, true );		// DUDE com_interpolate: built where the game draws it this frame
 
 	const bseView_t viewer = BSE_EffectView( view, def->parms.origin, def->parms.axis );
 	const float time = MS2SEC( view->renderView.time );

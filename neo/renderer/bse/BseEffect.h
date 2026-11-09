@@ -307,6 +307,15 @@ public:
 	int						serviceTime;		// ms, the last game time serviced
 	bool					finished;
 
+	// DUDE com_interpolate: where the game draws the effect this frame when its owner is drawn between
+	// two game tics (BSE_SetEffectDrawFrame) - the drawing's frame only: spawning, physics and sounds keep
+	// the serviced currentOrigin / currentAxis. Valid for the render frame drawFrameCount only.
+	idVec3					drawOrigin;
+	idMat3					drawAxis;
+	int						drawFrameCount;		// tr.frameCount it was set for, -1: none
+	int						drawFrameSynced;	// tr.frameCount the entities were placed at it
+	bool					drawFramePlaced;	// the entities were last placed at a draw frame
+
 private:
 	void					UpdateAttenuation( void );
 	void					UpdateParticleBounds( float time );
@@ -376,6 +385,9 @@ idBseEffect *	BSE_PlayEffect( idRenderWorld *world, const bseEffectParms_t &parm
 				// the owner's new state; true when the effect is over and can be freed
 bool			BSE_UpdateEffect( idBseEffect *effect, const bseEffectParms_t &parms, int timeMs );
 void			BSE_StopEffect( idBseEffect *effect );				// no more spawns; live particles die out
+				// DUDE com_interpolate: draw the effect at origin / axis this render frame (its owner drawn between
+				// two game tics) instead of where it was last serviced; for drawing only, gone next frame
+void			BSE_SetEffectDrawFrame( idBseEffect *effect, const idVec3 &origin, const idMat3 &axis );
 				// before a scene of world renders at timeMs: the entities of its effects serviced since, with
 				// their particles' bounds (a cinematic skip runs many game tics and renders none); also runs
 				// testEffect's effects, which no game owner services

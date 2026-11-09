@@ -71,6 +71,7 @@ public:
 	virtual const idRenderEffectQ4 *GetEffectDef( qhandle_t effectHandle ) const;
 	virtual void			FreeEffectDef( qhandle_t effectHandle );
 	virtual bool			EffectDefHasSound( const renderEffect_t *reffect );
+	virtual void			SetEffectDefDrawFrame( qhandle_t effectHandle, const idVec3 &origin, const idMat3 &axis );
 
 	virtual void			ProjectDecalOntoWorld( const idFixedWinding &winding, const idVec3 &projectionOrigin, const bool parallel, const float fadeDepth, const idMaterial *material, const int startTime );
 	virtual void			ProjectOverlay( qhandle_t entityHandle, const idPlane localTextureAxis[2], const idMaterial *material );
@@ -450,6 +451,12 @@ bool idRenderWorldQ4Local::UpdateEffectDef( qhandle_t effectHandle, const render
 	bseEffectParms_t parms;
 	R_RenderEffectQ4ToBse( *reffect, def->decl, parms );
 	return BSE_UpdateEffect( def->effect, parms, time );
+}
+
+void idRenderWorldQ4Local::SetEffectDefDrawFrame( qhandle_t effectHandle, const idVec3 &origin, const idMat3 &axis ) {
+	if ( effectHandle >= 0 && effectHandle < effects.Num() && effects[effectHandle] != NULL ) {
+		BSE_SetEffectDrawFrame( effects[effectHandle]->effect, origin, axis );
+	}
 }
 
 void idRenderWorldQ4Local::StopEffectDef( qhandle_t effectHandle ) {
