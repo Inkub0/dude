@@ -1348,7 +1348,21 @@ glimpParms_t GLimp_GetCurState()
 	}
 
 	assert( ret.width == glConfig.winWidth && ret.height == glConfig.winHeight );
-	assert( ret.fullScreen == glConfig.isFullscreen );
+
+	// DUDE (GitHub #8): the window manager owns the fullscreen state. On Wayland (and SDL2 running
+	// on SDL3, sdl2-compat) a fullscreen switch completes only when the compositor confirms it,
+	// after we recorded the state, and the compositor can change it on its own later (its fullscreen
+	// key, window rules: Hyprland). So a mismatch is not a bug to stop on - the window's flag is
+	// the truth; take it.
+	if ( ret.fullScreen != glConfig.isFullscreen ) {
+		static bool noted = false;
+		if ( !noted ) {
+			noted = true;
+			common->Printf( "Window is %s, not %s as last set: the window manager changed it\n",
+				ret.fullScreen ? "fullscreen" : "windowed", glConfig.isFullscreen ? "fullscreen" : "windowed" );
+		}
+		glConfig.isFullscreen = ret.fullScreen;
+	}
 
 #else
 	assert( 0 && "Don't use GLimp_GetCurState() with SDL1.2 !" );
@@ -1700,5 +1714,9 @@ void GLimp_UpdateWindowSize()
 		glConfig.winWidth = ww;
 		glConfig.winHeight = wh;
 	}
+
+	// DUDE (GitHub #8): follow the fullscreen state too - the window manager can finish or change a
+	// fullscreen switch after we asked for it (Wayland, sdl2-compat), and a size change comes with it
+	glConfig.isFullscreen = ( winFlags & SDL_WINDOW_FULLSCREEN ) != 0;
 #endif
 }
