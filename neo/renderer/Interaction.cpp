@@ -1042,6 +1042,31 @@ static bool R_PotentiallyInsideInfiniteShadow( const srfTriangles_t *occluder,
 
 /*
 ==================
+R_InteractionIndexCache
+
+DUDE: whether a light-interaction or shadow surface gets its static index cache at this draw. An animated model's
+interaction surfaces are rebuilt every frame (AddActiveInteraction frees them when the dynamic model was regenerated),
+so stock Doom 3 uploads a static index cache per surface per frame and frees it the next: on Vulkan a buffer created
+and destroyed each time - 5-6 a frame landed in system RAM alone in a Quake 4 fight once the 256 MB CPU-visible VRAM
+window was full (Resizable BAR off). Such a surface's indexes stream through the backend's per-frame index ring
+instead (RB_RHI_ResolveIndices, as the frame-temp surfaces of Model_prt.cpp do) until it is drawn in a second frame:
+a surface that lives on - a static model's, or an animated one's between its game's tics - then gets its cache, as
+stock gives it at once. Same indexes, same draws; the surface still owns its cache and frees it.
+==================
+*/
+static bool R_InteractionIndexCache( srfTriangles_t *tri ) {
+	if ( !r_useIndexBuffers.GetBool() ) {
+		return false;
+	}
+	const int frame = tr.frameCount + 1;		// + 1: 0 means "not drawn yet"
+	if ( tri->firstDrawnFrame == 0 ) {
+		tri->firstDrawnFrame = frame;
+	}
+	return tri->firstDrawnFrame != frame;
+}
+
+/*
+==================
 idInteraction::AddActiveInteraction
 
 Create and add any necessary light and shadow triangles
@@ -1191,7 +1216,8 @@ void idInteraction::AddActiveInteraction( void ) {
 						vertexCache.Touch( lightTris->lightingCache );
 					}
 
-					if ( !lightTris->indexCache && r_useIndexBuffers.GetBool() && !frameTemp ) {
+					// (DUDE: not for a surface rebuilt every frame - R_InteractionIndexCache)
+					if ( !lightTris->indexCache && !frameTemp && R_InteractionIndexCache( lightTris ) ) {
 						vertexCache.Alloc( lightTris->indexes, lightTris->numIndexes * sizeof( lightTris->indexes[0] ), &lightTris->indexCache, true );
 					}
 					if ( lightTris->indexCache ) {
@@ -1346,7 +1372,8 @@ void idInteraction::AddActiveInteraction( void ) {
 			// touch the shadow surface so it won't get purged
 			vertexCache.Touch( shadowTris->shadowCache );
 
-			if ( !shadowTris->indexCache && r_useIndexBuffers.GetBool() ) {
+			// (DUDE: not for a surface rebuilt every frame - R_InteractionIndexCache)
+			if ( !shadowTris->indexCache && R_InteractionIndexCache( shadowTris ) ) {
 				vertexCache.Alloc( shadowTris->indexes, shadowTris->numIndexes * sizeof( shadowTris->indexes[0] ), &shadowTris->indexCache, true );
 				vertexCache.Touch( shadowTris->indexCache );
 			}

@@ -186,6 +186,11 @@ typedef struct srfTriangles_s {
 	// time (GitHub #10). Like deformedSurface for a deform's borrowed indexes.
 	bool						referencedVerts;
 	bool						referencedIndexes;
+	// Light-interaction and shadow surfaces: tr.frameCount + 1 of the first frame this surface was drawn (0 = not yet).
+	// An animated model's interaction surfaces are rebuilt every frame, so a static index cache for them is created and
+	// freed again the next frame (on Vulkan a buffer each). Until the surface is drawn in a second frame its indexes
+	// stream through the backend's per-frame index ring instead (R_InteractionIndexCache, Interaction.cpp).
+	int							firstDrawnFrame;
 } srfTriangles_t;
 
 typedef idList<srfTriangles_t *> idTriList;

@@ -1021,13 +1021,24 @@ private:
 	bool			GetDeviceLocalMemory( uint64_t &usageBytes, uint64_t &budgetBytes ) override;
 	// Buffers that landed in SYSTEM RAM although the GPU reads them (2026-11-04): with Resizable BAR off the CPU-visible
 	// VRAM window is ~256 MB, and an upload / vertex / index buffer created once it is full silently goes to host memory -
-	// read over PCIe. CreateBuffer warns (rate-limited per usage) and vkMemReport lists them. BU_STORAGE is host memory by
-	// design (CPU read-back) and only counted.
+	// read over PCIe. CreateBuffer warns for the first few per usage, then EndFrame sums the rest up once a minute
+	// (HostPlacedSummary; per-buffer warnings flooded a 14-minute Quake 4 session's log with 3000 lines); vkMemReport
+	// lists them. BU_STORAGE is host memory by design (CPU read-back) and only counted.
 	struct HostPlacedBuf { BufferUsage usage; int size; };
 	std::unordered_map<uint32_t, HostPlacedBuf> hostPlaced;			// buffer slot -> what landed there
-	int				hostPlacedWarnings[16] = {};
+	int				hostPlacedWarnings[16] = {};					// placed in system RAM since start, per usage
+	int				bufferCreates[16] = {};							// CreateBuffer calls since start, per usage
+	// the summary's window, and vkMemReport's "since the last report" rates
+	unsigned int	hostPlacedSummaryMs = 0;
+	int				hostPlacedAtSummary[16] = {};
+	int				createsAtSummary[16] = {};
+	unsigned int	memReportMs = 0;
+	int				memReportFrames = 0;
+	int				hostPlacedAtMemReport[16] = {};
+	int				createsAtMemReport[16] = {};
 	void			CpuVisibleVram( uint64_t &usedBytes, uint64_t &sizeBytes, bool &resizableBar );
 	void			WarnHostPlaced( BufferUsage usage, int size, void *caller );
+	void			HostPlacedSummary();									// EndFrame: at most once a minute
  public:
 	void			MemReport();									// vkMemReport
  private:
@@ -3757,6 +3768,7 @@ void VulkanBackend::EndFrame() {
 		vkCheck( pr, "vkQueuePresentKHR" );
 	}
 	presentedFrames++;
+	HostPlacedSummary();		// buffers that went to system RAM: one line a minute at most
 
 	if ( dumpBuf != VK_NULL_HANDLE ) {
 		r_vkDumpNextFrame.SetBool( false );
@@ -4593,6 +4605,7 @@ BufferHandle VulkanBackend::CreateBuffer( BufferUsage usage, int size, const voi
 		bufferMapped.push_back( (byte *)info.pMappedData );
 		bufferAddr.push_back( addr );
 	}
+	bufferCreates[ (int)usage & 15 ]++;
 	VkMemoryPropertyFlags memFlags = 0;
 	vmaGetAllocationMemoryProperties( vma, alloc, &memFlags );
 	if ( !( memFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT ) ) {
@@ -4646,10 +4659,15 @@ void VulkanBackend::CpuVisibleVram( uint64_t &usedBytes, uint64_t &sizeBytes, bo
 	resizableBar = sizeBytes > 0 && sizeBytes * 10 >= largestDevice * 9;
 }
 
+// The first few buffers of a usage that land in system RAM are named one by one (size + creator, for addr2line); the rest
+// are summed up by HostPlacedSummary, at most once a minute.
+static const int VK_HOST_PLACED_NAMED = 5;
+static const unsigned int VK_HOST_PLACED_SUMMARY_MS = 60000;
+
 void VulkanBackend::WarnHostPlaced( BufferUsage usage, int size, void *caller ) {
 	int &n = hostPlacedWarnings[ (int)usage & 15 ];
 	n++;
-	if ( n > 10 && ( n % 100 ) != 0 ) {
+	if ( n > VK_HOST_PLACED_NAMED ) {
 		return;
 	}
 	char from[160];
@@ -4672,7 +4690,43 @@ void VulkanBackend::WarnHostPlaced( BufferUsage usage, int size, void *caller ) 
 	CpuVisibleVram( used, total, rebar );
 	common->Warning( "VK: a %s buffer (%d KB, created from %s) is in SYSTEM RAM, not VRAM - the GPU reads it over PCIe. "
 		"CPU-visible VRAM: %d of %d MB used (Resizable BAR %s)%s", Vk_BufferUsageName( usage ), Max( size >> 10, 1 ), from,
-		(int)( used >> 20 ), (int)( total >> 20 ), rebar ? "on" : "off", n > 10 ? va( " [%d such %s buffers so far]", n, Vk_BufferUsageName( usage ) ) : "" );
+		(int)( used >> 20 ), (int)( total >> 20 ), rebar ? "on" : "off",
+		n == VK_HOST_PLACED_NAMED ? va( " [further %s buffers there are summed up once a minute]", Vk_BufferUsageName( usage ) ) : "" );
+}
+
+// EndFrame: one line a minute while GPU-read buffers keep landing in system RAM - how many, and how many buffers of those
+// usages were created in the same time (a per-frame churn shows as a creation rate of hundreds a second).
+void VulkanBackend::HostPlacedSummary() {
+	const unsigned int now = Sys_Milliseconds();
+	if ( hostPlacedSummaryMs == 0 ) {
+		hostPlacedSummaryMs = now;
+		return;
+	}
+	const unsigned int elapsed = now - hostPlacedSummaryMs;
+	if ( elapsed < VK_HOST_PLACED_SUMMARY_MS ) {
+		return;
+	}
+	idStr placed, created;
+	for ( int u = 0; u < 16; u++ ) {
+		const int p = hostPlacedWarnings[u] - hostPlacedAtSummary[u];
+		if ( u == BU_STORAGE || p <= 0 ) {
+			continue;
+		}
+		const int c = bufferCreates[u] - createsAtSummary[u];
+		placed += va( "%s%d %s", placed.Length() ? ", " : "", p, Vk_BufferUsageName( (BufferUsage)u ) );
+		created += va( "%s%d %s (%.0f/s)", created.Length() ? ", " : "", c, Vk_BufferUsageName( (BufferUsage)u ), c * 1000.0 / elapsed );
+	}
+	if ( placed.Length() ) {
+		uint64_t used, total;
+		bool rebar;
+		CpuVisibleVram( used, total, rebar );
+		common->Warning( "VK: in the last %d s %s buffer(s) went to SYSTEM RAM, not VRAM (created in that time: %s). "
+			"CPU-visible VRAM: %d of %d MB used (Resizable BAR %s); vkMemReport lists them", (int)( elapsed / 1000 ), placed.c_str(),
+			created.c_str(), (int)( used >> 20 ), (int)( total >> 20 ), rebar ? "on" : "off" );
+	}
+	hostPlacedSummaryMs = now;
+	memcpy( hostPlacedAtSummary, hostPlacedWarnings, sizeof( hostPlacedAtSummary ) );
+	memcpy( createsAtSummary, bufferCreates, sizeof( createsAtSummary ) );
 }
 
 // vkMemReport: the heaps (VMA usage / budget) and the buffers that live in system RAM right now.
@@ -4721,6 +4775,30 @@ void VulkanBackend::MemReport() {
 	if ( !any ) {
 		common->Printf( "  none\n" );
 	}
+	// buffer churn: CreateBuffer calls since the last vkMemReport (run it twice, some seconds apart, in the scene to measure)
+	const unsigned int now = Sys_Milliseconds();
+	if ( memReportMs != 0 && now > memReportMs ) {
+		const double secs = ( now - memReportMs ) / 1000.0;
+		const int frames = Max( presentedFrames - memReportFrames, 0 );	// (presentedFrames restarts with a vid_restart)
+		common->Printf( "Buffers created since the last vkMemReport (%.1f s, %d frames):\n", secs, frames );
+		bool anyCreated = false;
+		for ( int u = 0; u < 16; u++ ) {
+			const int c = bufferCreates[u] - createsAtMemReport[u];
+			if ( c <= 0 ) { continue; }
+			anyCreated = true;
+			common->Printf( "  %-24s %7d (%8.1f/s, %6.2f/frame), %d of them in system RAM\n", Vk_BufferUsageName( (BufferUsage)u ), c,
+				c / secs, frames > 0 ? (double)c / frames : 0.0, hostPlacedWarnings[u] - hostPlacedAtMemReport[u] );
+		}
+		if ( !anyCreated ) {
+			common->Printf( "  none\n" );
+		}
+	} else {
+		common->Printf( "Buffers created: run vkMemReport again to see how many were created since this report\n" );
+	}
+	memReportMs = now;
+	memReportFrames = presentedFrames;
+	memcpy( hostPlacedAtMemReport, hostPlacedWarnings, sizeof( hostPlacedAtMemReport ) );
+	memcpy( createsAtMemReport, bufferCreates, sizeof( createsAtMemReport ) );
 }
 
 static void Vk_MemReport_f( const idCmdArgs &args ) {
