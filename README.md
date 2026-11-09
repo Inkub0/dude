@@ -1,5 +1,7 @@
 # DUDE — Doom3 Unified Development Engine
 
+**Website, downloads and install guide: https://inkub0.github.io/dude/**
+
 **DUDE** is a fork of [dhewm3](https://github.com/dhewm/dhewm3) (itself the GPL source
 port of _DOOM 3_) that modernizes the renderer while keeping the classic look and
 gameplay faithful. It runs _DOOM 3_, _Resurrection of Evil_, _The Lost Mission_ and, since

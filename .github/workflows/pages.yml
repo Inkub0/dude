@@ -26,6 +26,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/configure-pages@v5
+      # site/README.md is notes for maintainers, not a page to publish
+      - run: rm -f site/README.md
       - uses: actions/upload-pages-artifact@v3
         with:
           path: site
