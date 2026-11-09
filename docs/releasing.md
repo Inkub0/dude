@@ -99,6 +99,11 @@ pack is a single drop-in `.pk4`:
 Each version's release notes link to the current recommended pack with a one-line drop-in note;
 the packs are not rebuilt or re-uploaded per version.
 
+**Create every Baked AO release with `--latest=false`** (`gh release create baked-ao-vN ...
+--latest=false`), on both repositories. GitHub otherwise marks the newest release *Latest*,
+and the website's download buttons (`releases/latest/download/...`, section 4) would then
+point at the AO release, which has no DUDE archives.
+
 ### zz_dude_menu.pk4 — rebuild from the repo every release
 
 The DUDE main menu + high-res logo. Users get it merged into their `base/`:
@@ -193,8 +198,20 @@ known limitations, source link + commit hash).
 git push
 gh release create vX.Y dist/release-X.Y/*.zip dist/release-X.Y/*.tar.gz \
   --title "DUDE X.Y" --notes-file dist/release-X.Y/notes.md --draft
-# review in the browser, then Publish
+# review in the browser, then Publish (it must end up marked Latest)
 ```
+
+**On Publish, `.github/workflows/release-fixed-names.yml` adds the website's copies.** The
+site's (https://inkub0.github.io/dude/) download buttons are
+`https://github.com/Inkub0/dude/releases/latest/download/<fixed name>`, which GitHub redirects
+to that file in the release marked *Latest*. The workflow copies the release's
+`dude-X.Y-win64.zip`, `dude-X.Y-linux-x86_64.tar.gz`, `dude-q4-X.Y-win64.zip` and
+`dude-q4-X.Y-linux-x86_64.tar.gz` to the same release as `dude-win64.zip`,
+`dude-linux-x86_64.tar.gz`, `dude-q4-win64.zip` and `dude-q4-linux-x86_64.tar.gz`, so the site
+needs no edit per release. Upload the archives under their versioned names as always (DUDE's
+missing-Quake-4-library message names `dude-q4-X.Y-<platform>`); if one is missing the workflow
+run fails and says which. Check the run under *Actions* after publishing; to redo it for an
+existing release: *Actions* > *Release fixed-name archives* > *Run workflow* with the tag.
 
 (`gh repo set-default Inkub0/dude` once per clone — two remotes exist.)
 

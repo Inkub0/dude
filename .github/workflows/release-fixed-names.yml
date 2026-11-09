@@ -1,0 +1,59 @@
+name: Release fixed-name archives
+
+# The website's download buttons are
+#   https://github.com/Inkub0/dude/releases/latest/download/<fixed name>
+# which GitHub redirects to that file in the release marked Latest. This copies each
+# published DUDE release's versioned archives (dude-X.Y-win64.zip, ...) to the same
+# release under those fixed names, so the site never needs editing per release.
+# Baked AO releases (tags baked-ao-vN) are skipped. To run it for an existing
+# release: Actions > "Release fixed-name archives" > Run workflow, tag e.g. v0.9.8.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag, e.g. v0.9.8"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  fixed-names:
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.event.release.tag_name, 'v')
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+    steps:
+      - name: Copy the archives under fixed names
+        run: |
+          set -euo pipefail
+          case "$TAG" in
+            v[0-9]*) ;;
+            *) echo "::error::$TAG is not a DUDE release tag (vX.Y)"; exit 1 ;;
+          esac
+          VER="${TAG#v}"
+          mkdir dl && cd dl
+          # versioned name -> fixed name
+          pairs="dude-$VER-win64.zip:dude-win64.zip
+          dude-$VER-linux-x86_64.tar.gz:dude-linux-x86_64.tar.gz
+          dude-q4-$VER-win64.zip:dude-q4-win64.zip
+          dude-q4-$VER-linux-x86_64.tar.gz:dude-q4-linux-x86_64.tar.gz"
+          missing=0
+          for pair in $pairs; do
+            src="${pair%%:*}"; dst="${pair##*:}"
+            if gh release download "$TAG" --pattern "$src"; then
+              mv "$src" "$dst"
+              echo "$src -> $dst"
+            else
+              echo "::error::$TAG has no $src; the site's $dst button would break"
+              missing=1
+            fi
+          done
+          if ls ./* >/dev/null 2>&1; then
+            gh release upload "$TAG" ./* --clobber
+          fi
+          exit "$missing"
