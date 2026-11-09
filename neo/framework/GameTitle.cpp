@@ -54,6 +54,7 @@ static const gameTitleProfile_t titleProfiles[GAME_TITLE_COUNT] = {
 		"guis/assets/splash/pdtempa",
 		NULL,							// fullGameFiles: no check (the GPL game code has no such terms)
 		NULL, NULL, NULL,				// gameLibrary*: base.so ships with DUDE
+		false,							// runByDefault: Doom 3 walks; always-run is MP only (in_allowAlwaysRunInSP)
 	},
 	{
 		GAME_TITLE_QUAKE4, "quake4", "Quake 4",
@@ -83,6 +84,7 @@ static const gameTitleProfile_t titleProfiles[GAME_TITLE_COUNT] = {
 		"it is under the Quake 4 SDK licence, included in the archive and binding on you - "
 		"non-commercial use only, copies only free of charge and with that licence attached, "
 		"and only with the full retail Quake 4.",
+		true,							// runByDefault: retail in_alwaysRun "1", honoured in single player
 	},
 };
 
