@@ -127,6 +127,64 @@ static int			numPlanes;
 
 static idBlockAlloc<srfTriangles_t, 1<<8>				srfTrianglesAllocator;
 
+#ifdef ID_DYNAMIC_BLOCK_ALLOC_SYSTEM
+// DUDE, ASAN builds (GitHub #10): a surface's free is queued (R_FreeStaticTriSurf) and done at the
+// end of the frame, so ASan's "freed by" stack never names the code that let go of it. Record who
+// queued each surface and which surface freed each verts block; a second free of the same verts
+// prints both surfaces and both queueing stacks (dudelog.txt), then traps for ASan's own report.
+#include <execinfo.h>
+#include <unordered_map>
+struct triFreeTrace_t {
+	void *			frames[24];
+	int				depth;
+	const void *	tri;
+	const void *	ambientSurface;
+	int				numVerts;
+	int				numIndexes;
+	int				deformed;
+	int				frameCount;
+};
+static std::unordered_map<const void *, triFreeTrace_t>	triQueuedFrees;		// surface -> who queued its free
+static std::unordered_map<const void *, triFreeTrace_t>	triFreedVerts;		// verts block -> the surface that freed it
+
+static triFreeTrace_t R_TriFreeTrace( const srfTriangles_t *tri ) {
+	triFreeTrace_t t;
+	t.depth = backtrace( t.frames, 24 );
+	t.tri = tri;
+	t.ambientSurface = tri->ambientSurface;
+	t.numVerts = tri->numVerts;
+	t.numIndexes = tri->numIndexes;
+	t.deformed = tri->deformedSurface ? 1 : 0;
+	t.frameCount = tr.frameCount;
+	return t;
+}
+
+static void R_PrintTriFreeTrace( const char *what, const triFreeTrace_t &t ) {
+	common->Printf( "%s: surface %p ambientSurface %p numVerts %d numIndexes %d deformed %d, queued in frame %d at:\n",
+		what, t.tri, t.ambientSurface, t.numVerts, t.numIndexes, t.deformed, t.frameCount );
+	char **names = backtrace_symbols( t.frames, t.depth );
+	for ( int i = 0; i < t.depth; i++ ) {
+		common->Printf( "    %s\n", names ? names[i] : "?" );
+	}
+	free( names );
+}
+
+// before the verts block of tri is freed: the second free of a block names both surfaces
+static void R_TraceVertsFree( const srfTriangles_t *tri ) {
+	std::unordered_map<const void *, triFreeTrace_t>::iterator queued = triQueuedFrees.find( tri );
+	const triFreeTrace_t mine = ( queued != triQueuedFrees.end() ) ? queued->second : R_TriFreeTrace( tri );
+	std::unordered_map<const void *, triFreeTrace_t>::iterator first = triFreedVerts.find( tri->verts );
+	if ( first != triFreedVerts.end() ) {
+		common->Printf( "\nR_ReallyFreeStaticTriSurf: verts %p FREED TWICE (frame %d)\n", tri->verts, tr.frameCount );
+		R_PrintTriFreeTrace( "second free", mine );
+		R_PrintTriFreeTrace( "first free", first->second );
+		fflush( NULL );
+		__builtin_trap();
+	}
+	triFreedVerts[tri->verts] = mine;
+}
+#endif
+
 #ifdef USE_TRI_DATA_ALLOCATOR
 static idDynamicBlockAlloc<idDrawVert, 1<<20, 1<<10>	triVertexAllocator;
 static idDynamicBlockAlloc<glIndex_t, 1<<18, 1<<10>		triIndexAllocator;
@@ -424,6 +482,9 @@ void R_ReallyFreeStaticTriSurf( srfTriangles_t *tri ) {
 	if ( tri->verts != NULL ) {
 		// R_CreateLightTris points tri->verts at the verts of the ambient surface
 		if ( tri->ambientSurface == NULL || tri->verts != tri->ambientSurface->verts ) {
+#ifdef ID_DYNAMIC_BLOCK_ALLOC_SYSTEM
+			R_TraceVertsFree( tri );
+#endif
 			// dhewm-rt hardening for a latent, backend-agnostic stock-Doom3 double-free
 			// (still present through dhewm3 1.5.5): an idRenderModelOverlay decal surface
 			// baked onto an animated model can have its verts block freed twice when the
@@ -486,6 +547,9 @@ void R_ReallyFreeStaticTriSurf( srfTriangles_t *tri ) {
 #endif
 
 	srfTrianglesAllocator.Free( tri );
+#ifdef ID_DYNAMIC_BLOCK_ALLOC_SYSTEM
+	triQueuedFrees.erase( tri );
+#endif
 }
 
 /*
@@ -569,6 +633,9 @@ void R_FreeStaticTriSurf( srfTriangles_t *tri ) {
 #ifdef ID_DEBUG_MEMORY
 		R_CheckStaticTriSurfMemory( tri );
 #endif
+#ifdef ID_DYNAMIC_BLOCK_ALLOC_SYSTEM
+		triQueuedFrees[tri] = R_TriFreeTrace( tri );
+#endif
 		tri->nextDeferredFree = NULL;
 		if ( frame->lastDeferredFreeTriSurf ) {
 			frame->lastDeferredFreeTriSurf->nextDeferredFree = tri;
@@ -619,6 +686,9 @@ R_AllocStaticTriSurfVerts
 void R_AllocStaticTriSurfVerts( srfTriangles_t *tri, int numVerts ) {
 	assert( tri->verts == NULL );
 	tri->verts = triVertexAllocator.Alloc( numVerts );
+#ifdef ID_DYNAMIC_BLOCK_ALLOC_SYSTEM
+	triFreedVerts.erase( tri->verts );
+#endif
 }
 
 /*
@@ -697,6 +767,9 @@ R_ResizeStaticTriSurfVerts
 void R_ResizeStaticTriSurfVerts( srfTriangles_t *tri, int numVerts ) {
 #ifdef USE_TRI_DATA_ALLOCATOR
 	tri->verts = triVertexAllocator.Resize( tri->verts, numVerts );
+#ifdef ID_DYNAMIC_BLOCK_ALLOC_SYSTEM
+	triFreedVerts.erase( tri->verts );
+#endif
 #else
 	assert( false );
 #endif
@@ -1448,6 +1521,9 @@ static void	R_DuplicateMirroredVertexes( srfTriangles_t *tri ) {
 
 #ifdef USE_TRI_DATA_ALLOCATOR
 	tri->verts = triVertexAllocator.Resize( tri->verts, totalVerts );
+#ifdef ID_DYNAMIC_BLOCK_ALLOC_SYSTEM
+	triFreedVerts.erase( tri->verts );
+#endif
 #else
 	idDrawVert *oldVerts = tri->verts;
 	R_AllocStaticTriSurfVerts( tri, totalVerts );
