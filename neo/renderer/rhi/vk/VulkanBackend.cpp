@@ -1357,6 +1357,32 @@ static bool vkDeviceDead = false;
 // mitigation (guards) and the diagnostic (dump) never gate each other. Reset in Init().
 static bool vkCrashDumpWritten = false;
 
+// After a device loss the per-frame guards stop all Vulkan work: the game runs on behind a frozen
+// picture (GitHub #12). Recover the way a player would have to by hand - a renderer restart, which
+// creates a new device - at most r_vkDeviceLostRestart times per session, so a GPU that keeps
+// hanging can't loop forever. vkDeviceLostRestarts counts the session (Init does not reset it);
+// the notice latch belongs to one loss (one notice, one restart) and is reset in Init().
+static idCVar r_vkDeviceLostRestart( "r_vkDeviceLostRestart", "3", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER,
+	"Vulkan: when the GPU device is lost (a driver reset after a GPU hang: the picture freezes while the game runs on), restart the renderer automatically - at most this many times per session; 0 = never (then vid_restart by hand)" );
+static int vkDeviceLostRestarts = 0;
+static bool vkDeviceLostNoticeShown = false;
+
+static void VK_OnDeadDevice( const char *where ) {
+	if ( !vkDeviceLostNoticeShown ) {
+		vkDeviceLostNoticeShown = true;
+		common->Warning( "VK: the GPU device was lost (driver reset after a GPU hang); rendering stopped at %s", where );
+		if ( vkDeviceLostRestarts < r_vkDeviceLostRestart.GetInteger() ) {
+			vkDeviceLostRestarts++;
+			common->Printf( "VK: restarting the renderer to recover (%d of %d this session)\n",
+				vkDeviceLostRestarts, r_vkDeviceLostRestart.GetInteger() );
+			cmdSystem->BufferCommandText( CMD_EXEC_APPEND, "vid_restart\n" );
+		} else {
+			common->Warning( "VK: not restarting the renderer again (r_vkDeviceLostRestart %d reached this session): "
+				"use vid_restart, or lower the ray tracing setting", r_vkDeviceLostRestart.GetInteger() );
+		}
+	}
+}
+
 // Short ring of recent validation / debug messages for the crash dump and the debug HUD.
 // Guarded by vkDebugMsgMutex: the debug-utils callback can run off the main thread while
 // the HUD / dump reads it.
@@ -2721,6 +2747,7 @@ bool VulkanBackend::Init() {
 	// loss actually recovers (BeginFrame/EndFrame/etc. bail while vkDeviceDead is set).
 	vkDeviceDead = false;
 	vkCrashDumpWritten = false;
+	vkDeviceLostNoticeShown = false;
 	{
 		std::lock_guard<std::mutex> lock( vkDebugMsgMutex );
 		vkDebugMsgHistory.clear();
@@ -3070,7 +3097,7 @@ VulkanBackend::BeginFrame
 */
 void VulkanBackend::BeginFrame( int windowWidth, int windowHeight ) {
 	if ( vkDeviceDead ) {
-		common->Warning( "VK: device is dead; skipping BeginFrame (use vid_restart)" );
+		VK_OnDeadDevice( "BeginFrame" );
 		return;
 	}
 	if ( device == VK_NULL_HANDLE || frameOpen ) {
@@ -3424,7 +3451,7 @@ fresh scene image, where there is nothing to load yet).
 */
 void VulkanBackend::BeginPass( const ClearArgs *clear ) {
 	if ( vkDeviceDead ) {
-		common->Warning( "VK: device is dead; skipping BeginPass" );
+		VK_OnDeadDevice( "BeginPass" );
 		return;
 	}
 	if ( !frameOpen || skipFrame || insideScenePass || insideTargetPass ) {
@@ -3493,7 +3520,7 @@ VulkanBackend::EndPass
 */
 void VulkanBackend::EndPass() {
 	if ( vkDeviceDead ) {
-		common->Warning( "VK: device is dead; skipping EndPass" );
+		VK_OnDeadDevice( "EndPass" );
 		return;
 	}
 	if ( insideTargetPass ) {
@@ -3545,7 +3572,7 @@ void VulkanBackend::EndFrame() {
 	}
 	if ( vkDeviceDead ) {
 		// If the device is dead, gracefully abort EndFrame without issuing any Vulkan calls.
-		common->Warning( "VK: device is dead; skipping EndFrame (use vid_restart)" );
+		VK_OnDeadDevice( "EndFrame" );
 		// ensure consistent state for the rest of the engine
 		frameOpen = false;
 		skipFrame = false;

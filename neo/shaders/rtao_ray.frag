@@ -146,7 +146,7 @@ void main() {
 	vec3  rayOrg = Pw + normalize( eyeW - Pw ) * ( 0.25 + d * u_localParam1.w ) + Nw * 0.05;
 	float radius = u_localParam0.z;
 	rayQueryEXT rq;
-	rayQueryInitializeEXT( rq,
+	dudeRayQueryInit( rq,
 		accelerationStructureEXT( uvec2( floatBitsToUint( u_rtParms.x ), floatBitsToUint( u_rtParms.y ) ) ),
 		gl_RayFlagsOpaqueEXT, 0xFDu /* solid rays: skip perforated-caster instances (mask 0x02), only an alpha-testing ray may hit those */, rayOrg, 0.0, dir, radius );
 	while ( rayQueryProceedEXT( rq ) ) { }

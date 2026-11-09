@@ -226,7 +226,7 @@ float shadowVisibility( bool canReceive ) {
 			// opaque is the hardware's fastest traversal, and a runtime-selected flag word can't
 			// promise the driver that
 			rayQueryEXT rqo;
-			rayQueryInitializeEXT( rqo,
+			dudeRayQueryInit( rqo,
 				accelerationStructureEXT( uvec2( floatBitsToUint( u_rtParms.x ), floatBitsToUint( u_rtParms.y ) ) ),
 				gl_RayFlagsOpaqueEXT | gl_RayFlagsTerminateOnFirstHitEXT, 0xFDu,
 				wp + wn * u_rtParms.z, 0.0, toLight / distLight, tMax );
@@ -234,7 +234,7 @@ float shadowVisibility( bool canReceive ) {
 			return ( rayQueryGetIntersectionTypeEXT( rqo, true ) == gl_RayQueryCommittedIntersectionNoneEXT ) ? 1.0 : 0.0;
 		}
 		rayQueryEXT rq;
-		rayQueryInitializeEXT( rq,
+		dudeRayQueryInit( rq,
 			accelerationStructureEXT( uvec2( floatBitsToUint( u_rtParms.x ), floatBitsToUint( u_rtParms.y ) ) ),
 			gl_RayFlagsTerminateOnFirstHitEXT, 0xFFu,
 			wp + wn * u_rtParms.z, 0.0, toLight / distLight, tMax );

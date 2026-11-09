@@ -60,7 +60,7 @@ void main() {
 	float graze   = 1.0 + RT_GRAZE * ( m * m ) * ( m * m ) * m;	// pow(1-ndv,5) as muls (RR11-style)
 
 	rayQueryEXT rq;
-	rayQueryInitializeEXT( rq,
+	dudeRayQueryInit( rq,
 		accelerationStructureEXT( uvec2( floatBitsToUint( u_rtParms.x ), floatBitsToUint( u_rtParms.y ) ) ),
 		gl_RayFlagsOpaqueEXT, 0xFDu /* solid rays: skip perforated-caster instances (mask 0x02), only an alpha-testing ray may hit those */, origin, 0.0, R, 8192.0 );
 	while ( rayQueryProceedEXT( rq ) ) { }

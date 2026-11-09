@@ -26,3 +26,27 @@
 // Only transpiled shaders expand this — hand-written shaders use gl_FragCoord directly and
 // flip via u_windowCoord.
 #define RB_WPOS vec4( gl_FragCoord.x, ( u_fenv[31].y > 0.0 ? u_fenv[31].y : 1.0 / u_fenv[1].y ) - gl_FragCoord.y, gl_FragCoord.z, gl_FragCoord.w )
+
+// Ray-query arguments the spec allows (VUID-RuntimeSpirv-OpRayQueryInitializeKHR-06348..06351):
+// origin and direction finite and not NaN, 0 <= tMin <= tMax. Anything else is undefined behaviour,
+// which one driver shrugs off and another turns into a GPU hang (device lost: a frozen picture,
+// GitHub #12 on Intel Arc). Every ray goes through dudeRayQueryInit, which hands an invalid ray
+// to the hardware as a zero-length one: no traversal, a miss - what the callers already do when a
+// ray leaves the scene. Valid rays pass through untouched. The comparisons are written so a NaN
+// fails them (a NaN compares false), without isnan(), which a driver may fold away.
+void dudeSanitizeRay( inout vec3 o, inout vec3 d, inout float tMin, inout float tMax ) {
+	bool ok = all( lessThan( abs( o ), vec3( 1e30 ) ) ) && all( lessThan( abs( d ), vec3( 1e30 ) ) )
+		&& dot( d, d ) > 1e-30 && tMin >= 0.0 && tMax >= tMin;
+	if ( !ok ) {
+		o = vec3( 0.0 );
+		d = vec3( 0.0, 0.0, 1.0 );
+		tMin = 0.0;
+		tMax = 0.0;
+	}
+}
+// same arguments as rayQueryInitializeEXT (needs GL_EXT_ray_query in the including shader)
+#define dudeRayQueryInit( rq, as, flags, mask, o, tMin, d, tMax ) do { \
+	vec3 dudeRayO_ = ( o ); vec3 dudeRayD_ = ( d ); float dudeRayTMin_ = ( tMin ); float dudeRayTMax_ = ( tMax ); \
+	dudeSanitizeRay( dudeRayO_, dudeRayD_, dudeRayTMin_, dudeRayTMax_ ); \
+	rayQueryInitializeEXT( rq, as, flags, mask, dudeRayO_, dudeRayTMin_, dudeRayD_, dudeRayTMax_ ); \
+} while ( false )
