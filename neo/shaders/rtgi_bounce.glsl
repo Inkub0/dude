@@ -130,7 +130,7 @@ int rtgiTraceBounce( RtgiBounceParms bp, vec3 Pw, vec3 Nw, vec3 eyeW, float d, v
 		vec3  rayOrg = Pw + normalize( eyeW - Pw ) * ( 0.25 + d * bp.eyePullback ) + Nw * 0.05;
 	float radius = bp.radius;
 	rayQueryEXT rq;
-	rayQueryInitializeEXT( rq,
+	dudeRayQueryInit( rq,
 		accelerationStructureEXT( bp.tlas ),
 		gl_RayFlagsOpaqueEXT, 0xFDu /* solid rays: skip perforated-caster instances (mask 0x02) */, rayOrg, 0.0, dir, radius );
 	while ( rayQueryProceedEXT( rq ) ) { }
@@ -328,7 +328,7 @@ int rtgiTraceBounce( RtgiBounceParms bp, vec3 Pw, vec3 Nw, vec3 eyeW, float d, v
 	if ( bp.shadowRay && domLum > 0.0 ) {
 		vec3 sOrg = hitWorld + hitN * 0.2 + domDir * 0.05;			// bias off the surface + a touch toward the light
 		rayQueryEXT srq;
-		rayQueryInitializeEXT( srq,
+		dudeRayQueryInit( srq,
 			accelerationStructureEXT( bp.tlas ),
 			gl_RayFlagsOpaqueEXT | gl_RayFlagsTerminateOnFirstHitEXT, 0xFDu, sOrg, 0.0, domDir, max( domDist - 1.0, 0.1 ) );
 		while ( rayQueryProceedEXT( srq ) ) { }

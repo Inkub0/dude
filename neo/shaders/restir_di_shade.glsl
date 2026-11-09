@@ -262,7 +262,7 @@ float traceVisibility( vec3 Pw, vec3 Nw, vec3 ldir, float dl, float blurScale, o
 	bool  perfOn  = u_windowCoord.x > 0.5 && u_windowCoord.y > 0.0 && ( geoAddr.x | geoAddr.y ) != 0u;
 	if ( !perfOn ) {
 		rayQueryEXT rqo;
-		rayQueryInitializeEXT( rqo, DI_TLAS, gl_RayFlagsOpaqueEXT | gl_RayFlagsTerminateOnFirstHitEXT,
+		dudeRayQueryInit( rqo, DI_TLAS, gl_RayFlagsOpaqueEXT | gl_RayFlagsTerminateOnFirstHitEXT,
 			0xFDu /* skip perforated-caster instances */, O, 0.0, ldir, tMax );
 		while ( rayQueryProceedEXT( rqo ) ) { }
 		if ( rayQueryGetIntersectionTypeEXT( rqo, true ) == gl_RayQueryCommittedIntersectionNoneEXT ) { return 1.0; }
@@ -279,7 +279,7 @@ float traceVisibility( vec3 Pw, vec3 Nw, vec3 ldir, float dl, float blurScale, o
 	// and dudePerforatedCoverage averages the coverage over it through the texture's mips. Deterministic, so the
 	// gradient pass re-shades bit-identically, and noise-free for NRD. blurScale 0 = the hard texel test.
 	rayQueryEXT rq;
-	rayQueryInitializeEXT( rq, DI_TLAS, gl_RayFlagsTerminateOnFirstHitEXT, 0xFFu, O, 0.0, ldir, tMax );
+	dudeRayQueryInit( rq, DI_TLAS, gl_RayFlagsTerminateOnFirstHitEXT, 0xFFu, O, 0.0, ldir, tMax );
 	float strength = u_windowCoord.y;
 	float floorVis = 1.0 - strength;
 	bool  soft     = u_specularModifier.x > 0.5 && blurScale > 0.0;

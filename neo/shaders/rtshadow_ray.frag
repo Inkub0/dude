@@ -187,7 +187,7 @@ void main() {
 		// traced, flags and mask CONSTANT - forcing everything opaque is the hardware's fastest
 		// traversal, and a runtime-selected flag word can't promise the driver that
 		rayQueryEXT rqo;
-		rayQueryInitializeEXT( rqo,
+		dudeRayQueryInit( rqo,
 			accelerationStructureEXT( uvec2( floatBitsToUint( u_rtParms.x ), floatBitsToUint( u_rtParms.y ) ) ),
 			gl_RayFlagsOpaqueEXT, 0xFDu, O, 0.0, Ldir, tMax );
 		while ( rayQueryProceedEXT( rqo ) ) { }
@@ -197,7 +197,7 @@ void main() {
 		}
 	} else {
 		rayQueryEXT rq;
-		rayQueryInitializeEXT( rq,
+		dudeRayQueryInit( rq,
 			accelerationStructureEXT( uvec2( floatBitsToUint( u_rtParms.x ), floatBitsToUint( u_rtParms.y ) ) ),
 			gl_RayFlagsNoneEXT, 0xFFu, O, 0.0, Ldir, tMax );
 		while ( rayQueryProceedEXT( rq ) ) {

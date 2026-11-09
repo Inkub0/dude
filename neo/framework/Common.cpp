@@ -2972,6 +2972,48 @@ void Com_Help_f( const idCmdArgs &args ) {
 idCommonLocal::InitCommands
 =================
 */
+// CVarSystem.cpp: an archived setting changed for this session only (the config keeps the original)
+extern void CVar_SetSessionOnly( const char *name, const char *originalValue, const char *sessionValue );
+
+/*
+==================
+Com_DudeRtStepDown_f
+
+DUDE: lower the ray-tracing tier (dude_rtx) by one for this session and re-apply the current
+raster preset with it. The Vulkan backend queues it, ahead of its vid_restart, from the second
+GPU device loss of a session on (VK_OnDeadDevice): a GPU that hangs again under the same load
+gets a lighter one. Every archived setting the preset changes is session-only - the config keeps
+the player's own values - unless the player sets it again.
+==================
+*/
+static void Com_DudeRtStepDown_f( const idCmdArgs &args ) {
+	static const char *tierNames[] = { "off", "Ray Tracing", "Path Tracing" };
+	const int rtx = idMath::ClampInt( 0, 2, dude_rtx.GetInteger() );
+	if ( rtx == 0 ) {
+		common->Printf( "dudeRtStepDown: ray tracing is already off\n" );
+		return;
+	}
+	if ( dude_preset.GetInteger() < 0 ) {
+		common->Warning( "dudeRtStepDown: custom settings (no quality preset), no tier to step down from - lower ray tracing by hand" );
+		return;
+	}
+	const idDict before = *cvarSystem->MoveCVarsToDict( CVAR_ARCHIVE );
+	dude_rtx.SetInteger( rtx - 1 );
+	cmdSystem->BufferCommandText( CMD_EXEC_NOW, "dudePreset\n" );
+	const idDict *after = cvarSystem->MoveCVarsToDict( CVAR_ARCHIVE );
+	int changed = 0;
+	for ( int i = 0; i < before.GetNumKeyVals(); i++ ) {
+		const idKeyValue *kv = before.GetKeyVal( i );
+		const char *now = after->GetString( kv->GetKey().c_str() );
+		if ( kv->GetValue() != now ) {
+			CVar_SetSessionOnly( kv->GetKey().c_str(), kv->GetValue().c_str(), now );
+			changed++;
+		}
+	}
+	common->Warning( "Ray tracing lowered from %s to %s for this session (%d settings); your saved settings are unchanged",
+		tierNames[rtx], tierNames[rtx - 1], changed );
+}
+
 void idCommonLocal::InitCommands( void ) {
 	cmdSystem->AddCommand( "error", Com_Error_f, CMD_FL_SYSTEM|CMD_FL_CHEAT, "causes an error" );
 	cmdSystem->AddCommand( "crash", Com_Crash_f, CMD_FL_SYSTEM|CMD_FL_CHEAT, "causes a crash" );
@@ -2990,6 +3032,8 @@ void idCommonLocal::InitCommands( void ) {
 	cmdSystem->AddCommand( "editPbrMaterial", Com_EditPbrMaterial_f, CMD_FL_SYSTEM, "opens the in-game PBR material editor for the surface under the crosshair (docs/pbr-materials.md); bind it to a key" );
 
 	cmdSystem->AddCommand( "dudePreset", Com_DudePreset_f, CMD_FL_SYSTEM, "applies a DUDE enhancement quality raster preset by index (0 = Potato .. 5 = Nightmare); ray tracing is the separate dude_rtx axis; drives the in-game quality selector" );
+
+	cmdSystem->AddCommand( "dudeRtStepDown", Com_DudeRtStepDown_f, CMD_FL_SYSTEM, "lowers the ray-tracing tier (dude_rtx) by one for this session only and re-applies the quality preset; the Vulkan backend runs it after repeated GPU device losses (r_vkDeviceLostRestart)" );
 
 	cmdSystem->AddCommand( "dudeAA", Com_DudeAA_f, CMD_FL_SYSTEM, "applies the dude_aa menu antialiasing selection to r_rhiAA / r_fsr; drives the in-game AA selector on the opengl3/Vulkan backends" );
 
