@@ -308,3 +308,6 @@ code.cmdline {
     display: flex; flex-direction: column; justify-content: center;
   }
 }
+
+/* Home: the logo is the page's h1 */
+.logo-h1 { margin: 0; font-size: inherit; line-height: 0; }

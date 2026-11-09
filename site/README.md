@@ -24,6 +24,16 @@ are only the fallback if that request fails, so refresh them now and then.
 Still by hand: the Baked AO links (`baked-ao-vN`, only when a new pack ships) and text
 that describes a specific release.
 
+## Search engines
+
+Each page carries its title, description, canonical URL and share-card tags in `<head>`
+(keep the title under ~60 characters, the description under ~160); `index.html` also has
+JSON-LD (WebSite + SoftwareApplication). `sitemap.xml` lists the pages: add a new page
+there and bump its `lastmod` when a page changes a lot, then resubmit it in Google Search
+Console. There is no `robots.txt`: crawlers only read one at the root of
+inkub0.github.io, which this project site does not own. This README is not published
+(`pages.yml` removes it before upload).
+
 ## Images
 
 Screenshots come from the ModDB page (2560x1440 originals resized to 1920 px,

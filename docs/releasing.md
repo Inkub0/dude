@@ -192,7 +192,9 @@ tools/quake4/q4base_licence_audit.py --so build/q4base.so --sdk <pristine SDK so
 
 Notes template: `dist/release-0.9/notes.md` (highlights, bring-your-own-game-data —
 classic not BFG, per-platform setup incl. "copy the **contents** next to `base/`",
-known limitations, source link + commit hash).
+known limitations, source link + commit hash). Link the website's install guide
+(https://inkub0.github.io/dude/install.html) in the setup section, and use the site link on
+ModDB and other announcements: links in are what search engines rank the site on.
 
 ```
 git push
