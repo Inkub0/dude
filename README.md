@@ -162,11 +162,17 @@ button that opens the download page. The library links parts of DUDE's idlib; th
 in it is covered by the section 7 permission in COPYING-QUAKE4-EXCEPTION.txt. Licence details:
 [docs/quake4-release-licensing.md](docs/quake4-release-licensing.md).
 
-Setup: extract DUDE and the `dude-q4` archive into your Quake 4 folder (the one that contains
-`q4base/`) and start `dude` there; DUDE sees Quake 4's paks and runs Quake 4. From anywhere
-else, start it with `+set fs_basepath "/path/to/Quake 4"`; on Linux `./run-q4.sh` finds a Steam
-install by itself. A folder that holds both Doom 3's and Quake 4's game data stops with a
-message: start with `+set com_title doom3` or `+set com_title quake4` to choose.
+Setup: copy the contents of the DUDE archive and of the `dude-q4` archive into your Quake 4
+folder (the one that contains `q4base/`) and start `dude` there; DUDE sees Quake 4's paks and
+runs Quake 4. Each archive holds a single folder (`dude-<version>-<platform>/`,
+`dude-q4-<version>-<platform>/`): copy what is inside it, so that `dude` and the `q4base`
+library end up right next to Quake 4's own executable, not in subfolders. Never copy Quake 4's
+files into DUDE's or Doom 3's `base/`: DUDE reads them from `q4base/` where they are installed,
+and Quake 4 paks in `base/` stop DUDE with a message saying so (they share pak001-pak008's names
+with Doom 3, so a copy over Doom 3's `base/` replaces Doom 3's own). From anywhere else, start it
+with `+set fs_basepath "/path/to/Quake 4"`; on Linux `./run-q4.sh` finds a Steam install by
+itself. A folder that holds both Doom 3's and Quake 4's game data stops with a message: start
+with `+set com_title doom3` or `+set com_title quake4` to choose.
 
 **Full retail Quake 4 only.** DUDE needs the full game (Steam, GOG or disc) and refuses the
 Quake 4 demo, or an install missing its map paks: the Quake 4 SDK licence lets the game library

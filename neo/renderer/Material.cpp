@@ -34,6 +34,7 @@ If you have questions concerning this license or the applicable additional terms
 #include "ui/Window.h"
 #include "ui/UserInterface.h"
 #include "sound/sound.h"
+#include "framework/GameTitle.h"
 
 #include "renderer/Material.h"
 
@@ -2609,6 +2610,17 @@ void idMaterial::ParseMaterial( idLexer &src ) {
 		else if ( !token.Icmp( "materialType" ) ) {
 			// the surface's material type decl (materials/types/*.mtt): impacts, footsteps
 			src.ReadTokenOnLine( &token );
+			if ( GameTitle::Get().title != GAME_TITLE_QUAKE4 ) {
+				// the decl type exists only for Quake 4: elsewhere (Quake 4 data under Doom 3)
+				// FindType would be a fatal "bad type", so the keyword is skipped
+				static bool warned = false;
+				if ( !warned ) {
+					warned = true;
+					common->Warning( "material '%s': Quake 4 materialType keyword under %s, ignored",
+						GetName(), GameTitle::Get().displayName );
+				}
+				continue;
+			}
 			materialType = declManager->FindType( DECL_MATERIALTYPE, token, false );
 			if ( materialType == NULL ) {
 				common->Warning( "material '%s': unknown materialType '%s'", GetName(), token.c_str() );

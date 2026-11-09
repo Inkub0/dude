@@ -182,12 +182,45 @@ static void GameTitle_InstallFolders( idStrList &folders ) {
 
 /*
 ================
+GameTitle_Quake4PakInDoom3Base
+
+A Quake 4 pak in folder/base/: what a player gets by copying Quake 4's q4base/ paks into
+Doom 3's (or DUDE's) base/. Doom 3 then runs on Quake 4's data and dies on the first Quake 4
+material ("FindTypeWithoutParsing: bad type: 15"), so the title check names it instead. The
+names are Quake 4's only: Doom 3 ships pak000-pak008 and game00-game03.
+Returns the pak found, or NULL.
+================
+*/
+static const char *GameTitle_Quake4PakInDoom3Base( const char *folder ) {
+	static const char *quake4Only[] = {
+		"pak010.pk4", "pak015.pk4", "pak020.pk4", "pak025.pk4", "game000.pk4", "zpak_english.pk4"
+	};
+	for ( int i = 0; i < (int)( sizeof( quake4Only ) / sizeof( quake4Only[0] ) ); i++ ) {
+		idStr probe = folder;
+		probe.AppendPath( titleProfiles[GAME_TITLE_DOOM3].baseGameDir );
+		probe.AppendPath( quake4Only[i] );
+		if ( GameTitle_FileExists( probe.c_str() ) ) {
+			return quake4Only[i];
+		}
+	}
+	return NULL;
+}
+
+/*
+================
 GameTitle::Select
 ================
 */
 void GameTitle::Select( const char *basePath ) {
 	const gameTitleProfile_t *chosen = NULL;
 	idStr why;
+
+	idStrList folders;
+	if ( basePath != NULL && basePath[0] != '\0' ) {
+		folders.Append( basePath );
+	} else {
+		GameTitle_InstallFolders( folders );
+	}
 
 	const char *requested = com_title.GetString();
 	if ( requested[0] != '\0' ) {
@@ -209,12 +242,6 @@ void GameTitle::Select( const char *basePath ) {
 	// in the first install folder that holds any. Both at once is not guessed: the player
 	// names the one to run.
 	if ( chosen == NULL ) {
-		idStrList folders;
-		if ( basePath != NULL && basePath[0] != '\0' ) {
-			folders.Append( basePath );
-		} else {
-			GameTitle_InstallFolders( folders );
-		}
 		for ( int f = 0; f < folders.Num() && chosen == NULL; f++ ) {
 			const int found = GameTitle_TitlesIn( folders[f] );
 			if ( found == 0 ) {
@@ -244,6 +271,27 @@ void GameTitle::Select( const char *basePath ) {
 	if ( chosen == NULL ) {
 		chosen = &titleProfiles[GAME_TITLE_DOOM3];
 		why = "default";
+	}
+
+	// Quake 4's paks copied into base/: say so before Doom 3 runs on them
+	if ( chosen->title == GAME_TITLE_DOOM3 ) {
+		for ( int f = 0; f < folders.Num(); f++ ) {
+			const char *pak = GameTitle_Quake4PakInDoom3Base( folders[f] );
+			if ( pak == NULL ) {
+				continue;
+			}
+			common->FatalError(
+				"Quake 4 game data is in %s/%s/ (found %s).\n\n"
+				"DUDE reads Quake 4 where it is installed, from its %s/ folder - nothing needs copying. "
+				"Remove the Quake 4 paks from %s/, then put DUDE and the dude-q4 game library in your "
+				"Quake 4 folder (the one that contains %s/) and start it there, or start DUDE with "
+				"+set fs_basepath \"<your Quake 4 folder>\".\n\n"
+				"If they were copied over Doom 3's %s/, Doom 3's own pak001-pak008 were replaced: "
+				"restore them from your Doom 3 install (Steam: Properties > Installed Files > Verify integrity).",
+				folders[f].c_str(), titleProfiles[GAME_TITLE_DOOM3].baseGameDir, pak,
+				titleProfiles[GAME_TITLE_QUAKE4].baseGameDir, titleProfiles[GAME_TITLE_DOOM3].baseGameDir,
+				titleProfiles[GAME_TITLE_QUAKE4].baseGameDir, titleProfiles[GAME_TITLE_DOOM3].baseGameDir );
+		}
 	}
 
 	activeTitle = chosen;
