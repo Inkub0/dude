@@ -1511,6 +1511,8 @@ sysEvent_t Sys_GetEvent() {
 
 			case SDL_EVENT_WINDOW_RESIZED:
 			case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
+			case SDL_EVENT_WINDOW_ENTER_FULLSCREEN:	// DUDE (GitHub #8): the window manager confirmed or changed
+			case SDL_EVENT_WINDOW_LEAVE_FULLSCREEN:	// the fullscreen state, maybe later than we asked
 				GLimp_UpdateWindowSize();
 				continue;  // handle next event
 
@@ -1575,6 +1577,9 @@ sysEvent_t Sys_GetEvent() {
 #else
 			if (ev.key.keysym.sym == SDLK_RETURN && (ev.key.keysym.mod & KMOD_ALT) > 0) {
 #endif
+				// DUDE (GitHub #8): toggle from the window's state now - the window manager may have changed
+				// it since we last set it, and SDL2 reports no event for that when the size stays the same
+				GLimp_UpdateWindowSize();
 				cvarSystem->SetCVarBool("r_fullscreen", !renderSystem->IsFullScreen());
 				PushConsoleEvent("vid_restart partial");
 				return res_none;
