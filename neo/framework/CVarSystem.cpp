@@ -878,11 +878,30 @@ Appends lines containing "set variable value" for all variables
 with the "flags" flag set to true.
 ============
 */
+// DUDE: session-only values. A setting the engine changes for this session only (the ray-tracing
+// step-down after repeated GPU device losses, VulkanBackend.cpp) is written to the config with its
+// original value while it still holds the session value; once the player sets it to something
+// else, that is what gets saved. Engine-only: not part of idCVarSystem (dhewm3 ABI).
+static idDict cvarSessionOriginal;		// name -> the value the config keeps
+static idDict cvarSessionValue;			// name -> the session-only value that replaced it
+
+void CVar_SetSessionOnly( const char *name, const char *originalValue, const char *sessionValue ) {
+	if ( cvarSessionOriginal.FindKey( name ) == NULL ) {
+		cvarSessionOriginal.Set( name, originalValue );		// the earliest original stays
+	}
+	cvarSessionValue.Set( name, sessionValue );
+}
+
 void idCVarSystemLocal::WriteFlaggedVariables( int flags, const char *setCmd, idFile *f ) const {
 	for( int i = 0; i < cvars.Num(); i++ ) {
 		idInternalCVar *cvar = cvars[i];
 		if ( cvar->GetFlags() & flags ) {
-			f->Printf( "%s %s \"%s\"\n", setCmd, cvar->GetName(), cvar->GetString() );
+			const char *value = cvar->GetString();
+			const idKeyValue *session = cvarSessionValue.FindKey( cvar->GetName() );
+			if ( session != NULL && session->GetValue() == value ) {
+				value = cvarSessionOriginal.GetString( cvar->GetName() );
+			}
+			f->Printf( "%s %s \"%s\"\n", setCmd, cvar->GetName(), value );
 		}
 	}
 }

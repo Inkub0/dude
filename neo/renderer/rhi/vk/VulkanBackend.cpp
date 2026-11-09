@@ -1360,7 +1360,8 @@ static bool vkCrashDumpWritten = false;
 // After a device loss the per-frame guards stop all Vulkan work: the game runs on behind a frozen
 // picture (GitHub #12). Recover the way a player would have to by hand - a renderer restart, which
 // creates a new device - at most r_vkDeviceLostRestart times per session, so a GPU that keeps
-// hanging can't loop forever. vkDeviceLostRestarts counts the session (Init does not reset it);
+// hanging can't loop forever; from the second loss on, one ray-tracing tier lower (dudeRtStepDown).
+// vkDeviceLostRestarts counts the session (Init does not reset it);
 // the notice latch belongs to one loss (one notice, one restart) and is reset in Init().
 static idCVar r_vkDeviceLostRestart( "r_vkDeviceLostRestart", "3", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER,
 	"Vulkan: when the GPU device is lost (a driver reset after a GPU hang: the picture freezes while the game runs on), restart the renderer automatically - at most this many times per session; 0 = never (then vid_restart by hand)" );
@@ -1375,6 +1376,11 @@ static void VK_OnDeadDevice( const char *where ) {
 			vkDeviceLostRestarts++;
 			common->Printf( "VK: restarting the renderer to recover (%d of %d this session)\n",
 				vkDeviceLostRestarts, r_vkDeviceLostRestart.GetInteger() );
+			// from the second loss on, the same load hung the GPU again: come back one ray-tracing
+			// tier lower (Path Tracing -> Ray Tracing -> off), for this session only (Common.cpp)
+			if ( vkDeviceLostRestarts >= 2 ) {
+				cmdSystem->BufferCommandText( CMD_EXEC_APPEND, "dudeRtStepDown\n" );
+			}
 			cmdSystem->BufferCommandText( CMD_EXEC_APPEND, "vid_restart\n" );
 		} else {
 			common->Warning( "VK: not restarting the renderer again (r_vkDeviceLostRestart %d reached this session): "
