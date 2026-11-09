@@ -24,6 +24,10 @@
 #   set v097   : the 0.9.8 release notes - A = the published 0.9.7 binary (dist/release-0.9.7), B = current master as a
 #                RELEASE build (./build-linux-release.sh -> build-linux-release/dude); Path Tracing, Emissive Mode off
 #   set v097em : the same with Emissive Mode on (each binary's own emissive defaults; the authored setups seeded)
+#   set v098   : 0.9.8 vs now - A / C = the 0.9.8 release binary (dist/release-0.9.8), B / D = current master as a RELEASE
+#                build (./build-linux-release.sh -> build-linux-release/dude). A / B Path Tracing (Emissive Mode off, the
+#                default in both), C / D raster Medium on Vulkan, the CPU-bound probe where per-frame CPU work shows (the
+#                buffer churn fixed after 0.9.8). VARIANTS="A B" or "C D" = the short runs
 #   set memcheck : one run of build/dude, emissive mode - its stdout.log lists GPU-read buffers that landed in system RAM
 #                (WARMUPS=0 ... memcheck 1)
 #   set emitteraxis : A = master (build/dude-ref-master), B = emitter rows with a plain cone axis (build/dude); emissive mode
@@ -192,6 +196,21 @@ case "$SET" in
 		NAMES=( A B )
 		DESC[A]="0.9.7 release";                ARGS[A]="$EMV";                                 BINV[A]="$REPO/dist/release-0.9.7/dude-0.9.7-linux-x86_64/dude"; SCHEMAV[A]=3
 		DESC[B]="master, release build";        ARGS[B]="$EMV +set com_timeDemoLevelLoad 0";    BINV[B]="$REPO/build-linux-release/dude"
+		;;
+	v098)
+		# 2026-11-09: 0.9.8 vs current master. Same assets for both (the repo's base, fs_basepath), so only the engine differs;
+		# each binary keeps its own defaults (fresh config, 0.9.8's at its schema 4 - no one-time reset). Both have the timeDemo's
+		# level-load emulation (com_timeDemoLevelLoad, ab7c91c6 is in 0.9.8), so it stays at its default. B / D must be a release
+		# build: build/dude is -O0 (the CPU side would not compare).
+		PRESET=5; RTX=2
+		R098="$REPO/dist/release-0.9.8/dude-0.9.8-linux-x86_64/dude"
+		RB="$REPO/build-linux-release/dude"
+		RASTER="+set dude_rtx 0 +dudePreset 2"
+		NAMES=( A B C D )
+		DESC[A]="0.9.8 release, Path Tracing";                    ARGS[A]="";          BINV[A]="$R098"; SCHEMAV[A]=4
+		DESC[B]="master (release build), Path Tracing";           ARGS[B]="";          BINV[B]="$RB"
+		DESC[C]="0.9.8 release, raster Medium (CPU-bound probe)"; ARGS[C]="$RASTER";   BINV[C]="$R098"; SCHEMAV[C]=4
+		DESC[D]="master (release build), raster Medium";          ARGS[D]="$RASTER";   BINV[D]="$RB"
 		;;
 	memcheck)
 		# 2026-11-04: ONE run of build/dude in emissive mode for the Vulkan memory-placement warnings (a GPU-read buffer that
