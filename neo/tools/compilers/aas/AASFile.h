@@ -359,10 +359,13 @@ public:
 
 	const idAASSettings &		GetSettings( void ) const { return settings; }
 
-	// DUDE: Quake 4 (DewmAAS 1.08). A dummy file stands for a size the map has no use for: its
-	// settings and empty sections (a real one always has area 0); Raven's game frees it. The
-	// tactical features: an area's run in the feature index, which points into the features.
-	bool						IsDummyFile( void ) const { return areas.Num() == 0; }
+	// DUDE: Quake 4 (DewmAAS 1.08). A dummy file stands for a size the map has no use for; Raven's
+	// game frees it. Area 0 and node 0 are reserved (the null area, the solid leaf) and every tree
+	// walk starts at node 1, so a file without a second area and a second node has nothing to use.
+	// Most dummies are empty sections; two retail files (mcc_1.aas48, tram1b.aas32) keep just
+	// the reserved area and node, and walking them read past the node list (crash in mcc_1).
+	// The tactical features: an area's run in the feature index, which points into the features.
+	bool						IsDummyFile( void ) const { return areas.Num() <= 1 || nodes.Num() <= 1; }
 	int							GetNumFeatures( void ) const { return features.Num(); }
 	const aasFeature_t &		GetFeature( int index ) const { return features[index]; }
 								// Quake 4's tactical search keeps a scratch weight in each feature
