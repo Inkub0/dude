@@ -35,6 +35,8 @@ If you have questions concerning this license or the applicable additional terms
 #include <unistd.h>
 #endif
 
+#include <mutex>	// AssertFailedContinue
+
 #ifdef D3_SDL3
   #include <SDL3/SDL_endian.h>
   // some defines for backwards-compat with SDL2
@@ -549,4 +551,28 @@ void AssertFailed( const char *file, int line, const char *expression ) {
 	_exit(1);
 #endif
 
+}
+
+// DUDE: the release form (Lib.h, ID_ASSERT_CONTINUE): once per assert site, any thread.
+void AssertFailedContinue( const char *file, int line, const char *expression ) {
+	static std::mutex	lock;
+	static const char *	seenFiles[256];
+	static int			seenLines[256];
+	static int			numSeen = 0;
+	{
+		std::lock_guard<std::mutex> guard( lock );
+		for ( int i = 0; i < numSeen; i++ ) {
+			if ( seenLines[i] == line && seenFiles[i] == file ) {
+				return;
+			}
+		}
+		if ( numSeen < 256 ) {
+			seenFiles[numSeen] = file;
+			seenLines[numSeen] = line;
+			numSeen++;
+		}
+	}
+	if ( idLib::sys != NULL ) {
+		idLib::sys->DebugPrintf( "ASSERTION FAILED (continuing): %s(%d): '%s'\n", file, line, expression );
+	}
 }
