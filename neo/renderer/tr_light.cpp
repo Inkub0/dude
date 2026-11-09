@@ -1283,6 +1283,19 @@ idRenderModel *R_EntityDefDynamicModel( idRenderEntityLocal *def ) {
 	}
 
 	if ( model->IsDynamicModel() == DM_STATIC ) {
+		// DUDE: a callback that rebuilt its static model (returned true - the smoke system does on
+		// the first view of each game tic) or ran without a view (the smoke system empties its model
+		// then) has freed the triangles this entity's light-interaction surfaces borrow verts from
+		// (R_CreateLightTris). Drop those surfaces, as below for a dynamic model; they are rebuilt on
+		// the next AddActiveInteraction, and the freed ones are released at the end of the frame.
+		// Left in place, a later free trusted ambientSurface->verts on a recycled struct and freed
+		// the borrowed verts a second time - the vertex-pool corruption of GitHub #10. Vanilla never
+		// got here with live light surfaces: its smoke callback emptied the model on every call after
+		// the first of a frame; com_interpolate's smoke fix (c9bbf786) keeps the geometry instead.
+		if ( def->parms.callback != NULL && ( callbackUpdate || tr.viewDef == NULL ) ) {
+			R_ClearEntityDefDynamicModel( def );
+		}
+
 		// DUDE: Quake 4's hidden surfaces on a static model: a copy without them, kept while the
 		// mask and model stay (an unchanged dynamicModelFrameCount keeps the interactions)
 		if ( def->suppressSurfaceMask != 0 ) {

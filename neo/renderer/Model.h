@@ -178,6 +178,14 @@ typedef struct srfTriangles_s {
 	// its own tics (Quake 4 at a render rate above 60 Hz) shows the same pose for several frames; the next
 	// re-skin must still treat that pose as last frame's, or the animation's velocity drops to zero.
 	int							gpuSkinShownFrame;
+	// The verts / indexes are the ambientSurface's, borrowed by R_CreateLightTris
+	// (R_ReferenceStaticTriSurfVerts / Indexes): never freed with this surface. Recorded here rather
+	// than found by comparing with ambientSurface, which can already be freed (and zeroed, or reused)
+	// when this surface is - a callback model frees its old triangles before the renderer drops the
+	// interaction surfaces built on them; the comparison then freed the borrowed verts a second
+	// time (GitHub #10). Like deformedSurface for a deform's borrowed indexes.
+	bool						referencedVerts;
+	bool						referencedIndexes;
 } srfTriangles_t;
 
 typedef idList<srfTriangles_t *> idTriList;

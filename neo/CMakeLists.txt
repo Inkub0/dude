@@ -591,6 +591,9 @@ if(D3_COMPILER_IS_GCC_OR_CLANG)
 		# if this doesn't work, ASan might not be available on your platform, don't set ASAN then..
 		add_compile_options(-fsanitize=address)
 		set(sys_libs ${sys_libs} -fsanitize=address)
+		# DUDE: every idDynamicBlockAlloc allocation (the renderer's vertex/index pools, the sound
+		# cache, the game's event data) gets its own malloc block, so ASan sees them (idlib/Heap.h)
+		add_definitions(-DID_DYNAMIC_BLOCK_ALLOC_SYSTEM)
 	endif()
 	if(UBSAN)
 		# if this doesn't work, UBSan might not be available on your platform, don't set UBSAN then..
