@@ -75,6 +75,7 @@ if [ ! -f "$ROOT/build-linux-release/CMakeCache.txt" ]; then
 	enter cmake -S /work/neo -B /work/build-linux-release \
 		-DCMAKE_BUILD_TYPE=RelWithDebInfo \
 		-DDHEWM3_VULKAN=ON \
+		-DCURL=OFF \
 		-DVulkan_INCLUDE_DIR=/opt/vulkan-headers/include \
 		-DVulkan_LIBRARY=/usr/lib/x86_64-linux-gnu/libvulkan.so \
 		-DVulkan_GLSLANG_VALIDATOR_EXECUTABLE=/usr/local/bin/glslangValidator \

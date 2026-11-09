@@ -22,6 +22,13 @@ for every release.
 libstdc++/libgcc/shaderc static, RUNPATH `$ORIGIN/lib`. **Never ship `build/dude`
 (the dev build) in a release** — it needs the host's rolling-release glibc.
 
+It also configures with `-DCURL=OFF`: **the Linux `dude` must not link libcurl.** Steam
+starts every program (Launch Options, non-Steam shortcuts) with its runtime's
+`LD_LIBRARY_PATH`, which puts a pinned `libcurl.so.4` exporting only `CURL_OPENSSL_3`
+ahead of the system's; a binary built against Ubuntu's libcurl needs `CURL_OPENSSL_4` and
+the loader refuses to start it (0.9.8 shipped that way). libcurl only served multiplayer
+pak downloads from servers (`ID_ENABLE_CURL`, `FileSystem.cpp`).
+
 **Always build a release with `-c` (clean) when a shader was added or renamed since the
 last build.** Both scripts reconfigure CMake only when their build dir has no cache, and
 the SPIR-V/embed steps key off a `file(GLOB)` captured at configure time — so an
@@ -37,6 +44,12 @@ the embedded shaders → black screen on GL3/VK):
 ```
 strings <binary> | grep "DUDE 0\."          # must print the new version
 strings <binary> | grep -c "spv/interaction" # must be >0: embedded shader table present
+```
+
+Linux only, also:
+
+```
+readelf -d build-linux-release/dude | grep -c curl   # must be 0 (no libcurl, see above)
 ```
 
 ## 3. Package — every archive ships ALL of this
