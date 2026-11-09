@@ -55,6 +55,7 @@ static const gameTitleProfile_t titleProfiles[GAME_TITLE_COUNT] = {
 		NULL,							// fullGameFiles: no check (the GPL game code has no such terms)
 		NULL, NULL, NULL,				// gameLibrary*: base.so ships with DUDE
 		false,							// runByDefault: Doom 3 walks; always-run is MP only (in_allowAlwaysRunInSP)
+		1.0f,							// defaultBrightness
 	},
 	{
 		GAME_TITLE_QUAKE4, "quake4", "Quake 4",
@@ -85,6 +86,7 @@ static const gameTitleProfile_t titleProfiles[GAME_TITLE_COUNT] = {
 		"non-commercial use only, copies only free of charge and with that licence attached, "
 		"and only with the full retail Quake 4.",
 		true,							// runByDefault: retail in_alwaysRun "1", honoured in single player
+		1.2f,							// defaultBrightness: retail Quake4.exe r_brightness "1.2"
 	},
 };
 

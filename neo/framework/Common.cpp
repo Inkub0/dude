@@ -1516,6 +1516,13 @@ void idCommonLocal::CheckConfigSchema( void ) {
 	if ( from < 5 && GameTitle::Get().runByDefault && !cvarSystem->GetCVarBool( "in_alwaysRun" ) ) {
 		cvarSystem->SetCVarBool( "in_alwaysRun", true );
 	}
+	// 5 -> 6 (every path): the title's retail brightness - Quake 4 shipped r_brightness 1.2, DUDE's
+	// registered default is Doom 3's 1, which every Quake 4 config so far holds. Move a config
+	// still on 1, once; a deliberate other value stays. (The full reset below keeps r_brightness.)
+	const float titleBrightness = GameTitle::Get().defaultBrightness;
+	if ( from < 6 && titleBrightness != 1.0f && cvarSystem->GetCVarFloat( "r_brightness" ) == 1.0f ) {
+		cvarSystem->SetCVarFloat( "r_brightness", titleBrightness );
+	}
 
 	if ( from >= 3 ) {
 		// 3 -> 4: 0.9.7 shipped r_rtReStirDIBoostHistory 4, ~1.9 ms per frame at Path Tracing for no visible gain once
