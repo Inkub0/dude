@@ -361,7 +361,7 @@ int R_TriSurfMemory( const srfTriangles_t *tri ) {
 	if ( tri->shadowVertexes != NULL ) {
 		total += tri->numVerts * sizeof( tri->shadowVertexes[0] );
 	} else if ( tri->verts != NULL ) {
-		if ( tri->ambientSurface == NULL || tri->verts != tri->ambientSurface->verts ) {
+		if ( !tri->referencedVerts ) {
 			total += tri->numVerts * sizeof( tri->verts[0] );
 		}
 	}
@@ -369,7 +369,7 @@ int R_TriSurfMemory( const srfTriangles_t *tri ) {
 		total += tri->numIndexes / 3 * sizeof( tri->facePlanes[0] );
 	}
 	if ( tri->indexes != NULL ) {
-		if ( tri->ambientSurface == NULL || tri->indexes != tri->ambientSurface->indexes ) {
+		if ( !tri->referencedIndexes ) {
 			total += tri->numIndexes * sizeof( tri->indexes[0] );
 		}
 	}
@@ -480,8 +480,9 @@ void R_ReallyFreeStaticTriSurf( srfTriangles_t *tri ) {
 	R_FreeStaticTriSurfVertexCaches( tri );
 
 	if ( tri->verts != NULL ) {
-		// R_CreateLightTris points tri->verts at the verts of the ambient surface
-		if ( tri->ambientSurface == NULL || tri->verts != tri->ambientSurface->verts ) {
+		// R_CreateLightTris points tri->verts at the verts of the ambient surface (referencedVerts, set
+		// when it does - not a comparison with ambientSurface, which may already be freed: GitHub #10)
+		if ( !tri->referencedVerts ) {
 #ifdef ID_DYNAMIC_BLOCK_ALLOC_SYSTEM
 			R_TraceVertsFree( tri );
 #endif
@@ -513,7 +514,7 @@ void R_ReallyFreeStaticTriSurf( srfTriangles_t *tri ) {
 	if ( !tri->deformedSurface ) {
 		if ( tri->indexes != NULL ) {
 			// if a surface is completely inside a light volume R_CreateLightTris points tri->indexes at the indexes of the ambient surface
-			if ( tri->ambientSurface == NULL || tri->indexes != tri->ambientSurface->indexes ) {
+			if ( !tri->referencedIndexes ) {
 				triIndexAllocator.Free( tri->indexes );
 			}
 		}
@@ -563,8 +564,9 @@ void R_CheckStaticTriSurfMemory( const srfTriangles_t *tri ) {
 	}
 
 	if ( tri->verts != NULL ) {
-		// R_CreateLightTris points tri->verts at the verts of the ambient surface
-		if ( tri->ambientSurface == NULL || tri->verts != tri->ambientSurface->verts ) {
+		// R_CreateLightTris points tri->verts at the verts of the ambient surface (referencedVerts, set
+		// when it does - not a comparison with ambientSurface, which may already be freed: GitHub #10)
+		if ( !tri->referencedVerts ) {
 			const char *error id_attribute((unused)) = triVertexAllocator.CheckMemory( tri->verts );
 			assert( error == NULL );
 		}
@@ -573,7 +575,7 @@ void R_CheckStaticTriSurfMemory( const srfTriangles_t *tri ) {
 	if ( !tri->deformedSurface ) {
 		if ( tri->indexes != NULL ) {
 			// if a surface is completely inside a light volume R_CreateLightTris points tri->indexes at the indexes of the ambient surface
-			if ( tri->ambientSurface == NULL || tri->indexes != tri->ambientSurface->indexes ) {
+			if ( !tri->referencedIndexes ) {
 				const char *error id_attribute((unused)) = triIndexAllocator.CheckMemory( tri->indexes );
 				assert( error == NULL );
 			}
@@ -808,6 +810,7 @@ R_ReferenceStaticTriSurfVerts
 */
 void R_ReferenceStaticTriSurfVerts( srfTriangles_t *tri, const srfTriangles_t *reference ) {
 	tri->verts = reference->verts;
+	tri->referencedVerts = true;
 }
 
 /*
@@ -817,6 +820,7 @@ R_ReferenceStaticTriSurfIndexes
 */
 void R_ReferenceStaticTriSurfIndexes( srfTriangles_t *tri, const srfTriangles_t *reference ) {
 	tri->indexes = reference->indexes;
+	tri->referencedIndexes = true;
 }
 
 /*
