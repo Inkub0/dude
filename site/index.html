@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DUDE: Doom 3 Unified Development Engine</title>
+<meta name="description" content="DUDE is a free, open-source engine for DOOM 3 and Quake 4: the classic games with a modern renderer, from the original look up to full path tracing. Bring your own copy of the game.">
+<meta property="og:title" content="DUDE: Doom 3 Unified Development Engine">
+<meta property="og:description" content="DOOM 3 and Quake 4 with a modern renderer, from the original look up to full path tracing. Free and open source.">
+<meta property="og:image" content="https://inkub0.github.io/dude/assets/img/og.jpg">
+<meta property="og:type" content="website">
+<meta name="theme-color" content="#0d0907">
+<link rel="icon" href="assets/img/favicon.png" type="image/png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Oxanium:wght@500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/css/style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="inner">
+    <a class="brand" href="index.html"><img src="assets/img/logo.png" alt="DUDE" width="72" height="28"></a>
+    <nav aria-label="Main">
+      <a href="index.html" aria-current="page">Home</a>
+      <a href="features.html">Features</a>
+      <a href="install.html">Install</a>
+      <a href="downloads.html">Downloads</a>
+      <a href="faq.html">FAQ</a>
+      <a href="https://github.com/Inkub0/dude">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<div class="banner">
+  <img class="logo" src="assets/img/logo.png" alt="DUDE" width="656" height="256">
+  <p class="tagline">DOOM 3 and Quake 4, rebuilt with a modern renderer. From the original look all the way up to full path tracing.</p>
+  <p class="sub">Free and open source. Drop it into the game you already own and play.</p>
+  <div class="ctas">
+    <a class="btn btn-fire" href="downloads.html">Download <span data-latest="version">0.9.8</span> <small>Windows - Linux</small></a>
+    <a class="btn btn-ghost" href="install.html">How to install</a>
+  </div>
+</div>
+
+<main>
+
+<section id="about">
+  <h2>What is DUDE?</h2>
+  <p class="lead">DUDE (the <strong>D</strong>oom3 <strong>U</strong>nified <strong>D</strong>evelopment <strong>E</strong>ngine) is a new engine for the DOOM 3 games and Quake 4. It replaces the program that runs the game, not the game itself: your maps, monsters, story and saves stay exactly as id Software and Raven made them.</p>
+  <p>What changes is how the game is drawn. Pick a quality preset in the menu: <strong>Potato</strong> is the untouched 2004 look, and every step up adds modern lighting, shadows and effects. On a graphics card with ray tracing you can go further, up to a <strong>path-traced</strong> mode where every light in the level is traced in real time.</p>
+  <p class="muted">DUDE does not include any game files. You need your own copy of the game from Steam, GOG or the original discs. <a href="install.html">The install guide</a> covers each case step by step.</p>
+</section>
+
+<section id="games">
+  <h2>Games it runs</h2>
+  <div class="grid">
+    <div class="card"><h3>DOOM 3</h3><p>The 2004 original. Steam, GOG or CD/DVD (patched to 1.3.1).</p></div>
+    <div class="card"><h3>Resurrection of Evil</h3><p>The official expansion, with its own game code.</p></div>
+    <div class="card"><h3>The Lost Mission</h3><p>The community port of the BFG Edition's extra chapter.</p></div>
+    <div class="card"><h3>Quake 4</h3><p>The full retail single-player campaign, new in 0.9.8.</p></div>
+  </div>
+</section>
+
+<section id="highlights">
+  <h2>Highlights</h2>
+  <div class="grid">
+    <div class="card">
+      <h3>The classic look, kept</h3>
+      <p>Every improvement is optional. The lowest preset is the original renderer, untouched, and the gameplay is never changed.</p>
+    </div>
+    <div class="card">
+      <h3>One menu, six presets</h3>
+      <p>Potato, Low, Medium, High, Ultra and Nightmare. Choose one in the System options and DUDE sets everything else for you.</p>
+    </div>
+    <div class="card">
+      <h3>Ray tracing and path tracing</h3>
+      <p>On RTX, Radeon RX 6000+ and Arc cards: traced shadows, reflections and bounce light, or fully path-traced lighting.</p>
+    </div>
+    <div class="card">
+      <h3>Smooth on modern PCs</h3>
+      <p>High refresh rates while the game logic stays at its native speed, variable refresh (G-Sync/FreeSync) and fast level loads.</p>
+    </div>
+    <div class="card">
+      <h3>Saves and mods keep working</h3>
+      <p>Loads savegames from retail DOOM 3, dhewm3 and every DUDE release. Runs mods built for dhewm3 1.5.5.</p>
+    </div>
+    <div class="card">
+      <h3>Controllers</h3>
+      <p>Xbox-style pads work, with one-click default bindings for DOOM 3 and its expansions (settings menu, <kbd>F10</kbd>).</p>
+    </div>
+  </div>
+  <p style="margin-top:16px"><a href="features.html">See every feature</a></p>
+</section>
+
+<section id="screenshots">
+  <h2>Screenshots</h2>
+  <div class="gallery">
+    <a href="assets/img/shots/1.jpg"><img src="assets/img/shots/1-thumb.jpg" alt="DOOM 3, Mars City common area, a window onto the red Martian landscape" loading="lazy" width="640" height="360"><span>Common Area</span></a>
+    <a href="assets/img/shots/2.jpg"><img src="assets/img/shots/2-thumb.jpg" alt="DOOM 3, an organic hellish passage lit orange from a floor grate" loading="lazy" width="640" height="360"><span>Main Shaft</span></a>
+    <a href="assets/img/shots/3.jpg"><img src="assets/img/shots/3-thumb.jpg" alt="DOOM 3, a corridor glowing red through the grated floor, with a new objective on screen" loading="lazy" width="640" height="360"><span>Walkway to Enpro</span></a>
+    <a href="assets/img/shots/4.jpg"><img src="assets/img/shots/4-thumb.jpg" alt="DOOM 3, the dim pump station with a lit doorway" loading="lazy" width="640" height="360"><span>Pump Station</span></a>
+    <a href="assets/img/shots/5.jpg"><img src="assets/img/shots/5-thumb.jpg" alt="DOOM 3, a tiled restroom under a flickering ceiling light" loading="lazy" width="640" height="360"><span>Restroom</span></a>
+    <a href="assets/img/shots/6.jpg"><img src="assets/img/shots/6-thumb.jpg" alt="DOOM 3, Dr. Betruger in close-up in his office" loading="lazy" width="640" height="360"><span>Betruger</span></a>
+  </div>
+  <p class="muted" style="margin-top:10px">More images and videos on the <a href="https://www.moddb.com/mods/dude/images">ModDB page</a>.</p>
+</section>
+
+<section id="download">
+  <h2>Download</h2>
+  <div class="linkrow">
+    <strong>DUDE <span data-latest="version">0.9.8</span> (<span data-latest="date">2026-11-05</span>)</strong>
+    <span class="links"><a href="https://github.com/Inkub0/dude/releases/latest/download/dude-win64.zip">Windows (64-bit)</a><a href="https://github.com/Inkub0/dude/releases/latest/download/dude-linux-x86_64.tar.gz">Linux / SteamOS (x86_64)</a><a href="https://github.com/Inkub0/dude/releases/latest">Release notes</a></span>
+  </div>
+  <div class="linkrow">
+    <strong>Quake 4 add-on (only for Quake 4)</strong>
+    <span class="links"><a href="https://github.com/Inkub0/dude/releases/latest/download/dude-q4-win64.zip">Windows (64-bit)</a><a href="https://github.com/Inkub0/dude/releases/latest/download/dude-q4-linux-x86_64.tar.gz">Linux / SteamOS (x86_64)</a></span>
+  </div>
+  <div class="linkrow">
+    <strong>Optional extras</strong>
+    <span class="links"><a href="downloads.html#ao">Baked shading packs</a><a href="https://github.com/Inkub0/dude/releases">All releases</a><a href="https://github.com/Inkub0/dude">Source code</a></span>
+  </div>
+  <p class="muted">Not sure which file you need? The <a href="downloads.html">downloads page</a> explains each one.</p>
+</section>
+
+<section id="community">
+  <h2>Community</h2>
+  <div class="linkrow">
+    <span class="links"><a href="https://github.com/Inkub0/dude">GitHub</a><a href="https://github.com/Inkub0/dude/issues">Report a bug</a><a href="https://www.moddb.com/mods/dude">ModDB</a><a href="https://buymeacoffee.com/Inkub0">Buy me a coffee ☕</a></span>
+  </div>
+  <p>Donations go toward the hardware needed to build and test real HDR output and the ray-tracing pipeline.</p>
+</section>
+
+</main>
+
+<footer>
+  <div class="inner">
+    <p>DUDE is free software under the GNU GPLv3, a fork of <a href="https://github.com/dhewm/dhewm3">dhewm3</a>, itself based on id Software's DOOM 3 GPL source release. No game data is included: bring your own copy of the game.</p>
+    <p>DOOM, Quake and Quake 4 are trademarks of their owners (id Software / ZeniMax Media). DUDE is an independent, non-commercial project, not affiliated with, endorsed or sponsored by id Software, ZeniMax Media, Microsoft, Raven Software or Activision.</p>
+  </div>
+</footer>
+
+<script src="assets/js/site.js"></script>
+</body>
+</html>

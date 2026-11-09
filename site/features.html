@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DUDE Features</title>
+<meta name="description" content="What DUDE adds to DOOM 3 and Quake 4: quality presets, OpenGL 3 and Vulkan renderers, ray tracing and path tracing, smoother frame rates, controller support, savegame and mod compatibility.">
+<meta property="og:title" content="DUDE features">
+<meta property="og:image" content="https://inkub0.github.io/dude/assets/img/og.jpg">
+<meta name="theme-color" content="#0d0907">
+<link rel="icon" href="assets/img/favicon.png" type="image/png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Oxanium:wght@500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/css/style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="inner">
+    <a class="brand" href="index.html"><img src="assets/img/logo.png" alt="DUDE" width="72" height="28"></a>
+    <nav aria-label="Main">
+      <a href="index.html">Home</a>
+      <a href="features.html" aria-current="page">Features</a>
+      <a href="install.html">Install</a>
+      <a href="downloads.html">Downloads</a>
+      <a href="faq.html">FAQ</a>
+      <a href="https://github.com/Inkub0/dude">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<div class="banner small" style="background-image:url('assets/img/shots/4.jpg')">
+  <h1>Features</h1>
+  <p>Everything DUDE adds is optional. The original game is always one setting away.</p>
+</div>
+
+<main>
+
+<section id="presets">
+  <h2>Quality presets</h2>
+  <p>You don't need to understand any graphics option to use DUDE. Two settings in the classic <strong>Settings &gt; System</strong> menu decide everything:</p>
+  <div class="table-wrap">
+    <table>
+      <tr><th>Quality</th><th>What you get</th></tr>
+      <tr><td><strong>Potato</strong></td><td>The original 2004 rendering, unmodified.</td></tr>
+      <tr><td><strong>Low</strong></td><td>The original look on the new renderers, with light extras.</td></tr>
+      <tr><td><strong>Medium</strong></td><td>HDR lighting, ambient occlusion, surface relief, shadow maps. A good choice for laptops and the Steam Deck.</td></tr>
+      <tr><td><strong>High</strong></td><td>Adds physically based materials, smoother character outlines and deeper surface relief.</td></tr>
+      <tr><td><strong>Ultra</strong></td><td>Adds screen-space reflections and higher-quality shading everywhere.</td></tr>
+      <tr><td><strong>Nightmare</strong></td><td>Everything at full quality, including full-resolution shadows and shimmer-free surfaces, for fast graphics cards.</td></tr>
+    </table>
+  </div>
+  <p>The second setting is <strong>Ray Tracing</strong> (Vulkan on a ray-tracing card): <strong>Off</strong>, <strong>On</strong> (hybrid ray tracing) or full <strong>Path Tracing</strong>. It works with any quality preset.</p>
+  <p class="muted">Every individual setting is still there for tinkerers: press <kbd>F10</kbd> for the full settings menu.</p>
+</section>
+
+<section id="renderers">
+  <h2>Three renderers</h2>
+  <div class="grid">
+    <div class="card"><h3>Legacy (classic)</h3><p>The original renderer, kept untouched as the faithful reference. Works on anything that ran DOOM 3.</p></div>
+    <div class="card"><h3>OpenGL 3</h3><p>The original look rewritten for modern graphics cards, plus all of DUDE's raster effects. The safe choice for any PC.</p></div>
+    <div class="card"><h3>Vulkan</h3><p>The same effects, faster on modern cards, plus ray tracing, path tracing, AMD FSR 2 upscaling and GPU tessellation.</p></div>
+  </div>
+</section>
+
+<section id="rt">
+  <h2>Ray tracing</h2>
+  <p>On graphics cards with ray-tracing hardware (NVIDIA GeForce RTX, AMD Radeon RX 6000 and newer, Intel Arc), DUDE can trace light the way it really travels.</p>
+  <ul>
+    <li><strong>RTX On (hybrid):</strong> ray-traced soft shadows from every light, ray-traced reflections, ray-traced ambient occlusion and <strong>global illumination</strong> (light bouncing off walls and floors), on top of the regular renderer.</li>
+    <li><strong>Path Tracing:</strong> all direct lighting is traced too, from every light in the scene at once, then cleaned up by NVIDIA's NRD denoiser. The most realistic look, and the most demanding.</li>
+    <li><strong>Volumetric lighting:</strong> light shafts and glowing haze from the scene's real lights.</li>
+    <li>Animated monsters and characters cast correct traced shadows and reflections every frame.</li>
+    <li><strong>Emissive Mode</strong> (experimental): glowing panels, strips and screens become real light sources, set up per level in the built-in Light Editor.</li>
+  </ul>
+</section>
+
+<section id="raster">
+  <h2>Modern effects (OpenGL 3 and Vulkan)</h2>
+  <div class="grid">
+    <div class="card"><h3>Lighting</h3><p>HDR rendering, physically based (PBR) materials, screen-space reflections, ambient occlusion (live and pre-baked), contact shadows.</p></div>
+    <div class="card"><h3>Shadows</h3><p>Soft shadow maps for room lights and sunlight. The original sharp stencil shadows remain available.</p></div>
+    <div class="card"><h3>Surfaces</h3><p>Parallax relief on walls and floors, subsurface skin and flesh shading, soft particles, anisotropic filtering.</p></div>
+    <div class="card"><h3>Characters</h3><p>Smoother character outlines through GPU tessellation, GPU skinning, per-bone motion for clean upscaling.</p></div>
+    <div class="card"><h3>Anti-aliasing</h3><p>SMAA and FXAA, plus AMD FSR 2 on Vulkan for native-resolution AA or upscaling.</p></div>
+    <div class="card"><h3>Little touches</h3><p>Depth of field while reloading, glowing pickups, screens that cast light, sharper menu fonts at high resolutions.</p></div>
+  </div>
+</section>
+
+<section id="smooth">
+  <h2>Smooth on modern PCs</h2>
+  <ul>
+    <li><strong>High frame rates:</strong> render at 120, 144 Hz or more while the game logic keeps its native 60 Hz, so physics and scripts behave as designed.</li>
+    <li><strong>Speedrunner option:</strong> DOOM 3's original 62.5 Hz game timing, as in version 1.3.1.</li>
+    <li><strong>Variable refresh rate</strong> (G-Sync / FreeSync) and a frame rate limiter.</li>
+    <li><strong>Faster level loading</strong>, with images and sounds loaded in parallel.</li>
+    <li><strong>Widescreen done right:</strong> the HUD keeps its proportions on wide screens, no extra pack needed.</li>
+    <li><strong>Built-in benchmark</strong> with average and 1 % low frame times.</li>
+  </ul>
+</section>
+
+<section id="games">
+  <h2>Games, saves and mods</h2>
+  <ul>
+    <li>Runs <strong>DOOM 3</strong>, <strong>Resurrection of Evil</strong>, <strong>The Lost Mission</strong> and the full <strong>Quake 4</strong> single-player campaign, all from one program.</li>
+    <li>For Quake 4, DUDE includes its own rebuild of Raven's particle and effects system, so muzzle flashes, explosions and Strogg effects render on every renderer.</li>
+    <li><strong>Savegames:</strong> loads saves from retail DOOM 3, dhewm3 and every DUDE 0.9.x release.</li>
+    <li><strong>Mods:</strong> runs mods made for dhewm3 1.5.5, including ones with custom shaders.</li>
+    <li><strong>Controllers:</strong> any pad SDL recognises, with ready-made Xbox-style bindings.</li>
+    <li><strong>Ultra Nightmare</strong> difficulty, unlocked with Nightmare: one checkpoint per level, no manual saves, and your run is erased when you die.</li>
+  </ul>
+</section>
+
+<section id="tech">
+  <h2>For the technically curious</h2>
+  <p>DUDE is a fork of <a href="https://github.com/dhewm/dhewm3">dhewm3</a>. Doom 3's ARB assembly shaders are translated into one shared GLSL source tree that serves both an OpenGL 3.3 core and a Vulkan 1.4 backend. The ray-traced tiers use <code>VK_KHR_ray_query</code>, ReSTIR DI with a ReGIR light grid, a multi-bounce irradiance cache and NVIDIA NRD (ReLAX). The full feature list, build instructions and design documents are in the <a href="https://github.com/Inkub0/dude">GitHub repository</a>.</p>
+</section>
+
+</main>
+
+<footer>
+  <div class="inner">
+    <p>DUDE is free software under the GNU GPLv3, a fork of <a href="https://github.com/dhewm/dhewm3">dhewm3</a>, itself based on id Software's DOOM 3 GPL source release. No game data is included: bring your own copy of the game.</p>
+    <p>DOOM, Quake and Quake 4 are trademarks of their owners (id Software / ZeniMax Media). DUDE is an independent, non-commercial project, not affiliated with, endorsed or sponsored by id Software, ZeniMax Media, Microsoft, Raven Software or Activision.</p>
+  </div>
+</footer>
+
+</body>
+</html>
