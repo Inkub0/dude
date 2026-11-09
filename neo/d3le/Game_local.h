@@ -305,6 +305,8 @@ public:
 	float					renderInterpolateFrac;	// this rendered frame's sub-tic alpha [0,1] (1.0 = on a tic / not interpolating); read by UpdateRenderEntity for anim
 	bool					renderInterpCubic;		// cached com_interpolateCubic for this rendered frame
 	bool					renderInterpAnim;		// cached com_interpolateAnim for this rendered frame
+	int						renderInterpTimeOffset;	// ms (<= 0) the scene drawn by Draw lags the tic time; 0 outside Draw
+	int						renderInterpTimeOffsetFast;	// the same for the fast time group (hell time)
 	idDict					persistentLevelInfo;	// contains args that are kept around between levels
 
 	// can be used to automatically effect every material in the world that references globalParms

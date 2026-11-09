@@ -202,6 +202,7 @@ void idGameLocal::Clear( void ) {
 	renderInterpolateFrac = 1.0f;
 	renderInterpCubic = false;
 	renderInterpAnim = false;
+	renderInterpTimeOffset = 0;
 	persistentLevelInfo.Clear();
 	memset( globalShaderParms, 0, sizeof( globalShaderParms ) );
 	random.SetSeed( 0 );
@@ -2619,10 +2620,24 @@ bool idGameLocal::Draw( int clientNum ) {
 		// stage 3: world entities that moved this tic (movers, doors, monsters, projectiles,
 		// moving lights) glide between their previous and current tic transforms
 		InterpolateRenderEntities( frac );
+
+		// and the scene is drawn at the same instant: particles, animated materials and surface GUIs are
+		// evaluated at the view's time, which would otherwise stay the tic's and step at 60 Hz while
+		// everything around them glides. Never past the tic (no extrapolation); restored after rendering,
+		// so game code only ever sees tic times (GetTimeGroupTime and the smoke particles add the offset).
+		renderInterpTimeOffset = -(int)( ( 1.0f - frac ) * (float)( time - previousTime ) );
 	}
 
 	// render the scene
+	renderView_t *interpView = player->GetRenderView();
+	if ( interpView ) {
+		interpView->time += renderInterpTimeOffset;
+	}
 	player->playerView.RenderPlayerView( player->hud );
+	if ( interpView ) {
+		interpView->time -= renderInterpTimeOffset;
+	}
+	renderInterpTimeOffset = 0;
 
 	// done rendering: anything that issues a render callback before the next rendered frame (the
 	// game tics, e.g. a trace against an animated model) gets the exact tic pose, not this frame's
@@ -4522,7 +4537,8 @@ idGameLocal::GetTimeGroupTime
 ============
 */
 int idGameLocal::GetTimeGroupTime( int timeGroup ) {
-	return gameLocal.time;
+	// the offset: com_interpolate, the scene Draw renders between two tics (0 otherwise)
+	return gameLocal.time + renderInterpTimeOffset;
 }
 
 /*

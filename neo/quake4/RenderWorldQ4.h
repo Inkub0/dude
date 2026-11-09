@@ -264,6 +264,11 @@ public:
 							// a field of view cone between the near and far dot/distance
 	virtual void			DebugFOV( const idVec4 &color, const idVec3 &origin, const idVec3 &dir, float farDot, float farDist, float nearDot = 1.0f, float nearDist = 0.0f, float alpha = 0.3f, int lifetime = 0 ) = 0;
 	virtual void			DrawText( const char *text, const idVec3 &origin, float scale, const idVec4 &color, const idMat3 &viewAxis, const int align = 1, const int lifetime = 0, bool depthTest = false ) = 0;
+
+	// DUDE com_interpolate (appended: DUDE's own call, not retail's): this render frame, draw the effect
+	// at origin / axis - where its owner is drawn between two game tics - instead of where it was last
+	// updated. Drawing only, for this frame only; spawning and physics keep the updated state.
+	virtual void			SetEffectDefDrawFrame( qhandle_t effectHandle, const idVec3 &origin, const idMat3 &axis ) = 0;
 };
 
 #endif /* !__RENDERWORLDQ4_H__ */
