@@ -109,9 +109,12 @@ not supported: DUDE refuses it, because the licence below lets this library run 
 full version of Quake 4 only. No Quake 4 game data is included, and DUDE never copies any:
 it reads your installed copy where it is.
 
-Setup: extract DUDE $VER and this archive into your Quake 4 folder (the one that contains
-q4base/), so that $LIBNAME sits next to the DUDE executable, and start DUDE there. From
-another folder, start it with
+Setup: copy the contents of DUDE $VER's archive and of this one into your Quake 4 folder
+(the one that contains q4base/). Each archive holds one folder (dude-$VER-..., dude-q4-$VER-...):
+copy what is inside it, so that the DUDE executable and $LIBNAME sit right next to Quake 4's
+own executable, not in subfolders. Start DUDE there. Do not copy any Quake 4 files into DUDE's
+or Doom 3's base/ folder: DUDE reads Quake 4 from q4base/ where it is. From another folder,
+start DUDE with
 
     $EXE +set fs_basepath "/path/to/Quake 4"
 
