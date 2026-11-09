@@ -3426,6 +3426,13 @@ struct EnhancementPreset {
 	// Potato/Low 1 (the faithful, stock-Doom3 floor); Medium 2; High 4; Ultra 8; Nightmare 16. Clamped
 	// to the device max at apply time, so a level above the card's cap quietly becomes the cap.
 	int   anisotropy;               // image_anisotropy
+	// Texture compression on load (appended; image_useCompression + image_usePrecompressedTextures).
+	// Only OpenGL compresses (S3TC/DXT at upload, and Doom 3's precompressed dds/ files); Vulkan always
+	// uploads uncompressed, so this is inert there. Potato/Low/Medium keep compression (the dhewm3
+	// defaults): about 5.6x less texture memory, for GL 3.3 cards with 1-2 GB. High and up upload
+	// uncompressed, as vanilla Doom 3's Ultra did (busy maps: Doom 3 ~350 MB, Quake 4 ~1 GB of textures).
+	// Not matched in Detect, so a hand change from the Graphics settings never reads "Custom".
+	bool  compressTextures;
 };
 
 // Potato/Low keep the enhancements off but carry the cheap Medium sub-params, so
@@ -3434,13 +3441,13 @@ struct EnhancementPreset {
 // see anchor note above — the pipeline columns deliberately exceed the cvar
 // defaults, which keep every enhancement off).
 static const EnhancementPreset enhancementPresets[PRESET_COUNT] = {
-	//                soft   smoke  emiss  ssao   shadow  aoRes aoSl aoSt aoNB   aoBN   smSz  smPt  pcf ptLim emLim grain  chrom  refl  shd sScl  sExp   szScl szRad   occl   hdr    pbr    ssr    ssrRes  grainSz aa aoRad   aoTmp   tess   tessDsp  parlx  parlxSh gpuSkn dMip   mv     fsr    dynDrop rtSun  rtMov  rtRefl aoTrade interp rtao   rtBlur rtAll  stagger  volum  rtaoRes  skin   rtgi  hdrGam aniso
-	{ "Potato",       false, false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.0f,  0.0f,  1.0f, 0,  1.0f, 62.0f, true, 380.0f, false, false, false, false, 1.0f,   1.5f,   0, 48.0f,  false,  false, 0.0f, false, 0.0f, false, false, false, false, 1,     false, false, false, true,  false, false, false, false, false, false, 1.0f, 0.0f, false, 1.20f, 1 },
-	{ "Low",          true,  false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.05f, 0.0f,  1.0f, 1,  1.2f, 42.0f, true, 380.0f, true,  false, false, false, 1.0f,   1.5f,   2, 48.0f,  false,  false, 0.12f, false, 0.0f, false, false, false, false, 1,     false, false, false, true,  true , false, false, false, false, false, 1.0f, 0.6f, false, 1.20f, 1 },
-	{ "Medium",       true,  false, true,  true,  true,   0.5f, 2,   4,   false, true,  512,  512,  8,  16,   16,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  false, false, 1.0f,   1.5f,   2, 48.0f,  true,   false, 0.12f, true, 0.0f, true, true,  false, false, 1,     false, false, false, true,  true , false, false, false, false, false, 1.0f, 0.6f, false, 1.20f, 2 },
-	{ "High",         true,  false, true,  true,  true,   0.667f, 3,   6,   true,  true,  1024, 1200, 10,  64,   24,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  true,  false, 1.0f,   1.5f,   2, 48.0f,  false,  true,  0.12f, true, 1.0f, true, true,  false, false, 1,     false, false, false, true,  true , false, false, false, false, false, 1.0f, 0.6f, false, 1.20f, 4 },
-	{ "Ultra",        true,  true,  true,  true,  true,   0.75f, 4,   8,   true,  true,  2400, 2400, 11,  96,   32,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.5f,   1.5f,   2, 48.0f,  false,  true,  0.12f, true, 1.0f, true, true,  true,  false, 1,     false, false, false, true,  true , false, false, false, false, false, 1.0f, 0.6f, false, 1.20f, 8 },
-	{ "Nightmare", true, true, true, true,  true,   0.8f, 5,   10,  true,  true,  3600, 3600, 12, 128,  48,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.5f, 1.5f,   2, 48.0f, false,  true,  0.12f, true, 1.0f, true, true,  true,  true,  0,     false, false, false, false, true , false, false, false, false, false, 1.0f, 0.6f, false, 1.20f, 16 },
+	//                soft   smoke  emiss  ssao   shadow  aoRes aoSl aoSt aoNB   aoBN   smSz  smPt  pcf ptLim emLim grain  chrom  refl  shd sScl  sExp   szScl szRad   occl   hdr    pbr    ssr    ssrRes  grainSz aa aoRad   aoTmp   tess   tessDsp  parlx  parlxSh gpuSkn dMip   mv     fsr    dynDrop rtSun  rtMov  rtRefl aoTrade interp rtao   rtBlur rtAll  stagger  volum  rtaoRes  skin   rtgi  hdrGam aniso cmpTex
+	{ "Potato",       false, false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.0f,  0.0f,  1.0f, 0,  1.0f, 62.0f, true, 380.0f, false, false, false, false, 1.0f,   1.5f,   0, 48.0f,  false,  false, 0.0f, false, 0.0f, false, false, false, false, 1,     false, false, false, true,  false, false, false, false, false, false, 1.0f, 0.0f, false, 1.20f, 1, true  },
+	{ "Low",          true,  false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.05f, 0.0f,  1.0f, 1,  1.2f, 42.0f, true, 380.0f, true,  false, false, false, 1.0f,   1.5f,   2, 48.0f,  false,  false, 0.12f, false, 0.0f, false, false, false, false, 1,     false, false, false, true,  true , false, false, false, false, false, 1.0f, 0.6f, false, 1.20f, 1, true  },
+	{ "Medium",       true,  false, true,  true,  true,   0.5f, 2,   4,   false, true,  512,  512,  8,  16,   16,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  false, false, 1.0f,   1.5f,   2, 48.0f,  true,   false, 0.12f, true, 0.0f, true, true,  false, false, 1,     false, false, false, true,  true , false, false, false, false, false, 1.0f, 0.6f, false, 1.20f, 2, true  },
+	{ "High",         true,  false, true,  true,  true,   0.667f, 3,   6,   true,  true,  1024, 1200, 10,  64,   24,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  true,  false, 1.0f,   1.5f,   2, 48.0f,  false,  true,  0.12f, true, 1.0f, true, true,  false, false, 1,     false, false, false, true,  true , false, false, false, false, false, 1.0f, 0.6f, false, 1.20f, 4, false },
+	{ "Ultra",        true,  true,  true,  true,  true,   0.75f, 4,   8,   true,  true,  2400, 2400, 11,  96,   32,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.5f,   1.5f,   2, 48.0f,  false,  true,  0.12f, true, 1.0f, true, true,  true,  false, 1,     false, false, false, true,  true , false, false, false, false, false, 1.0f, 0.6f, false, 1.20f, 8, false },
+	{ "Nightmare", true, true, true, true,  true,   0.8f, 5,   10,  true,  true,  3600, 3600, 12, 128,  48,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.5f, 1.5f,   2, 48.0f, false,  true,  0.12f, true, 1.0f, true, true,  true,  true,  0,     false, false, false, false, true , false, false, false, false, false, 1.0f, 0.6f, false, 1.20f, 16, false },
 };
 
 // Ray-tracing augmentation layered on top of a raster tier when RTX is on and the device is
@@ -3626,6 +3633,40 @@ static void ApplyEnhancementPreset( int idx, int rtMode )
 	// and on VK BeginFrame's live poll rebuilds the samplers, so the preset takes effect without a
 	// vid_restart. Potato/Low 1 (the faithful, no-AF floor); Medium 2; High 4; Ultra 8; Nightmare 16.
 	cvarSystem->SetCVarInteger( "image_anisotropy", p.anisotropy );
+
+	// Base texture resolution and compression. Every tier loads textures at full size: the legacy
+	// image-quality class (com_machineSpec) is pinned to Ultra, so a Low left behind by Quake 4's own
+	// Video Quality menu or by "execMachineSpec" (load-time downsizing, ignored high-quality flags)
+	// must not survive a preset. Compression is the tier's (see compressTextures). Textures that are
+	// already loaded keep their old size/format, so a change that matters on this backend restarts
+	// the renderer the way the Graphics settings do for these cvars; nothing changed, no restart.
+	{
+		static const char *fullSizeCvars[] = {
+			"image_downSize", "image_downSizeBump", "image_downSizeSpecular", "image_forceDownSize",
+			"image_ignoreHighQuality"
+		};
+		bool reloadTextures = false;
+		for ( int i = 0; i < (int)( sizeof( fullSizeCvars ) / sizeof( fullSizeCvars[0] ) ); i++ ) {
+			if ( cvarSystem->GetCVarInteger( fullSizeCvars[i] ) != 0 ) {
+				cvarSystem->SetCVarInteger( fullSizeCvars[i], 0 );
+				reloadTextures = true;
+			}
+		}
+		// a compressing tier keeps a compression the player picked (2 = BC7 in the Graphics settings)
+		idCVar *compressionCvars[] = { &globalImages->image_useCompression, &globalImages->image_usePrecompressedTextures };
+		for ( int i = 0; i < 2; i++ ) {
+			const int cur = compressionCvars[i]->GetInteger();
+			const int want = p.compressTextures ? ( cur != 0 ? cur : 1 ) : 0;
+			if ( cur != want ) {
+				compressionCvars[i]->SetInteger( want );
+				// only OpenGL compresses: Vulkan uploads uncompressed whatever these say
+				reloadTextures |= glConfig.textureCompressionAvailable;
+			}
+		}
+		if ( reloadTextures && glConfig.isInitialized ) {
+			cmdSystem->BufferCommandText( CMD_EXEC_APPEND, "vid_restart\n" );
+		}
+	}
 
 	// --- Ray-tracing axis (orthogonal to the raster tier above) ---
 	// The raster block left every RT cvar at its OFF baseline (the rows carry rt* = false). If RTX
