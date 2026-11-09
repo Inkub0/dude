@@ -1,0 +1,255 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Install DUDE: Steam, GOG, CD/DVD, SteamOS</title>
+<meta name="description" content="Step-by-step guide to installing DUDE for DOOM 3 and Quake 4: Steam, GOG, the original CD/DVD, Linux and SteamOS / Steam Deck.">
+<meta property="og:title" content="How to install DUDE">
+<meta property="og:image" content="https://inkub0.github.io/dude/assets/img/og.jpg">
+<meta name="theme-color" content="#0d0907">
+<link rel="icon" href="assets/img/favicon.png" type="image/png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Oxanium:wght@500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/css/style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="inner">
+    <a class="brand" href="index.html"><img src="assets/img/logo.png" alt="DUDE" width="72" height="28"></a>
+    <nav aria-label="Main">
+      <a href="index.html">Home</a>
+      <a href="features.html">Features</a>
+      <a href="install.html" aria-current="page">Install</a>
+      <a href="downloads.html">Downloads</a>
+      <a href="faq.html">FAQ</a>
+      <a href="https://github.com/Inkub0/dude">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<div class="banner small" style="background-image:url('assets/img/banner-install.jpg')">
+  <h1>How to install</h1>
+  <p>Five minutes, no technical knowledge needed. DUDE goes <em>into</em> the folder of a game you already own, next to the original files. Nothing of the original game is changed or replaced.</p>
+</div>
+
+<main>
+
+<section id="before">
+  <h2>Before you start</h2>
+  <h3>You need</h3>
+  <ul>
+    <li><strong>Your own copy of the game</strong>: DOOM 3 (with or without Resurrection of Evil) and/or Quake 4, from Steam, GOG or the original discs. DUDE contains no game files.</li>
+    <li><strong>A 64-bit Windows 10/11 or Linux PC</strong> (or a Steam Deck), with a graphics card that supports OpenGL 3.3. For the Vulkan renderer and ray tracing, see the <a href="faq.html#hardware">hardware FAQ</a>.</li>
+    <li><strong>Up-to-date graphics drivers.</strong> This fixes most problems before they happen.</li>
+  </ul>
+
+  <div class="warn">
+    <p><strong>Not supported: the "BFG Edition" and the "Bethesda.net Edition" of DOOM 3.</strong> Those are remasters that store the game in a different format. DUDE needs the <strong>original</strong> 2004 DOOM 3. Good news: if you bought DOOM 3 on Steam or GOG, the original version is included with your purchase. The steps below show you how to find it.</p>
+  </div>
+
+  <h3>How to recognise the right folder</h3>
+  <p>Everything below comes down to one thing: copying DUDE into the game's folder. You are in the right place when you see:</p>
+  <div class="table-wrap">
+    <table>
+      <tr><th>Game</th><th>The right folder contains...</th></tr>
+      <tr><td>DOOM 3</td><td>a folder named <code>base</code> with files named <code>pak000.pk4</code> up to <code>pak008.pk4</code> inside it</td></tr>
+      <tr><td>Resurrection of Evil</td><td>the same folder as DOOM 3, which also has a <code>d3xp</code> folder (with <code>pak000.pk4</code> and <code>pak001.pk4</code>)</td></tr>
+      <tr><td>Quake 4</td><td>a folder named <code>q4base</code> and the file <code>Quake4.exe</code></td></tr>
+    </table>
+  </div>
+  <p class="muted">If the <code>base</code> folder holds files ending in <code>.resources</code> instead of <code>.pk4</code>, that is the BFG or Bethesda.net version. Look for the other DOOM 3 entry.</p>
+
+  <h3>Pick your case</h3>
+  <div class="tabs" data-switch role="tablist" aria-label="Install case">
+    <a href="#steam">🪟 Steam on Windows</a>
+    <a href="#gog">🪟 GOG on Windows</a>
+    <a href="#cd">💿 CD / DVD</a>
+    <a href="#linux">🐧 Steam on Linux</a>
+    <a href="#steamos">🎮 SteamOS / Steam Deck</a>
+    <a href="#quake4">⚡ Quake 4</a>
+    <a href="#lostmission">🛰️ The Lost Mission</a>
+  </div>
+  <p class="pick-hint" hidden>👆 Choose the one that matches your game to see its steps.</p>
+</section>
+
+<!-- ===================== STEAM / WINDOWS ===================== -->
+<div class="scenario" id="steam">
+  <h2>Steam on Windows</h2>
+  <ol class="steps">
+    <li><strong>Install the original DOOM 3.</strong> Open your Steam Library and install <strong>DOOM 3</strong> (not "BFG Edition", not "Bethesda.net Edition"). Buying DOOM 3 on Steam gives you the original game and Resurrection of Evil plus the BFG Edition; you want the original.</li>
+    <li><strong>Open the game folder.</strong> In the Library, right-click <strong>DOOM 3</strong> &gt; <strong>Manage</strong> &gt; <strong>Browse local files</strong>. A window opens, usually at <code>C:\Program Files (x86)\Steam\steamapps\common\Doom 3</code>. Check that it has the <code>base</code> folder with the <code>pak000.pk4</code>... files (see <a href="#before">above</a>). Leave this window open.</li>
+    <li><strong>Download DUDE for Windows</strong>: <a href="https://github.com/Inkub0/dude/releases/latest/download/dude-win64.zip">dude-win64.zip</a> (<span data-size="dude-win64.zip">85 MB</span>).</li>
+    <li><strong>Unzip it.</strong> In your Downloads folder, right-click the file &gt; <strong>Extract All...</strong> &gt; <strong>Extract</strong>. You get a folder named <code>dude-<span data-latest="version">0.9.8</span>-win64</code>.</li>
+    <li><strong>Copy what is <em>inside</em> it into the game folder.</strong> Open <code>dude-<span data-latest="version">0.9.8</span>-win64</code>, press <kbd>Ctrl</kbd>+<kbd>A</kbd> to select everything, <kbd>Ctrl</kbd>+<kbd>C</kbd> to copy, then click in the Doom 3 window from step 2 and press <kbd>Ctrl</kbd>+<kbd>V</kbd>. If Windows asks about folders that already exist (<code>base</code>, <code>d3xp</code>), answer <strong>Yes</strong>. If it asks to replace files (only happens when updating DUDE), choose <strong>Replace</strong>.</li>
+    <li><strong>Make Steam's Play button start DUDE.</strong> Steam needs the full path to <code>dude.exe</code>, which depends on where your game is installed. Click the address bar at the top of the folder window from step 2, copy it (<kbd>Ctrl</kbd>+<kbd>C</kbd>) and paste it in the box below:
+      <div class="lo-builder" data-exe="dude.exe">
+        <label for="lo-doom3">Your Doom 3 folder:</label>
+        <input id="lo-doom3" type="text" spellcheck="false" autocomplete="off" placeholder="C:\Program Files (x86)\Steam\steamapps\common\Doom 3">
+        <code class="cmdline">"C:\Program Files (x86)\Steam\steamapps\common\Doom 3\dude.exe" %command%</code>
+      </div>
+      Copy the line under the box. Then in the Library, right-click <strong>DOOM 3</strong> &gt; <strong>Properties</strong> &gt; <strong>General</strong> and paste it into <strong>Launch Options</strong>. (Writing it by hand: the folder path followed by <code>\dude.exe</code>, all in quotes, then a space and <code>%command%</code>.)</li>
+    <li><strong>Play.</strong> Press <strong>Play</strong> on DOOM 3 in Steam as usual: DUDE starts, with the Steam overlay and your play time. To play the original <code>Doom3.exe</code> again, empty the Launch Options box. You can also start DUDE without Steam by double-clicking <code>dude.exe</code>.</li>
+  </ol>
+  <div class="note">
+    <p><strong>"Windows protected your PC"?</strong> DUDE is not signed with a paid certificate, so Windows SmartScreen may warn the first time. Click <strong>More info</strong> &gt; <strong>Run anyway</strong>. Only do this for files you downloaded from this site or the official <a href="https://github.com/Inkub0/dude/releases">GitHub releases</a>.</p>
+  </div>
+  <p>Next: <a href="#first-launch">first launch and settings</a>.</p>
+</div>
+
+<!-- ===================== GOG / WINDOWS ===================== -->
+<div class="scenario" id="gog">
+  <h2>GOG on Windows</h2>
+  <ol class="steps">
+    <li><strong>Install DOOM 3</strong> with GOG Galaxy or the offline installer from your GOG library.</li>
+    <li><strong>Open the game folder.</strong> In GOG Galaxy, open DOOM 3 &gt; click the settings icon next to <strong>Play</strong> &gt; <strong>Manage installation</strong> &gt; <strong>Show folder</strong>. With the offline installer, it is the folder you picked during setup (often <code>C:\GOG Games\DOOM 3</code>). Check that you see <code>base</code> with the <code>pak000.pk4</code>... files. If your GOG package also contains the BFG Edition, make sure you are in the folder of the original game.</li>
+    <li><strong>Download DUDE for Windows</strong>: <a href="https://github.com/Inkub0/dude/releases/latest/download/dude-win64.zip">dude-win64.zip</a>, and unzip it (right-click &gt; <strong>Extract All...</strong>).</li>
+    <li><strong>Copy everything inside</strong> the <code>dude-<span data-latest="version">0.9.8</span>-win64</code> folder into the DOOM 3 folder (<kbd>Ctrl</kbd>+<kbd>A</kbd>, <kbd>Ctrl</kbd>+<kbd>C</kbd>, then <kbd>Ctrl</kbd>+<kbd>V</kbd> in the game folder; answer <strong>Yes</strong> to merging folders).</li>
+    <li><strong>Play:</strong> double-click <code>dude.exe</code>. To start it from GOG Galaxy, use <strong>Add game</strong> &gt; <strong>Manually add game</strong> and point it at <code>dude.exe</code>.</li>
+  </ol>
+  <p>Next: <a href="#first-launch">first launch and settings</a>.</p>
+</div>
+
+<!-- ===================== CD / DVD ===================== -->
+<div class="scenario" id="cd">
+  <h2>Original CD / DVD</h2>
+  <p>The boxed game works, but it must be updated to <strong>version 1.3.1</strong> first: the last official patch adds files DUDE needs (<code>pak005.pk4</code> to <code>pak008.pk4</code>, and the second Resurrection of Evil file).</p>
+  <h3>Windows</h3>
+  <ol class="steps">
+    <li><strong>Install DOOM 3</strong> (and Resurrection of Evil, if you have it) from the discs as usual. The default folder is <code>C:\Program Files (x86)\Doom 3</code> (or <code>C:\Program Files\Doom 3</code>).</li>
+    <li><strong>Install the official 1.3.1 patch</strong> for DOOM 3. It is no longer on id Software's site but is mirrored widely, for example among the <a href="https://www.moddb.com/games/doom-iii/downloads">DOOM 3 downloads on ModDB</a> (look for "1.3.1 patch").</li>
+    <li><strong>Check the folder:</strong> <code>base</code> should now hold <code>pak000.pk4</code> to <code>pak008.pk4</code>.</li>
+    <li>Continue from step 3 of <a href="#steam">Steam on Windows</a>: download DUDE, unzip it, copy everything inside into the Doom 3 folder, run <code>dude.exe</code>.</li>
+  </ol>
+  <h3>Linux</h3>
+  <p>Windows discs work on Linux; you only need their data files.</p>
+  <ol class="steps">
+    <li>Make a folder for the game, for example <code>~/Games/doom3</code>, with a <code>base</code> folder inside (and <code>d3xp</code> for Resurrection of Evil).</li>
+    <li>Copy <code>pak000.pk4</code> to <code>pak004.pk4</code> from the DOOM 3 discs into <code>base</code>, and <code>pak000.pk4</code> from the Resurrection of Evil disc into <code>d3xp</code>.</li>
+    <li>Get the remaining files from the 1.3.1 Linux patch <code>doom3-linux-1.3.1.1304.x86.run</code> (see the <a href="https://github.com/dhewm/dhewm3/wiki/FAQ">dhewm3 FAQ</a> for a download link). Put it in your game folder, open a terminal there and run:<br>
+      <code>sh doom3-linux-1.3.1.1304.x86.run --tar xvf --wildcards base/pak* d3xp/pak*</code></li>
+    <li>Continue with <a href="#linux">Steam on Linux</a> from step 3, using this folder.</li>
+  </ol>
+</div>
+
+<!-- ===================== LINUX ===================== -->
+<div class="scenario" id="linux">
+  <h2>Steam on Linux</h2>
+  <ol class="steps">
+    <li><strong>Let Steam install a Windows game.</strong> DOOM 3 is sold as a Windows game, so Steam may hide the Install button. Open <strong>Steam</strong> &gt; <strong>Settings</strong> &gt; <strong>Compatibility</strong> and turn on <strong>Enable Steam Play for all other titles</strong>. Then install <strong>DOOM 3</strong> (the original, not BFG).</li>
+    <li><strong>Open the game folder:</strong> right-click <strong>DOOM 3</strong> &gt; <strong>Manage</strong> &gt; <strong>Browse local files</strong>. It is usually <code>~/.local/share/Steam/steamapps/common/Doom 3</code>. Check for <code>base</code> with the <code>pak000.pk4</code>... files.</li>
+    <li><strong>Download DUDE for Linux</strong>: <a href="https://github.com/Inkub0/dude/releases/latest/download/dude-linux-x86_64.tar.gz">dude-linux-x86_64.tar.gz</a> (<span data-size="dude-linux-x86_64.tar.gz">75 MB</span>), then right-click it &gt; <strong>Extract here</strong>.</li>
+    <li><strong>Copy everything inside</strong> the <code>dude-<span data-latest="version">0.9.8</span>-linux-x86_64</code> folder into the Doom 3 folder, merging the <code>base</code>, <code>d3xp</code> and <code>d3le</code> folders.</li>
+    <li><strong>Make Steam's Play button start DUDE.</strong> Right-click <strong>DOOM 3</strong> &gt; <strong>Properties</strong> &gt; <strong>General</strong>, and paste this line into <strong>Launch Options</strong>:
+      <code class="cmdline">env -u LD_LIBRARY_PATH ./dude # %command%</code>
+      Steam starts the game from inside its own folder, so <code>./dude</code> finds DUDE wherever the game is installed, on any drive or Steam library. The <code>#</code> tells Steam to skip its usual Windows start-up, so the Linux version of DUDE runs directly, and <code>env -u LD_LIBRARY_PATH</code> makes it use your system's libraries instead of Steam's older copies.</li>
+    <li><strong>Play:</strong> press <strong>Play</strong> on DOOM 3 in Steam. Empty the Launch Options box to get the original game back. Without Steam, double-click <code>dude</code>, or type <code>./dude</code> in a terminal in the Doom 3 folder.</li>
+  </ol>
+  <div class="note">
+    <p>DUDE uses SDL2 and OpenAL from your system; nearly every desktop distribution has them already. If nothing happens, install them (Debian/Ubuntu: <code>sudo apt install libsdl2-2.0-0 libopenal1</code>; Arch: <code>sudo pacman -S sdl2 openal</code>; Fedora: <code>sudo dnf install SDL2 openal-soft</code>) and start <code>./dude</code> from a terminal to see any error.</p>
+  </div>
+</div>
+
+<!-- ===================== STEAMOS ===================== -->
+<div class="scenario" id="steamos">
+  <h2>SteamOS / Steam Deck</h2>
+  <p>On SteamOS you use the <strong>Linux</strong> version of DUDE, inside the DOOM 3 that Steam installs for you. You need Desktop Mode once, to copy the files; after that you play from Game Mode as usual.</p>
+  <ol class="steps">
+    <li><strong>Install DOOM 3</strong> from your Library in Game Mode (the original DOOM 3, not BFG Edition). Steam Deck installs Windows games without any extra setting.</li>
+    <li><strong>Switch to Desktop Mode:</strong> press the <strong>Steam</strong> button &gt; <strong>Power</strong> &gt; <strong>Switch to Desktop</strong>. A mouse and keyboard help but are not required: the right trackpad moves the pointer, <strong>R2</strong> clicks, and <strong>Steam</strong> + <strong>X</strong> opens the on-screen keyboard.</li>
+    <li><strong>Download DUDE for Linux</strong>: open a web browser (install Firefox from the <strong>Discover</strong> app if you have none) and get <a href="https://github.com/Inkub0/dude/releases/latest/download/dude-linux-x86_64.tar.gz">dude-linux-x86_64.tar.gz</a>. Or download it on another computer and copy it over with a USB stick.</li>
+    <li><strong>Extract it:</strong> open <strong>Dolphin</strong> (the file manager), go to <strong>Downloads</strong>, right-click the file &gt; <strong>Extract</strong> &gt; <strong>Extract archive here</strong>.</li>
+    <li><strong>Open the game folder:</strong> open Steam on the desktop, right-click <strong>DOOM 3</strong> &gt; <strong>Manage</strong> &gt; <strong>Browse local files</strong>. On internal storage it is <code>/home/deck/.local/share/Steam/steamapps/common/Doom 3</code>; on a microSD card it is under <code>/run/media/.../steamapps/common/Doom 3</code>.</li>
+    <li><strong>Copy everything inside</strong> the extracted <code>dude-<span data-latest="version">0.9.8</span>-linux-x86_64</code> folder into the Doom 3 folder (select all, copy, paste; when Dolphin asks about existing folders, choose <strong>Write Into</strong> / <strong>Apply to All</strong>).</li>
+    <li><strong>Make DOOM 3's Play button start DUDE.</strong> Still in desktop Steam (pasting is easier here than in Game Mode), right-click <strong>DOOM 3</strong> &gt; <strong>Properties</strong> &gt; <strong>General</strong>, and paste this line into <strong>Launch Options</strong>:
+      <code class="cmdline">env -u LD_LIBRARY_PATH ./dude # %command%</code>
+      Steam starts the game from inside its own folder, so this works on internal storage and on a microSD card alike. The <code>#</code> tells Steam to skip its usual Windows start-up, so the Linux version of DUDE runs directly, and <code>env -u LD_LIBRARY_PATH</code> makes it use your system's libraries instead of Steam's older copies.</li>
+    <li><strong>Back to Game Mode</strong> with the <strong>Return to Gaming Mode</strong> icon on the desktop, and press <strong>Play</strong> on DOOM 3. To play the original game again, empty the Launch Options box.</li>
+  </ol>
+  <div class="tip">
+    <p><strong>Recommended on Steam Deck:</strong> the <strong>Medium</strong> preset with ray tracing <strong>off</strong>, which keeps the Deck's 800p screen smooth. Ray tracing and path tracing are made for desktop graphics cards.</p>
+    <p><strong>Controls:</strong> the Deck's controls work as a standard pad. Open the settings menu (<kbd>F10</kbd>, or <strong>DUDE Settings</strong> in the main menu) &gt; <strong>Bindings</strong> &gt; <strong>Reset Gamepad Bindings to Xbox-style Defaults</strong>. Alternatively, choose Steam's "Keyboard (WASD) and Mouse" controller layout for DOOM 3.</p>
+  </div>
+  <div class="note">
+    <p>A Steam update or "Verify integrity of game files" does not remove DUDE: it only checks the game's own files.</p>
+  </div>
+</div>
+
+<!-- ===================== QUAKE 4 ===================== -->
+<div class="scenario" id="quake4">
+  <h2>Quake 4</h2>
+  <p>Same idea, two downloads: DUDE itself, and the small <strong>Quake 4 add-on</strong> (the Quake 4 game code, which comes under Raven's own licence and is distributed separately). Both go into your Quake 4 folder.</p>
+  <ol class="steps">
+    <li><strong>Install the full Quake 4</strong> from Steam, GOG or the discs (discs: update to the last official patch, 1.4.2). The demo version is not supported. On Linux, turn on Steam Play first as described in <a href="#linux">Steam on Linux</a>.</li>
+    <li><strong>Open the Quake 4 folder</strong> (Steam: right-click <strong>Quake 4</strong> &gt; <strong>Manage</strong> &gt; <strong>Browse local files</strong>). It contains <code>q4base</code> and <code>Quake4.exe</code>.</li>
+    <li><strong>Download both files for your system</strong> and extract them:
+      <ul>
+        <li>Windows: <a href="https://github.com/Inkub0/dude/releases/latest/download/dude-win64.zip">dude-win64.zip</a> + <a href="https://github.com/Inkub0/dude/releases/latest/download/dude-q4-win64.zip">dude-q4-win64.zip</a></li>
+        <li>Linux / SteamOS: <a href="https://github.com/Inkub0/dude/releases/latest/download/dude-linux-x86_64.tar.gz">dude-linux-x86_64.tar.gz</a> + <a href="https://github.com/Inkub0/dude/releases/latest/download/dude-q4-linux-x86_64.tar.gz">dude-q4-linux-x86_64.tar.gz</a></li>
+      </ul>
+    </li>
+    <li><strong>Copy the contents of both extracted folders</strong> into the Quake 4 folder, so that <code>dude.exe</code> (or <code>dude</code>) sits right next to <code>Quake4.exe</code>, not in a subfolder.</li>
+    <li><strong>Make Steam's Play button start DUDE</strong>, exactly as for DOOM 3 but with the Quake 4 folder: right-click <strong>Quake 4</strong> &gt; <strong>Properties</strong> &gt; <strong>General</strong> &gt; <strong>Launch Options</strong>.
+      <ul>
+        <li>Windows: paste the address of your Quake 4 folder (from step 2) here and use the line under the box:
+          <div class="lo-builder" data-exe="dude.exe">
+        <label for="lo-quake4">Your Quake 4 folder:</label>
+        <input id="lo-quake4" type="text" spellcheck="false" autocomplete="off" placeholder="C:\Program Files (x86)\Steam\steamapps\common\Quake 4">
+        <code class="cmdline">"C:\Program Files (x86)\Steam\steamapps\common\Quake 4\dude.exe" %command%</code>
+      </div></li>
+        <li>Linux / SteamOS: <code class="cmdline">env -u LD_LIBRARY_PATH ./dude # %command%</code></li>
+      </ul></li>
+    <li><strong>Play:</strong> press <strong>Play</strong> on Quake 4 in Steam, or start <code>dude.exe</code> / <code>dude</code> from the Quake 4 folder. DUDE sees Quake 4's files and runs Quake 4.</li>
+  </ol>
+  <div class="warn">
+    <p><strong>Never copy Quake 4's files into DOOM 3's folder</strong> (or the other way round). Quake 4 and DOOM 3 use the same file names, so mixing them would overwrite DOOM 3's own files. Keep one copy of DUDE in each game's folder instead; DUDE stops with a message if it finds both games in one place.</p>
+  </div>
+  <p class="muted">Forgot the add-on? DUDE tells you which file is missing and has a button that opens the download page. Multiplayer is not supported yet.</p>
+</div>
+
+<!-- ===================== LOST MISSION ===================== -->
+<div class="scenario" id="lostmission">
+  <h2>The Lost Mission</h2>
+  <p><em>The Lost Mission</em> was made for the BFG Edition; the community ported it back to the original DOOM 3 engine, and DUDE runs that port.</p>
+  <ol class="steps">
+    <li>Install DUDE into your DOOM 3 folder as described above (DUDE already includes The Lost Mission's game code).</li>
+    <li>Download the community <strong>Lost Mission</strong> port from <a href="https://www.moddb.com/games/doom-iii/mods?kw=lost+mission">ModDB</a> and extract its <code>d3le</code> folder into the DOOM 3 folder, next to <code>base</code>.</li>
+    <li>Start DUDE and choose <strong>Mods</strong> &gt; <strong>The Lost Mission</strong> in the main menu.</li>
+  </ol>
+</div>
+
+<!-- ===================== FIRST LAUNCH ===================== -->
+<section id="first-launch">
+  <h2>First launch</h2>
+  <p>DUDE starts with the classic renderer, so the first screen looks just like the original game. To turn on the new graphics:</p>
+  <ol class="steps">
+    <li><strong>Pick a renderer.</strong> In the main menu open <strong>Settings</strong> &gt; <strong>System</strong> and set <strong>Renderer</strong> to <strong>OpenGL 3</strong> (works on almost every PC) or <strong>Vulkan</strong> (faster on modern cards, needed for ray tracing), then apply.</li>
+    <li><strong>Pick a Quality preset</strong> on the same page: Potato (the original look), Low, Medium, High, Ultra or Nightmare. Start at <strong>High</strong> on a recent gaming PC, <strong>Medium</strong> on a laptop or Steam Deck.</li>
+    <li><strong>Ray Tracing</strong> appears on that page with Vulkan on a card that supports it (GeForce RTX, Radeon RX 6000 or newer, Intel Arc). <strong>On</strong> adds traced shadows, reflections and bounce light; the highest setting is full path tracing, for powerful cards.</li>
+    <li>Everything else, from controls to individual effects, is in the full settings menu: press <kbd>F10</kbd> at any time, or use <strong>DUDE Settings</strong> in the main menu.</li>
+  </ol>
+  <p>Resurrection of Evil: choose <strong>Mods</strong> &gt; <strong>Resurrection of Evil</strong> in the main menu.</p>
+</section>
+
+<section id="update">
+  <h2>Updating and uninstalling</h2>
+  <p><strong>Update:</strong> download the new version and copy it over the old one in the same way, choosing <strong>Replace</strong> when asked. Your settings and saves are kept.</p>
+  <p><strong>Uninstall:</strong> delete what DUDE added to the game folder: <code>dude.exe</code>/<code>dude</code>, <code>base.dll</code>, <code>d3xp.dll</code>, <code>d3le.dll</code>, <code>q4base.dll</code> (or the <code>.so</code> files on Linux), the other <code>.dll</code> files from the archive, <code>base/zz_dude_menu.pk4</code> and <code>d3xp/zz_dude_roe_menu.pk4</code>. The original game keeps working either way: <code>Doom3.exe</code> ignores DUDE's files.</p>
+  <p>Your DUDE settings and saves live in their own folder: <code>Documents\My Games\dude</code> on Windows, <code>~/.local/share/dude</code> on Linux and SteamOS.</p>
+  <p class="muted">Stuck? See the <a href="faq.html">FAQ</a> or <a href="https://github.com/Inkub0/dude/issues">ask on GitHub</a>.</p>
+</section>
+
+</main>
+
+<footer>
+  <div class="inner">
+    <p>DUDE is free software under the GNU GPLv3, a fork of <a href="https://github.com/dhewm/dhewm3">dhewm3</a>, itself based on id Software's DOOM 3 GPL source release. No game data is included: bring your own copy of the game.</p>
+    <p>DOOM, Quake and Quake 4 are trademarks of their owners (id Software / ZeniMax Media). DUDE is an independent, non-commercial project, not affiliated with, endorsed or sponsored by id Software, ZeniMax Media, Microsoft, Raven Software or Activision.</p>
+  </div>
+</footer>
+
+<script src="assets/js/site.js"></script>
+</body>
+</html>

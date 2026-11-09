@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DUDE FAQ</title>
+<meta name="description" content="Answers to common DUDE questions: which versions of DOOM 3 work, hardware for ray tracing, Vulkan problems, saves, controllers, mods and uninstalling.">
+<meta property="og:title" content="DUDE FAQ">
+<meta property="og:image" content="https://inkub0.github.io/dude/assets/img/og.jpg">
+<meta name="theme-color" content="#0d0907">
+<link rel="icon" href="assets/img/favicon.png" type="image/png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Oxanium:wght@500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/css/style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="inner">
+    <a class="brand" href="index.html"><img src="assets/img/logo.png" alt="DUDE" width="72" height="28"></a>
+    <nav aria-label="Main">
+      <a href="index.html">Home</a>
+      <a href="features.html">Features</a>
+      <a href="install.html">Install</a>
+      <a href="downloads.html">Downloads</a>
+      <a href="faq.html" aria-current="page">FAQ</a>
+      <a href="https://github.com/Inkub0/dude">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<div class="banner small banner-betruger" style="background-image:url('assets/img/shots/6.jpg')">
+  <h1>FAQ</h1>
+  <p>Common questions, short answers.</p>
+</div>
+
+<main>
+
+<section id="general">
+  <h2>The basics</h2>
+  <details open>
+    <summary>Is DUDE free? Do I still need to buy the game?</summary>
+    <p>DUDE is free and open source. It is only the engine, the program that runs the game, so you need your own copy of DOOM 3 and/or Quake 4 for the maps, sounds and textures.</p>
+  </details>
+  <details>
+    <summary>Which versions of DOOM 3 work?</summary>
+    <p>The original 2004 DOOM 3 and Resurrection of Evil, patched to 1.3.1: the Steam and GOG versions (already patched) or the CD/DVD (apply the 1.3.1 patch). <strong>DOOM 3: BFG Edition</strong> and the <strong>Bethesda.net Edition</strong> don't work, because they store the game in a different format; but buying DOOM 3 on Steam or GOG includes the original version too. See <a href="install.html#before">how to recognise the right folder</a>.</p>
+  </details>
+  <details>
+    <summary>Does it change the game? Will my original game still work?</summary>
+    <p>The gameplay is unchanged, and the lowest preset (Potato) is the original rendering. DUDE only adds files to your game folder; <code>Doom3.exe</code> / <code>Quake4.exe</code> keep working exactly as before.</p>
+  </details>
+  <details>
+    <summary>Is there a macOS version?</summary>
+    <p>Not at the moment: DUDE is built for 64-bit Windows and Linux (including SteamOS).</p>
+  </details>
+  <details>
+    <summary>Can I play multiplayer?</summary>
+    <p>DUDE focuses on single player. Quake 4 multiplayer is not supported yet. For DOOM 3, the old network code is not considered safe on the internet: play only on a LAN with people you trust.</p>
+  </details>
+</section>
+
+<section id="hardware">
+  <h2>Hardware and graphics</h2>
+  <details open>
+    <summary>What PC do I need?</summary>
+    <p>A 64-bit Windows 10/11 or Linux PC (or a Steam Deck) and a graphics card with OpenGL 3.3 covers the classic and OpenGL 3 renderers: practically any card from the last fifteen years.</p>
+    <p>The <strong>Vulkan</strong> renderer needs a graphics driver that supports <strong>Vulkan 1.4</strong>. Most cards from recent years get it with an up-to-date driver; older cards may stop at Vulkan 1.3 or below, and then the OpenGL 3 renderer is the one to use.</p>
+    <p><strong>Ray tracing</strong> needs ray-tracing hardware: NVIDIA GeForce RTX (20 series and newer), AMD Radeon RX 6000 and newer, or Intel Arc. <strong>Path Tracing</strong> is demanding; it is meant for upper mid-range and high-end cards, ideally with FSR 2 upscaling on.</p>
+  </details>
+  <details>
+    <summary>Which renderer and preset should I choose?</summary>
+    <p>Try <strong>Vulkan</strong> with the <strong>High</strong> preset first. If Vulkan doesn't start or you see problems, use <strong>OpenGL 3</strong>. On older or low-power hardware, <strong>Medium</strong> or <strong>Low</strong>. Want the 2004 experience? <strong>Potato</strong>.</p>
+  </details>
+  <details>
+    <summary>The Vulkan renderer won't start.</summary>
+    <p>Update or reinstall your graphics driver: the Vulkan support comes with it. On Windows, download the driver from NVIDIA, AMD or Intel directly rather than relying on Windows Update. The OpenGL renderers are not affected, so you can keep playing with OpenGL 3 meanwhile.</p>
+  </details>
+  <details>
+    <summary>My frame rate dropped a lot.</summary>
+    <p>Lower the preset one step, or turn Ray Tracing down from Path Tracing to On or Off. On Vulkan, FSR 2 upscaling (in the <kbd>F10</kbd> settings menu) renders fewer pixels and scales the image up, which gives a large boost at high resolutions. On laptops, make sure the game runs on the dedicated graphics card and the charger is plugged in.</p>
+  </details>
+  <details>
+    <summary>Ray Tracing doesn't appear in the menu.</summary>
+    <p>It shows only with the <strong>Vulkan</strong> renderer on a card with ray-tracing hardware. Switch the renderer to Vulkan first, and update your driver.</p>
+  </details>
+</section>
+
+<section id="using">
+  <h2>Using DUDE</h2>
+  <details>
+    <summary>Where are my settings and savegames?</summary>
+    <p>In DUDE's own folder, separate from the game: <code>Documents\My Games\dude</code> on Windows, <code>~/.local/share/dude</code> on Linux and SteamOS. Back up that folder to keep your saves.</p>
+  </details>
+  <details>
+    <summary>Can I continue my old savegames?</summary>
+    <p>Yes. DUDE loads saves from the retail DOOM 3, from dhewm3 and from every earlier DUDE release. Copy your old save files into DUDE's <code>savegames</code> folder (inside the folder above, under <code>base</code> for DOOM 3).</p>
+  </details>
+  <details>
+    <summary>Does my controller work?</summary>
+    <p>Yes, any controller your system recognises. A new install starts without pad bindings: open the settings menu (<kbd>F10</kbd> or <strong>DUDE Settings</strong> in the main menu) &gt; <strong>Bindings</strong> &gt; <strong>Reset Gamepad Bindings to Xbox-style Defaults</strong>.</p>
+  </details>
+  <details>
+    <summary>Do mods work?</summary>
+    <p>Mods made for dhewm3 1.5.5 work, including many with their own game code and shaders. Install a mod into its own folder next to <code>base</code> as its instructions say, then pick it from the <strong>Mods</strong> menu.</p>
+  </details>
+  <details>
+    <summary>How do I start Resurrection of Evil or The Lost Mission?</summary>
+    <p>From the <strong>Mods</strong> entry in DUDE's main menu. The Lost Mission needs the community port installed first: see <a href="install.html#lostmission">the install guide</a>.</p>
+  </details>
+  <details>
+    <summary>What are the "baked shading packs"? Do I need them?</summary>
+    <p>Optional files that add soft shading to the creases of characters, weapons and props. Nice to have, not needed. <a href="downloads.html#ao">Details on the downloads page.</a></p>
+  </details>
+  <details>
+    <summary>Windows says "Windows protected your PC".</summary>
+    <p>DUDE is not signed with a paid certificate, so SmartScreen warns about it. Click <strong>More info</strong> &gt; <strong>Run anyway</strong>, but only for files from this site or the official <a href="https://github.com/Inkub0/dude/releases">GitHub releases</a>.</p>
+  </details>
+  <details>
+    <summary>How do I uninstall it?</summary>
+    <p>Delete the files DUDE added to the game folder; the list is in <a href="install.html#update">the install guide</a>. Delete DUDE's settings folder too if you don't want to keep your saves.</p>
+  </details>
+</section>
+
+<section id="help">
+  <h2>Still stuck?</h2>
+  <p>Open an issue on <a href="https://github.com/Inkub0/dude/issues">GitHub</a> or leave a comment on <a href="https://www.moddb.com/mods/dude">ModDB</a>. Say which game, which version of DUDE, Windows or Linux, and your graphics card. If the game started, the log file <code>dudelog.txt</code> in DUDE's settings folder helps a lot.</p>
+</section>
+
+</main>
+
+<footer>
+  <div class="inner">
+    <p>DUDE is free software under the GNU GPLv3, a fork of <a href="https://github.com/dhewm/dhewm3">dhewm3</a>, itself based on id Software's DOOM 3 GPL source release. No game data is included: bring your own copy of the game.</p>
+    <p>DOOM, Quake and Quake 4 are trademarks of their owners (id Software / ZeniMax Media). DUDE is an independent, non-commercial project, not affiliated with, endorsed or sponsored by id Software, ZeniMax Media, Microsoft, Raven Software or Activision.</p>
+  </div>
+</footer>
+
+</body>
+</html>
