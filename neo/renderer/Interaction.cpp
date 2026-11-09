@@ -1058,9 +1058,6 @@ static bool R_InteractionIndexCache( srfTriangles_t *tri ) {
 	if ( !r_useIndexBuffers.GetBool() ) {
 		return false;
 	}
-	if ( !r_indexCacheChurnFix.GetBool() ) {
-		return true;
-	}
 	const int frame = tr.frameCount + 1;		// + 1: 0 means "not drawn yet"
 	if ( tri->firstDrawnFrame == 0 ) {
 		tri->firstDrawnFrame = frame;

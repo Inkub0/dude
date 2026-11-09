@@ -1216,7 +1216,7 @@ void idMD5Mesh::UpdateSurface( const struct renderEntity_s *ent, const idJointMa
 			// R_FreeEntityDefDerivedData), and the pointer check keeps any other indexes out.
 			srfTriangles_t *reused = surf->geometry;
 			struct vertCache_s *keptIndexCache = NULL;
-			if ( r_indexCacheChurnFix.GetBool() && reused->indexes == deformInfo->indexes ) {
+			if ( reused->indexes == deformInfo->indexes ) {
 				keptIndexCache = reused->indexCache;
 				reused->indexCache = NULL;
 			}
