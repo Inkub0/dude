@@ -94,6 +94,10 @@ idCVar r_useCachedDynamicModels( "r_useCachedDynamicModels", "1", CVAR_RENDERER 
 
 idCVar r_useVertexBuffers( "r_useVertexBuffers", "1", CVAR_RENDERER | CVAR_INTEGER, "use ARB_vertex_buffer_object for vertexes", 0, 1, idCmdSystem::ArgCompletion_Integer<0,1>  );
 idCVar r_useIndexBuffers( "r_useIndexBuffers", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "use ARB_vertex_buffer_object for indexes", 0, 1, idCmdSystem::ArgCompletion_Integer<0,1>  );
+// DUDE (perf/index-buffer-churn, TEMPORARY A/B - removed once measured): 1 = an animated model's per-frame light / shadow
+// surfaces stream their indexes until drawn in a second frame and its meshes keep their index caches across re-skins;
+// 0 = stock: a static index cache (on Vulkan a buffer) per such surface per frame
+idCVar r_indexCacheChurnFix( "r_indexCacheChurnFix", "1", CVAR_RENDERER | CVAR_BOOL, "1 = no per-frame static index caches for animated models' surfaces (stock 0); temporary A/B" );
 
 idCVar r_useStateCaching( "r_useStateCaching", "1", CVAR_RENDERER | CVAR_BOOL, "avoid redundant state changes in GL_*() calls" );
 idCVar r_useInfiniteFarZ( "r_useInfiniteFarZ", "1", CVAR_RENDERER | CVAR_BOOL, "use the no-far-clip-plane trick" );

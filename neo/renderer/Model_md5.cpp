@@ -1209,7 +1209,19 @@ void idMD5Mesh::UpdateSurface( const struct renderEntity_s *ent, const idJointMa
 		// if the number of verts and indexes are the same we can re-use the triangle surface
 		// the number of indexes must be the same to assure the correct amount of memory is allocated for the facePlanes
 		if ( surf->geometry->numVerts == deformInfo->numOutputVerts && surf->geometry->numIndexes == deformInfo->numIndexes ) {
-			R_FreeStaticTriSurfVertexCaches( surf->geometry );
+			// DUDE: keep the index cache. The triangles are this mesh's (deformInfo->indexes, set below on every re-skin
+			// and never changed), so stock freed and re-uploaded the same indexes on every re-skin - on Vulkan an index
+			// buffer created and destroyed per animated surface per frame. The cache's user pointer (&indexCache) stays
+			// valid: the surface is reused. A snapshot never outlives its model's deformInfo (a model change deletes it,
+			// R_FreeEntityDefDerivedData), and the pointer check keeps any other indexes out.
+			srfTriangles_t *reused = surf->geometry;
+			struct vertCache_s *keptIndexCache = NULL;
+			if ( r_indexCacheChurnFix.GetBool() && reused->indexes == deformInfo->indexes ) {
+				keptIndexCache = reused->indexCache;
+				reused->indexCache = NULL;
+			}
+			R_FreeStaticTriSurfVertexCaches( reused );
+			reused->indexCache = keptIndexCache;
 		} else {
 			R_FreeStaticTriSurf( surf->geometry );
 			surf->geometry = R_AllocStaticTriSurf();
