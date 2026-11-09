@@ -127,6 +127,13 @@ void AssertFailed( const char *file, int line, const char *expression );
 #undef assert
 // DG: change assert to use ?: so I can use it in _alloca()/_alloca16() (MSVC didn't like if() in there)
 #define assert( X )			(X) ? 1 : (AssertFailed( __FILE__, __LINE__, #X ), 0)
+#elif defined( ID_ASSERT_CONTINUE )
+// DUDE: release builds (RelWithDebInfo). The retail games shipped with their asserts compiled
+// out, so one that their own data trips must not end the game: log it once per site to
+// dudelog.txt and carry on, so a field report still names the check that failed.
+void AssertFailedContinue( const char *file, int line, const char *expression );
+#undef assert
+#define assert( X )			(X) ? 1 : (AssertFailedContinue( __FILE__, __LINE__, #X ), 0)
 #endif
 
 class idException {

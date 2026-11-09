@@ -328,6 +328,7 @@ void Sys_DebugVPrintf( const char *fmt, va_list arg ) {
 	msg[ sizeof(msg)-1 ] = '\0';
 
 	printf("%s", msg);
+	fflush( stdout );	// DUDE: on disk even if the game dies next (e.g. after a logged assert)
 
 	OutputDebugString( msg );
 }

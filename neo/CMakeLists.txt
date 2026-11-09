@@ -697,6 +697,11 @@ else()
 endif()
 
 set(CMAKE_CXX_FLAGS_DEBUG ${CMAKE_C_FLAGS_DEBUG})
+# DUDE: the shipped builds are RelWithDebInfo. id's and Raven's asserts log once and carry on
+# there (idlib/Lib.h, ID_ASSERT_CONTINUE) - the retail games shipped with them compiled out, so
+# one their data trips must not end the game; NDEBUG compiles out the C runtime assert the
+# bundled libraries (ImGui, VMA, NRD, stb, miniz) use, which would abort.
+set(CMAKE_C_FLAGS_RELWITHDEBINFO "-DNDEBUG -DID_ASSERT_CONTINUE ${CMAKE_C_FLAGS_RELWITHDEBINFO}")
 set(CMAKE_CXX_FLAGS_RELWITHDEBINFO ${CMAKE_C_FLAGS_RELWITHDEBINFO})
 # disable assertions in release builds
 set(CMAKE_CXX_FLAGS_RELEASE "-DNDEBUG ${CMAKE_C_FLAGS_RELEASE}")
