@@ -4501,6 +4501,51 @@ bool idWindow::HasCstAnchors( void ) {
 
 /*
 ================
+idWindow::GetCstAnchors, SetCstAnchors
+================
+*/
+void idWindow::GetCstAnchors( idList<cstAnchorState_t> &out ) {
+	cstAnchorState_t s;
+	s.anchor = cstAnchor;
+	s.anchorTo = cstAnchorTo;
+	s.factor = cstAnchorFactor;
+	out.Append( s );
+	for ( int i = 0; i < drawWindows.Num(); i++ ) {
+		idSimpleWindow *simp = drawWindows[i].simp;
+		if ( simp != NULL ) {
+			s.anchor = simp->cstAnchor;
+			s.anchorTo = simp->cstAnchorTo;
+			s.factor = simp->cstAnchorFactor;
+			out.Append( s );
+		} else if ( drawWindows[i].win != NULL ) {
+			drawWindows[i].win->GetCstAnchors( out );
+		}
+	}
+}
+
+void idWindow::SetCstAnchors( const idList<cstAnchorState_t> &in, int &index ) {
+	if ( index >= in.Num() ) {
+		return;
+	}
+	cstAnchor = in[index].anchor;
+	cstAnchorTo = in[index].anchorTo;
+	cstAnchorFactor = in[index].factor;
+	index++;
+	for ( int i = 0; i < drawWindows.Num() && index < in.Num(); i++ ) {
+		idSimpleWindow *simp = drawWindows[i].simp;
+		if ( simp != NULL ) {
+			simp->cstAnchor = in[index].anchor;
+			simp->cstAnchorTo = in[index].anchorTo;
+			simp->cstAnchorFactor = in[index].factor;
+			index++;
+		} else if ( drawWindows[i].win != NULL ) {
+			drawWindows[i].win->SetCstAnchors( in, index );
+		}
+	}
+}
+
+/*
+================
 idWindow::SetChildCstAnchor
 ================
 */
