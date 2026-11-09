@@ -66,6 +66,14 @@ typedef struct gameTitleProfile_s {
 	const char *	gameLibraryProject;	// project page; release pages at <project>/releases/tag/v<version>
 	const char *	gameLibraryArchive;	// release archive stem: <stem>-<version>-<platform>
 	const char *	gameLibraryTerms;	// what the player must know before using it: whose code, which licence
+
+	// The player runs by default and the run button walks, in single player too (Quake 4: its
+	// in_alwaysRun defaulted to 1 and worked in SP; Doom 3 walks by default, always-run MP only)
+	bool			runByDefault;
+
+	// The retail game's r_brightness default (Doom 3 1, Quake 4 1.2): the starting point of the
+	// LDR brightness (an HDR tonemap curve replaces r_brightness / r_gamma when it is on)
+	float			defaultBrightness;
 } gameTitleProfile_t;
 
 // Stem of the null game library (nullgame.so / nullgame.dll): a spectator-only idGame

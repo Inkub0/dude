@@ -1509,6 +1509,21 @@ void idCommonLocal::CheckConfigSchema( void ) {
 
 	const int from = dude_cfgSchema.GetInteger();
 
+	// 4 -> 5 (every path, a fresh config too): Quake 4 runs by default and the run button walks, as
+	// the retail game did (its in_alwaysRun defaulted to 1 and worked in single player). DUDE's
+	// in_alwaysRun defaults to 0 for Doom 3, so every Quake 4 config so far holds a 0 the player
+	// never chose (no menu option, and no effect in single player until now): move it, once.
+	if ( from < 5 && GameTitle::Get().runByDefault && !cvarSystem->GetCVarBool( "in_alwaysRun" ) ) {
+		cvarSystem->SetCVarBool( "in_alwaysRun", true );
+	}
+	// 5 -> 6 (every path): the title's retail brightness - Quake 4 shipped r_brightness 1.2, DUDE's
+	// registered default is Doom 3's 1, which every Quake 4 config so far holds. Move a config
+	// still on 1, once; a deliberate other value stays. (The full reset below keeps r_brightness.)
+	const float titleBrightness = GameTitle::Get().defaultBrightness;
+	if ( from < 6 && titleBrightness != 1.0f && cvarSystem->GetCVarFloat( "r_brightness" ) == 1.0f ) {
+		cvarSystem->SetCVarFloat( "r_brightness", titleBrightness );
+	}
+
 	if ( from >= 3 ) {
 		// 3 -> 4: 0.9.7 shipped r_rtReStirDIBoostHistory 4, ~1.9 ms per frame at Path Tracing for no visible gain once
 		// the 2026-10-28 gradient shadow-edge fix had stopped the shadow smear (docs/rtx-sigma-shadows.md, M1). The
