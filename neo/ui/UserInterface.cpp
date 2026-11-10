@@ -281,6 +281,7 @@ const idUserInterfaceManagerLocal::guiIcon_t *idUserInterfaceManagerLocal::FindI
 
 idUserInterfaceLocal::idUserInterfaceLocal() {
 	cursorX = cursorY = 0.0;
+	drawOffset.Zero();
 	desktop = NULL;
 	hudAnchors = 0;
 	loading = false;
@@ -715,7 +716,13 @@ void idUserInterfaceLocal::Redraw( int _time ) {
 		}
 
 		uiManagerLocal.dc.PushClipRect( uiManagerLocal.screenRect );
+		// DUDE: SetDrawOffset shifts everything this GUI draws, in final screen units (after the
+		// 4:3 fit and the anchors), so a GUI's layout code never sees it. Restored afterwards:
+		// the HUD and the crosshair GUI share the one device context
+		const idVec2 prevDrawOffset = uiManagerLocal.dc.GetDrawOffset();
+		uiManagerLocal.dc.SetDrawOffset( drawOffset );
 		desktop->Redraw( 0, 0 );
+		uiManagerLocal.dc.SetDrawOffset( prevDrawOffset );
 		uiManagerLocal.dc.PopClipRect();
 	}
 }

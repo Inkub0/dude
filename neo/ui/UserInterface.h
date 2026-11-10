@@ -134,6 +134,12 @@ public:
 								// the last index of text that fits windowName's width (wrapInfo: where, and
 								// the last whitespace before it); false when it all fits
 	virtual bool				GetMaxTextIndex( const char *windowName, const char *text, wrapInfo_t &wrapInfo ) const = 0;
+
+	// ---- DUDE (appended; a dhewm3 game library's vtable is unchanged) -----
+								// shift the whole GUI by x, y virtual-screen (640x480) units when it is next
+								// drawn, after any 4:3 fitting or anchoring: the third-person crosshair
+								// follows the aim point this way. Persists until set again; 0, 0 is the default
+	virtual void				SetDrawOffset( float x, float y ) = 0;
 };
 
 

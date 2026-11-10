@@ -101,6 +101,7 @@ public:
 	virtual void				SetStateVec4( const char *varName, const idVec4 &vector ) { state.SetVec4( varName, vector ); }
 	virtual void				ClearState( void ) { state.Clear(); }
 	virtual bool				GetMaxTextIndex( const char *windowName, const char *text, wrapInfo_t &wrapInfo ) const;
+	virtual void				SetDrawOffset( float x, float y ) { drawOffset.Set( x, y ); }
 
 private:
 	// DUDE: InitFromFile's parse; savegame state of another version of the GUI file (UserInterface.cpp)
@@ -139,6 +140,7 @@ private:
 	// DUDE: Quake 4
 	bool						initScriptsRun;		// onInit ran (first redraw, or restored from a save game)
 	idVec4						lightColor;			// setLightColor
+	idVec2						drawOffset;			// SetDrawOffset: applied by the device context while this GUI draws
 
 	// DG: used so we can notify GUI scripts about changes in side padding.
 	//  Relevant if they use cstAnchor, so they can know how big padding on the left/right
