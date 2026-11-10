@@ -196,7 +196,8 @@ This can be configured with the following CVars:
 
 ## Third-person view
 
-`pm_thirdPerson 1` (console, or bind a key to `toggle pm_thirdPerson`) plays Doom 3, its
+`pm_thirdPerson 1` (the F10 settings menu, Game Options > Camera, which also has the camera
+knobs below; or the console, or bind a key to `toggle pm_thirdPerson`) plays Doom 3, its
 expansions and Quake 4 from behind the player. Stock Doom 3 treated it as a developer camera:
 no HUD, a crosshair stuck at the screen centre (where the shots do not go, since the camera
 sits behind and above the eye) and a body that cast no shadow. DUDE makes it playable:

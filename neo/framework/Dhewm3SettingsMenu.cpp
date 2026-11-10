@@ -7091,6 +7091,14 @@ static CVarOption gameOptions[] = {
 	CVarOption( "in_toggleZoom", "Toggle Zoom", OT_BOOL ),
 	CVarOption( "ui_autoReload", "Auto Weapon Reload", OT_BOOL ),
 	CVarOption( "ui_autoSwitch", "Auto Weapon Switch", OT_BOOL ),
+	// DUDE: the playable third-person view (Configuration.md "Third-person view"): the HUD stays up,
+	// the crosshair follows the aim and the body is shadowed; the knobs frame the camera
+	CVarOption( "Camera" ),
+	CVarOption( "pm_thirdPerson", "Third-Person View (over the shoulder)", OT_BOOL ),
+	CVarOption( "pm_thirdPersonSide", "Shoulder Offset (0 = centred, negative = left shoulder)", OT_FLOAT, -64.0f, 64.0f ),
+	CVarOption( "pm_thirdPersonRange", "Camera Distance", OT_FLOAT, 32.0f, 200.0f ),
+	CVarOption( "pm_thirdPersonHeight", "Camera Height (above the eye)", OT_FLOAT, -32.0f, 64.0f ),
+	CVarOption( "pm_thirdPersonClip", "Keep the Camera Out of Walls", OT_BOOL ),
 	CVarOption( "Timing" ),
 	// DUDE: Doom 3's original 16 msec game tic; also on the main menu's Options > Game page
 	CVarOption( "com_classicTics", "Classic 62.5 Hz Game Tics (applies at the next map load)", OT_BOOL ),
