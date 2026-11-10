@@ -401,6 +401,15 @@ default, Ultra Nightmare only at most). Reflections were judged excellent withou
 on-screen reuse already carries real shadows wherever the reflected surface is on screen. Plan:
 [rtx-reflections.md](rtx-reflections.md), RR16.
 
+## Volumetric lighting on the raster tiers (shadow-map shafts)  **[planned 2026-11-10 - not scheduled]**
+
+User request (2026-11-10): volumetric lighting on at **every Ultra and Nightmare preset, regardless of RTX and Path
+Tracing**. Today the haze needs the ray-traced scene for its shadows, so with RTX off it would be unshadowed (cones
+through walls) on RT hardware and absent elsewhere. The user chose to build the raster version first: visibility from
+the shadow maps the light loop already renders, then make `r_volumetrics` a raster preset column (Ultra and Nightmare
+on, every RT mode). Phases R0 recon, R1 static spots, R2 moving spots + flashlight, R3 point lights, R4 presets + menu,
+R5 optional GL3. Plan: **[volumetric-raster-plan.md](volumetric-raster-plan.md)**.
+
 ---
 
 ## Fidelity backlog (no new assets)  **[proposed 2026-09-19 — nothing scheduled]**

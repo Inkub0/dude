@@ -284,6 +284,8 @@ at 4K is a problem, B0 starts with the shading and the look already settled.
 
 ## 6. Raster tiers (no RT) — deliberately later
 
+**Planned 2026-11-10 in detail: [volumetric-raster-plan.md](volumetric-raster-plan.md)** (to-do: [todo.md](todo.md)).
+
 Visibility from shadow maps instead of rays: the 2D spot maps are straightforward (one extra sampler
 array / atlas bind + the light's shadow matrix in the buffer row), the point-light **cube cache** is not
 (per-light cube slots, budgeted, staggered, some lights unmapped in a given frame → flickering shafts
