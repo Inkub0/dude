@@ -514,6 +514,7 @@ idRenderModelManagerLocal::BeginLevelLoad
 */
 void idRenderModelManagerLocal::BeginLevelLoad() {
 	insideLevelLoad = true;
+	R_MD5_BeginTessBakes();		// DUDE: queue the deform-once bakes for EndLevelLoad's parallel flush
 
 	for ( int i = 0 ; i < models.Num() ; i++ ) {
 		idRenderModel *model = models[i];
@@ -607,6 +608,9 @@ void idRenderModelManagerLocal::EndLevelLoad() {
 			}
 		}
 	}
+
+	// DUDE: every model is in - fill the queued deform-once bakes, all at once on worker threads
+	R_MD5_FlushTessBakes();
 
 	// DUDE (docs/benchmark.md): precache this level's baked occlusion maps now, while the image
 	// manager is still insideLevelLoad, so they load on the parallel loader in the globalImages
