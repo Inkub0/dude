@@ -33,11 +33,8 @@ If you have questions concerning this license or the applicable additional terms
 
 #include "renderer/Model_local.h"
 #include "framework/LoadTiming.h"		// DUDE: md5 load sub-split timers
-#include "framework/FileSystem.h"		// DUDE: FS_SetThreadReadSafe (parallel tess bake)
+#include "framework/ParallelFor.h"		// DUDE: the parallel tess bake's worker pool
 
-#include <thread>
-#include <atomic>
-#include <vector>
 
 // DUDE: the deferred, parallel deform-once bake (defined with R_MD5_FlushTessBakes below)
 static bool R_MD5_QueueTessBake( idMD5Mesh *mesh, idDrawVert *bindVerts, const idImage *heightImage );
@@ -1126,35 +1123,6 @@ static void R_MD5_UnqueueTessBake( idMD5Mesh *mesh ) {
 	}
 }
 
-// run work( index ) for index 0..count-1 on worker threads
-template< class workFunc_t >
-static int R_MD5_RunOnWorkers( int count, const workFunc_t &work ) {
-	int nThreads = (int)std::thread::hardware_concurrency();
-	if ( nThreads < 2 ) { nThreads = 2; }
-	if ( nThreads > 32 ) { nThreads = 32; }
-	if ( nThreads > count ) { nThreads = count; }
-	std::atomic<int> nextIndex( 0 );
-	std::vector<std::thread> pool;
-	pool.reserve( nThreads );
-	for ( int k = 0; k < nThreads; k++ ) {
-		pool.push_back( std::thread( [&]() {
-			Com_BeginThreadCapture();
-			for ( ;; ) {
-				const int idx = nextIndex.fetch_add( 1, std::memory_order_relaxed );
-				if ( idx >= count ) {
-					break;
-				}
-				work( idx );
-			}
-			Com_EndThreadCapture();
-		} ) );
-	}
-	for ( size_t k = 0; k < pool.size(); k++ ) {
-		pool[k].join();
-	}
-	return nThreads;
-}
-
 /*
 ====================
 R_MD5_FlushTessBakes
@@ -1189,33 +1157,26 @@ void R_MD5_FlushTessBakes( void ) {
 	idList<bool> filled;
 	filled.SetNum( numJobs );
 
-	// heap / filesystem become thread-safe only for this window (the parallel image and sound loaders' helpers)
-	Mem_SetThreadSafe( true );
-	FS_SetThreadReadSafe( true );
-
-	// phase 1: decode each height image once
 	int nThreads = 0;
-	if ( images.Num() > 0 ) {
-		nThreads = R_MD5_RunOnWorkers( images.Num(), [&]( int i ) {
-			R_TessHeightPixelsForImage( images[i], &pixels[i].pic, &pixels[i].w, &pixels[i].h );
-		} );
-	}
-	// phase 2: fill every mesh from the shared pixels (each job writes its own mesh's arrays only)
-	nThreads = Max( nThreads, R_MD5_RunOnWorkers( numJobs, [&]( int i ) {
-		const md5TessBakeJob_t &job = s_md5TessBakeJobs[i];
-		const decodedHeight_t *px = ( job.pixelsIndex >= 0 ) ? &pixels[job.pixelsIndex] : NULL;
-		filled[i] = job.mesh->FillTessTopology( job.bindVerts, px ? px->pic : NULL, px ? px->w : 0, px ? px->h : 0 );
-	} ) );
+	{
+		idParallelWindow window;	// heap / filesystem thread-safe for the workers (the image and sound loaders' window)
 
-	Mem_SetThreadSafe( false );
-	FS_SetThreadReadSafe( false );
+		// phase 1: decode each height image once
+		if ( images.Num() > 0 ) {
+			nThreads = Com_ParallelFor( images.Num(), [&]( int i ) {
+				R_TessHeightPixelsForImage( images[i], &pixels[i].pic, &pixels[i].w, &pixels[i].h );
+			} );
+		}
+		// phase 2: fill every mesh from the shared pixels (each job writes its own mesh's arrays only)
+		nThreads = Max( nThreads, Com_ParallelFor( numJobs, [&]( int i ) {
+			const md5TessBakeJob_t &job = s_md5TessBakeJobs[i];
+			const decodedHeight_t *px = ( job.pixelsIndex >= 0 ) ? &pixels[job.pixelsIndex] : NULL;
+			filled[i] = job.mesh->FillTessTopology( job.bindVerts, px ? px->pic : NULL, px ? px->w : 0, px ? px->h : 0 );
+		} ) );
+	}
 
 	// surface what the workers printed
-	const bool hadErr = Com_ThreadCaptureHadError();
-	Com_FlushThreadCapture();
-	if ( hadErr ) {
-		common->Warning( "parallel tess bake: a worker hit an error (see above)" );
-	}
+	Com_FlushThreadCaptureWarn( "parallel tess bake: a worker hit an error (see above)" );
 
 	int failed = 0;
 	for ( int i = 0; i < numJobs; i++ ) {

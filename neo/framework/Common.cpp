@@ -675,6 +675,15 @@ void Com_FlushThreadCapture( void ) {
 	com_captureHadError = false;
 }
 
+bool Com_FlushThreadCaptureWarn( const char *warning ) {
+	const bool hadErr = Com_ThreadCaptureHadError();
+	Com_FlushThreadCapture();
+	if ( hadErr ) {
+		common->Warning( "%s", warning );
+	}
+	return hadErr;
+}
+
 void idCommonLocal::VPrintf( const char *fmt, va_list args ) {
 	char		msg[MAX_PRINT_MSG_SIZE];
 	int			timeLength;

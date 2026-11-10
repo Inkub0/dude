@@ -41,9 +41,7 @@ If you have questions concerning this license or the applicable additional terms
 
 #include "sound/snd_local.h"
 
-#include <thread>
-#include <atomic>
-#include <vector>
+#include "framework/ParallelFor.h"		// DUDE: the parallel decode (EndLevelLoad)
 #include <mutex>
 #include <cstdlib>
 
@@ -244,51 +242,21 @@ void idSoundCache::LoadPendingParallel() {
 	idSoundSample ** const	list = samplesToLoad.Ptr();
 	const int				count = samplesToLoad.Num();
 
-	int nThreads = (int)std::thread::hardware_concurrency();
-	if ( nThreads < 2 ) { nThreads = 2; }
-	if ( nThreads > 32 ) { nThreads = 32; }
-	if ( nThreads > count ) { nThreads = count; }
-
 	const double			t0 = Sys_MillisecondsPrecise();
-	std::atomic<int>	nextIndex( 0 );
 
-	// heap / filesystem / print become thread-safe only for this window (same helpers the
-	// parallel image loader uses). Snd_SetParallelDecode lets OpenOGG skip its CRITICAL_SECTION_ONE,
-	// now redundant under these windows and otherwise a per-open serialization point.
-	Mem_SetThreadSafe( true );
-	FS_SetThreadReadSafe( true );
+	// phase 1: worker threads open + decode each sample to PCM (no OpenAL). Snd_SetParallelDecode lets
+	// OpenOGG skip its CRITICAL_SECTION_ONE, redundant under the window's thread-safe heap / filesystem
+	// and otherwise a per-open serialization point.
 	Snd_SetParallelDecode( true );
-
-	// phase 1: worker threads open + decode each sample to PCM (no OpenAL)
-	std::vector<std::thread> pool;
-	pool.reserve( nThreads );
-	for ( int k = 0 ; k < nThreads ; k++ ) {
-		pool.push_back( std::thread( [&]() {
-			Com_BeginThreadCapture();
-			for ( ;; ) {
-				const int idx = nextIndex.fetch_add( 1, std::memory_order_relaxed );
-				if ( idx >= count ) {
-					break;
-				}
-				list[idx]->DecodeCpu();
-			}
-			Com_EndThreadCapture();
-		} ) );
+	int nThreads = 0;
+	{
+		idParallelWindow window;
+		nThreads = Com_ParallelFor( count, [&]( int idx ) { list[idx]->DecodeCpu(); } );
 	}
-	for ( size_t k = 0 ; k < pool.size() ; k++ ) {
-		pool[k].join();
-	}
-
 	Snd_SetParallelDecode( false );
-	Mem_SetThreadSafe( false );
-	FS_SetThreadReadSafe( false );
 
 	// surface any prints/warnings the workers buffered (order-independent)
-	const bool hadErr = Com_ThreadCaptureHadError();
-	Com_FlushThreadCapture();
-	if ( hadErr ) {
-		common->Warning( "parallel sound load: a worker hit an error during decode (see above); affected sounds use the default beep" );
-	}
+	Com_FlushThreadCaptureWarn( "parallel sound load: a worker hit an error during decode (see above); affected sounds use the default beep" );
 
 	// phase 2: create + upload the OpenAL buffers on the main thread (OpenAL is not thread-safe)
 	for ( int i = 0 ; i < count ; i++ ) {

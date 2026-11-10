@@ -362,5 +362,7 @@ void					Com_EndThreadCapture( void );
 bool					Com_ThreadCaptureActive( void );
 bool					Com_ThreadCaptureHadError( void );
 void					Com_FlushThreadCapture( void );
+// the workers' buffered prints, then `warning` when one of them hit Error / FatalError; true when one did
+bool					Com_FlushThreadCaptureWarn( const char *warning );
 
 #endif /* !__COMMON_H__ */
