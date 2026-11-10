@@ -3514,6 +3514,11 @@ static const RtAugment rtAugment[PRESET_COUNT] = {
 };
 
 
+// the two preset-derived values Apply writes and Detect checks against, in one place: the RT reflection reads brighter
+// than the screen-space one at the same intensity, so SSR tiers use 0.8 and the RT tier 0.5; the RT trace runs at half res
+static float PresetSsrIntensity( bool ssrOn )    { return ssrOn ? 0.8f : 0.5f; }
+static float PresetRtReflResScale( bool rtRefl ) { return rtRefl ? 0.5f : 1.0f; }
+
 static void ApplyEnhancementPreset( int idx, int rtMode )
 {
 	if ( idx < 0 || idx >= PRESET_COUNT ) {
@@ -3583,7 +3588,7 @@ static void ApplyEnhancementPreset( int idx, int rtMode )
 	// SSR vs RT reflection luminance: the ray-traced reflection (Path Tracing, rtReflections) reads
 	// brighter than the screen-space one at the same intensity, so the SSR tiers use 0.8 and the RT tier
 	// 0.5 to match. Lower/SSR-off tiers carry 0.5 (the cvar default), inert until SSR is hand-enabled.
-	r_ssrIntensity.SetFloat( ( p.ssr && !p.rtReflections ) ? 0.8f : 0.5f );
+	r_ssrIntensity.SetFloat( PresetSsrIntensity( p.ssr && !p.rtReflections ) );
 
 	// GPU tessellation (Vulkan-only; inert on GL3): character smoothing from High,
 	// normal-map displacement from Ultra.
@@ -3622,7 +3627,7 @@ static void ApplyEnhancementPreset( int idx, int rtMode )
 	// RT reflection trace resolution: Half wherever the preset turns RT reflections on (Path Tracing) - a
 	// quarter of the rays, temporally upscaled to full res with no visible loss (docs/rtx-reflections.md RR6c).
 	// Inert on the other tiers, which get the Full default back.
-	r_rtReflResScale.SetFloat( p.rtReflections ? 0.5f : 1.0f );
+	r_rtReflResScale.SetFloat( PresetRtReflResScale( p.rtReflections ) );
 	r_ssaoTemporalTrade.SetBool( p.ssaoTemporalTrade );
 	com_interpolate.SetBool( p.interpolate );
 	r_decalLitHighlights.SetBool( p.decalLitHighlights );
@@ -3763,8 +3768,8 @@ static void ApplyEnhancementPreset( int idx, int rtMode )
 		// RT-vs-SSR luminance match + half-res reflection trace follow (mirrors the raster
 		// derivation above, but against the augment's rtReflections instead of the row's).
 		r_ssr.SetBool( p.ssr && !a.rtReflections );
-		r_ssrIntensity.SetFloat( ( p.ssr && !a.rtReflections ) ? 0.8f : 0.5f );
-		r_rtReflResScale.SetFloat( a.rtReflections ? 0.5f : 1.0f );
+		r_ssrIntensity.SetFloat( PresetSsrIntensity( p.ssr && !a.rtReflections ) );
+		r_rtReflResScale.SetFloat( PresetRtReflResScale( a.rtReflections ) );
 
 		// The NRD denoiser (RTAO / RTGI) needs motion vectors; force the velocity producer on
 		// where the raster tier didn't already fund it (e.g. Ultra, which carries mv/fsr off).
@@ -3880,7 +3885,7 @@ static int DetectEnhancementPreset( int* outRtMode = NULL )
 				!r_rtShadowBlurStagger.GetBool() && !r_volumetrics.GetBool() && !r_rtContactShadows.GetBool() &&
 				!r_rtReStirDI.GetBool() && !r_rtReStirDIApply.GetBool() && !r_rtgiCache.GetBool() && !r_rtLightGrid.GetBool() &&
 				r_ssr.GetBool()                    == p.ssr &&
-				idMath::Fabs( r_ssrIntensity.GetFloat() - ( p.ssr ? 0.8f : 0.5f ) ) < 0.01f &&
+				idMath::Fabs( r_ssrIntensity.GetFloat() - PresetSsrIntensity( p.ssr ) ) < 0.01f &&
 				idMath::Fabs( r_rtReflResScale.GetFloat() - 1.0f ) < 0.01f &&
 				r_motionVectors.GetBool()          == p.motionVectors &&
 				idMath::Fabs( cvarSystem->GetCVarFloat( "r_hdrGamma" ) - p.hdrGamma ) < 0.01f &&
@@ -3899,7 +3904,7 @@ static int DetectEnhancementPreset( int* outRtMode = NULL )
 				r_rtSunShadows.GetBool()           == a.rtSunShadows &&
 				r_rtMovingLights.GetBool()         == a.rtMovingLights &&
 				r_rtReflections.GetBool()          == a.rtReflections &&
-				idMath::Fabs( r_rtReflResScale.GetFloat() - ( a.rtReflections ? 0.5f : 1.0f ) ) < 0.01f &&
+				idMath::Fabs( r_rtReflResScale.GetFloat() - PresetRtReflResScale( a.rtReflections ) ) < 0.01f &&
 				r_rtao.GetBool()                   == a.rtao &&
 				( !a.rtao || idMath::Fabs( r_rtaoResScale.GetFloat() - a.rtaoResScale ) < 0.01f ) &&
 				r_rtgi.GetBool()                   == a.rtgi &&
@@ -3914,7 +3919,7 @@ static int DetectEnhancementPreset( int* outRtMode = NULL )
 				r_rtgiCache.GetBool()              == a.rtgi &&
 				r_rtLightGrid.GetBool()            == ( rtMode == RTX_PATHTRACED ) &&
 				r_ssr.GetBool()                    == expSsr &&
-				idMath::Fabs( r_ssrIntensity.GetFloat() - ( expSsr ? 0.8f : 0.5f ) ) < 0.01f &&
+				idMath::Fabs( r_ssrIntensity.GetFloat() - PresetSsrIntensity( expSsr ) ) < 0.01f &&
 				r_motionVectors.GetBool()          == expMv &&
 				idMath::Fabs( cvarSystem->GetCVarFloat( "r_hdrGamma" ) - expGamma ) < 0.01f &&
 				idMath::Fabs( NamedCvar( "r_hdrExposure" ).GetFloat() - expExpo ) < 0.01f &&
