@@ -194,6 +194,30 @@ This can be configured with the following CVars:
       (`recordDemo`) and timedemos always play on the 60 Hz clock, so a render demo recorded at
       62.5 Hz plays back about 4% slower.
 
+## Third-person view
+
+`pm_thirdPerson 1` (console, or bind a key to `toggle pm_thirdPerson`) plays Doom 3, its
+expansions and Quake 4 from behind the player. Stock Doom 3 treated it as a developer camera:
+no HUD, a crosshair stuck at the screen centre (where the shots do not go, since the camera
+sits behind and above the eye) and a body that cast no shadow. DUDE makes it playable:
+
+- the HUD, the damage and low-health feedback and the weapon GUIs draw as in first person;
+  only the blood splashes on the lens stay first-person;
+- the crosshair follows the aim: each frame the shot ray (from the eye along the view
+  direction, exactly what the weapons fire along) is traced and its hit projected on the
+  third-person camera, and the crosshair GUI is drawn at that point. With `com_interpolate`
+  it tracks the camera within the tic. The player model's torso already blends its aim
+  animations with the view pitch, so the gun points there too;
+- the player model is lit and shadowed like any other character: it casts shadows, shadows
+  itself and receives the world's shadows (first person keeps the body's shadow off the view
+  weapon as stock does).
+
+The camera itself is the stock one: `pm_thirdPersonRange` (distance, default 80),
+`pm_thirdPersonHeight`, `pm_thirdPersonAngle` (0 behind, 180 in front; with the camera in
+front of the player the aim point can fall behind it, and the crosshair then stays at the
+centre) and `pm_thirdPersonClip` (keep the camera out of walls, default on). In Quake 4,
+vehicles keep Raven's own third-person camera and crosshair.
+
 ## Other CVars added in dhewm3
 
 - `com_disableAutoSaves` if set to `1`, no Autosaves are created when starting a level, and when

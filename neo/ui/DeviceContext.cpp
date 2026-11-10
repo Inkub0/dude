@@ -147,6 +147,8 @@ void idDeviceContext::Init() {
 	// DG: this is used for the "make sure menus are rendered as 4:3" hack
 	fixScaleForMenu.Set(1, 1);
 	fixOffsetForMenu.Set(0, 0);
+
+	drawOffset.Zero();	// DUDE: SetDrawOffset
 }
 
 void idDeviceContext::Shutdown() {
@@ -309,6 +311,7 @@ void idDeviceContext::AdjustCoords(float *x, float *y, float *w, float *h) {
 
 		*x *= fixScaleForMenu.x; // DG: for "render menus as 4:3" hack
 		*x += fixOffsetForMenu.x;
+		*x += drawOffset.x; // DUDE: whole-GUI shift (SetDrawOffset)
 	}
 	if (y) {
 		*y *= yScale;
@@ -316,6 +319,7 @@ void idDeviceContext::AdjustCoords(float *x, float *y, float *w, float *h) {
 
 		*y *= fixScaleForMenu.y; // DG: for "render menus as 4:3" hack
 		*y += fixOffsetForMenu.y;
+		*y += drawOffset.y; // DUDE: whole-GUI shift (SetDrawOffset)
 	}
 	if (w) {
 		*w *= xScale;
@@ -420,8 +424,8 @@ void idDeviceContext::DrawStretchPic(float x, float y, float w, float h, float s
 			// Note: if cstAdjustCoords == false; cst_*Offset is 0, so that doesn't require special handling
 			float x = verts[i].xyz[0] * xScale + cst_xOffset;
 			float y = verts[i].xyz[1] * yScale + cst_yOffset;
-			verts[i].xyz[0] = x * fixScaleForMenu.x + fixOffsetForMenu.x;
-			verts[i].xyz[1] = y * fixScaleForMenu.y + fixOffsetForMenu.y;
+			verts[i].xyz[0] = x * fixScaleForMenu.x + fixOffsetForMenu.x + drawOffset.x;	// DUDE: + SetDrawOffset
+			verts[i].xyz[1] = y * fixScaleForMenu.y + fixOffsetForMenu.y + drawOffset.y;
 		}
 	}
 	//#modified-fva; END
@@ -654,8 +658,8 @@ void idDeviceContext::DrawStretchPicRotated(float x, float y, float w, float h, 
 			// Note: if cstAdjustCoords == false; cst_*Offset is 0, so that doesn't require special handling
 			float x = verts[i].xyz[0] * xScale + cst_xOffset;
 			float y = verts[i].xyz[1] * yScale + cst_yOffset;
-			verts[i].xyz[0] = x * fixScaleForMenu.x + fixOffsetForMenu.x;
-			verts[i].xyz[1] = y * fixScaleForMenu.y + fixOffsetForMenu.y;
+			verts[i].xyz[0] = x * fixScaleForMenu.x + fixOffsetForMenu.x + drawOffset.x;	// DUDE: + SetDrawOffset
+			verts[i].xyz[1] = y * fixScaleForMenu.y + fixOffsetForMenu.y + drawOffset.y;
 		}
 	}
 	//#modified-fva; END

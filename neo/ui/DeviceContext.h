@@ -111,6 +111,11 @@ public:
 
 	void				DrawEditCursor(float x, float y, float scale);
 
+	// DUDE: a whole-GUI shift in final virtual-screen units, applied after the 4:3 fix and the
+	// anchors to everything drawn (idUserInterface::SetDrawOffset). Not applied to the mouse cursor.
+	void				SetDrawOffset( const idVec2 &ofs ) { drawOffset = ofs; }
+	const idVec2 &		GetDrawOffset( void ) const { return drawOffset; }
+
 	// DG: this is used for the "make sure menus are rendered as 4:3" hack
 	void				SetMenuScaleFix(bool enable);
 	bool				IsMenuScaleFixActive() const {
@@ -219,6 +224,8 @@ private:
 	// DG: this is used for the "make sure menus are rendered as 4:3" hack
 	idVec2				fixScaleForMenu;
 	idVec2				fixOffsetForMenu;
+
+	idVec2				drawOffset;			// DUDE: SetDrawOffset
 };
 
 #endif /* !__DEVICECONTEXT_H__ */

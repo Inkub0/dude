@@ -86,6 +86,9 @@ menu:
 - **Ultra Nightmare** difficulty (unlocked with Nightmare): Nightmare rules plus permadeath:
   one checkpoint per run written at map starts only, no manual saves, erased when you die
   ([docs/ultra-nightmare.md](docs/ultra-nightmare.md)).
+- **Playable third person** (`pm_thirdPerson 1`, Doom 3 and Quake 4): the HUD stays up, the
+  crosshair sits where the shots land, and the player model casts and receives shadows like
+  any other character (see [Configuration.md](Configuration.md)).
 
 **Engine quality-of-life**
 - `com_interpolate`: render above 60 fps while the game simulates at its native 60 Hz.

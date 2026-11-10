@@ -1301,6 +1301,8 @@ idPlayer::idPlayer() {
 	renderViewOffsetViewAngles.Zero();
 	renderViewOffsetViewAnglesPrev.Zero();
 	renderViewOffsetAngle		= 0.0f;
+	renderViewAimOrigin.Zero();
+	renderViewAimAxis.Identity();
 	renderViewOffsetHeight		= 0.0f;
 	renderViewOffsetClip		= false;
 	renderViewOffsetRange		= 0.0f;
@@ -3247,7 +3249,7 @@ void idPlayer::UpdateHudWeapon( bool flashWeapon ) {
 idPlayer::DrawHUD
 ===============
 */
-void idPlayer::DrawHUD( idUserInterface *_hud ) {
+void idPlayer::DrawHUD( idUserInterface *_hud, const renderView_t *view ) {
 
 	if ( !weapon.GetEntity() || influenceActive != INFLUENCE_NONE || privateCameraView || gameLocal.GetCamera() || !_hud || !g_showHud.GetBool() ) {
 		return;
@@ -3269,6 +3271,10 @@ void idPlayer::DrawHUD( idUserInterface *_hud ) {
 	// weapon targeting crosshair
 	if ( !GuiActive() ) {
 		if ( cursor && weapon.GetEntity()->ShowCrosshair() ) {
+			// DUDE: in third person the crosshair sits where the shots land, not at the screen centre
+			float crossX, crossY;
+			ThirdPersonCrosshairOffset( view, crossX, crossY );
+			cursor->SetDrawOffset( crossX, crossY );
 
 #ifdef _D3XP
 			bool wantScaleTo43 = true; // DG: for fixing scaling of grabber cursor
@@ -7597,7 +7603,7 @@ void idPlayer::Think( void ) {
 		}
 	}
 
-	if ( gameLocal.isMultiplayer || g_showPlayerShadow.GetBool() ) {
+	if ( gameLocal.isMultiplayer || g_showPlayerShadow.GetBool() || pm_thirdPerson.GetBool() ) {
 		renderEntity.suppressShadowInViewID	= 0;
 		if ( headRenderEnt ) {
 			headRenderEnt->suppressShadowInViewID = 0;
@@ -7607,6 +7613,13 @@ void idPlayer::Think( void ) {
 		if ( headRenderEnt ) {
 			headRenderEnt->suppressShadowInViewID = entityNumber+1;
 		}
+	}
+	// DUDE: in third person the body is a character in the scene like any other -- it casts its shadow,
+	// shadows itself and takes the world's shadows (noSelfShadow lifts an entity out of the last two).
+	// First person keeps the stock flag, which keeps the body's shadow off the view weapon.
+	renderEntity.noSelfShadow = !pm_thirdPerson.GetBool();
+	if ( headRenderEnt ) {
+		headRenderEnt->noSelfShadow = renderEntity.noSelfShadow;
 	}
 	// never cast shadows from our first-person muzzle flashes
 	renderEntity.suppressShadowInLightID = LIGHTID_VIEW_MUZZLE_FLASH + entityNumber;
@@ -8679,6 +8692,46 @@ void idPlayer::ComputeThirdPersonView( const idVec3 &eyeOrigin, const idAngles &
 
 /*
 ===============
+idPlayer::ThirdPersonCrosshairOffset
+
+DUDE: in third person the camera orbits behind (pm_thirdPersonAngle: around) the player, so the
+screen centre is not where the shots go. Shots leave the eye along the view axis (idWeapon fires
+from playerViewOrigin along playerViewAxis), so trace that ray as a shot would, project the hit on
+the frame's render view and give the crosshair GUI's offset from the screen centre, in virtual
+640x480 units (idUserInterface::SetDrawOffset). 0, 0 -- the stock centre -- outside third person
+and when the aim point is behind the camera (an orbit angle near 180). The eye and axis are the
+frame's (renderViewAimOrigin / renderViewAimAxis), carried along with the orbit by
+InterpolateRenderView, so the crosshair never trails the camera within a tic.
+===============
+*/
+bool idPlayer::ThirdPersonCrosshairOffset( const renderView_t *view, float &x, float &y ) const {
+	x = 0.0f;
+	y = 0.0f;
+	if ( !view || !pm_thirdPerson.GetBool() ) {
+		return false;
+	}
+
+	trace_t tr;
+	const idVec3 start = renderViewAimOrigin;
+	const idVec3 end = start + renderViewAimAxis[0] * THIRD_PERSON_AIM_DISTANCE;
+	gameLocal.clip.TracePoint( tr, start, end, MASK_SHOT_RENDERMODEL, this );
+
+	// project on the rendered view: the depth along the camera's forward, then the half-fov
+	// tangents take the side offsets to normalized device coordinates (what R_SetupProjection does)
+	const idVec3 rel = tr.endpos - view->vieworg;
+	const float depth = rel * view->viewaxis[0];
+	if ( depth < 1.0f ) {
+		return false;
+	}
+	const float ndcX = -( rel * view->viewaxis[1] ) / ( depth * idMath::Tan( DEG2RAD( view->fov_x * 0.5f ) ) );
+	const float ndcY =  ( rel * view->viewaxis[2] ) / ( depth * idMath::Tan( DEG2RAD( view->fov_y * 0.5f ) ) );
+	x = ndcX * ( SCREEN_WIDTH * 0.5f );
+	y = -ndcY * ( SCREEN_HEIGHT * 0.5f );
+	return true;
+}
+
+/*
+===============
 idPlayer::OffsetThirdPersonView
 ===============
 */
@@ -8825,6 +8878,10 @@ void idPlayer::CalculateRenderView( void ) {
 		renderView = new renderView_t;
 	}
 	memset( renderView, 0, sizeof( *renderView ) );
+
+	// DUDE: the aim the third-person crosshair follows this tic (InterpolateRenderView moves it per frame)
+	renderViewAimOrigin = firstPersonViewOrigin;
+	renderViewAimAxis = firstPersonViewAxis;
 
 	// copy global shader parms
 	for( i = 0; i < MAX_GLOBAL_SHADER_PARMS; i++ ) {
@@ -9051,6 +9108,21 @@ void idPlayer::InterpolateRenderView( float frac ) {
 
 		const float rng = renderViewOffsetRangePrev + frac * ( renderViewOffsetRange - renderViewOffsetRangePrev );
 		ComputeThirdPersonView( eye, ang, physicsObj.GetGravityAxis(), renderViewOffsetAngle, rng, renderViewOffsetHeight, renderViewOffsetClip );
+
+		// the crosshair's aim ray (ThirdPersonCrosshairOffset) gets the same frame-time eye and the same
+		// angle adjustment the orbit just got, else it trails the camera by up to a tic and jitters while
+		// turning. The shot axis itself keeps its bob and kick (firstPersonViewAxis), only the delta is added.
+		renderViewAimOrigin = eye;
+		idAngles aimDelta = ang - viewAngles;
+		aimDelta.Normalize180();
+		if ( aimDelta.yaw != 0.0f || aimDelta.pitch != 0.0f ) {
+			idAngles aimAng = firstPersonViewAxis.ToAngles();
+			aimAng.yaw += aimDelta.yaw;
+			aimAng.pitch += aimDelta.pitch;
+			renderViewAimAxis = aimAng.ToMat3();
+		} else {
+			renderViewAimAxis = firstPersonViewAxis;
+		}
 
 		// fov: lerp the FINAL (already aspect-corrected) components directly (CalcFov ran at the tic)
 		renderView->fov_x = renderViewOffsetFovXPrev + frac * ( renderViewOffsetFovX - renderViewOffsetFovXPrev );
@@ -9789,7 +9861,7 @@ void idPlayer::ClientPredictionThink( void ) {
 		}
 	}
 
-	if ( gameLocal.isMultiplayer || g_showPlayerShadow.GetBool() ) {
+	if ( gameLocal.isMultiplayer || g_showPlayerShadow.GetBool() || pm_thirdPerson.GetBool() ) {
 		renderEntity.suppressShadowInViewID	= 0;
 		if ( headRenderEnt ) {
 			headRenderEnt->suppressShadowInViewID = 0;
@@ -9799,6 +9871,13 @@ void idPlayer::ClientPredictionThink( void ) {
 		if ( headRenderEnt ) {
 			headRenderEnt->suppressShadowInViewID = entityNumber+1;
 		}
+	}
+	// DUDE: in third person the body is a character in the scene like any other -- it casts its shadow,
+	// shadows itself and takes the world's shadows (noSelfShadow lifts an entity out of the last two).
+	// First person keeps the stock flag, which keeps the body's shadow off the view weapon.
+	renderEntity.noSelfShadow = !pm_thirdPerson.GetBool();
+	if ( headRenderEnt ) {
+		headRenderEnt->noSelfShadow = renderEntity.noSelfShadow;
 	}
 	// never cast shadows from our first-person muzzle flashes
 	renderEntity.suppressShadowInLightID = LIGHTID_VIEW_MUZZLE_FLASH + entityNumber;

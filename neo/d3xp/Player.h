@@ -60,6 +60,7 @@ extern const idEventDef EV_Player_SelectWeapon;
 extern const idEventDef EV_SpectatorTouch;
 
 const float THIRD_PERSON_FOCUS_DISTANCE	= 512.0f;
+const float THIRD_PERSON_AIM_DISTANCE	= 8192.0f;	// DUDE: the crosshair's aim trace (ThirdPersonCrosshairOffset); a miss projects its far end
 const int	LAND_DEFLECT_TIME = 150;
 const int	LAND_RETURN_TIME = 300;
 const int	FOCUS_TIME = 300;
@@ -431,6 +432,11 @@ public:
 	float					renderViewOffsetRange;			// lerped between tics (the death cam ramps it)
 	float					renderViewOffsetRangePrev;
 	float					renderViewOffsetFovX;			// final aspect-corrected fov, lerped directly
+	// DUDE third person: the eye and axis the shots leave along, for this rendered frame -- the tic's
+	// firstPersonViewOrigin / firstPersonViewAxis, moved with the orbit by InterpolateRenderView so the
+	// crosshair (ThirdPersonCrosshairOffset) tracks the camera within the tic
+	idVec3					renderViewAimOrigin;
+	idMat3					renderViewAimAxis;
 	float					renderViewOffsetFovXPrev;
 	float					renderViewOffsetFovY;
 	float					renderViewOffsetFovYPrev;
@@ -523,7 +529,9 @@ public:
 	void					InterpolateRenderView( float frac );	// called every rendered frame (may be >1 per tic)
 	void					InterpolateViewWeapon( float frac );	// interpolate the view model to match the interpolated view
 
-	void					DrawHUD( idUserInterface *hud );
+	// DUDE: view is the frame's rendered view (the crosshair projects on it in third person)
+	void					DrawHUD( idUserInterface *hud, const renderView_t *view );
+	bool					ThirdPersonCrosshairOffset( const renderView_t *view, float &x, float &y ) const;
 
 	void					WeaponFireFeedback( const idDict *weaponDef );
 
