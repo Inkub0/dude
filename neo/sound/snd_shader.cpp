@@ -449,37 +449,19 @@ idSoundShader::CheckShakesAndOgg
 ===============
 */
 bool idSoundShader::CheckShakesAndOgg( void ) const {
-	int i;
-	bool ret = false;
-
-	// DUDE: the check runs every time such a sound starts (snd_emitter.cpp); note once per shader,
-	// not on every play - Quake 4 starts shaking OGG sounds constantly (airdefense1's cannons).
+	// DUDE: only called once, when the shader is parsed (id also ran it on every start of a
+	// shaking sound - Quake 4 starts shaking OGG sounds constantly, airdefense1's cannons).
 	// Only a developer note: shakes from OGG work - idSoundWorldLocal::FindAmplitude decodes the
 	// playing channel (GatherChannelSamples -> DecodeOGG on the kept compressed data) whenever a
 	// sample has no amplitudeData, which DUDE never builds for any format.
-	static idList<const idSoundShader *> warnedShaders;
-	const bool warn = warnedShaders.FindIndex( this ) < 0;
-
-	for ( i = 0; i < numLeadins; i++ ) {
-		if ( leadins[ i ]->objectInfo.wFormatTag == WAVE_FORMAT_TAG_OGG ) {
-			if ( warn ) {
-				common->DPrintf( "sound shader '%s' has shakes and uses OGG file '%s' (amplitude decoded at play)\n",
-									GetName(), leadins[ i ]->name.c_str() );
-			}
+	bool ret = false;
+	for ( int i = 0; i < numLeadins + numEntries; i++ ) {
+		const idSoundSample *sample = ( i < numLeadins ) ? leadins[ i ] : entries[ i - numLeadins ];
+		if ( sample->objectInfo.wFormatTag == WAVE_FORMAT_TAG_OGG ) {
+			common->DPrintf( "sound shader '%s' has shakes and uses OGG file '%s' (amplitude decoded at play)\n",
+								GetName(), sample->name.c_str() );
 			ret = true;
 		}
-	}
-	for ( i = 0; i < numEntries; i++ ) {
-		if ( entries[ i ]->objectInfo.wFormatTag == WAVE_FORMAT_TAG_OGG ) {
-			if ( warn ) {
-				common->DPrintf( "sound shader '%s' has shakes and uses OGG file '%s' (amplitude decoded at play)\n",
-									GetName(), entries[ i ]->name.c_str() );
-			}
-			ret = true;
-		}
-	}
-	if ( ret && warn ) {
-		warnedShaders.Append( this );
 	}
 	return ret;
 }

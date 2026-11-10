@@ -697,10 +697,6 @@ int idSoundEmitterLocal::StartSound( const idSoundShader *shader, const s_channe
 	OverrideParms( &chanParms, &this->parms, &chanParms );
 	chanParms.soundShaderFlags |= soundShaderFlags;
 
-	if ( chanParms.shakes > 0.0f ) {
-		shader->CheckShakesAndOgg();
-	}
-
 	// this is the sample time it will be first mixed
 	int start44kHz;
 
@@ -931,10 +927,6 @@ void idSoundEmitterLocal::ModifySound( const s_channelType channel, const soundS
 		}
 
 		OverrideParms( &chan->parms, parms, &chan->parms );
-
-		if ( chan->parms.shakes > 0.0f && chan->soundShader != NULL ) {
-			chan->soundShader->CheckShakesAndOgg();
-		}
 	}
 }
 
