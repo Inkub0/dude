@@ -200,6 +200,13 @@ public:
 		// seamless cube filtering so shadow-cube PCF taps don't seam at face edges
 		qglEnable( GL_TEXTURE_CUBE_MAP_SEAMLESS );
 
+		// per-pixel (not per-quad) dFdx / dFdy: GLSL 3.30 has no dFdxFine, and the contact-shadow
+		// 2x2 quad average (interaction.frag) reads each pixel's own neighbours through them
+#ifndef GL_FRAGMENT_SHADER_DERIVATIVE_HINT
+#define GL_FRAGMENT_SHADER_DERIVATIVE_HINT 0x8B8B
+#endif
+		qglHint( GL_FRAGMENT_SHADER_DERIVATIVE_HINT, GL_NICEST );
+
 		// attribute enable is VAO state: set it once here so the per-draw
 		// BindVertexLayout only has to (re)specify the pointers when the bound
 		// buffer/offset changes, not re-enable every array every draw
