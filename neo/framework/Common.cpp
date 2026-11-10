@@ -1530,6 +1530,22 @@ void idCommonLocal::CheckConfigSchema( void ) {
 	}
 
 	if ( from >= 3 ) {
+		// 9 -> 10: RT shadow look retuned (user, 2026-11-10): blur intensity 0.13 -> 1.0, blur falloff curve 0.5 -> 0.47,
+		// RT contact shadows strength 0.5 -> 0.4, ray length 4 -> 14, softness 15 -> 12. A config still on an old default
+		// moves; a deliberate other value stays. (The skip-below-penumbra default moved 1.0 -> 2.0 too, but the presets
+		// that blur set it themselves, so a config's value there is the preset's, not a default to move.)
+		if ( from < 10 ) {
+			static const struct { const char *name; float oldDefault; } rtRetune[] = {
+				{ "r_rtShadowBlurIntensity", 0.13f }, { "r_rtShadowBlurCurve", 0.5f },
+				{ "r_rtContactShadowStrength", 0.5f }, { "r_rtContactShadowLength", 4.0f }, { "r_rtContactShadowSoftness", 15.0f },
+			};
+			for ( int i = 0; i < (int)( sizeof( rtRetune ) / sizeof( rtRetune[0] ) ); i++ ) {
+				idCVar *cv = cvarSystem->Find( rtRetune[i].name );	// absent without the renderer
+				if ( cv != NULL && cv->GetFloat() == rtRetune[i].oldDefault ) {
+					cv->SetString( cv->GetResetString() );
+				}
+			}
+		}
 		// 8 -> 9: RT contact shadows (r_rtContactShadows) are part of the RT presets from High up. A config on such a
 		// tier with its ray tracing applied (RT sun shadows live - every RT tier from Medium has them) gets them on,
 		// once, so it keeps reading as that preset. A raster-only or non-RT config is left alone.

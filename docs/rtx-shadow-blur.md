@@ -354,7 +354,7 @@ pass's own law - per-light blur scale (`RB_RHI_RtShadowBlurLightRadius`, shared)
 the grate's coverage over the penumbra disc projected onto the caster (`dudePerforatedCoverage`, mips), since DI has no
 per-light mask to blur. Details in rtx-restir-di.md "Soft grate shadows". Gated on `r_rtShadowBlur` like this pass.
 
-## Perf: cheaper tile classification (2026-09-21, `r_rtShadowBlurFastTiles`, option 2)
+## Perf: cheaper tile classification (2026-09-21, option 2; always on since 2026-11-10)
 
 The tile pass 0 reduced the full-res RGBA16F ray target (8 bytes/texel, 64 fetches/tile) into the
 per-tile summary - reading every pixel of the ray rect. The ray pass now also writes a compact
@@ -362,8 +362,10 @@ per-tile summary - reading every pixel of the ray rect. The ray pass now also wr
 `rtshadow_ray.frag` `out_summary` = R visibility, G half-width / HW_MAX, G = 1.0 the "never traced"
 sentinel that replaces the old `B == 0` test). Tile pass 0 reads that (2 bytes/texel) instead, an
 8 -> 2 byte cut on the pass's dominant read. Image-identical (the only rounding: a max-width tile's
-stored reach caps at 254/255 of HW_MAX = 23.9 px vs 24). `r_rtShadowBlurFastTiles` (default 1) keeps
-the old RGBA16F path for A/B; the ray target is the MRT either way (the summary write is ~2 bytes).
+stored reach caps at 254/255 of HW_MAX = 23.9 px vs 24). The A/B cvar
+`r_rtShadowBlurFastTiles` was removed 2026-11-10 (user: identical look): the summary read is always used, and the old
+RGBA16F read stays only as the fallback for a ray target without the summary attachment. The ray target is the MRT
+either way (the summary write is ~2 bytes).
 GPU scope `rtblur.tiles` under `r_vkGpuTime 2` shows the delta.
 
 **Measured by the user (RTX 3080 Ti, 2026-09-21, 4 lights blurred/frame, look identical):**
@@ -385,15 +387,16 @@ larger backend build.
   shadow-casting light (see above). `r_rtShadowBlurStagger` is on there too (the preset owns the on/off, not the two distances).
 - `r_rtShadowBlurStagger` (0) / `r_rtShadowBlurStaggerNear` (192) / `r_rtShadowBlurStaggerFar` (380): see above.
 - `r_rtShadowBlur` (0): the toggle. Off = exactly the previous hard RT shadows.
-- `r_rtShadowBlurIntensity` (0.13, 0..4; Debugging -> RT Shadows -> "Blur Intensity"): scales the blur width. Replaced
+- `r_rtShadowBlurIntensity` (1.0, 0..4; Debugging -> RT Shadows -> "Blur Intensity"): scales the blur width. Replaced
   the "Light Size" / sun-angle pair (user, 2026-09-18: with the emitter model gone a "light size"
   has no reason to exist - it is a blur amount). Internally the width is still
   `3 * intensity * dOcc / (dLight - dOcc)` world units (point lights x `max(1, largest radius axis
   / 256)`; parallel suns 1 degree x intensity), so contact hardening is unchanged.
-- `r_rtShadowBlurCurve` (0.5, 0.25..4; Debugging -> RT Shadows -> "Blur Falloff Curve"): the exponent on the gap ratio -
+- `r_rtShadowBlurCurve` (0.47, 0.25..4; Debugging -> RT Shadows -> "Blur Falloff Curve"): the exponent on the gap ratio -
   width = `blurScale * g^curve`, `g = dOcc / (dLight - dOcc)` (caster-to-surface over
   caster-to-light distance). 1 = geometric growth; < 1 softens sooner then levels off; > 1 stays
-  crisp longer near the caster. Defaults 0.13 / 0.5 are the user's tuned look (retuned 2026-10-19 from
+  crisp longer near the caster. Defaults 1.0 / 0.47 are the user's tuned look (retuned 2026-11-10 from 0.13 / 0.5,
+  which were retuned 2026-10-19 from
   0.65 / 0.9, themselves retuned 2026-10-02 from the original 1.5 / 1.45: tighter, softer-sooner penumbra;
   the ReSTIR DI soft grate coverage shares both numbers); the
   Graphics tab keeps only the on/off toggle. g is usually < 1 indoors (casters sit nearer the surface than the

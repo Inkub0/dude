@@ -1258,7 +1258,6 @@ extern idCVar r_rtShadowBlurStagger;		// far lights refresh their blurred mask e
 extern idCVar r_rtShadowBlurStaggerNear;	// nearer than this (viewer -> light volume): every frame
 extern idCVar r_rtShadowBlurStaggerFar;		// farther than this: every 3rd frame; between: every 2nd
 extern idCVar r_rtShadowBlurIntensity;		// blur width multiplier (0 = hard, 1 = default)
-extern idCVar r_rtShadowBlurFastTiles;		// tile pass reads the compact RG8 summary instead of the RGBA16F ray target
 extern idCVar r_rtShadowBlurCheckerboard;	// r_rtShadowBlur perf: trace the shadow ray at a static checkerboard, reconstruct skipped pixels in the horizontal blur
 extern idCVar r_volFastResolve;				// volumetric perf: low-res temporal + single depth-aware upsample at composite (vs upsample-then-full-res-temporal)
 extern idCVar r_rtShadowBlurCurve;			// exponent on the gap ratio: how the blur grows with distance from the caster (1 = geometric)
