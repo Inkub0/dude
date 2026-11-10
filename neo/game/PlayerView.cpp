@@ -37,6 +37,28 @@ If you have questions concerning this license or the applicable additional terms
 
 #include "PlayerView.h"
 
+// DUDE: the renderer cvars the view effects talk to every frame, found once (idCVarSystem::Find is a name lookup per
+// call; a cvar lives as long as the process). A renderer without them reads as inactive.
+static idCVar *PV_RendererCvar( idCVar *&cached, const char *name ) {
+	if ( cached == NULL ) {
+		cached = cvarSystem->Find( name );
+	}
+	return cached;
+}
+static bool PV_RhiActive( void ) {
+	static idCVar *cv = NULL;
+	return PV_RendererCvar( cv, "r_rhiActive" ) != NULL && cv->GetBool();
+}
+static void PV_SetRendererFloat( idCVar *&cached, const char *name, float value ) {
+	if ( PV_RendererCvar( cached, name ) != NULL ) {
+		cached->SetFloat( value );
+	}
+}
+static float PV_BerserkFade( void ) {
+	static idCVar *cv = NULL;
+	return PV_RendererCvar( cv, "r_berserkFade" ) != NULL ? cv->GetFloat() : 0.0f;
+}
+
 static int MakePowerOfTwo( int num ) {
 	int		pot;
 	for (pot = 1 ; pot < num ; pot<<=1) {
@@ -580,14 +602,14 @@ void idPlayerView::DoubleVision( idUserInterface *hud, const renderView_t *view,
 	// sub-window came back split, mis-scaled or missing. Uncropped, _scratch holds the whole
 	// window in the corner of a POT-padded image, so the blits below scale their texcoords by
 	// window/POT (the same shiftScale the D3XP double vision uses). Legacy keeps its crop.
-	const bool rhiDv = cvarSystem->GetCVarBool( "r_rhiActive" );
+	const bool rhiDv = PV_RhiActive();
 	float scaleS = 1.0f, scaleT = 1.0f;
 	if ( rhiDv ) {
 		int vidWidth, vidHeight;
 		renderSystem->GetGLSettings( vidWidth, vidHeight );
 		// (not while berserk is up or winding down: the renderer then swaps these blits for its
 		// berserk feedback buffer, a window-sized target addressed 0..1)
-		if ( vidWidth > 0 && vidHeight > 0 && cvarSystem->GetCVarFloat( "r_berserkFade" ) <= 0.0f ) {
+		if ( vidWidth > 0 && vidHeight > 0 && PV_BerserkFade() <= 0.0f ) {
 			scaleS = (float)vidWidth / MakePowerOfTwo( vidWidth );
 			scaleT = (float)vidHeight / MakePowerOfTwo( vidHeight );
 		}
@@ -631,7 +653,7 @@ void idPlayerView::BerserkVision( idUserInterface *hud, const renderView_t *view
 	// crosshair pulled to the top-right). With no crop, _scratch holds the whole render
 	// (POT-padded) and RB_RHI_BerserkAccum screen-corrects the sample. Legacy keeps its
 	// 512x256 crop, which its recursive _scratch feedback path expects.
-	const bool rhiBerserk = cvarSystem->GetCVarBool( "r_rhiActive" );
+	const bool rhiBerserk = PV_RhiActive();
 	if ( !rhiBerserk ) {
 		renderSystem->CropRenderSize( 512, 256, true );
 	}
@@ -768,7 +790,7 @@ void idPlayerView::RenderPlayerView( idUserInterface *hud ) {
 		// BerserkVision running through the fade. Legacy is unaffected: it never reads the
 		// cvar and its wind-down branch (below) is gated off.
 		const int   BERSERK_WINDDOWN_MS = 2000;
-		const bool  berserkRhi    = cvarSystem->GetCVarBool( "r_rhiActive" );
+		const bool  berserkRhi    = PV_RhiActive();
 		const bool  berserkActive = player->PowerUpActive( BERSERK );
 		const int   berserkEnd    = player->inventory.powerupEndTime[ BERSERK ];
 		float berserkFade = 0.0f;
@@ -780,7 +802,8 @@ void idPlayerView::RenderPlayerView( idUserInterface *hud ) {
 				berserkFade = 1.0f - (float)since / (float)BERSERK_WINDDOWN_MS;
 			}
 		}
-		cvarSystem->SetCVarFloat( "r_berserkFade", berserkFade );
+		static idCVar *berserkFadeCvar = NULL;
+		PV_SetRendererFloat( berserkFadeCvar, "r_berserkFade", berserkFade );
 
 		// DUDE weapon-reload depth-of-field (RHI backends only): as the weapon
 		// reloads, focus on it and blur the world beyond. Drive a 0..1 envelope off
@@ -811,7 +834,8 @@ void idPlayerView::RenderPlayerView( idUserInterface *hud ) {
 				reloadFocus = 1.0f - out * out * ( 3.0f - 2.0f * out );	// ease out once it truly ends
 			}
 		}
-		cvarSystem->SetCVarFloat( "r_weaponReloadFocus", reloadFocus );
+		static idCVar *reloadFocusCvar = NULL;
+		PV_SetRendererFloat( reloadFocusCvar, "r_weaponReloadFocus", reloadFocus );
 
 		if ( player->GetInfluenceMaterial() || player->GetInfluenceEntity() ) {
 			InfluenceVision( hud, view );

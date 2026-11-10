@@ -37,6 +37,24 @@ If you have questions concerning this license or the applicable additional terms
 
 #include "PlayerView.h"
 
+// DUDE: the renderer cvars the view effects talk to every frame, found once (idCVarSystem::Find is a name lookup per
+// call; a cvar lives as long as the process). A renderer without them reads as inactive.
+static idCVar *PV_RendererCvar( idCVar *&cached, const char *name ) {
+	if ( cached == NULL ) {
+		cached = cvarSystem->Find( name );
+	}
+	return cached;
+}
+static bool PV_RhiActive( void ) {
+	static idCVar *cv = NULL;
+	return PV_RendererCvar( cv, "r_rhiActive" ) != NULL && cv->GetBool();
+}
+static void PV_SetRendererFloat( idCVar *&cached, const char *name, float value ) {
+	if ( PV_RendererCvar( cached, name ) != NULL ) {
+		cached->SetFloat( value );
+	}
+}
+
 // _D3XP : rename all gameLocal.time to gameLocal.slow.time for merge!
 
 #ifdef _D3XP
@@ -712,7 +730,7 @@ void idPlayerView::RenderPlayerView( idUserInterface *hud ) {
 	float reloadFocus = 0.0f;
 	// r_rhiActive: only the RHI backends have the DoF pass. Also off when view effects are
 	// skipped, matching the base-game tree (otherwise the blur ran under g_skipViewEffects here).
-	if ( cvarSystem->GetCVarBool( "r_rhiActive" ) && !g_skipViewEffects.GetBool() ) {
+	if ( PV_RhiActive() && !g_skipViewEffects.GetBool() ) {
 		idWeapon *reloadWeapon = player->weapon.GetEntity();
 		if ( reloadWeapon && reloadWeapon->IsReloading() ) {
 			reloadFocusHoldUntil = gameLocal.time + RELOAD_FOCUS_HOLD_MS;
@@ -731,7 +749,8 @@ void idPlayerView::RenderPlayerView( idUserInterface *hud ) {
 			reloadFocus = 1.0f - out * out * ( 3.0f - 2.0f * out );
 		}
 	}
-	cvarSystem->SetCVarFloat( "r_weaponReloadFocus", reloadFocus );
+	static idCVar *reloadFocusCvar = NULL;
+	PV_SetRendererFloat( reloadFocusCvar, "r_weaponReloadFocus", reloadFocus );
 
 	SingleView( hud, view );
 	ScreenFade();
