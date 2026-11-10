@@ -3349,6 +3349,14 @@ static bool R_RtEmissiveNearTable( const idVec3 &p, float reach ) { return R_RtE
 // drop the table's GPU handles WITHOUT destroying them (a new backend owns the slots now, R_RtResetSceneState) and
 // clear every CPU-side list, so the next RT frame rebuilds from nothing
 // r_rtEmissiveScale as the table uses it (the clamp the cvar's range would give it)
+// the seen-model list reaches entity index i, the new slots NULL (not idList::AssureSize: it leaves the slots inside
+// the old capacity as they were)
+static void R_RtEmissiveSeenGrow( int i ) {
+	while ( s_rtEmissiveSeenModel.Num() <= i ) {
+		s_rtEmissiveSeenModel.Append( NULL );
+	}
+}
+
 static float R_RtEmissiveScale( void ) { return idMath::ClampFloat( 0.0f, 64.0f, r_rtEmissiveScale.GetFloat() ); }
 
 static void R_RtEmissiveForget( void ) {
@@ -4151,9 +4159,7 @@ static rtEmissiveGroup_t *R_RtEmissiveAdoptGroup( const idRenderWorldLocal *worl
 	if ( best->entityIndex >= 0 && best->entityIndex < s_rtEmissiveSeenModel.Num() && s_rtEmissiveSeenModel[ best->entityIndex ] == best->model ) {
 		s_rtEmissiveSeenModel[ best->entityIndex ] = NULL;
 	}
-	if ( entityIndex >= s_rtEmissiveSeenModel.Num() ) {
-		s_rtEmissiveSeenModel.AssureSize( entityIndex + 1, NULL );	// grow only: AssureSize would also shrink the list
-	}
+	R_RtEmissiveSeenGrow( entityIndex );
 	s_rtEmissiveSeenModel[ entityIndex ] = def->parms.hModel;
 	best->entityIndex = entityIndex;
 	best->regather = true;
@@ -4175,9 +4181,7 @@ static bool R_RtEmissiveAppendEntity( const idRenderWorldLocal *world, rhi::RHI 
 	idList<rtEmissiveCensus_t> census;
 	int overflow = 0, screens = 0, runsSplit = 0, fixtures = 0;
 	const int added = R_RtEmissiveGatherEntity( world, i, scale, census, overflow, screens, runsSplit, fixtures, NULL );
-	if ( i >= s_rtEmissiveSeenModel.Num() ) {
-		s_rtEmissiveSeenModel.AssureSize( i + 1, NULL );	// grow only: AssureSize would also shrink the list
-	}
+	R_RtEmissiveSeenGrow( i );
 	s_rtEmissiveSeenModel[i] = world->entityDefs[i] ? world->entityDefs[i]->parms.hModel : NULL;
 	if ( added <= 0 ) {
 		return true;				// the scan's emissive stage gathers nothing here (clipped away / overflow): nothing to add
@@ -4224,9 +4228,7 @@ static void R_RtEmissiveScanNewEntities( const idRenderWorldLocal *world, idList
 			continue;
 		}
 		if ( trackedModel[i] == def->parms.hModel ) {
-			if ( i >= s_rtEmissiveSeenModel.Num() ) {
-				s_rtEmissiveSeenModel.AssureSize( i + 1, NULL );	// grow only: AssureSize would also shrink the list
-			}
+			R_RtEmissiveSeenGrow( i );
 			s_rtEmissiveSeenModel[i] = def->parms.hModel;
 			continue;
 		}
@@ -4246,9 +4248,7 @@ static void R_RtEmissiveScanNewEntities( const idRenderWorldLocal *world, idList
 		}
 		if ( !emissive ) {
 			// examined and dark, as the build records it: not tested again every 90 frames
-			if ( i >= s_rtEmissiveSeenModel.Num() ) {
-				s_rtEmissiveSeenModel.AssureSize( i + 1, NULL );	// grow only: AssureSize would also shrink the list
-			}
+			R_RtEmissiveSeenGrow( i );
 			s_rtEmissiveSeenModel[i] = model;
 		} else if ( R_RtEmissiveAdoptGroup( world, i, def ) == NULL ) {
 			newEntities.Append( i );

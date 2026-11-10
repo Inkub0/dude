@@ -295,7 +295,12 @@ qhandle_t idRenderWorldQ4Local::AddEntityDef( const renderEntityQ4_t *re ) {
 	}
 
 	if ( handle >= entities.Num() ) {
-		entities.AssureSize( handle + 1, NULL );		// grow only: AssureSize would also shrink the list
+		// every new slot NULL (idList::AssureSize leaves the slots inside the old capacity as they were)
+		const int oldNum = entities.Num();
+		entities.SetNum( handle + 1 );
+		for ( int i = oldNum; i < entities.Num(); i++ ) {
+			entities[i] = NULL;
+		}
 	}
 	if ( entities[handle] != NULL ) {
 		// a stale game entity under a recycled handle (never expected)
@@ -314,7 +319,12 @@ void idRenderWorldQ4Local::UpdateEntityDef( qhandle_t entityHandle, const render
 		return;
 	}
 	if ( entityHandle >= entities.Num() ) {
-		entities.AssureSize( entityHandle + 1, NULL );	// grow only
+		// every new slot NULL (idList::AssureSize leaves the slots inside the old capacity as they were)
+		const int oldNum = entities.Num();
+		entities.SetNum( entityHandle + 1 );
+		for ( int i = oldNum; i < entities.Num(); i++ ) {
+			entities[i] = NULL;
+		}
 	}
 	entityQ4_t *ent = entities[entityHandle];
 	if ( ent == NULL ) {
