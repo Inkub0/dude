@@ -1,4 +1,6 @@
-# DUDE — Doom3 Unified Development Engine
+# DUDE: Doom3 Unified Development Engine
+
+![DUDE logo](https://inkub0.github.io/dude/assets/img/logo.png)
 
 **Website, downloads and install guide: https://inkub0.github.io/dude/**
 
@@ -8,7 +10,7 @@ gameplay faithful. It runs _DOOM 3_, _Resurrection of Evil_, _The Lost Mission_ 
 0.9.8, the retail _Quake 4_ campaign, all from one executable.
 
 The stock renderer's ARB assembly shaders are translated to a shared GLSL source tree
-serving two new backends — **OpenGL 3.3 core** and **Vulkan 1.4** — selectable via the
+serving two new backends, **OpenGL 3.3 core** and **Vulkan 1.4**, selectable via the
 `r_graphicsAPI` cvar, with the original ARB renderer kept intact as the faithful reference.
 On ray-tracing GPUs the Vulkan backend goes all the way to a **path-traced lighting tier**.
 All visual enhancements are **opt-in**, driven by in-game quality presets whose floor is the
@@ -16,19 +18,19 @@ unmodified classic look.
 
 **License note:** DUDE is a modified version of [dhewm3](https://github.com/dhewm/dhewm3),
 based on id Software's Doom 3 GPL source release. All DUDE-authored source in this
-repository — including every file under `neo/shaders/` and files without an explicit
-license header — is licensed under the GNU GPLv3 (see COPYING.txt), with an additional
+repository, including every file under `neo/shaders/` and files without an explicit
+license header, is licensed under the GNU GPLv3 (see COPYING.txt), with an additional
 permission for linking with the Quake 4 SDK game code (COPYING-QUAKE4-EXCEPTION.txt). Third-party
 components (Dear ImGui, VMA, FSR2, NRD, SMAA, stb) keep their original licenses, stated in
 their files. **No game assets are included or redistributable here**: the game data is
-proprietary id/Bethesda content — bring your own copy of the game.
+proprietary id/Bethesda content; bring your own copy of the game.
 
 ## Features
 
 **Renderers** (`r_graphicsAPI opengl | opengl3 | vulkan`)
-- Legacy **OpenGL/ARB** path (`opengl`, the default) — untouched, the faithful reference.
-- **OpenGL 3.3 core** — the stock look re-expressed in GLSL, plus the enhancement suite.
-- **Vulkan 1.4** — the same enhancement suite, plus ray tracing and the Vulkan-only features
+- Legacy **OpenGL/ARB** path (`opengl`, the default): untouched, the faithful reference.
+- **OpenGL 3.3 core**: the stock look re-expressed in GLSL, plus the enhancement suite.
+- **Vulkan 1.4**: the same enhancement suite, plus ray tracing and the Vulkan-only features
   below. VMA-managed memory, persistent scene buffers, GPU timestamps (`r_vkGpuTime`).
 
 **Quality presets.** Two independent axes, in the classic System menu and the F10 settings
@@ -81,13 +83,13 @@ menu:
 - Savegames from retail Doom 3, dhewm3 and every DUDE 0.9.x release load.
 
 **Gameplay**
-- **Ultra Nightmare** difficulty (unlocked with Nightmare): Nightmare rules plus permadeath —
+- **Ultra Nightmare** difficulty (unlocked with Nightmare): Nightmare rules plus permadeath:
   one checkpoint per run written at map starts only, no manual saves, erased when you die
   ([docs/ultra-nightmare.md](docs/ultra-nightmare.md)).
 
 **Engine quality-of-life**
-- `com_interpolate` — render above 60 fps while the game simulates at its native 60 Hz.
-- `com_classicTics` — Doom 3's original 62.5 Hz game tic (16 ms, as 1.3.1 ran) instead of
+- `com_interpolate`: render above 60 fps while the game simulates at its native 60 Hz.
+- `com_classicTics`: Doom 3's original 62.5 Hz game tic (16 ms, as 1.3.1 ran) instead of
   60 Hz, for speedrunners; pair it with `com_interpolate` (see [Configuration.md](Configuration.md)).
 - VRR / adaptive sync (`r_vrr`), `com_maxFPS` frame limiter, SSE4.1 SIMD baseline.
 - Fast level loads: parallel image and sound decoding, a binary model cache.
@@ -111,7 +113,7 @@ tracing support.
 ## Supporting the project
 
 If you enjoy DUDE, you can support development at
-**[buymeacoffee.com/Inkub0](https://buymeacoffee.com/Inkub0)** ☕ — donations go
+**[buymeacoffee.com/Inkub0](https://buymeacoffee.com/Inkub0)** ☕. Donations go
 toward new hardware needed to build and test **real HDR output support** and the
 **ray-tracing pipeline** above.
 
@@ -190,10 +192,10 @@ DUDE is built on **dhewm3**; everything documented there (game data setup, origi
 compile instructions, mod support, FAQ) applies to DUDE's faithful baseline too:
 
 - Project + README: https://github.com/dhewm/dhewm3
-- Homepage: https://dhewm3.org — mods: https://dhewm3.org/mods.html
+- Homepage: https://dhewm3.org (mods: https://dhewm3.org/mods.html)
 - FAQ: https://github.com/dhewm/dhewm3/wiki/FAQ
 
-DUDE-specific documentation lives in this repo under [docs/](docs/) —
+DUDE-specific documentation lives in this repo under [docs/](docs/):
 [port architecture](docs/port-architecture.md), [Vulkan backend](docs/vulkan-backend.md),
 [Quake 4 port](docs/quake4-port.md), [Quake 4 effects (BSE)](docs/quake4-bse.md), and
 per-feature plans.
