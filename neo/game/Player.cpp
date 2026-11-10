@@ -6262,6 +6262,22 @@ void idPlayer::StartFxOnBone( const char *fx, const char *bone ) {
 
 /*
 ==============
+idPlayer::UpdateBodySelfShadow
+
+DUDE: in third person the body is a character in the scene like any other -- it casts its shadow,
+shadows itself and takes the world's shadows (noSelfShadow lifts an entity out of the last two).
+First person keeps the stock flag, which keeps the body's shadow off the view weapon.
+==============
+*/
+void idPlayer::UpdateBodySelfShadow( renderEntity_t *headRenderEnt ) {
+	renderEntity.noSelfShadow = !pm_thirdPerson.GetBool();
+	if ( headRenderEnt ) {
+		headRenderEnt->noSelfShadow = renderEntity.noSelfShadow;
+	}
+}
+
+/*
+==============
 idPlayer::Think
 
 Called every tic for each player
@@ -6449,13 +6465,7 @@ void idPlayer::Think( void ) {
 			headRenderEnt->suppressShadowInViewID = entityNumber+1;
 		}
 	}
-	// DUDE: in third person the body is a character in the scene like any other -- it casts its shadow,
-	// shadows itself and takes the world's shadows (noSelfShadow lifts an entity out of the last two).
-	// First person keeps the stock flag, which keeps the body's shadow off the view weapon.
-	renderEntity.noSelfShadow = !pm_thirdPerson.GetBool();
-	if ( headRenderEnt ) {
-		headRenderEnt->noSelfShadow = renderEntity.noSelfShadow;
-	}
+	UpdateBodySelfShadow( headRenderEnt );
 	// never cast shadows from our first-person muzzle flashes
 	renderEntity.suppressShadowInLightID = LIGHTID_VIEW_MUZZLE_FLASH + entityNumber;
 	if ( headRenderEnt ) {
@@ -8381,13 +8391,7 @@ void idPlayer::ClientPredictionThink( void ) {
 			headRenderEnt->suppressShadowInViewID = entityNumber+1;
 		}
 	}
-	// DUDE: in third person the body is a character in the scene like any other -- it casts its shadow,
-	// shadows itself and takes the world's shadows (noSelfShadow lifts an entity out of the last two).
-	// First person keeps the stock flag, which keeps the body's shadow off the view weapon.
-	renderEntity.noSelfShadow = !pm_thirdPerson.GetBool();
-	if ( headRenderEnt ) {
-		headRenderEnt->noSelfShadow = renderEntity.noSelfShadow;
-	}
+	UpdateBodySelfShadow( headRenderEnt );
 	// never cast shadows from our first-person muzzle flashes
 	renderEntity.suppressShadowInLightID = LIGHTID_VIEW_MUZZLE_FLASH + entityNumber;
 	if ( headRenderEnt ) {
