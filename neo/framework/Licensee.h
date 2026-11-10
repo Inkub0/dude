@@ -58,7 +58,10 @@ If you have questions concerning this license or the applicable additional terms
 // (~1.9 ms at Path Tracing for no visible gain). From 3 on, a bump may be such a step (CheckConfigSchema, from >= 3).
 // 7 (2026-11-10): TARGETED step - r_decalLitHighlights is on by default, off on Potato (the faithful floor): a config
 // already on the Potato preset gets it off, once.
-#define DUDE_CONFIG_SCHEMA				7
+// 8 (2026-11-10): TARGETED step - contact shadows retuned (strength 0.5, march length 4, occluder thickness 25; configs
+// on the old defaults move) and now owned by the quality preset (off Potato / Low, on Medium+ with 2 / 4 / 6 / 8 steps):
+// a config on a preset gets its tier's values, once.
+#define DUDE_CONFIG_SCHEMA				8
 
 #ifdef ID_REPRODUCIBLE_BUILD
 	// for reproducible builds we hardcode values that would otherwise come from __DATE__ and __TIME__

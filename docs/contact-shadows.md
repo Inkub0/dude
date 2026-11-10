@@ -5,7 +5,7 @@ to resolve — dropped pickups, thin props, weapon detail, a monster's feet. A p
 depth march inside the interaction pass darkens a lit pixel when a nearer occluder sits between it
 and the light. GL3 + Vulkan (the RHI enhanced path); off by default.
 
-**Cvar:** `r_contactShadows` (0). **Tiers:** intended for Medium → Nightmare. **Not** Ultra
+**Cvar:** `r_contactShadows` (0). **Tiers:** on from Medium → Nightmare (the quality preset sets it; off on Potato and Low). **Not** Ultra
 Nightmare — there `r_rtAllLights` already traces a real hard ray per light, which is strictly better.
 The feature is **automatically disabled whenever `r_rtAllLights` is on** (a hard gate in
 `RB_RHI_DrawInteraction` / the GL3 loop-global bind, and the Debug-tab group greys out and says so),
@@ -75,14 +75,16 @@ so there is no feedback with the depth buffer bound for the interactions' depth-
 
 | cvar | default | meaning |
 |---|---|---|
-| `r_contactShadows` | 0 | master toggle |
-| `r_contactShadowStrength` | 0.8 | darkening on a found occluder (0..1) |
-| `r_contactShadowLength` | 12 | march length toward the light, world units |
-| `r_contactShadowThickness` | 8 | occluder thickness band, world units (a sample nearer than the ray by more than this is background, not an occluder) |
-| `r_contactShadowSteps` | 8 | march steps per lit pixel (2..32; runs per light, so keep low) |
+| `r_contactShadows` | 0 | master toggle. **Set by the quality preset:** off on Potato and Low, on from Medium up (matched in preset detection) |
+| `r_contactShadowStrength` | 0.5 | darkening on a found occluder (0..1) |
+| `r_contactShadowLength` | 4 | march length toward the light, world units |
+| `r_contactShadowThickness` | 25 | occluder thickness band, world units (a sample nearer than the ray by more than this is background, not an occluder) |
+| `r_contactShadowSteps` | 8 | march steps per lit pixel (2..32; runs per light, so keep low). **Set by the quality preset:** Medium 2, High 4, Ultra 6, Nightmare 8 (applied, not matched in preset detection, so tuning it never reads "Custom") |
 
-All are `CVAR_ARCHIVE`. None is preset-wired — this is a look change, so it stays a manual toggle
-until a visual pass says otherwise (like `r_specOcclusion` / `r_ssrIntensity`).
+All are `CVAR_ARCHIVE`. Preset-wired since 2026-11-10 (user decision, after the dots fix and the retune):
+the toggle and the march steps come from the quality tier; strength, length and thickness stay free
+tuning knobs. Config schema 8 moves configs on the old defaults (0.8 / 12 / 8) to the new ones and puts a
+config that is on a preset onto its tier's toggle and steps, once.
 
 ## Backend wiring
 
@@ -107,8 +109,8 @@ until a visual pass says otherwise (like `r_specOcclusion` / `r_ssrIntensity`).
 - GL3 addresses fragment texture unit 16, i.e. it needs `GL_MAX_TEXTURE_IMAGE_UNITS ≥ 17`. Every
   target GL 3.3 desktop GPU (the GTX-1070-class reference exposes 32) satisfies this; only bare-minimum
   16-unit iGPUs would not, and this is a Medium+ opt-in they would not enable.
-- Fidelity: purely additive darkening, but a genuine look change vs. stock — hence opt-in, gated by eye,
-  not preset-wired.
+- Fidelity: purely additive darkening, but a genuine look change vs. stock - hence off on Potato (the
+  faithful floor) and Low, on from Medium up.
 
 ## Verification protocol
 

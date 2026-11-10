@@ -3440,6 +3440,13 @@ struct EnhancementPreset {
 	// wall instead of glowing in the dark - a fix for an oversight in the material, so ON for every tier
 	// except Potato, the faithful floor. Matched in Detect.
 	bool  decalLitHighlights;
+	// Screen-space contact shadows (appended; r_contactShadows + r_contactShadowSteps, GL3 + Vulkan,
+	// docs/contact-shadows.md): off on Potato and Low, on from Medium up, with the march steps - the cost
+	// lever - rising 2 / 4 / 6 / 8 from Medium to Nightmare. The on/off is matched in Detect; the steps are
+	// NOT (a free tuning knob, so the Debugging slider never reads "Custom"). Under RT shadows for all
+	// lights the backend skips the march anyway (they cover it).
+	bool  contactShadows;
+	int   contactShadowSteps;
 };
 
 // Potato/Low keep the enhancements off but carry the cheap Medium sub-params, so
@@ -3449,12 +3456,12 @@ struct EnhancementPreset {
 // defaults, which keep every enhancement off).
 static const EnhancementPreset enhancementPresets[PRESET_COUNT] = {
 	//                soft   smoke  emiss  ssao   shadow  aoRes aoSl aoSt aoNB   aoBN   smSz  smPt  pcf ptLim emLim grain  chrom  refl  shd sScl  sExp   szScl szRad   occl   hdr    pbr    ssr    ssrRes  grainSz aa aoRad   aoTmp   tess   tessDsp  parlx  parlxSh gpuSkn dMip   mv     fsr    dynDrop rtSun  rtMov  rtRefl aoTrade interp rtao   rtBlur rtAll  stagger  volum  rtaoRes  skin   rtgi  hdrGam aniso cmpTex decLit
-	{ "Potato",       false, false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.0f,  0.0f,  1.0f, 0,  1.0f, 62.0f, true, 380.0f, false, false, false, false, 1.0f,   1.5f,   0, 48.0f,  false,  false, 0.0f, false, 0.0f, false, false, false, false, 1,     false, false, false, true,  false, false, false, false, false, false, 1.0f, 0.0f, false, 1.20f, 1, true, false  },
-	{ "Low",          true,  false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.05f, 0.0f,  1.0f, 1,  1.2f, 42.0f, true, 380.0f, true,  false, false, false, 1.0f,   1.5f,   2, 48.0f,  false,  false, 0.12f, false, 0.0f, false, false, false, false, 1,     false, false, false, true,  true , false, false, false, false, false, 1.0f, 0.6f, false, 1.20f, 1, true, true  },
-	{ "Medium",       true,  false, true,  true,  true,   0.5f, 2,   4,   false, true,  512,  512,  8,  16,   16,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  false, false, 1.0f,   1.5f,   2, 48.0f,  true,   false, 0.12f, true, 0.0f, true, true,  false, false, 1,     false, false, false, true,  true , false, false, false, false, false, 1.0f, 0.6f, false, 1.20f, 2, true, true  },
-	{ "High",         true,  false, true,  true,  true,   0.667f, 3,   6,   true,  true,  1024, 1200, 10,  64,   24,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  true,  false, 1.0f,   1.5f,   2, 48.0f,  false,  true,  0.12f, true, 1.0f, true, true,  false, false, 1,     false, false, false, true,  true , false, false, false, false, false, 1.0f, 0.6f, false, 1.20f, 4, false, true },
-	{ "Ultra",        true,  true,  true,  true,  true,   0.75f, 4,   8,   true,  true,  2400, 2400, 11,  96,   32,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.5f,   1.5f,   2, 48.0f,  false,  true,  0.12f, true, 1.0f, true, true,  true,  false, 1,     false, false, false, true,  true , false, false, false, false, false, 1.0f, 0.6f, false, 1.20f, 8, false, true },
-	{ "Nightmare", true, true, true, true,  true,   0.8f, 5,   10,  true,  true,  3600, 3600, 12, 128,  48,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.5f, 1.5f,   2, 48.0f, false,  true,  0.12f, true, 1.0f, true, true,  true,  true,  0,     false, false, false, false, true , false, false, false, false, false, 1.0f, 0.6f, false, 1.20f, 16, false, true },
+	{ "Potato",       false, false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.0f,  0.0f,  1.0f, 0,  1.0f, 62.0f, true, 380.0f, false, false, false, false, 1.0f,   1.5f,   0, 48.0f,  false,  false, 0.0f, false, 0.0f, false, false, false, false, 1,     false, false, false, true,  false, false, false, false, false, false, 1.0f, 0.0f, false, 1.20f, 1, true, false, false, 2 },
+	{ "Low",          true,  false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.05f, 0.0f,  1.0f, 1,  1.2f, 42.0f, true, 380.0f, true,  false, false, false, 1.0f,   1.5f,   2, 48.0f,  false,  false, 0.12f, false, 0.0f, false, false, false, false, 1,     false, false, false, true,  true , false, false, false, false, false, 1.0f, 0.6f, false, 1.20f, 1, true, true, false, 2 },
+	{ "Medium",       true,  false, true,  true,  true,   0.5f, 2,   4,   false, true,  512,  512,  8,  16,   16,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  false, false, 1.0f,   1.5f,   2, 48.0f,  true,   false, 0.12f, true, 0.0f, true, true,  false, false, 1,     false, false, false, true,  true , false, false, false, false, false, 1.0f, 0.6f, false, 1.20f, 2, true, true, true,  2 },
+	{ "High",         true,  false, true,  true,  true,   0.667f, 3,   6,   true,  true,  1024, 1200, 10,  64,   24,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  true,  false, 1.0f,   1.5f,   2, 48.0f,  false,  true,  0.12f, true, 1.0f, true, true,  false, false, 1,     false, false, false, true,  true , false, false, false, false, false, 1.0f, 0.6f, false, 1.20f, 4, false, true, true,  4 },
+	{ "Ultra",        true,  true,  true,  true,  true,   0.75f, 4,   8,   true,  true,  2400, 2400, 11,  96,   32,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.5f,   1.5f,   2, 48.0f,  false,  true,  0.12f, true, 1.0f, true, true,  true,  false, 1,     false, false, false, true,  true , false, false, false, false, false, 1.0f, 0.6f, false, 1.20f, 8, false, true, true,  6 },
+	{ "Nightmare", true, true, true, true,  true,   0.8f, 5,   10,  true,  true,  3600, 3600, 12, 128,  48,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.5f, 1.5f,   2, 48.0f, false,  true,  0.12f, true, 1.0f, true, true,  true,  true,  0,     false, false, false, false, true , false, false, false, false, false, 1.0f, 0.6f, false, 1.20f, 16, false, true, true,  8 },
 };
 
 // Ray-tracing augmentation layered on top of a raster tier when RTX is on and the device is
@@ -3617,6 +3624,8 @@ static void ApplyEnhancementPreset( int idx, int rtMode )
 	r_ssaoTemporalTrade.SetBool( p.ssaoTemporalTrade );
 	com_interpolate.SetBool( p.interpolate );
 	r_decalLitHighlights.SetBool( p.decalLitHighlights );
+	r_contactShadows.SetBool( p.contactShadows );
+	r_contactShadowSteps.SetInteger( p.contactShadowSteps );	// free knob: not matched in Detect
 	r_rtao.SetBool( p.rtao );
 	r_rtaoResScale.SetFloat( p.rtaoResScale );
 	r_rtgi.SetBool( p.rtgi );		// H6e: Path Tracing enables GI (and carries rtao=false — GI replaces it)
@@ -3848,6 +3857,7 @@ static int DetectEnhancementPreset( int* outRtMode = NULL )
 			r_ssaoTemporalTrade.GetBool()      == p.ssaoTemporalTrade &&
 			com_interpolate.GetBool()          == p.interpolate &&
 			r_decalLitHighlights.GetBool()     == p.decalLitHighlights &&
+			r_contactShadows.GetBool()         == p.contactShadows &&
 			cvarSystem->GetCVarInteger( "image_anisotropy" ) == p.anisotropy &&
 			idMath::Fabs( r_skinShading.GetFloat() - p.skinShading ) < 0.01f;
 		if ( !rasterMatch ) {
@@ -5827,18 +5837,19 @@ static void DrawDbgGroup_ContactShadows()
 		ImGui::BeginDisabled( !backendOk || rtAll );
 
 		CvarSliderF( "Strength", r_contactShadowStrength, 0.0f, 1.0f, "%.2f", "how much a found occluder dims the light (0 = none, 1 = full black "
-			"at the contact). Faded by march distance so a nearer occluder darkens more. Default 0.8." );
+			"at the contact). Faded by march distance so a nearer occluder darkens more. Default 0.5." );
 
 		CvarSliderF( "March Length", r_contactShadowLength, 1.0f, 128.0f, "%.0f", "how far toward the light the depth march reaches, world units. Short "
 			"= tight contact grounding; long = broader but coarser and dearer. Clamped to the distance to the "
-			"light. Default 12." );
+			"light. Default 4." );
 
 		CvarSliderF( "Occluder Thickness", r_contactShadowThickness, 0.5f, 128.0f, "%.0f", "a depth sample nearer than the ray by more than this is treated as "
 			"background, not an occluder. Too low = shadows drop out behind thin geometry; too high = haloing / "
-			"over-occlusion. Default 8." );
+			"over-occlusion. Default 25." );
 
 		CvarSliderI( "March Steps", r_contactShadowSteps, 2, 32, "depth-march samples per lit pixel. More = smoother/further-reaching, "
-			"dearer. Runs per light, so keep it low (watch r_gl3GpuTime / r_vkGpuTime). Default 8." );
+			"dearer. Runs per light, so keep it low (watch r_gl3GpuTime / r_vkGpuTime). Set by the quality preset: "
+			"Medium 2, High 4, Ultra 6, Nightmare 8 (Potato and Low have contact shadows off)." );
 
 		ImGui::EndDisabled();	// backendOk
 		EndSettingsGroup();
@@ -7227,6 +7238,18 @@ int Com_DetectDudePreset( void )
 	return DetectEnhancementPreset();
 }
 
+// DUDE: a raster tier's contact shadows - returns r_contactShadows (0 / 1) and fills *steps with
+// r_contactShadowSteps - or -1 for no such tier. For the config-schema step that moves an old config
+// onto its tier's values (Common.cpp).
+int Com_DudePresetContactShadows( int tier, int *steps )
+{
+	if ( tier < 0 || tier >= PRESET_COUNT ) {
+		return -1;
+	}
+	*steps = enhancementPresets[tier].contactShadowSteps;
+	return enhancementPresets[tier].contactShadows ? 1 : 0;
+}
+
 // DUDE: the live ray-tracing axis state (RtMode: 0 = off, 1 = on), for the classic menu's
 // Ray Tracing selector highlight (Session*.cpp pushes it into dude_rtx). Detected from the live
 // RT cvars, same as the preset above.
@@ -7704,6 +7727,11 @@ void Com_DudePreset_f( const idCmdArgs &args )
 }
 
 int Com_DetectDudePreset( void )
+{
+	return -1;
+}
+
+int Com_DudePresetContactShadows( int tier, int *steps )
 {
 	return -1;
 }

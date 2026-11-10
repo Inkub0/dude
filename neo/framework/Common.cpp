@@ -1502,6 +1502,9 @@ CVAR_ARCHIVE modified flag set and WriteConfiguration persists the new schema + 
 shutdown (otherwise the stamp would never reach disk and the wipe would re-fire every launch).
 ===============
 */
+// Dhewm3SettingsMenu.cpp: a raster tier's contact shadows (0 / 1, *steps), -1 for none (stub without ImGui)
+extern int Com_DudePresetContactShadows( int tier, int *steps );
+
 void idCommonLocal::CheckConfigSchema( void ) {
 	if ( dude_cfgSchema.GetInteger() >= DUDE_CONFIG_SCHEMA ) {
 		return;		// settings already match the current schema
@@ -1525,6 +1528,30 @@ void idCommonLocal::CheckConfigSchema( void ) {
 	}
 
 	if ( from >= 3 ) {
+		// 7 -> 8: screen-space contact shadows retuned once the march stopped dotting (soft scores + quad
+		// average, docs/contact-shadows.md): strength 0.8 -> 0.5, march length 12 -> 4, occluder thickness
+		// 8 -> 25 - a config still on an old default moves, a deliberate other value stays. And the quality
+		// presets now own them (off on Potato / Low, on from Medium up with 2 / 4 / 6 / 8 march steps): a
+		// config on a preset gets that tier's values once, so it keeps reading as that preset.
+		if ( from < 8 ) {
+			static const struct { const char *name; float oldDefault; } contactRetune[] = {
+				{ "r_contactShadowStrength", 0.8f }, { "r_contactShadowLength", 12.0f }, { "r_contactShadowThickness", 8.0f },
+			};
+			for ( int i = 0; i < (int)( sizeof( contactRetune ) / sizeof( contactRetune[0] ) ); i++ ) {
+				idCVar *cv = cvarSystem->Find( contactRetune[i].name );	// absent without the renderer
+				if ( cv != NULL && cv->GetFloat() == contactRetune[i].oldDefault ) {
+					cv->SetString( cv->GetResetString() );
+				}
+			}
+			idCVar *onOff = cvarSystem->Find( "r_contactShadows" );
+			idCVar *steps = cvarSystem->Find( "r_contactShadowSteps" );
+			int tierSteps = 0;
+			const int tierOn = Com_DudePresetContactShadows( dude_preset.GetInteger(), &tierSteps );
+			if ( onOff != NULL && steps != NULL && tierOn >= 0 ) {
+				onOff->SetBool( tierOn != 0 );
+				steps->SetInteger( tierSteps );
+			}
+		}
 		// 6 -> 7: r_decalLitHighlights (decals' painted-on highlights follow the light) arrives on by default
 		// and off on Potato, the faithful floor. It is a new cvar, so every config gets the new default; one
 		// already on the Potato preset gets the preset's value instead, so it keeps reading "Potato".
