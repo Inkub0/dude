@@ -37,6 +37,23 @@ struct gl3Program_t {
 };
 
 static idList<gl3Program_t>	gl3Programs;
+static idHashIndex			gl3ProgramHash;		// IHash(name) -> gl3Programs index; the frontend asks for its programs by name every pass
+
+// name -> gl3Programs index (-1 = none)
+static int GL3_FindProgramIndex( const char *name ) {
+	for ( int i = gl3ProgramHash.First( idStr::IHash( name ) ); i >= 0; i = gl3ProgramHash.Next( i ) ) {
+		if ( gl3Programs[i].name.Icmp( name ) == 0 ) {
+			return i;
+		}
+	}
+	return -1;
+}
+
+static int GL3_AppendProgram( const gl3Program_t &entry ) {
+	const int index = gl3Programs.Append( entry );
+	gl3ProgramHash.Add( idStr::IHash( entry.name ), index );
+	return index;
+}
 static bool					gl3CmdRegistered = false;
 
 // hand-translated boot set (neo/shaders/README.md "Translated" table);
@@ -391,17 +408,16 @@ retries it.
 =============
 */
 unsigned int GL3_FindProgram( const char *name ) {
-	for ( int i = 0; i < gl3Programs.Num(); i++ ) {
-		if ( gl3Programs[i].name.Icmp( name ) == 0 ) {
-			return gl3Programs[i].object ? i + 1 : 0;
-		}
+	const int found = GL3_FindProgramIndex( name );
+	if ( found >= 0 ) {
+		return gl3Programs[found].object ? found + 1 : 0;
 	}
 
 	gl3Program_t entry;
 	entry.name = name;
 	entry.fromSource = false;
 	entry.object = GL3_BuildProgramObject( name );
-	int index = gl3Programs.Append( entry );
+	int index = GL3_AppendProgram( entry );
 	return gl3Programs[index].object ? index + 1 : 0;
 }
 
@@ -415,11 +431,9 @@ modified .vfp), it is rebuilt in place — handles stay valid.
 =============
 */
 unsigned int GL3_FindProgramFromSource( const char *name, const char *vertBody, const char *fragBody ) {
-	for ( int i = 0; i < gl3Programs.Num(); i++ ) {
+	const int i = GL3_FindProgramIndex( name );
+	if ( i >= 0 ) {
 		gl3Program_t &e = gl3Programs[i];
-		if ( e.name.Icmp( name ) != 0 ) {
-			continue;
-		}
 		if ( e.object && e.vertSrc.Cmp( vertBody ) == 0 && e.fragSrc.Cmp( fragBody ) == 0 ) {
 			return i + 1;
 		}
@@ -442,7 +456,7 @@ unsigned int GL3_FindProgramFromSource( const char *name, const char *vertBody, 
 	entry.vertSrc = vertBody;
 	entry.fragSrc = fragBody;
 	entry.object = GL3_BuildProgramObject( name, vertBody, fragBody );
-	int index = gl3Programs.Append( entry );
+	int index = GL3_AppendProgram( entry );
 	return gl3Programs[index].object ? index + 1 : 0;
 }
 
@@ -506,6 +520,7 @@ old GL objects died with the old context (cleared, not deleted).
 */
 void GL3_InitShaderCache() {
 	gl3Programs.Clear();
+	gl3ProgramHash.Clear();
 	IR_Purge();
 
 	int ok = 0;
@@ -536,6 +551,7 @@ void GL3_ShutdownShaderCache() {
 		}
 	}
 	gl3Programs.Clear();
+	gl3ProgramHash.Clear();
 }
 
 } // namespace rhi

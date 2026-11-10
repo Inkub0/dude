@@ -621,6 +621,23 @@ private:
 		bool			failed = false;
 	};
 	std::vector<ShaderRec>		shaderTable;			// handle = index + 1
+	idHashIndex					shaderNameHash;			// IHash(name) -> shaderTable index; the frontend asks for its programs by name every pass
+
+	// name -> shaderTable index (-1 = none). Case-insensitive like the names in the table.
+	int FindShaderIndex( const char *name ) const {
+		for ( int i = shaderNameHash.First( idStr::IHash( name ) ); i >= 0; i = shaderNameHash.Next( i ) ) {
+			if ( shaderTable[i].name.Icmp( name ) == 0 ) {
+				return i;
+			}
+		}
+		return -1;
+	}
+	// appends (and indexes) a shader record; returns its handle, 0 for a failed record
+	ShaderHandle AddShaderRec( const ShaderRec &rec ) {
+		shaderNameHash.Add( idStr::IHash( rec.name ), (int)shaderTable.size() );
+		shaderTable.push_back( rec );
+		return rec.failed ? 0 : (ShaderHandle)shaderTable.size();
+	}
 
 	std::vector<std::pair<unsigned int, VkSampler> >	samplerCache;	// key = filter|repeat|mips
 	// Live anisotropy (image_anisotropy): GL sets it per texture object, but VK bakes it into the
@@ -4210,6 +4227,7 @@ void VulkanBackend::DestroyM2Resources() {
 		if ( shaderTable[i].comp ) { vkDestroyShaderModule( device, shaderTable[i].comp, NULL ); }
 	}
 	shaderTable.clear();
+	shaderNameHash.Clear();
 
 	for ( size_t i = 0; i < imageTable.size(); i++ ) {
 		if ( imageTable[i].live ) {
@@ -4942,10 +4960,9 @@ ShaderHandle VulkanBackend::LoadShader( const char *name ) {
 	if ( device == VK_NULL_HANDLE || name == NULL || name[0] == '\0' ) {
 		return 0;
 	}
-	for ( size_t i = 0; i < shaderTable.size(); i++ ) {
-		if ( shaderTable[i].name.Icmp( name ) == 0 ) {
-			return shaderTable[i].failed ? 0 : (ShaderHandle)( i + 1 );
-		}
+	const int found = FindShaderIndex( name );
+	if ( found >= 0 ) {
+		return shaderTable[found].failed ? 0 : (ShaderHandle)( found + 1 );
 	}
 
 	ShaderRec rec;
@@ -4956,7 +4973,7 @@ ShaderHandle VulkanBackend::LoadShader( const char *name ) {
 	  || !VK_ReadSpv( va( "%s.frag.spv", name ), fragSpv ) ) {
 		common->Warning( "VK shaders: missing SPIR-V pair for '%s' (shaders/spv)", name );
 		rec.failed = true;
-		shaderTable.push_back( rec );
+		AddShaderRec( rec );
 		return 0;
 	}
 
@@ -4995,8 +5012,7 @@ ShaderHandle VulkanBackend::LoadShader( const char *name ) {
 		if ( rec.frag ) { vkDestroyShaderModule( device, rec.frag, NULL ); rec.frag = VK_NULL_HANDLE; }
 		rec.failed = true;
 	}
-	shaderTable.push_back( rec );
-	return rec.failed ? 0 : (ShaderHandle)shaderTable.size();
+	return AddShaderRec( rec );
 }
 
 /*
@@ -5150,10 +5166,9 @@ ShaderHandle VulkanBackend::CreateShaderFromGlsl( const char *name, const char *
 	if ( device == VK_NULL_HANDLE || name == NULL || name[0] == '\0' || vertSrc == NULL || fragSrc == NULL ) {
 		return 0;
 	}
-	for ( size_t i = 0; i < shaderTable.size(); i++ ) {
-		if ( shaderTable[i].name.Icmp( name ) == 0 ) {
-			return shaderTable[i].failed ? 0 : (ShaderHandle)( i + 1 );
-		}
+	const int found = FindShaderIndex( name );
+	if ( found >= 0 ) {
+		return shaderTable[found].failed ? 0 : (ShaderHandle)( found + 1 );
 	}
 
 	ShaderRec rec;
@@ -5163,7 +5178,7 @@ ShaderHandle VulkanBackend::CreateShaderFromGlsl( const char *name, const char *
 	if ( !VK_CompileGlslToSpv( name, vertSrc, shaderc_vertex_shader, vertSpv )
 	  || !VK_CompileGlslToSpv( name, fragSrc, shaderc_fragment_shader, fragSpv ) ) {
 		rec.failed = true;
-		shaderTable.push_back( rec );
+		AddShaderRec( rec );
 		return 0;
 	}
 
@@ -5180,8 +5195,7 @@ ShaderHandle VulkanBackend::CreateShaderFromGlsl( const char *name, const char *
 		if ( rec.frag ) { vkDestroyShaderModule( device, rec.frag, NULL ); rec.frag = VK_NULL_HANDLE; }
 		rec.failed = true;
 	}
-	shaderTable.push_back( rec );
-	return rec.failed ? 0 : (ShaderHandle)shaderTable.size();
+	return AddShaderRec( rec );
 #else
 	(void)name; (void)vertSrc; (void)fragSrc;
 	return 0;
@@ -5197,10 +5211,9 @@ ShaderHandle VulkanBackend::CreateComputeShader( const char *name, const char *g
 	if ( device == VK_NULL_HANDLE || name == NULL || name[0] == '\0' || glslSrc == NULL ) {
 		return 0;
 	}
-	for ( size_t i = 0; i < shaderTable.size(); i++ ) {
-		if ( shaderTable[i].name.Icmp( name ) == 0 ) {
-			return shaderTable[i].failed ? 0 : (ShaderHandle)( i + 1 );
-		}
+	const int found = FindShaderIndex( name );
+	if ( found >= 0 ) {
+		return shaderTable[found].failed ? 0 : (ShaderHandle)( found + 1 );
 	}
 
 	ShaderRec rec;
@@ -5209,7 +5222,7 @@ ShaderHandle VulkanBackend::CreateComputeShader( const char *name, const char *g
 	std::vector<uint32_t> compSpv;
 	if ( !VK_CompileGlslToSpv( name, glslSrc, shaderc_compute_shader, compSpv ) ) {
 		rec.failed = true;
-		shaderTable.push_back( rec );
+		AddShaderRec( rec );
 		return 0;
 	}
 
@@ -5221,8 +5234,7 @@ ShaderHandle VulkanBackend::CreateComputeShader( const char *name, const char *g
 		rec.comp = VK_NULL_HANDLE;
 		rec.failed = true;
 	}
-	shaderTable.push_back( rec );
-	return rec.failed ? 0 : (ShaderHandle)shaderTable.size();
+	return AddShaderRec( rec );
 #else
 	(void)name; (void)glslSrc;
 	return 0;
@@ -5237,10 +5249,9 @@ ShaderHandle VulkanBackend::LoadComputeShader( const char *name ) {
 	if ( device == VK_NULL_HANDLE || name == NULL || name[0] == '\0' ) {
 		return 0;
 	}
-	for ( size_t i = 0; i < shaderTable.size(); i++ ) {
-		if ( shaderTable[i].name.Icmp( name ) == 0 ) {
-			return shaderTable[i].failed ? 0 : (ShaderHandle)( i + 1 );
-		}
+	const int found = FindShaderIndex( name );
+	if ( found >= 0 ) {
+		return shaderTable[found].failed ? 0 : (ShaderHandle)( found + 1 );
 	}
 	ShaderRec rec;
 	rec.name = name;
@@ -5248,7 +5259,7 @@ ShaderHandle VulkanBackend::LoadComputeShader( const char *name ) {
 	if ( !VK_ReadSpv( va( "%s.comp.spv", name ), compSpv ) ) {
 		common->Warning( "VK shaders: missing SPIR-V for compute shader '%s' (shaders/spv/%s.comp.spv)", name, name );
 		rec.failed = true;
-		shaderTable.push_back( rec );
+		AddShaderRec( rec );
 		return 0;
 	}
 	VkShaderModuleCreateInfo mi = {};
@@ -5259,8 +5270,7 @@ ShaderHandle VulkanBackend::LoadComputeShader( const char *name ) {
 		rec.comp = VK_NULL_HANDLE;
 		rec.failed = true;
 	}
-	shaderTable.push_back( rec );
-	return rec.failed ? 0 : (ShaderHandle)shaderTable.size();
+	return AddShaderRec( rec );
 }
 
 // r_vkPipelineStats (docs/rtx-irradiance-cache.md G0): does this pipeline's shader name match the readout filter?
