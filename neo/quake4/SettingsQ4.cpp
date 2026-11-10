@@ -50,6 +50,8 @@ static idCVar *				q4_volume = NULL;
 static idCVar *				q4_speakerFraction = NULL;
 static idCVar *				q4_musicVolume = NULL;
 static idCVar *				q4_deviceName = NULL;
+static idCVar *				q4_sVolumeDb = NULL;		// the sound system's s_volume_dB / s_device, found once (Q4Settings_Frame runs every frame)
+static idCVar *				q4_sDevice = NULL;
 static idCVar *				q4_skipSky = NULL;
 static idCVar *				q4_forceAmbient = NULL;
 
@@ -109,24 +111,29 @@ void Q4Settings_Frame( void ) {
 	if ( q4_volume == NULL ) {
 		return;
 	}
+	if ( q4_sVolumeDb == NULL ) { q4_sVolumeDb = cvarSystem->Find( "s_volume_dB" ); }
+	if ( q4_sDevice == NULL ) { q4_sDevice = cvarSystem->Find( "s_device" ); }
+	if ( q4_sVolumeDb == NULL || q4_sDevice == NULL ) {
+		return;		// no sound system
+	}
 
 	// the master volume: whichever side changed last wins; DUDE's own setting the first time
 	const float volume = q4_volume->GetFloat();
-	const float volumeDb = cvarSystem->GetCVarFloat( "s_volume_dB" );
+	const float volumeDb = q4_sVolumeDb->GetFloat();
 	if ( q4_lastVolume < 0.0f || ( volumeDb != q4_lastVolumeDb && volume == q4_lastVolume ) ) {
 		q4_volume->SetFloat( idMath::ClampFloat( 0.0f, 2.0f, idMath::dBToScale( volumeDb ) ) );
 	} else if ( volume != q4_lastVolume ) {
 		// id's dB rule, 6 dB per doubling (idMath::dBToScale, the mixer's dB2Scale)
 		const float db = volume > 0.001f ? 6.0f * log2f( volume ) : Q4_VOLUME_SILENT_DB;
-		cvarSystem->SetCVarFloat( "s_volume_dB", db );
+		q4_sVolumeDb->SetFloat( db );
 	}
 	q4_lastVolume = q4_volume->GetFloat();
-	q4_lastVolumeDb = cvarSystem->GetCVarFloat( "s_volume_dB" );
+	q4_lastVolumeDb = q4_sVolumeDb->GetFloat();
 
 	// the device: the menu's choice (a device name as its list reads it back) to s_device, and
 	// back; "" and "default" are the default device
 	const char *deviceName = q4_deviceName->GetString();
-	const char *device = cvarSystem->GetCVarString( "s_device" );
+	const char *device = q4_sDevice->GetString();
 	if ( q4_lastDeviceName.Cmp( deviceName ) != 0 ) {
 		idStr chosen = "default";
 		if ( deviceName[0] != '\0' && idStr::Icmp( deviceName, "default" ) != 0 ) {
@@ -139,12 +146,12 @@ void Q4Settings_Frame( void ) {
 				}
 			}
 		}
-		cvarSystem->SetCVarString( "s_device", chosen );
+		q4_sDevice->SetString( chosen );
 	} else if ( q4_lastDevice.Cmp( device ) != 0 ) {
 		q4_deviceName->SetString( idStr::Icmp( device, "default" ) == 0 ? "" : Q4_ChoiceValue( Q4_MenuDeviceName( device ) ).c_str() );
 	}
 	q4_lastDeviceName = q4_deviceName->GetString();
-	q4_lastDevice = cvarSystem->GetCVarString( "s_device" );
+	q4_lastDevice = q4_sDevice->GetString();
 }
 
 /*
@@ -362,7 +369,7 @@ void Q4Settings_SetMenuGuiVars( idUserInterface *gui ) {
 		list += i == 0 ? devices[i] : Q4_MenuDeviceName( devices[i] );
 	}
 	gui->SetStateString( "device_name", list );
-	const char *device = cvarSystem->GetCVarString( "s_device" );
+	const char *device = q4_sDevice->GetString();
 	for ( int i = 0; i < devices.Num(); i++ ) {
 		if ( devices[i].Icmp( device ) == 0 ) {
 			q4_deviceName->SetString( i == 0 ? "" : Q4_ChoiceValue( Q4_MenuDeviceName( devices[i] ) ).c_str() );
