@@ -63,7 +63,9 @@ If you have questions concerning this license or the applicable additional terms
 // a config on a preset gets its tier's values, once.
 // 9 (2026-11-10): TARGETED step - RT contact shadows (r_rtContactShadows) join the RT presets from High up: a config on
 // such a tier with its ray tracing applied gets them on, once.
-#define DUDE_CONFIG_SCHEMA				9
+// 10 (2026-11-10): TARGETED step - RT shadow blur intensity / curve and RT contact shadow strength / length / softness
+// retuned: configs on the old defaults move, once.
+#define DUDE_CONFIG_SCHEMA				10
 
 #ifdef ID_REPRODUCIBLE_BUILD
 	// for reproducible builds we hardcode values that would otherwise come from __DATE__ and __TIME__

@@ -9984,9 +9984,10 @@ static rhi::ImageHandle RB_RHI_RtShadowBlurLight( rhi::RHI *r, const viewDef_t *
 		const int tyTop = rTop / 8, tyBot = rBot / 8;
 		tp.localParam0[0] = (float)pass;
 		// pass 0 reads the ray pass's compact RG8 summary (attachment 1, 2 B/texel) instead of the
-		// 8-byte RGBA16F, when the MRT target carried it and r_rtShadowBlurFastTiles is on
+		// 8-byte RGBA16F whenever the MRT target carried it (image-identical, ~0.3 ms cheaper - always on
+		// since 2026-11-10; the RGBA16F read stays only as the fallback for a target without the summary)
 		const rhi::ImageHandle summaryImg = r->GetRenderTargetImage2( srcRT );
-		const bool fastTiles = ( pass == 0 ) && r_rtShadowBlurFastTiles.GetBool() && summaryImg != 0;
+		const bool fastTiles = ( pass == 0 ) && summaryImg != 0;
 		tp.localParam0[1] = fastTiles ? 1.0f : 0.0f;
 		r->GpuScopeBegin( "rtblur.tiles" );
 		r->BeginTargetPass( rhiRtBlurTileRT[pass], &clearZero );

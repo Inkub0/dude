@@ -5224,17 +5224,17 @@ static void DrawDbgGroup_RTShadows()
 	CvarSliderF( "Blur Intensity", r_rtShadowBlurIntensity, 0.0f, 4.0f, "%.2f", "How strongly the ray-traced shadows are blurred. The blur still follows the "
 		"scene - none where an object touches the surface, more as the gap grows - this scales "
 		"all of it. It tops out at 24 pixels, so high values mostly soften the edges near "
-		"contact further. 0 = hard shadows. Default 0.13." );
+		"contact further. 0 = hard shadows. Default 1.00." );
 
 	CvarSliderF( "Blur Falloff Curve", r_rtShadowBlurCurve, 0.25f, 4.0f, "%.2f", "How quickly a shadow softens as it gets further from the object casting it. "
 		"1 = the natural growth of a real light. Lower = soft almost straight away, then "
 		"levelling off (a more even blur). Higher = crisp for longer near the object, then "
-		"widening fast. Blur Intensity sets how much; this sets where. Default 0.5." );
+		"widening fast. Blur Intensity sets how much; this sets where. Default 0.47." );
 
 	CvarSliderF( "Skip Below Penumbra", r_rtShadowBlurMinPenumbra, 0.0f, 8.0f, "%.1f px", "Performance: a distant or small light casts a shadow edge finer than this many "
 		"screen pixels, so softening it would be invisible - skip its blur entirely and keep the "
 		"crisp hard ray (the whole per-light ray + blur chain is saved). Higher skips more lights "
-		"for more FPS; parallel suns are never skipped. 0 = blur every ray-served light. "
+		"for more FPS; parallel suns are never skipped. 0 = blur every ray-served light. Default 2.0. "
 		"Preset defaults: 4 at Ultra(RTX), 2 at Nightmare(RTX). Watch rtblur.ray's calls/frame in r_vkGpuTime 2." );
 
 	ImGui::BeginDisabled( !r_rtShadowBlurStagger.GetBool() );
@@ -5250,7 +5250,6 @@ static void DrawDbgGroup_RTShadows()
 
 	SettingsHeading( "Performance" );
 	CvarCheckbox( "Checkerboard Shadow Rays", r_rtShadowBlurCheckerboard, nullptr );
-	CvarCheckbox( "Fast Tile Classification", r_rtShadowBlurFastTiles, nullptr );
 	ImGui::EndDisabled();	// rtCapable
 	EndSettingsGroup();
 	}
@@ -5887,14 +5886,14 @@ static void DrawDbgGroup_RtContactShadows()
 		ImGui::BeginDisabled( !rtCapable );
 
 		CvarSliderF( "Strength", r_rtContactShadowStrength, 0.0f, 1.0f, "%.2f", "how much an occluder dims the light (0 = none, 1 = full "
-			"black at the contact). Faded by the hit distance so a nearer occluder darkens more. Default 0.5." );
+			"black at the contact). Faded by the hit distance so a nearer occluder darkens more. Default 0.4." );
 
 		CvarSliderF( "Ray Length", r_rtContactShadowLength, 1.0f, 128.0f, "%.0f", "how far toward the light the ray looks, world units. "
-			"Short = tight contact grounding; long = broader. Clamped to the distance to the light. Default 4." );
+			"Short = tight contact grounding; long = broader. Clamped to the distance to the light. Default 14." );
 
 		CvarSliderF( "Softness", r_rtContactShadowSoftness, 0.0f, 45.0f, "%.0f", "how soft the edge is: the half-angle in degrees "
 			"of the cone the rays spread over toward the light (each 2x2 pixel block traces four directions and averages "
-			"them). 0 = hard edge. Default 15." );
+			"them). 0 = hard edge. Default 12." );
 
 		ImGui::EndDisabled();	// rtCapable
 		EndSettingsGroup();
