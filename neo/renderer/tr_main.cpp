@@ -2856,7 +2856,6 @@ static int						s_rtEmissiveLastRebuildMs = -100000;	// Sys_Milliseconds of the 
 // first build of a map, after a table cvar changed, or with r_rtEmissiveTableDebug; the rebuilds a map makes on its
 // own print one timed line instead - writing ~250 console + log lines was part of each rebuild's hitch
 static bool						s_rtEmissiveReport = true;
-static int						s_rtEmissiveRowBuilds = 0;		// R_RtEmissiveBuildRows calls, for the mover-upkeep timing (R_RtEmissiveRefreshMovers)
 static idStr					s_rtEmissiveReportedMap;
 static void R_RtEmissiveReport( const char *fmt, ... ) id_attribute((format(printf,1,2)));
 static void R_RtEmissiveReport( const char *fmt, ... ) {
@@ -3759,7 +3758,6 @@ float R_RtEmissiveLightAnimatedAverage( const idRenderLightLocal *ld ) {
 }
 
 static void R_RtEmissiveBuildRows( void ) {
-	s_rtEmissiveRowBuilds++;
 	s_rtEmissiveRows.SetNum( 0, false );
 	if ( s_rtEmissiveLabels.Num() == 0 || s_rtEmissiveBuf == 0 ) {
 		return;
@@ -4097,34 +4095,15 @@ static void R_RtEmissiveRefreshMoversBody( const idRenderWorldLocal *world, rhi:
 	}
 }
 
-// DUDE (2026-10-27): the per-frame mover upkeep is map-wide (any emissive mover anywhere re-bakes its slice, and any
-// change regenerates the emitter rows the light grid reads). Timed here; with r_rtEmissiveTableDebug on, a summary
-// line every 5 s: the average and worst cost per frame and on how many frames the rows were regenerated.
+// DUDE: the per-frame mover upkeep is map-wide (any emissive mover anywhere re-bakes its slice, and any change
+// regenerates the emitter rows the light grid reads), so it runs once per frame however many views draw.
 static void R_RtEmissiveRefreshMovers( const idRenderWorldLocal *world, rhi::RHI *r ) {
-	static int lastFrame = -1, frames = 0, rowFrames = 0, windowStartMs = 0;
-	static double sumMs = 0.0, maxMs = 0.0;
+	static int lastFrame = -1;
 	if ( tr.frameCount == lastFrame ) {
 		return;
 	}
 	lastFrame = tr.frameCount;
-	const int rowsBefore = s_rtEmissiveRowBuilds;
-	const double t0 = Sys_MillisecondsPrecise();
 	R_RtEmissiveRefreshMoversBody( world, r );
-	const double ms = Sys_MillisecondsPrecise() - t0;
-	sumMs += ms;
-	maxMs = Max( maxMs, ms );
-	frames++;
-	rowFrames += ( s_rtEmissiveRowBuilds != rowsBefore ) ? 1 : 0;
-	const int now = Sys_Milliseconds();
-	if ( now - windowStartMs >= 5000 ) {
-		if ( r_rtEmissiveTableDebug.GetInteger() > 0 && frames > 0 && windowStartMs != 0 ) {
-			common->Printf( "r_rtEmissiveTable: mover upkeep over %.1f s: %.3f ms/frame average, %.3f ms worst; emitter rows regenerated on %d of %d frames\n",
-				( now - windowStartMs ) * 0.001f, sumMs / frames, maxMs, rowFrames, frames );
-		}
-		windowStartMs = now;
-		sumMs = maxMs = 0.0;
-		frames = rowFrames = 0;
-	}
 }
 
 // A group whose entity is gone: its slot was freed, or now holds another model (R_RtEmissiveRefreshMovers darkened it).
