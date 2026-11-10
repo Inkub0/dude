@@ -4006,17 +4006,19 @@ bool VulkanBackend::CreateM2Resources() {
 	// (ComputeArgs::storage[]) + a 128-byte push-constant range for params, a dedicated
 	// pipeline layout, and a FREE-able pool for per-dispatch sets. All COMPUTE-stage, kept
 	// fully independent of the 2-set graphics layout above.
+	// DUDE: plus two COMBINED_IMAGE_SAMPLER bindings 8 and 9 (ComputeArgs::images[]); a shader that
+	// doesn't declare them leaves them unwritten, as it does unused storage slots.
 	{
-		VkDescriptorSetLayoutBinding sb[8] = {};
-		for ( int i = 0; i < 8; i++ ) {
+		VkDescriptorSetLayoutBinding sb[10] = {};
+		for ( int i = 0; i < 10; i++ ) {
 			sb[i].binding = (uint32_t)i;
-			sb[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+			sb[i].descriptorType = ( i < 8 ) ? VK_DESCRIPTOR_TYPE_STORAGE_BUFFER : VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
 			sb[i].descriptorCount = 1;
 			sb[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 		}
 		VkDescriptorSetLayoutCreateInfo li = {};
 		li.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-		li.bindingCount = 8;
+		li.bindingCount = 10;
 		li.pBindings = sb;
 		if ( !vkCheck( vkCreateDescriptorSetLayout( device, &li, NULL, &setLayoutCompute ), "vkCreateDescriptorSetLayout(compute)" ) ) {
 			return false;
@@ -4034,13 +4036,16 @@ bool VulkanBackend::CreateM2Resources() {
 		if ( !vkCheck( vkCreatePipelineLayout( device, &pli, NULL, &computePipeLayout ), "vkCreatePipelineLayout(compute)" ) ) {
 			return false;
 		}
-		VkDescriptorPoolSize ps = { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, MAX_FRAME_SETS * 8 };
+		VkDescriptorPoolSize ps[2] = {
+			{ VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, MAX_FRAME_SETS * 8 },
+			{ VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, MAX_FRAME_SETS * 2 }		// DUDE: bindings 8-9
+		};
 		VkDescriptorPoolCreateInfo pci = {};
 		pci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
 		pci.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
 		pci.maxSets = MAX_FRAME_SETS;
-		pci.poolSizeCount = 1;
-		pci.pPoolSizes = &ps;
+		pci.poolSizeCount = 2;
+		pci.pPoolSizes = ps;
 		if ( !vkCheck( vkCreateDescriptorPool( device, &pci, NULL, &computePool ), "vkCreateDescriptorPool(compute)" ) ) {
 			return false;
 		}
@@ -5380,10 +5385,11 @@ VkDescriptorSet VulkanBackend::RecordDispatch( VkCommandBuffer cb, const Compute
 		common->Warning( "VK: compute descriptor pool exhausted" );
 		return VK_NULL_HANDLE;
 	}
-	// write only the bound storage buffers; a compute shader statically uses only what it
-	// binds, so unbound bindings need no descriptor.
+	// write only the bound storage buffers (and images); a compute shader statically uses only
+	// what it binds, so unbound bindings need no descriptor.
 	VkDescriptorBufferInfo bi[8] = {};
-	VkWriteDescriptorSet w[8] = {};
+	VkDescriptorImageInfo ii[2] = {};
+	VkWriteDescriptorSet w[10] = {};
 	int n = 0;
 	for ( int i = 0; i < 8; i++ ) {
 		if ( args.storage[i] < 1 || args.storage[i] > (BufferHandle)bufferTable.size() ) {
@@ -5398,6 +5404,24 @@ VkDescriptorSet VulkanBackend::RecordDispatch( VkCommandBuffer cb, const Compute
 		w[n].descriptorCount = 1;
 		w[n].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
 		w[n].pBufferInfo = &bi[n];
+		n++;
+	}
+	// DUDE: sampled images, bindings 8-9, each with its own sampler (filter / wrap)
+	for ( int i = 0; i < 2; i++ ) {
+		const ImageHandle img = args.images[i];
+		if ( img < 1 || img > (ImageHandle)imageTable.size() || !imageTable[img - 1].live
+				|| imageTable[img - 1].view == VK_NULL_HANDLE || imageTable[img - 1].sampler == VK_NULL_HANDLE ) {
+			continue;
+		}
+		ii[i].sampler = imageTable[img - 1].sampler;
+		ii[i].imageView = imageTable[img - 1].view;
+		ii[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+		w[n].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		w[n].dstSet = set;
+		w[n].dstBinding = (uint32_t)( 8 + i );
+		w[n].descriptorCount = 1;
+		w[n].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+		w[n].pImageInfo = &ii[i];
 		n++;
 	}
 	if ( n > 0 ) {

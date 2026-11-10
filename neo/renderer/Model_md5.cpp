@@ -249,6 +249,8 @@ idMD5Mesh::idMD5Mesh() {
 	tessBakeLevel		= 0;
 	tessBakeMinEdge		= -1.0f;
 	tessBakePending		= false;
+	tessGpuBake			= false;
+	tessJobFrame		= -1;
 	tessBarySeam		= NULL;
 	tessSrcTri			= NULL;
 	tessHeight			= NULL;
@@ -929,6 +931,17 @@ static rhi::ShaderHandle r_md5TessShader = 0;
 static bool r_md5TessShaderTried = false;
 
 // Lazily compile the shared deform compute shader (once). 0 if there's no compute lane (GL3).
+static rhi::ShaderHandle r_md5TessBakeShader = 0;
+static bool r_md5TessBakeShaderTried = false;
+// DUDE: the GPU bake of the deform-once subdivision (md5tessbake.comp); 0 = unavailable -> the CPU bake
+static rhi::ShaderHandle R_MD5_TessBakeShader( rhi::RHI *r ) {
+	if ( !r_md5TessBakeShaderTried ) {
+		r_md5TessBakeShaderTried = true;
+		r_md5TessBakeShader = r->LoadComputeShader( "md5tessbake" );	// build-time SPIR-V
+	}
+	return r_md5TessBakeShader;
+}
+
 static rhi::ShaderHandle r_md5TessPrevShader = 0;
 static bool r_md5TessPrevShaderTried = false;
 // The PREVPOS variant of the deform kernel (md5tessdeform_prevpos.comp): also saves last frame's deformed
@@ -973,6 +986,7 @@ void R_MD5_ResetGpuShaders( void ) {
 	r_md5DeriveShader = 0;		r_md5DeriveShaderTried = false;
 	r_md5TessShader = 0;		r_md5TessShaderTried = false;
 	r_md5TessPrevShader = 0;	r_md5TessPrevShaderTried = false;
+	r_md5TessBakeShader = 0;	r_md5TessBakeShaderTried = false;
 	// the backend is gone: every per-mesh skin/tess buffer handle cached across all MD5 meshes now
 	// names a reissued table slot. Bump the generation so EnsureSkin/TessBuffersUploaded re-uploads
 	// them lazily and FreeGpuSkinData/FreeTessData skip the (now dangling) DestroyBuffer.
@@ -1032,6 +1046,28 @@ void idMD5Mesh::FreeTessData( void ) {
 	numTessOutTris = 0;
 	tessBakeLevel = 0;
 	tessBakeMinEdge = -1.0f;
+	tessGpuBake = false;
+}
+
+/*
+====================
+idMD5Mesh::TessHeightImage
+
+DUDE: the SIGNED height field the material's bump stage displaces with, NOT the normal map - the same
+pixels the fixed-function tess passes sample, so the deform-once bake displaces identically
+(docs/tessellation.md). NULL = no relief.
+====================
+*/
+const idImage *idMD5Mesh::TessHeightImage( void ) const {
+	if ( shader ) {
+		for ( int s = 0; s < shader->GetNumStages(); s++ ) {
+			const shaderStage_t *st = shader->GetStage( s );
+			if ( st && st->lighting == SL_BUMP && shader->GetStageExtra( st ).tessHeightImage ) {
+				return shader->GetStageExtra( st ).tessHeightImage;
+			}
+		}
+	}
+	return NULL;
 }
 
 /*
@@ -1082,7 +1118,9 @@ static void R_MD5_UnqueueTessBake( idMD5Mesh *mesh ) {
 	for ( int i = s_md5TessBakeJobs.Num() - 1; i >= 0; i-- ) {
 		if ( s_md5TessBakeJobs[i].mesh == mesh ) {
 			mesh->SetTessBakePending( false );
-			R_StaticFree( s_md5TessBakeJobs[i].bindVerts );
+			if ( s_md5TessBakeJobs[i].bindVerts ) {
+				R_StaticFree( s_md5TessBakeJobs[i].bindVerts );
+			}
 			s_md5TessBakeJobs.RemoveIndex( i );
 		}
 	}
@@ -1186,7 +1224,9 @@ void R_MD5_FlushTessBakes( void ) {
 			s_md5TessBakeJobs[i].mesh->DisableTessDeform();
 			failed++;
 		}
-		R_StaticFree( s_md5TessBakeJobs[i].bindVerts );
+		if ( s_md5TessBakeJobs[i].bindVerts ) {
+			R_StaticFree( s_md5TessBakeJobs[i].bindVerts );
+		}
 	}
 	for ( int i = 0; i < pixels.Num(); i++ ) {
 		if ( pixels[i].pic ) {
@@ -1243,10 +1283,29 @@ void idMD5Mesh::BuildTessTopology( const idJointMat *bindJoints ) {
 		return;
 	}
 
-	tessBarySeam      = (idVec4 *)   Mem_Alloc16( numTessOutVerts * sizeof( idVec4 ) );
-	tessSrcTri        = (int *)      Mem_Alloc16( numTessOutVerts * 3 * sizeof( int ) );
-	tessHeight        = (float *)    Mem_Alloc16( numTessOutVerts * sizeof( float ) );
+	// DUDE: the per-vertex data is baked on the GPU when the backend can (Vulkan + the md5tessbake kernel):
+	// EnsureTessBuffersUploaded dispatches it on first use, sampling the height image the renderer already
+	// uploaded, so nothing here decodes an image and no per-vertex array stays in RAM. Only the expanded index
+	// list is built here (plain arithmetic; the draw's index buffers are made from it). Otherwise the CPU bake
+	// below, the fallback, fills everything.
+	tessGpuBake = rhi::GetActiveBackendType() == rhi::BT_VULKAN && R_MD5_TessBakeShader( rhi::GetRHI() ) != 0;
+	if ( !tessGpuBake ) {
+		tessBarySeam      = (idVec4 *)   Mem_Alloc16( numTessOutVerts * sizeof( idVec4 ) );
+		tessSrcTri        = (int *)      Mem_Alloc16( numTessOutVerts * 3 * sizeof( int ) );
+		tessHeight        = (float *)    Mem_Alloc16( numTessOutVerts * sizeof( float ) );
+	}
 	tessExpandIndexes = (glIndex_t *)Mem_Alloc16( numTessOutTris * 3 * sizeof( glIndex_t ) );
+	if ( tessGpuBake ) {
+		// the index list only: queued with the level load's other bakes, or now
+		if ( R_MD5_QueueTessBake( this, NULL, NULL ) ) {
+			return;
+		}
+		if ( !FillTessTopology( NULL, NULL, 0, 0 ) ) {
+			common->Warning( "BuildTessTopology: count mismatch -- disabling deform for this mesh" );
+			FreeTessData();
+		}
+		return;
+	}
 
 	// bind-pose OUTPUT-vertex positions + st + seam mask (positions for nothing runtime, but the st
 	// and seam are load-time; positions are only used to satisfy the same layout as UpdateSurface).
@@ -1257,7 +1316,9 @@ void idMD5Mesh::BuildTessTopology( const idJointMat *bindJoints ) {
 		bindVerts[i].st = texCoords[i];
 	}
 	StampTessSeamMask( bindVerts );
-	TransformVerts( bindVerts, bindJoints );
+	if ( bindJoints != NULL ) {
+		TransformVerts( bindVerts, bindJoints );	// positions: only the layout; the fill reads st + seam (NULL on a live re-bake)
+	}
 	for ( int i = 0; i < numMir; i++ ) {
 		bindVerts[mbase + i] = bindVerts[deformInfo->mirroredVerts[i]];
 	}
@@ -1265,19 +1326,7 @@ void idMD5Mesh::BuildTessTopology( const idJointMat *bindJoints ) {
 	// the material's height map for the displacement relief. Absent => relief 0 (no displacement); the
 	// material sampler matrix is treated as identity (character bumps have no texture matrix), so the
 	// bump UV is the interpolated source st.
-	const idImage *heightImage = NULL;
-	if ( shader ) {
-		for ( int s = 0; s < shader->GetNumStages(); s++ ) {
-			const shaderStage_t *st = shader->GetStage( s );
-			if ( st && st->lighting == SL_BUMP && shader->GetStageExtra( st ).tessHeightImage ) {
-				// DUDE: the SIGNED height field, NOT the normal map -- the same pixels the
-				// fixed-function tess passes sample, so this pre-deform path displaces
-				// identically (docs/tessellation.md).
-				heightImage = shader->GetStageExtra( st ).tessHeightImage;
-				break;
-			}
-		}
-	}
+	const idImage *heightImage = TessHeightImage();
 
 	// During a level load the fill waits for R_MD5_FlushTessBakes (the model manager's EndLevelLoad), which
 	// decodes each height image ONCE for every mesh sharing it and fills all the meshes on worker threads.
@@ -1307,7 +1356,8 @@ void idMD5Mesh::BuildTessTopology( const idJointMat *bindJoints ) {
 idMD5Mesh::FillTessTopology
 
 The per-triangle fill of BuildTessTopology's arrays (allocated there) from the bind-pose verts and the
-height pixels (NULL = no relief). Touches only this mesh's arrays and reads shared, unchanging input, so
+height pixels (NULL = no relief). With the GPU bake (tessGpuBake) only the expanded index list is
+filled here - no per-vertex arrays, bindVerts NULL. Touches only this mesh's arrays and reads shared, unchanging input, so
 R_MD5_FlushTessBakes runs it for many meshes at once on worker threads. False on a count mismatch (the
 caller disables the deform for the mesh).
 ====================
@@ -1315,17 +1365,21 @@ caller disables the deform for the mesh).
 bool idMD5Mesh::FillTessTopology( const idDrawVert *bindVerts, const byte *bumpPic, int bumpW, int bumpH ) {
 	const int L = tessBakeLevel;
 	const int numSrcTris = deformInfo->numIndexes / 3;
+	const bool perVertex = ( tessBarySeam != NULL && bindVerts != NULL );
 
 	int vOut = 0, iOut = 0;
 	for ( int t = 0; t < numSrcTris; t++ ) {
 		const int i0 = deformInfo->indexes[t * 3 + 0];
 		const int i1 = deformInfo->indexes[t * 3 + 1];
 		const int i2 = deformInfo->indexes[t * 3 + 2];
+		const int vBase = vOut;
+		if ( !perVertex ) {
+			vOut += ( L + 1 ) * ( L + 2 ) / 2;		// the GPU bake writes this triangle's vertices
+		} else {
 		const idVec2 st0 = bindVerts[i0].st, st1 = bindVerts[i1].st, st2 = bindVerts[i2].st;
 		const float c0 = bindVerts[i0].color[3] / 255.0f;
 		const float c1 = bindVerts[i1].color[3] / 255.0f;
 		const float c2 = bindVerts[i2].color[3] / 255.0f;
-		const int vBase = vOut;
 
 		// regular barycentric grid, row-major (j = 0..L outer, i = 0..L-j inner), (u,v,w) ->
 		// (p0,p1,p2) == (tc.x,tc.y,tc.z). See docs/tessellation.md roadmap.
@@ -1350,6 +1404,7 @@ bool idMD5Mesh::FillTessTopology( const idDrawVert *bindVerts, const byte *bumpP
 				vOut++;
 			}
 		}
+		}	// perVertex
 
 		// expanded index list, winding 'cw' to match interaction.tese. idx(i,j) is the O(1)
 		// row-major inverse into this triangle's vertex block.
@@ -1393,6 +1448,9 @@ bool idMD5Mesh::EnsureTessBuffersUploaded( void ) {
 	if ( tessGpuBarySeam ) {
 		return true;
 	}
+	if ( tessGpuBake ) {
+		return BakeTessOnGpu();
+	}
 	if ( !tessBarySeam || numTessOutVerts <= 0 ) {
 		return false;
 	}
@@ -1410,6 +1468,64 @@ bool idMD5Mesh::EnsureTessBuffersUploaded( void ) {
 		tessGpuBarySeam = tessGpuSrcTri = tessGpuHeight = 0;
 		return false;
 	}
+	tessGpuGen = r_md5GpuGen;				// these handles belong to the current backend
+	return true;
+}
+
+/*
+====================
+idMD5Mesh::BakeTessOnGpu
+
+DUDE: the GPU bake (tessGpuBake): creates the per-mesh static buffers the deform kernel reads, GPU-only, and
+records md5tessbake.comp to fill them in this frame's compute window, ahead of the deform jobs that read them
+(RB_RHI_FlushTessJobs). Its inputs are rebuilt here from what the mesh keeps anyway - the texcoords, the UV-seam
+mask (StampTessSeamMask), the triangles - so it needs no CPU arrays and re-bakes the same after a renderer
+restart. The relief samples the uploaded height image; one not on the GPU yet (it loads the first time a pass
+binds it) postpones the bake, and the mesh draws with fixed-function tessellation meanwhile.
+====================
+*/
+bool idMD5Mesh::BakeTessOnGpu( void ) {
+	rhi::RHI *r = rhi::GetRHI();
+	if ( !r || numTessOutVerts <= 0 || !deformInfo || R_MD5_TessBakeShader( r ) == 0 ) {
+		return false;
+	}
+	const idImage *heightImage = TessHeightImage();
+	const unsigned int heightHandle = heightImage ? heightImage->rhiHandle : 0;
+	if ( heightImage && heightHandle == 0 ) {
+		return false;		// not uploaded yet: bake once it is
+	}
+	tessGpuBarySeam = r->CreateBuffer( rhi::BU_STORAGE_DEVICE, numTessOutVerts * (int)sizeof( idVec4 ), NULL );
+	tessGpuSrcTri   = r->CreateBuffer( rhi::BU_STORAGE_DEVICE, numTessOutVerts * 3 * (int)sizeof( int ), NULL );
+	tessGpuHeight   = r->CreateBuffer( rhi::BU_STORAGE_DEVICE, numTessOutVerts * (int)sizeof( float ), NULL );
+	if ( !tessGpuBarySeam || !tessGpuSrcTri || !tessGpuHeight ) {
+		if ( tessGpuBarySeam ) { r->DestroyBuffer( tessGpuBarySeam ); }
+		if ( tessGpuSrcTri )   { r->DestroyBuffer( tessGpuSrcTri ); }
+		if ( tessGpuHeight )   { r->DestroyBuffer( tessGpuHeight ); }
+		tessGpuBarySeam = tessGpuSrcTri = tessGpuHeight = 0;
+		return false;
+	}
+
+	// per output vertex (s, t, seam, 0): the bind texcoords and the UV-seam mask, mirror-seam copies included
+	// (the same values the CPU bake reads from its bind-pose verts)
+	const int numOut = deformInfo->numOutputVerts;
+	const int numSrc = deformInfo->numSourceVerts;
+	const int mbase  = numOut - deformInfo->numMirroredVerts;
+	idDrawVert *verts = (idDrawVert *)R_FrameAlloc( numOut * (int)sizeof( idDrawVert ) );
+	for ( int i = 0; i < numSrc; i++ ) {
+		verts[i].Clear();
+		verts[i].st = texCoords[i];
+	}
+	StampTessSeamMask( verts );
+	for ( int i = 0; i < deformInfo->numMirroredVerts; i++ ) {
+		verts[mbase + i] = verts[deformInfo->mirroredVerts[i]];
+	}
+	idVec4 *stSeam = (idVec4 *)R_FrameAlloc( numOut * (int)sizeof( idVec4 ) );
+	for ( int i = 0; i < numOut; i++ ) {
+		stSeam[i].Set( verts[i].st.x, verts[i].st.y, verts[i].color[3] / 255.0f, 0.0f );
+	}
+
+	RB_RHI_AddTessBakeJob( r_md5TessBakeShader, stSeam, numOut, deformInfo->indexes, deformInfo->numIndexes,
+	                       tessGpuBarySeam, tessGpuSrcTri, tessGpuHeight, heightHandle, numTessOutVerts, tessBakeLevel );
 	tessGpuGen = r_md5GpuGen;				// these handles belong to the current backend
 	return true;
 }
@@ -1767,6 +1883,22 @@ void idMD5Mesh::UpdateSurface( const struct renderEntity_s *ent, const idJointMa
 	// tessellation (which also has the distance LOD the fixed-baked deform topology lacks). So the two
 	// GPU-offload features are wired together — deform-once only ever runs on top of GPU-resident source.
 	const bool tessDeformActive = r_tessDeform.GetBool() && r_gpuSkinning.GetBool();
+
+	// DUDE: the subdivision level follows r_tessLevel live (the Graphics slider). The bake was made at load for
+	// the level then, so a change re-bakes the mesh here, on its next deform: the fixed-function passes (the
+	// translucent badges and decals on the armor, which can't use the deform buffer) read the cvar every frame,
+	// and drawing the body at the old level left them curving at the new one - floating off or sinking into the
+	// armor. With the GPU bake that is the index list on the CPU and one dispatch; the per-surface buffers below
+	// resize to the new vertex count. (Not mid level load: a queued bake is filled at its end.)
+	if ( tessDeformActive && rhi::GetActiveBackendType() == rhi::BT_VULKAN && numTessOutVerts > 0 && !tessBakePending ) {
+		const int liveLevel = idMath::ClampInt( 1, 32, r_tessLevel.GetInteger() );
+		// not while a deform job recorded earlier this frame (another entity with this model) still has to read
+		// the current buffers: the first of them to draw next frame re-bakes, before any job
+		if ( liveLevel != tessBakeLevel && tessJobFrame != tr.frameCount ) {
+			BuildTessTopology( NULL );
+		}
+	}
+
 	if ( !tessDeformActive && tri->tessDeformVB ) {
 		// toggled off: release so the draw stops binding the frozen last deform and falls back
 		rhi::RHI *r = rhi::GetRHI();
@@ -1782,7 +1914,7 @@ void idMD5Mesh::UpdateSurface( const struct renderEntity_s *ent, const idJointMa
 	}
 
 	if ( tessDeformActive && rhi::GetActiveBackendType() == rhi::BT_VULKAN
-	     && tessBarySeam && numTessOutVerts > 0 && !tessBakePending && R_MD5_TessShader( rhi::GetRHI() ) != 0 && EnsureTessBuffersUploaded() ) {
+	     && ( tessBarySeam || tessGpuBake ) && numTessOutVerts > 0 && !tessBakePending && R_MD5_TessShader( rhi::GetRHI() ) != 0 && EnsureTessBuffersUploaded() ) {
 		rhi::RHI *r = rhi::GetRHI();
 		const int numTessV = numTessOutVerts;
 		const int numTessIdx = numTessOutTris * 3;
@@ -1830,6 +1962,7 @@ void idMD5Mesh::UpdateSurface( const struct renderEntity_s *ent, const idJointMa
 		}
 		// one deform dispatch per surface per frame
 		if ( tri->tessDeformVB && tri->tessDeformFrame != tr.frameCount ) {
+			tessJobFrame = tr.frameCount;		// this frame's jobs read the mesh's tessGpu* buffers (see the re-bake above)
 			// tessDeformVB holds LAST frame's deformed pose only if it was deformed then, or deformed earlier and
 			// shown unchanged last frame (the cached dynamic model reused between a game's tics); never in a
 			// buffer just (re)allocated (tessDeformFrame -1). Otherwise the kernel stores the current pose.

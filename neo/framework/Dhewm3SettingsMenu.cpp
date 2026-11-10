@@ -2350,7 +2350,9 @@ static CVarOption tessellationOptions[] = {
 	CVarOption( "r_tessLevel", []( idCVar& cvar ) {
 		float f = cvar.GetFloat();
 		if ( ImGui::SliderFloat( "Tessellation Level", &f, 1.0f, 16.0f, "%.0f", 0 ) ) {
-			cvar.SetFloat( f );
+			// whole levels, as shown: the deform-once bake subdivides at an integer level, and the decals the
+			// fixed-function passes tessellate on top of it (armor badges) must curve at the same one
+			cvar.SetFloat( idMath::Floor( f + 0.5f ) );
 		}
 		AddCVarOptionTooltips( cvar );
 		CvarResetButton( cvar );

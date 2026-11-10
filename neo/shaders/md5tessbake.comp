@@ -1,0 +1,59 @@
+// MD5 deform-once tessellation BAKE (r_tessDeform) - loaded as "md5tessbake". Build-time SPIR-V (no runtime
+// shaderc: works on the mingw/Windows build + Proton). Do NOT add a #version line: the Vulkan prelude supplies it.
+//
+// Fills, once per mesh, the static subdivision the per-frame deform kernel (md5tessdeform) reads - what
+// idMD5Mesh::BuildTessTopology / FillTessTopology bake on the CPU (still the fallback). One thread per
+// generated vertex of the uniform level-L subdivision: every source triangle becomes a regular barycentric
+// grid of (L+1)(L+2)/2 vertices, row-major (row j = 0..L, ii = 0..L-j along it), so a vertex's barycentric
+// follows in closed form from its index (as in the uniform grids of NVIDIA's displaced micro-meshes; the
+// adaptive variant of Khoury & Dupuy, "Adaptive GPU Tessellation with Compute Shaders", GPU Zen 2, needs
+// recursive key decoding instead). Writes:
+//   BarySeam[i] = (u, v, w, seam)          seam = the source corners' UV-seam mask, interpolated
+//   SrcTri[i*3 .. +2] = the corners' output-vertex indices
+//   Height[i] = relief at the interpolated UV, times the clamped seam
+// The relief is sampled exactly as the fixed-function tessellation samples it (tess.glsl dudeTessDisplace:
+// textureLod( heightMap, uv, 0 ).r - 0.5, the height image's own repeat sampler), from the height image the
+// renderer already uploaded - no CPU decode.
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) readonly buffer StSeam   { vec4 sts[]; };	// per output vert: (s, t, seam, 0)
+layout(std430, binding = 1) readonly buffer SrcIdx   { int  sidx[]; };	// the mesh's triangles (output-vertex indices)
+layout(std430, binding = 2) writeonly buffer BarySeam { vec4 bs[]; };	// per generated vert
+layout(std430, binding = 3) writeonly buffer SrcTri   { int  sti[]; };	// 3 per generated vert
+layout(std430, binding = 4) writeonly buffer Height   { float ht[]; };	// per generated vert
+layout(binding = 8) uniform sampler2D heightMap;
+layout(push_constant) uniform PC { uint numVerts; uint level; uint hasHeight; } pc;
+
+void main() {
+	uint i = gl_GlobalInvocationID.x;
+	if ( i >= pc.numVerts ) return;
+	const int L = int( pc.level );
+	const uint vPerTri = uint( ( L + 1 ) * ( L + 2 ) / 2 );
+	const uint t = i / vPerTri;
+	int k = int( i - t * vPerTri );
+	// row j holds L + 1 - j vertices
+	int j = 0;
+	while ( k >= L + 1 - j ) {
+		k -= L + 1 - j;
+		j++;
+	}
+	const int ii = k;
+
+	const int i0 = sidx[t * 3u + 0u], i1 = sidx[t * 3u + 1u], i2 = sidx[t * 3u + 2u];
+	const vec4 a = sts[i0], b = sts[i1], c = sts[i2];
+	const float u = float( L - ii - j ) / float( L );
+	const float v = float( ii ) / float( L );
+	const float w = float( j ) / float( L );
+	const float seam = a.z * u + b.z * v + c.z * w;
+
+	bs[i] = vec4( u, v, w, seam );
+	sti[i * 3u + 0u] = i0;
+	sti[i * 3u + 1u] = i1;
+	sti[i * 3u + 2u] = i2;
+
+	float relief = 0.0;
+	if ( pc.hasHeight != 0u ) {
+		const vec2 uv = a.xy * u + b.xy * v + c.xy * w;
+		relief = ( textureLod( heightMap, uv, 0.0 ).r - 0.5 ) * clamp( seam, 0.0, 1.0 );
+	}
+	ht[i] = relief;
+}

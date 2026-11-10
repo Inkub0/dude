@@ -1667,11 +1667,84 @@ void RB_RHI_AddTessJob( unsigned int shader, unsigned int srcVB, const void *src
 	rbTessJobs.Append( j );
 }
 
+// DUDE: GPU bake jobs (md5tessbake.comp) - one per mesh, the first time it is deformed (idMD5Mesh::BakeTessOnGpu)
+struct rbTessBakeJob_t {
+	rhi::ShaderHandle	shader;
+	const void *		stSeam;			// R_FrameAlloc'd vec4 per output vertex
+	int					numOutVerts;
+	const void *		indexes;		// the mesh's triangle list (glIndex_t = int)
+	int					numIndexes;
+	rhi::BufferHandle	outBarySeam, outSrcTri, outHeight;
+	rhi::ImageHandle	heightImage;	// 0 = no relief
+	int					numTessVerts;
+	int					level;
+};
+static idList<rbTessBakeJob_t>	rbTessBakeJobs;
+
+void RB_RHI_AddTessBakeJob( unsigned int shader, const void *stSeam, int numOutVerts, const void *indexes, int numIndexes,
+                            unsigned int outBarySeam, unsigned int outSrcTri, unsigned int outHeight, unsigned int heightImage,
+                            int numTessVerts, int level ) {
+	rbTessBakeJob_t j;
+	j.shader = shader; j.stSeam = stSeam; j.numOutVerts = numOutVerts; j.indexes = indexes; j.numIndexes = numIndexes;
+	j.outBarySeam = outBarySeam; j.outSrcTri = outSrcTri; j.outHeight = outHeight; j.heightImage = heightImage;
+	j.numTessVerts = numTessVerts; j.level = level;
+	rbTessBakeJobs.Append( j );
+}
+
+// the bakes, before the deforms that read their output
+static void RB_RHI_FlushTessBakeJobs( rhi::RHI *r ) {
+	if ( rbTessBakeJobs.Num() == 0 ) {
+		return;
+	}
+	for ( int i = 0; i < rbTessBakeJobs.Num(); i++ ) {
+		const rbTessBakeJob_t &j = rbTessBakeJobs[i];
+		// the inputs: slices of this frame's storage ring (a buffer of their own where the backend has none)
+		const int stBytes = j.numOutVerts * 16;
+		const int idxBytes = j.numIndexes * (int)sizeof( int );
+		rhi::BufferHandle stBuf = 0, idxBuf = 0;
+		int stOfs = r->AllocStorage( j.stSeam, stBytes, &stBuf );
+		int idxOfs = r->AllocStorage( j.indexes, idxBytes, &idxBuf );
+		bool ownSt = false, ownIdx = false;
+		if ( stBuf == 0 ) { stBuf = r->CreateBuffer( rhi::BU_STORAGE, stBytes, j.stSeam ); stOfs = 0; ownSt = true; }
+		if ( idxBuf == 0 ) { idxBuf = r->CreateBuffer( rhi::BU_STORAGE, idxBytes, j.indexes ); idxOfs = 0; ownIdx = true; }
+		if ( stBuf && idxBuf ) {
+			struct { unsigned int numVerts; unsigned int level; unsigned int hasHeight; } pc =
+				{ (unsigned int)j.numTessVerts, (unsigned int)j.level, j.heightImage != 0 ? 1u : 0u };
+			rhi::ComputeArgs ca = {};
+			ca.shader = j.shader;
+			ca.storage[0] = stBuf;
+			ca.storageOffset[0] = stOfs;
+			ca.storageRange[0] = ownSt ? 0 : stBytes;
+			ca.storage[1] = idxBuf;
+			ca.storageOffset[1] = idxOfs;
+			ca.storageRange[1] = ownIdx ? 0 : idxBytes;
+			ca.storage[2] = j.outBarySeam;
+			ca.storage[3] = j.outSrcTri;
+			ca.storage[4] = j.outHeight;
+			ca.images[0] = j.heightImage;		// binding 8
+			ca.pushConstants = &pc;
+			ca.pushConstantSize = (int)sizeof( pc );
+			ca.groupsX = ( j.numTessVerts + 63 ) / 64; ca.groupsY = 1; ca.groupsZ = 1;
+			ca.deferBarrier = true;				// one barrier for all the bakes, below
+			r->Dispatch( ca );
+		}
+		if ( ownSt && stBuf ) { r->DestroyBuffer( stBuf ); }		// deferred/fence-retired: safe after recording
+		if ( ownIdx && idxBuf ) { r->DestroyBuffer( idxBuf ); }
+	}
+	rbTessBakeJobs.SetNum( 0 );
+	r->PostComputeBarrier();					// the baked buffers -> the deform jobs' reads
+}
+
 void RB_RHI_FlushTessJobs( void ) {
+	rhi::RHI *r = rhi::GetRHI();
+	if ( r ) {
+		RB_RHI_FlushTessBakeJobs( r );			// DUDE: first-use GPU bakes, ahead of the deforms reading them
+	} else {
+		rbTessBakeJobs.SetNum( 0 );
+	}
 	if ( rbTessJobs.Num() == 0 ) {
 		return;
 	}
-	rhi::RHI *r = rhi::GetRHI();
 	if ( r ) {
 		for ( int i = 0; i < rbTessJobs.Num(); i++ ) {
 			const rbTessJob_t &j = rbTessJobs[i];
