@@ -320,8 +320,7 @@ float shadowVisibility( bool canReceive ) {
 // this fragment TOWARD the light samples the captured scene depth (u_contactDepth) for a nearer
 // occluder, grounding the small geometry a shadow map is too coarse to resolve -- pickups, thin
 // props, weapon detail, feet. Opt-in (r_contactShadows), raster tiers only (Ultra Nightmare uses
-// r_rtAllLights, a real per-light ray). Returns light visibility, 1 = lit, (1 - strength) when a
-// contact occluder is found (faded by march distance so a nearer occluder darkens more).
+// r_rtAllLights, a real per-light ray).
 //
 // The conventions mirror ssr.frag (proven on GL3 + VK): the fragment and light are taken to view
 // space through u_modelViewMatrix (model->view; both var_ModelPos and u_localLightOrigin live in
@@ -330,10 +329,31 @@ float shadowVisibility( bool canReceive ) {
 // and scaled to the depth texture's texel space (u_depthTexRecip.xy = viewSize / uploadSize, so
 // the GL power-of-two depth copy is addressed correctly). Depth is linearised by DUDE_DEPTH_CONSTS.
 // u_contactParms = ( steps [0 = off], marchLength, thickness, strength ), all set by the backend.
-float contactShadowTerm( bool canReceive ) {
-	if ( u_contactParms.x < 0.5 || !canReceive ) {
-		return 1.0;			// disabled, or the light contributes nothing here anyway
-	}
+//
+// Noise-free by construction (a forward per-light pass has no screen buffer to blur afterwards):
+// - every step scores a SOFT occlusion - a ramp on how far the depth sample sits in front of the
+//   ray, times the march-distance fade - and the march keeps the strongest, instead of a hit/miss
+//   on the first step inside the band. Partial occlusion (the soft edge under a nose or a chin)
+//   then varies smoothly from pixel to pixel instead of flipping between lit and black;
+// - the start offset is staggered across each 2x2 pixel quad (four offsets, a quarter step
+//   apart), and the quad averages its four results through fine derivatives: four marches' worth
+//   of samples per quad at the cost of one, a 2x2 box blur for free. It replaces the per-pixel
+//   random start, which left salt-and-pepper dots wherever the occlusion was partial.
+
+// per-pixel derivatives: Vulkan GLSL has dFdxFine / dFdyFine. GLSL 3.30 has only dFdx / dFdy, whose
+// precision is the driver's choice; the GL3 backend asks for the precise (per-pixel) kind with
+// GL_FRAGMENT_SHADER_DERIVATIVE_HINT = GL_NICEST (GL3Backend.cpp), which every desktop driver honours.
+#ifdef VULKAN
+#define DUDE_DFDX_FINE( v ) dFdxFine( v )
+#define DUDE_DFDY_FINE( v ) dFdyFine( v )
+#else
+#define DUDE_DFDX_FINE( v ) dFdx( v )
+#define DUDE_DFDY_FINE( v ) dFdy( v )
+#endif
+
+// The march's occlusion, 0 = none .. 1 = a contact occluder right at the start. jitter = the
+// start offset in steps, 0..1.
+float contactOcclusion( float jitter ) {
 	int steps = int( u_contactParms.x + 0.5 );
 	// fragment + light in view space (negative Z is forward, matching ssr.frag)
 	vec3 Pv = ( u_modelViewMatrix * vec4( var_ModelPos, 1.0 ) ).xyz;
@@ -341,22 +361,28 @@ float contactShadowTerm( bool canReceive ) {
 	vec3 toL = Lv - Pv;
 	float distL = length( toL );
 	if ( distL < 1e-3 ) {
-		return 1.0;
+		return 0.0;
 	}
 	vec3 dir = toL / distL;
 	float marchLen = min( u_contactParms.y, distL );	// never march past the light itself
 	float stepLen = marchLen / float( steps );
 	vec2 dc = DUDE_DEPTH_CONSTS();
-	// per-pixel dither on the start offset turns the step banding into fine grain (same hash the
-	// shadow-map PCF uses); it also biases the first sample off the surface (self-shadow guard).
-	float jitter = shadowHash( gl_FragCoord.xy );
-	vec3 rayPos = Pv + dir * stepLen * ( 0.5 + jitter );
 	float thick = u_contactParms.z;
+	// the start sits half to one-and-a-half steps off the surface (the self-shadow guard)
+	float t = stepLen * ( 0.5 + jitter );
+	// ramp width of the soft hit: a sample this far in front of the ray scores fully
+	float ramp = max( 0.5 * stepLen, 0.25 );
+	float occ = 0.0;
 	// constant loop bound (steps <= 32 by the cvar clamp) keeps the loop uniform across drivers
 	for ( int i = 0; i < 32; i++ ) {
 		if ( i >= steps ) {
 			break;
 		}
+		float fade = 1.0 - t / marchLen;		// nearer occluder -> darker
+		if ( fade <= occ ) {
+			break;								// no later step can score higher
+		}
+		vec3 rayPos = Pv + dir * t;
 		vec4 clip = u_projectionMatrix * vec4( rayPos, 1.0 );
 		if ( clip.w > 0.0 ) {
 			vec2 uv01 = ( clip.xy / clip.w ) * 0.5 + 0.5;
@@ -366,17 +392,41 @@ float contactShadowTerm( bool canReceive ) {
 				float raw = texture( u_contactDepth, vec2( uv01.x, row ) * u_depthTexRecip.xy ).x;
 				float sceneZ = 1.0 / ( min( raw, 0.9994 ) * dc.x + dc.y );	// negative
 				// both negative; a surface NEARER the camera than the ray point (sceneZ less
-				// negative -> sceneZ > rayPos.z) that sits within the thickness band occludes.
+				// negative -> sceneZ > rayPos.z) that sits within the thickness band occludes:
+				// ramps in past a small epsilon, ramps out over the far half of the band
 				float d = sceneZ - rayPos.z;
-				if ( d > 0.05 * stepLen && d < thick ) {
-					float fade = 1.0 - float( i ) / float( steps );	// nearer occluder -> darker
-					return clamp( 1.0 - u_contactParms.w * fade, 0.0, 1.0 );
-				}
+				float eps = 0.05 * stepLen;
+				float w = smoothstep( eps, eps + ramp, d ) * ( 1.0 - smoothstep( 0.5 * thick, thick, d ) );
+				occ = max( occ, w * fade );
 			}
 		}
-		rayPos += dir * stepLen;
+		t += stepLen;
 	}
-	return 1.0;
+	return occ;
+}
+
+// Light visibility from the contact march: 1 = lit, down to (1 - strength) at a contact occluder.
+// Call from uniform control flow (the quad average takes derivatives).
+float contactShadowTerm( bool canReceive ) {
+	if ( u_contactParms.x < 0.5 ) {
+		return 1.0;			// disabled (uniform per draw)
+	}
+	// 2x2 ordered start offsets (0, 2, 3, 1 quarters, centred), averaged across the quad below
+	ivec2 q = ivec2( gl_FragCoord.xy ) & 1;
+	float jitter = ( float( ( q.x ^ q.y ) * 2 + q.y ) + 0.5 ) * 0.25;
+	// a pixel the light doesn't reach scores nothing and is left out of its quad's average
+	float valid = canReceive ? 1.0 : 0.0;
+	float occ = canReceive ? contactOcclusion( jitter ) : 0.0;
+	// per-pixel derivatives give this pixel's horizontal / vertical / diagonal quad neighbours:
+	// dFdx = right minus left in the pair, so the left pixel adds it and the right one subtracts
+	vec2 sgn = vec2( q.x == 0 ? 1.0 : -1.0, q.y == 0 ? 1.0 : -1.0 );
+	vec2 v  = vec2( occ * valid, valid );
+	vec2 vh = v  + DUDE_DFDX_FINE( v )  * sgn.x;
+	vec2 vv = v  + DUDE_DFDY_FINE( v )  * sgn.y;
+	vec2 vd = vh + DUDE_DFDY_FINE( vh ) * sgn.y;
+	vec2 sum = v + vh + vv + vd;
+	occ = ( sum.y > 0.5 ) ? sum.x / sum.y : 0.0;
+	return canReceive ? clamp( 1.0 - u_contactParms.w * occ, 0.0, 1.0 ) : 1.0;
 }
 
 // DUDE parallax occlusion mapping (docs/parallax.md). Marches the height field along the

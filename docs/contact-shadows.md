@@ -34,8 +34,9 @@ Conventions mirror `ssr.frag`, which is proven on both backends:
    maps both consistently). View space is rigid, so distances stay in world units.
 2. March from the fragment toward the light in `r_contactShadowSteps` steps over
    `r_contactShadowLength` world units (clamped to the distance to the light). The start point is
-   offset half-to-one-and-a-half steps off the surface (a per-pixel hash dither, `shadowHash`, that
-   both breaks the step banding into grain and biases the first sample off the surface).
+   offset half-to-one-and-a-half steps off the surface, which biases the first sample off the surface.
+   The offset is **staggered across each 2x2 pixel quad** (four ordered offsets a quarter step apart),
+   not random per pixel (see "Noise-free resolve" below).
 3. Project each step with `u_projectionMatrix`, convert NDC→uv, re-orient the row for Vulkan's
    top-down depth buffer (`u_windowCoord.z` = view-Y sign, the `deviceRow` trick), and scale into the
    depth texture's texel space (`u_depthTexRecip.xy = viewSize / uploadSize`, so GL's power-of-two
@@ -43,8 +44,28 @@ Conventions mirror `ssr.frag`, which is proven on both backends:
 4. Sample the captured scene depth (`_currentDepth`, unit 16), linearise it with the view's
    `u_depthParms` pair (`DUDE_DEPTH_CONSTS`, correct under cinematic near-plane cramming), and compare:
    a surface **nearer the camera than the ray** (both view-Z negative, so `sceneZ > rayZ`) that sits
-   **within `r_contactShadowThickness`** world units is an occluder. Darken by
-   `r_contactShadowStrength`, faded by march distance (a nearer occluder darkens more), and stop.
+   **within `r_contactShadowThickness`** world units is an occluder. Each step scores a **soft**
+   occlusion: a ramp on how far the sample sits in front of the ray (in past a small epsilon, out
+   over the far half of the thickness band), times the march-distance fade (a nearer occluder darkens
+   more). The march keeps the strongest score and stops once no later step can beat it; the light is
+   darkened by `r_contactShadowStrength` times that score.
+
+### Noise-free resolve
+
+The term is computed per light inside the forward interaction pass, so there is no screen buffer to
+blur afterwards. The first version used a per-pixel random start offset and a hit/miss test, so
+wherever occlusion was partial (the soft edge under a nose or a chin) neighbouring pixels flipped
+between lit and fully darkened: salt-and-pepper dots. Two changes remove the noise without a blur pass:
+
+- **Soft scores** instead of hit/miss, so partial occlusion varies smoothly from pixel to pixel.
+- **Quad average:** the four pixels of each 2x2 quad march with the four staggered start offsets,
+  then average their scores through per-pixel derivatives (a pixel's horizontal, vertical and
+  diagonal neighbour are `v ± dFdx`, `v ± dFdy` and the diagonal of those). That is four marches'
+  worth of samples per quad at the cost of one, a 2x2 box blur for free. A pixel the light does not
+  reach (N·L ≤ 0) is left out of its quad's average. Vulkan uses `dFdxFine` / `dFdyFine`; GLSL 3.30
+  has only `dFdx` / `dFdy`, so the GL3 backend asks for per-pixel derivatives with
+  `GL_FRAGMENT_SHADER_DERIVATIVE_HINT = GL_NICEST` at init. `contactShadowTerm` must therefore be
+  called from uniform control flow (it is: only per-draw branches enclose it).
 
 `_currentDepth` is a completed, shader-readable copy captured at the top of `RB_RHI_DrawWorld`
 (before the light loop; SSAO already consumes it that frame), *not* the live depth-test attachment —
