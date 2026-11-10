@@ -4527,6 +4527,16 @@ static void DrawEnhGroup_Shadows()
 			"the look of shadows: hard-edged unless Soften RT Shadows is on, which then softens all "
 			"of them. Vulkan + RT hardware only." );
 
+		// r_rtContactShadows (docs/contact-shadows.md): the contact term traced through the RT scene; on/off here, the
+		// tuning in Debugging -> RT Contact Shadows. Not preset-owned: opt-in.
+		CvarCheckbox( "RT Contact Shadows", r_rtContactShadows, "Contact shadows traced through the ray-traced scene: from each lit "
+			"pixel one short ray toward the light, darkening where something is in the way - the small things a shadow "
+			"misses or blurs away (dropped pickups, thin props, feet). Unlike the screen-space Contact Shadows it also sees "
+			"occluders that are off screen or hidden behind other surfaces. Works while ray tracing is on and replaces the "
+			"screen-space version there. Under Path Tracing it only reaches the few lights still drawn one by one (ReSTIR "
+			"lights the rest). Skipped for lights whose hard RT shadow ray already covers it. Off = vanilla. Vulkan + RT "
+			"hardware only." );
+
 		// r_rtPerforatedShadows: not preset-owned (default on; it only matters while a light is ray-traced)
 		ImGui::BeginDisabled( !( r_rtSunShadows.GetBool() || r_rtMovingLights.GetBool() || r_rtAllLights.GetBool() ) );
 		bool rtPerf = r_rtPerforatedShadows.GetBool();
@@ -5856,6 +5866,32 @@ static void DrawDbgGroup_ContactShadows()
 	}
 }
 
+static void DrawDbgGroup_RtContactShadows()
+{
+	// RT contact shadows (r_rtContactShadows, docs/contact-shadows.md): the contact term with the occluder found by a
+	// short ray query through the RT scene instead of the depth march. Vulkan + RT hardware, live while RTX builds the
+	// scene. The on/off also sits in Graphics -> Shadows -> Ray Tracing (RTX).
+	const bool rtCapable = R_SupportsRayTracing();
+	if ( BeginSettingsGroup( "RT Contact Shadows", &r_rtContactShadows,
+			"r_rtContactShadows: trace one short ray from each lit pixel toward the light through the ray-traced scene and "
+			"darken where something is in the way. Vulkan + RT hardware, while ray tracing is on; replaces the screen-space "
+			"contact shadows on those lights. Skipped for lights that trace a hard RT shadow ray anyway." ) ) {
+		if ( !rtCapable ) {
+			SettingsNoteDisabled( "Needs the Vulkan backend and a ray-tracing GPU." );
+		}
+		ImGui::BeginDisabled( !rtCapable );
+
+		CvarSliderF( "Strength", r_rtContactShadowStrength, 0.0f, 1.0f, "%.2f", "how much an occluder dims the light (0 = none, 1 = full "
+			"black at the contact). Faded by the hit distance so a nearer occluder darkens more. Default 0.5." );
+
+		CvarSliderF( "Ray Length", r_rtContactShadowLength, 1.0f, 128.0f, "%.0f", "how far toward the light the ray looks, world units. "
+			"Short = tight contact grounding; long = broader. Clamped to the distance to the light. Default 4." );
+
+		ImGui::EndDisabled();	// rtCapable
+		EndSettingsGroup();
+	}
+}
+
 static void DrawDbgGroup_DepthOfField()
 {
 	// Weapon-reload depth-of-field (r_dof): as a weapon reloads, the world beyond it
@@ -6695,6 +6731,7 @@ static void DrawDbgTab_Raster()
 {
 	DrawDbgGroup_ShadowMaps();
 	DrawDbgGroup_ContactShadows();
+	DrawDbgGroup_RtContactShadows();
 	DrawDbgGroup_GTAO();
 	DrawDbgGroup_SSR();
 	DrawDbgGroup_Volumetrics();

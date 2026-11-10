@@ -86,6 +86,34 @@ the toggle and the march steps come from the quality tier; strength, length and 
 tuning knobs. Config schema 8 moves configs on the old defaults (0.8 / 12 / 8) to the new ones and puts a
 config that is on a preset onto its tier's toggle and steps, once.
 
+## RT contact shadows (`r_rtContactShadows`)
+
+The same contact term for the ray-traced tiers (2026-11-10, user request: "contact shadows, but using RT so it can
+be used on the RTX rendering"). The screen-space march is switched off while RT shadows for all lights is on, and the
+blurred RT shadows (`r_rtShadowBlur`) soften contact detail away; this puts the contact grounding back with the
+occluder found by a ray instead of the depth buffer.
+
+- **What it traces:** in `interaction.frag` `rtContactShadowTerm` (ray-query variant only), one ray from the lit
+  fragment toward the light, `r_rtContactShadowLength` world units (clamped short of the light), opaque, solid
+  geometry only (cull mask `0xFD`: grates are left to the shadow itself), origin offset along the world normal by
+  `r_rtSunShadowOffset` like every RT shadow ray. No terminate-on-first-hit: the nearest hit's distance sets the fade.
+- **Same look as the screen-space version:** visibility `1 - strength * (1 - t / length)` with
+  `r_rtContactShadowStrength` (default 0.5) and length (default 4), the new screen-space defaults. Deterministic,
+  so there is no dither and nothing to average. No thickness setting: a ray needs no depth-buffer guess, and it sees
+  occluders off screen or behind other surfaces.
+- **Where it runs:** every non-ambient interaction while the scene TLAS exists (RTX On / Path Tracing) and the device
+  has the ray-query variant. The backend (`RB_RHI_FillContactShadowParms`) sets `u_contactParms = (-1, length, 0,
+  strength)`, fills the TLAS + normal offset into `u_rtParms` when the draw's shadow mode didn't already, and binds
+  `interaction_rt` (its shadow-map / mask paths are unchanged). It **replaces** the screen-space march on those draws.
+- **Skipped** for lights that trace the full hard RT shadow ray (mode 4: `r_rtSunShadows`, `r_rtMovingLights`,
+  `r_rtAllLights` without the blur): that ray already finds every occluder the short one could. With the blur (modes
+  5 / 6) it runs and restores the contact the blur softened.
+- **Path Tracing:** ReSTIR DI lights the scene without per-light draws, so only the lights still drawn one by one get
+  it. Covering the DI-lit lights would need its own design (a per-pixel contact ray toward a stochastic light sample
+  brings the dots back).
+- **Not preset-wired:** opt-in, off by default (Graphics -> Shadows -> Ray Tracing, tuning in Debugging -> RT Contact
+  Shadows). GL3 and non-RT GPUs: inert.
+
 ## Backend wiring
 
 - **Unit 16** carries `_currentDepth`. Units 0–14 are the interaction material/shadow/decal samplers

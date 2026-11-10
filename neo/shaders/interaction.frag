@@ -405,9 +405,59 @@ float contactOcclusion( float jitter ) {
 	return occ;
 }
 
+#if defined(VULKAN) && defined(DUDE_RT_SUN)
+// DUDE RT contact shadows (r_rtContactShadows, docs/contact-shadows.md): the contact term above with the occluder
+// found by ONE short ray query through the scene TLAS instead of the depth-buffer march - no thickness guess, and
+// occluders off screen or hidden behind other surfaces count. Same look: the light dims by the strength, faded by
+// how far along the ray the nearest occluder sits (an occluder at the surface darkens most). The ray starts off the
+// surface along the world normal (u_rtParms.z, shared with the RT shadow rays), solid geometry only (grates are
+// left to the shadow itself). u_contactParms = ( -1, ray length, 0, strength ). Deterministic: no noise to resolve.
+float rtContactShadowTerm( bool canReceive ) {
+	if ( !canReceive ) {
+		return 1.0;			// the light contributes nothing here anyway
+	}
+	vec4 mp = vec4( var_ModelPos, 1.0 );
+	vec3 wp = vec3( dot( u_modelMatrixRow0, mp ), dot( u_modelMatrixRow1, mp ), dot( u_modelMatrixRow2, mp ) );
+	vec4 lp = vec4( u_localLightOrigin.xyz, 1.0 );
+	vec3 wl = vec3( dot( u_modelMatrixRow0, lp ), dot( u_modelMatrixRow1, lp ), dot( u_modelMatrixRow2, lp ) );
+	vec3 toLight = wl - wp;
+	float distLight = length( toLight );
+	float len = min( u_contactParms.y, distLight - 1.0 );	// never reach the light itself
+	if ( len <= 0.0 ) {
+		return 1.0;
+	}
+	vec3 wn = vec3( dot( u_modelMatrixRow0.xyz, var_ModelNormal.xyz ),
+	                dot( u_modelMatrixRow1.xyz, var_ModelNormal.xyz ),
+	                dot( u_modelMatrixRow2.xyz, var_ModelNormal.xyz ) );
+	float wnLen = length( wn );
+	wn = ( wnLen > 0.0 ) ? wn / wnLen : vec3( 0.0 );
+	// the NEAREST occluder is wanted (its distance sets the fade), so no terminate-on-first-hit; opaque solid-only
+	// traversal keeps it the hardware's fast path, and the ray is short
+	rayQueryEXT rq;
+	dudeRayQueryInit( rq,
+		accelerationStructureEXT( uvec2( floatBitsToUint( u_rtParms.x ), floatBitsToUint( u_rtParms.y ) ) ),
+		gl_RayFlagsOpaqueEXT, 0xFDu,
+		wp + wn * u_rtParms.z, 0.0, toLight / distLight, len );
+	while ( rayQueryProceedEXT( rq ) ) { }
+	if ( rayQueryGetIntersectionTypeEXT( rq, true ) == gl_RayQueryCommittedIntersectionNoneEXT ) {
+		return 1.0;
+	}
+	float fade = 1.0 - clamp( rayQueryGetIntersectionTEXT( rq, true ) / len, 0.0, 1.0 );	// nearer occluder -> darker
+	return clamp( 1.0 - u_contactParms.w * fade, 0.0, 1.0 );
+}
+#endif
+
 // Light visibility from the contact march: 1 = lit, down to (1 - strength) at a contact occluder.
 // Call from uniform control flow (the quad average takes derivatives).
 float contactShadowTerm( bool canReceive ) {
+	if ( u_contactParms.x < -0.5 ) {
+		// RT contact shadows (uniform per draw: the backend binds the ray-query variant for these draws)
+#if defined(VULKAN) && defined(DUDE_RT_SUN)
+		return rtContactShadowTerm( canReceive );
+#else
+		return 1.0;
+#endif
+	}
 	if ( u_contactParms.x < 0.5 ) {
 		return 1.0;			// disabled (uniform per draw)
 	}

@@ -1964,7 +1964,36 @@ static void RB_RHI_FillSsaoParms( rhi::RenderParams &parms, const drawInteractio
 	}
 }
 
-static bool RB_RHI_FillContactShadowParms( rhi::RenderParams &parms, const drawInteraction_t *din ) {
+static bool RB_RHI_FillContactShadowParms( rhi::RenderParams &parms, const drawInteraction_t *din, bool &rtSun ) {
+	// DUDE RT contact shadows (r_rtContactShadows, docs/contact-shadows.md): the same contact term, but the occluder is
+	// found by one short ray query through the scene TLAS (interaction.frag rtContactShadowTerm) instead of the depth
+	// march - so it needs the ray-query interaction variant and a live scene, i.e. RTX on. contactParms.x = -1 selects
+	// it; .y = ray length, .w = strength. A light that already traces the full hard ray (mode 4) gets nothing more:
+	// that ray sees every occluder the short one could. Takes precedence over the screen-space march on these draws.
+	if ( r_rtContactShadows.GetBool() && !din->ambientLight && ictx.interactionRtProg != 0
+	     && rhi::GetActiveBackendType() == rhi::BT_VULKAN && R_BackendSupportsEnhancements() ) {
+		const unsigned long long tlas = ictx.r->GetTlasAddress();
+		if ( tlas != 0 ) {
+			if ( parms.shadowParms[0] != 4.0f ) {
+				parms.contactParms[0] = -1.0f;
+				parms.contactParms[1] = r_rtContactShadowLength.GetFloat();
+				parms.contactParms[2] = 0.0f;
+				parms.contactParms[3] = idMath::ClampFloat( 0.0f, 1.0f, r_rtContactShadowStrength.GetFloat() );
+				if ( !rtSun ) {
+					// a shadow-map / mask / unshadowed draw: hand it the TLAS and the ray-origin normal offset (the
+					// RT shadow modes fill the same lanes), and bind the ray-query variant, whose map paths are unchanged
+					const unsigned int tlasLo = (unsigned int)( tlas & 0xFFFFFFFFu );
+					const unsigned int tlasHi = (unsigned int)( tlas >> 32 );
+					memcpy( &parms.rtParms[0], &tlasLo, sizeof( tlasLo ) );	// bit-cast, NOT a value cast
+					memcpy( &parms.rtParms[1], &tlasHi, sizeof( tlasHi ) );
+					parms.rtParms[2] = r_rtSunShadowOffset.GetFloat();
+					parms.rtParms[3] = 100000.0f;
+					rtSun = true;
+				}
+			}
+			return false;		// no captured depth to bind: the screen-space march is off on this draw
+		}
+	}
 	// DUDE screen-space contact shadows (docs/contact-shadows.md). interaction.frag's
 	// contactShadowTerm marches the captured scene depth (_currentDepth, unit 16 - already
 	// sampleable, SSAO consumed it earlier this frame) from the fragment toward the light and
@@ -2238,7 +2267,7 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 
 	RB_RHI_FillSsaoParms( parms, din );
 
-	bool contactShadows = RB_RHI_FillContactShadowParms( parms, din );
+	bool contactShadows = RB_RHI_FillContactShadowParms( parms, din, rtSun );
 
 	idImage *occlusionImage = RB_RHI_FillOcclusionParms( parms, din );
 
