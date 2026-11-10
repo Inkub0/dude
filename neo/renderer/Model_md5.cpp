@@ -918,6 +918,18 @@ static rhi::ShaderHandle r_md5TessShader = 0;
 static bool r_md5TessShaderTried = false;
 
 // Lazily compile the shared deform compute shader (once). 0 if there's no compute lane (GL3).
+static rhi::ShaderHandle r_md5TessPrevShader = 0;
+static bool r_md5TessPrevShaderTried = false;
+// The PREVPOS variant of the deform kernel (md5tessdeform_prevpos.comp): also saves last frame's deformed
+// positions for the velocity prepass, as R_MD5_SkinPrevShader's kernel does for the plain skinned mesh.
+static rhi::ShaderHandle R_MD5_TessPrevShader( rhi::RHI *r ) {
+	if ( !r_md5TessPrevShaderTried ) {
+		r_md5TessPrevShaderTried = true;
+		r_md5TessPrevShader = r->LoadComputeShader( "md5tessdeform_prevpos" );	// build-time SPIR-V
+	}
+	return r_md5TessPrevShader;
+}
+
 static rhi::ShaderHandle R_MD5_TessShader( rhi::RHI *r ) {
 	if ( !r_md5TessShaderTried ) {
 		r_md5TessShaderTried = true;
@@ -949,6 +961,7 @@ void R_MD5_ResetGpuShaders( void ) {
 	r_md5SkinPrevShader = 0;	r_md5SkinPrevShaderTried = false;
 	r_md5DeriveShader = 0;		r_md5DeriveShaderTried = false;
 	r_md5TessShader = 0;		r_md5TessShaderTried = false;
+	r_md5TessPrevShader = 0;	r_md5TessPrevShaderTried = false;
 	// the backend is gone: every per-mesh skin/tess buffer handle cached across all MD5 meshes now
 	// names a reissued table slot. Bump the generation so EnsureSkin/TessBuffersUploaded re-uploads
 	// them lazily and FreeGpuSkinData/FreeTessData skip the (now dangling) DestroyBuffer.
@@ -1436,6 +1449,11 @@ void idMD5Mesh::UpdateSurface( const struct renderEntity_s *ent, const idJointMa
 		tri->gpuSkinPrevVB = 0;	tri->gpuSkinPrevAddr = 0;	tri->gpuSkinPrevValid = false;
 	}
 
+	// deform-once motion vectors (below): whether this surface was drawn last frame, read before the skin
+	// block stamps this frame - a pose reused unchanged from the cached dynamic model (Quake 4 between its
+	// tics) leaves last frame's deform in tessDeformVB
+	const bool shownLastFrame = ( tri->gpuSkinShownFrame == tr.frameCount - 1 );
+
 	if ( r_gpuSkinning.GetBool() && rhi::GetActiveBackendType() == rhi::BT_VULKAN
 	     && skinExpandLocalTBN && R_MD5_SkinShader( rhi::GetRHI() ) != 0 && EnsureSkinBuffersUploaded() ) {
 		rhi::RHI *r = rhi::GetRHI();
@@ -1544,10 +1562,12 @@ void idMD5Mesh::UpdateSurface( const struct renderEntity_s *ent, const idJointMa
 		if ( r ) {
 			r->DestroyBuffer( tri->tessDeformVB );
 			if ( tri->tessDeformIB ) { r->DestroyBuffer( tri->tessDeformIB ); }
+			if ( tri->tessDeformPrevVB ) { r->DestroyBuffer( tri->tessDeformPrevVB ); }
 		}
 		tri->tessDeformVB = tri->tessDeformIB = 0;
 		tri->tessDeformVerts = tri->tessDeformIndexes = 0;
 		tri->tessDeformFrame = -1;
+		tri->tessDeformPrevVB = 0;	tri->tessDeformPrevAddr = 0;
 	}
 
 	if ( tessDeformActive && rhi::GetActiveBackendType() == rhi::BT_VULKAN
@@ -1560,6 +1580,8 @@ void idMD5Mesh::UpdateSurface( const struct renderEntity_s *ent, const idJointMa
 			r->DestroyBuffer( tri->tessDeformVB );
 			if ( tri->tessDeformIB ) { r->DestroyBuffer( tri->tessDeformIB ); }
 			tri->tessDeformVB = tri->tessDeformIB = 0;
+			if ( tri->tessDeformPrevVB ) { r->DestroyBuffer( tri->tessDeformPrevVB ); }
+			tri->tessDeformPrevVB = 0;	tri->tessDeformPrevAddr = 0;
 		}
 		if ( !tri->tessDeformVB ) {
 			idDrawVert *seed = (idDrawVert *)Mem_Alloc16( numTessV * sizeof( idDrawVert ) );
@@ -1577,15 +1599,40 @@ void idMD5Mesh::UpdateSurface( const struct renderEntity_s *ent, const idJointMa
 				tri->tessDeformVerts = tri->tessDeformIndexes = 0;
 			}
 		}
+		// deform-once motion vectors: a second per-surface buffer receives last frame's deformed positions (the
+		// PREVPOS kernel copies them out of tessDeformVB before overwriting it); gbuffer.vert reads it by device
+		// address. Same lifetime rules as gpuSkinPrevVB.
+		rhi::ShaderHandle tessShader = r_md5TessShader;
+		if ( r_skinnedMotionVectors.GetBool() && tri->tessDeformVB && R_MD5_TessPrevShader( r ) != 0 ) {
+			if ( !tri->tessDeformPrevVB ) {
+				tri->tessDeformPrevVB   = r->CreateBuffer( rhi::BU_STORAGE, numTessV * 16, NULL );
+				tri->tessDeformPrevAddr = tri->tessDeformPrevVB ? r->GetBufferDeviceAddress( tri->tessDeformPrevVB ) : 0;
+				if ( tri->tessDeformPrevVB && tri->tessDeformPrevAddr == 0 ) {	// no buffer-device-address: unusable
+					r->DestroyBuffer( tri->tessDeformPrevVB );
+					tri->tessDeformPrevVB = 0;
+				}
+			}
+			if ( tri->tessDeformPrevVB ) { tessShader = r_md5TessPrevShader; }
+		} else if ( tri->tessDeformPrevVB ) {										// toggled off
+			r->DestroyBuffer( tri->tessDeformPrevVB );
+			tri->tessDeformPrevVB = 0;	tri->tessDeformPrevAddr = 0;
+		}
 		// one deform dispatch per surface per frame
 		if ( tri->tessDeformVB && tri->tessDeformFrame != tr.frameCount ) {
+			// tessDeformVB holds LAST frame's deformed pose only if it was deformed then, or deformed earlier and
+			// shown unchanged last frame (the cached dynamic model reused between a game's tics); never in a
+			// buffer just (re)allocated (tessDeformFrame -1). Otherwise the kernel stores the current pose.
+			const bool prevPoseInVB = tri->tessDeformFrame >= 0
+				&& ( tri->tessDeformFrame == tr.frameCount - 1 || shownLastFrame );
 			tri->tessDeformFrame = tr.frameCount;
 			const int nSrc = deformInfo->numOutputVerts;
 			const float disp = r_tessDisplace.GetFloat();
+			const unsigned int prevBuf = ( tessShader != r_md5TessShader ) ? tri->tessDeformPrevVB : 0;
 			if ( tri->gpuSkinVB ) {
 				// GPU source: read the skinned buffer directly (skin flush + its barrier run first)
-				RB_RHI_AddTessJob( r_md5TessShader, tri->gpuSkinVB, NULL, nSrc,
-				                   tri->tessDeformVB, tessGpuBarySeam, tessGpuSrcTri, tessGpuHeight, numTessV, disp );
+				RB_RHI_AddTessJob( tessShader, tri->gpuSkinVB, NULL, nSrc,
+				                   tri->tessDeformVB, tessGpuBarySeam, tessGpuSrcTri, tessGpuHeight, numTessV, disp,
+				                   prevBuf, prevPoseInVB );
 			} else {
 				// CPU source: snapshot this frame's deformed verts (with current-pose tangents) to
 				// frame memory; the flush uploads it as the source SSBO.
@@ -1594,8 +1641,9 @@ void idMD5Mesh::UpdateSurface( const struct renderEntity_s *ent, const idJointMa
 				}
 				idDrawVert *snap = (idDrawVert *)R_FrameAlloc( nSrc * (int)sizeof( idDrawVert ) );
 				memcpy( snap, tri->verts, nSrc * sizeof( idDrawVert ) );
-				RB_RHI_AddTessJob( r_md5TessShader, 0, snap, nSrc,
-				                   tri->tessDeformVB, tessGpuBarySeam, tessGpuSrcTri, tessGpuHeight, numTessV, disp );
+				RB_RHI_AddTessJob( tessShader, 0, snap, nSrc,
+				                   tri->tessDeformVB, tessGpuBarySeam, tessGpuSrcTri, tessGpuHeight, numTessV, disp,
+				                   prevBuf, prevPoseInVB );
 			}
 		}
 	}

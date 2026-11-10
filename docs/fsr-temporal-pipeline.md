@@ -623,7 +623,16 @@ reverted: it traded that ghosting for noise everywhere else and did not touch th
   (`R_FreeStaticTriSurf`, resize, `r_gpuSkinning` off, cvar off).
 - Cost: one extra storage write per skinned vertex in a kernel that already touches it, 16 B per skinned
   vertex of memory, one address in the per-draw uniforms. **Not covered:** CPU-skinned meshes (GL3,
-  `r_gpuSkinning 0`), deform-once tessellation (`r_tessDeform`), vertex-deform materials, particles.
+  `r_gpuSkinning 0`), vertex-deform materials, particles.
+- **Deform-once tessellation (`r_tessDeform`, 2026-11-10):** not covered at first - a deformed character drew
+  `tessDeformVB` and got its rigid motion only, so under Path Tracing the denoisers (450 ms of ReSTIR DI
+  history) dragged the lighting of its limbs and face behind it, worst on Quake 4's marines (bodies and
+  `lipsync/` heads all tessellate). The deform kernel now has the same `PREVPOS` variant
+  (`md5tessdeform_prevpos.comp`, shared body `md5tessdeform_body.glsl`, binding 5): before overwriting an
+  expanded vertex it saves its position into the owner-only `tessDeformPrevVB`, and the prepass hands that
+  address to `gbuffer.vert` when the draw uses the deform buffer (bound at offset 0) and it was deformed this
+  frame. Last frame's pose counts as in the buffer when it was deformed last frame, or deformed earlier and
+  shown unchanged (the cached dynamic model reused between a game's tics); a fresh buffer never.
 
 ## Crop-view frames (2026-10-27, `fix/hdr-crop-view-frames`, user-verified + merged)
 

@@ -401,6 +401,13 @@ void R_ReallyFreeStaticTriSurf( srfTriangles_t *tri ) {
 		tri->gpuSkinPrevValid = false;
 	}
 
+	if ( tri->tessDeformPrevVB ) {				// deform-once motion vectors: owner-only, never inherited
+		rhi::RHI *r = rhi::GetRHI();
+		if ( r ) { r->DestroyBuffer( tri->tessDeformPrevVB ); }
+		tri->tessDeformPrevVB = 0;
+		tri->tessDeformPrevAddr = 0;
+	}
+
 	// Roadmap B deform-once buffers: same ownership as gpuSkinVB -- R_CreateLightTris copies the owning
 	// ambient surface's handles into every interaction surface, so only the owner (ambientSurface==NULL)
 	// destroys them; inherited copies just drop the borrowed handles.

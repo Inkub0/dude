@@ -191,6 +191,13 @@ typedef struct srfTriangles_s {
 	// freed again the next frame (on Vulkan a buffer each). Until the surface is drawn in a second frame its indexes
 	// stream through the backend's per-frame index ring instead (R_InteractionIndexCache, Interaction.cpp).
 	int							firstDrawnFrame;
+	// Motion vectors for deform-once surfaces (r_skinnedMotionVectors + r_tessDeform): the deform kernel's
+	// PREVPOS variant saves each EXPANDED vertex's previous-frame model-space position here (vec4 per vert)
+	// before overwriting tessDeformVB, and gbuffer.vert reads it by device address - without it a deformed
+	// (tessellated) character had only its rigid motion in the velocity buffer, so the temporal denoisers
+	// dragged the lighting of its moving limbs behind them. Owner-only, never inherited. 0 = none.
+	unsigned int				tessDeformPrevVB;		// rhi::BufferHandle (0 = none)
+	unsigned long long			tessDeformPrevAddr;		// its device address (0 = no BDA / none)
 } srfTriangles_t;
 
 typedef idList<srfTriangles_t *> idTriList;

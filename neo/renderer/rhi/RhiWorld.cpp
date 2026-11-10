@@ -5498,6 +5498,13 @@ static bool RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef, int pha
 				&& tri->gpuSkinPrevAddr != 0 && tri->gpuSkinFrame == tr.frameCount ) {
 			memcpy( &parms.rtParms[0], &tri->gpuSkinPrevAddr, sizeof( tri->gpuSkinPrevAddr ) );
 		}
+		// The deform-once expansion (r_tessDeform) the same way: its kernel saved last frame's deformed positions,
+		// indexed like tessDeformVB, which the draw binds at offset 0. Before 2026-11-10 a deformed character -
+		// every tessellated monster and Quake 4 marine at the tiers with r_tessDeform - got its rigid motion only,
+		// and the Path Tracing denoisers dragged the lighting of its limbs and face behind them by their history.
+		if ( velWants && useDeform && tri->tessDeformPrevAddr != 0 && tri->tessDeformFrame == tr.frameCount ) {
+			memcpy( &parms.rtParms[0], &tri->tessDeformPrevAddr, sizeof( tri->tessDeformPrevAddr ) );
+		}
 
 		// Layered surfaces (decals, signs, details) sit coplanar on walls and rely on
 		// polygon offset to win the depth test — same as the depth prepass. Without it
