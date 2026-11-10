@@ -4947,14 +4947,9 @@ static void DrawDbgGroup_Performance()
 		"every stage adds full frame-stage coverage." );
 	CvarCheckbox( "GPU Frame Time (OpenGL 3)", NamedCvar( "r_gl3GpuTime" ), nullptr );
 
-	if ( SettingsRow( "Vulkan Deep-Dive HUD", "r_vkDebugHud" ) ) {
-		bool vkDebugHud = cvarSystem->GetCVarBool( "r_vkDebugHud" );
-		if ( ImGui::Checkbox( "Vulkan Deep-Dive HUD (GPU clock / temp / VRAM / errors)", &vkDebugHud ) ) {
-			cvarSystem->SetCVarBool( "r_vkDebugHud", vkDebugHud );
-		}
-		CvarTipNamed( "r_vkDebugHud", "Always-on overlay with live GPU clock/temp/power (NVIDIA), VRAM usage and validation-error count. "
-			"The clock turns amber/red as it climbs toward the boost range - useful for telling a hardware/driver reset apart from a code fault." );
-	}
+	CvarCheckbox( "Vulkan Deep-Dive HUD (GPU clock / temp / VRAM / errors)", NamedCvar( "r_vkDebugHud" ),
+		"Always-on overlay with live GPU clock/temp/power (NVIDIA), VRAM usage and validation-error count. "
+		"The clock turns amber/red as it climbs toward the boost range - useful for telling a hardware/driver reset apart from a code fault." );
 
 	CvarSliderI( "Shadow-Map Coverage Print", r_shadowMapDebug, 0, 2, "Print once a second how many lights got a shadow map, stencil "
 		"shadows or none, and why lit lights stay on the forward path. 2 = per light." );
@@ -4970,14 +4965,9 @@ static void DrawDbgGroup_Diagnostics()
 
 	// Vulkan crash logging (opt-in) - writes a dudelog-crash-YYYYMMDD-HHMMSS.txt next to dudelog.txt
 	// when a VK_ERROR_DEVICE_LOST is detected by the backend. Default OFF.
-	if ( SettingsRow( "Vulkan Crash Logging", "r_vkCrashLogging" ) ) {
-		bool vkCrashLog = cvarSystem->GetCVarBool( "r_vkCrashLogging" );
-		if ( ImGui::Checkbox( "Vulkan Crash Logging (write crash dumps)", &vkCrashLog ) ) {
-			cvarSystem->SetCVarBool( "r_vkCrashLogging", vkCrashLog );
-		}
-		CvarTipNamed( "r_vkCrashLogging", "When enabled, writes a dudelog-crash-YYYYMMDD-HHMMSS.txt on device-lost events, with the last "
-			"GPU pass markers. Enable only when debugging driver resets." );
-	}
+	CvarCheckbox( "Vulkan Crash Logging (write crash dumps)", NamedCvar( "r_vkCrashLogging" ),
+		"When enabled, writes a dudelog-crash-YYYYMMDD-HHMMSS.txt on device-lost events, with the last "
+		"GPU pass markers. Enable only when debugging driver resets." );
 	CvarCheckbox( "Vulkan Validation Layer (restart)", NamedCvar( "r_vkValidation" ), "Enable the Khronos validation layer if installed. Takes effect "
 		"on the next renderer restart; costs a lot of FPS." );
 	CvarCheckbox( "Dump the Next Frame (vkdump.tga)", NamedCvar( "r_vkDumpNextFrame" ), nullptr );
@@ -5073,30 +5063,17 @@ static void DrawDbgGroup_Materials()
 
 	SettingsHeading( "Skin" );
 	ImGui::BeginDisabled( r_skinShading.GetFloat() <= 0.0f );
-	if ( SettingsRow( "Skin SSS Strength", "r_skinShading" ) ) {
-	float sss = r_skinShading.GetFloat();
-	if ( ImGui::SliderFloat( "Skin SSS Strength", &sss, 0.0f, 1.0f, "%.2f" ) ) {
-		r_skinShading.SetFloat( idMath::ClampFloat( 0.0f, 1.0f, sss ) );
-	}
-	CvarTip( r_skinShading, "how strongly skin and flesh scatter light under the surface, warming and "
+	CvarSliderF( "Skin SSS Strength", r_skinShading, 0.0f, 1.0f, "%.2f",
+		"how strongly skin and flesh scatter light under the surface, warming and "
 		"softening the lighting terminator so faces stop reading as plastic. Doubles as the on/off, so "
 		"dragging this to 0 also unticks it in the Graphics tab. Default 0.6. Preset-owned (Potato 0 = "
 		"faithful floor, Low+ 0.6), so moving it reads as a Custom preset." );
-	CvarResetButton( r_skinShading );
 
-	}
-
-	if ( SettingsRow( "Skin Scatter Reach", "r_skinScatter" ) ) {
-	float reach = r_skinScatter.GetFloat();
-	if ( ImGui::SliderFloat( "Skin Scatter Reach", &reach, 0.0f, 1.0f, "%.2f" ) ) {
-		r_skinScatter.SetFloat( idMath::ClampFloat( 0.0f, 1.0f, reach ) );
-	}
-	CvarTip( r_skinScatter, "how far light wraps around the terminator - higher = a softer, redder, "
+	CvarSliderF( "Skin Scatter Reach", r_skinScatter, 0.0f, 1.0f, "%.2f",
+		"how far light wraps around the terminator - higher = a softer, redder, "
 		"wider glow, lower = tighter. The red channel's reach; green and blue derive shorter, which is "
 		"what makes the falloff warm. Flesh scatters ~30% deeper than face skin. Default 0.32. NOT "
 		"preset-owned, so it survives a preset change." );
-	CvarResetButton( r_skinScatter );
-	}
 	ImGui::EndDisabled();
 	EndSettingsGroup();
 	}
