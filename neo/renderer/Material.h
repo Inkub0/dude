@@ -243,6 +243,10 @@ typedef struct {
 	// authored `_h`; otherwise integrated from the normal map. NULL unless r_tessellation was
 	// set when the material was parsed.
 	idImage *			tessHeightImage;
+
+	// an additive "_add" highlight painted over a darkening decal (r_decalLitHighlights),
+	// classified once at parse (R_DecalClassifyLitHighlightStage); read per draw
+	bool				decalLitHighlight;
 } shaderStageExtra_t;
 
 typedef enum {
@@ -430,6 +434,11 @@ public:
 						// DUDE: the enhancement data of one of this material's stages (all NULL /
 						// 0 for a stage that is not one of them)
 	const shaderStageExtra_t &GetStageExtra( const shaderStage_t *stage ) const;
+
+						// DUDE: decal classes the draw-time sheen / highlight rules read (classified
+						// once at parse by R_DecalClassifyBlood and the glass rule; see R_DecalSheenScale)
+	bool				IsBloodDecal( void ) const { return decalBlood; }
+	bool				IsGlassDecal( void ) const { return decalGlass; }
 
 						// DUDE PBR (docs/pbr-materials.md Phase B): per-material metalness /
 						// roughness from the generated pbr/pbr_materials.cfg table (merged
@@ -802,6 +811,10 @@ private:
 	float				portalDistanceFar;
 
 	shaderStageExtra_t *stageExtras;		// DUDE: numStages entries next to stages (GetStageExtra)
+	bool				decalBlood;			// DUDE: a blood decal (content flag or a blood-like name)
+	bool				decalGlass;			// DUDE: a glass pane / glass-named decal (its sheen stays)
+
+	void				ClassifyDecal( void );	// DUDE: fills the three decal classes above after a parse
 };
 
 // DUDE PBR: the material classes the table tags entries with, one vocabulary for every
