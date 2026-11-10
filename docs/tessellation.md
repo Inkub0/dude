@@ -616,11 +616,26 @@ Two deliberate design choices, both departures worth stating:
   dodges this only because it gates per-*edge*, which a uniform grid can't represent). `r_tessMinEdge`
   therefore stays a fixed-function-path control; the eye/dense-cluster over-inflation it guarded is
   already handled by the classifier's name/path exclusions.
-- **Displacement height is CPU-precomputed.** The compute descriptor set is storage-only (no sampler
-  reachable by a dispatch), so the per-vertex relief is sampled from the bump map on the CPU at bake
-  (`R_LoadImageProgram` → bilinear blue channel, decode/seam-scale exactly as `dudeTessDisplace`) and
-  uploaded as a storage buffer. The bump matrix is treated as identity (character bumps carry none), so
-  the bump UV is the interpolated source `st`.
+- **Displacement height: baked on the GPU (2026-11-10), CPU as the fallback.** At first the compute
+  descriptor set was storage-only (no sampler reachable by a dispatch), so the per-vertex relief was sampled
+  from the height map on the CPU at bake (`R_LoadImageProgram`, decode/seam-scale exactly as
+  `dudeTessDisplace`) and uploaded as a storage buffer - decoding the image again for every mesh. The compute
+  set now has two combined-image-sampler bindings (8-9, `ComputeArgs::images`), and `md5tessbake.comp` bakes
+  the per-vertex data on the GPU: one thread per generated vertex, its barycentric in closed form from its
+  index (uniform grid, row-major), the corners from the mesh's triangles, the seam mask interpolated, and the
+  relief `textureLod( heightMap, uv, 0 ).r - 0.5` - exactly how the fixed-function tessellation samples it,
+  from the `_tessHeight` image the renderer already uploaded. It runs on a mesh's first deform, in the frame's
+  compute window ahead of the deform jobs (`RB_RHI_FlushTessJobs`), into GPU-only buffers, rebuilding its
+  inputs from the texcoords, seam mask and triangles: no CPU arrays (they stayed in RAM for every mesh for
+  the whole level), no CPU decode, and a renderer restart simply re-bakes. A height image not uploaded yet
+  postpones the bake (fixed-function tessellation meanwhile, which loads it). The expanded index list is
+  still built on the CPU (integer arithmetic). The CPU bake stays the fallback (no Vulkan, or the kernel
+  missing), queued during a level load and filled on worker threads with each height image decoded once
+  (`R_MD5_FlushTessBakes`). The bump matrix is treated as identity (character bumps carry none), so the bump
+  UV is the interpolated source `st`. Background: the uniform barycentric grids of NVIDIA's displaced
+  micro-meshes (whose HeightmapRTX sample also bakes from a heightmap in a compute shader); the adaptive
+  variant (Khoury, Dupuy & Riccio, "Adaptive GPU Tessellation with Compute Shaders", GPU Zen 2, 2019) needs
+  recursive key decoding instead.
 
 **Fidelity note:** uniform integer `L` == `equal_spacing`, bit-identical to the shipping
 `fractional_odd_spacing` only for **odd** `L` (default `r_tessLevel` 5 is odd). Even `L` shifts the

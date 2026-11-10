@@ -231,6 +231,9 @@ private:
 	int							tessBakeLevel;		// L this bake used (rebuild on r_tessLevel change)
 	float						tessBakeMinEdge;	// r_tessMinEdge this bake used (rebuild on change)
 	bool						tessBakePending;	// DUDE: arrays allocated, fill queued for R_MD5_FlushTessBakes - no deform yet
+	bool						tessGpuBake;		// DUDE: the per-vertex data (bary/seam, corners, relief) is baked on the GPU
+													// (md5tessbake.comp) straight into the tessGpu* buffers: no CPU arrays,
+													// no CPU height decode. false = the CPU bake (the fallback)
 	idVec4 *					tessBarySeam;		// [numTessOutVerts] (bary u,v,w in xyz; seam mask in w)
 	int *						tessSrcTri;			// [numTessOutVerts*3] the 3 source-corner output-vert indices
 	float *						tessHeight;			// [numTessOutVerts] CPU-sampled displacement relief scalar (pre-strength)
@@ -245,6 +248,8 @@ private:
 
 	void						BuildTessTopology( const idJointMat *bindJoints );
 	void						FreeTessData( void );
+	const idImage *				TessHeightImage( void ) const;	// DUDE: the material's tess height map, NULL = none
+	bool						BakeTessOnGpu( void );			// DUDE: tessGpuBake: create + GPU-fill the tessGpu* buffers
 public:
 	// DUDE: BuildTessTopology's fill, worker-safe (see R_MD5_FlushTessBakes); false on a count mismatch
 	bool						FillTessTopology( const idDrawVert *bindVerts, const byte *bumpPic, int bumpW, int bumpH );

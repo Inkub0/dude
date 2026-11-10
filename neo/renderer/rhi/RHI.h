@@ -168,6 +168,9 @@ struct ComputeArgs {
 	// frame's storage ring (AllocStorage) sets both; the offset honours the device's storage alignment.
 	int				storageOffset[8] = {};
 	int				storageRange[8] = {};
+	// DUDE: sampled images at bindings 8 and 9 (combined image sampler, each image's own sampler - its
+	// filter and wrap), 0 = unbound. Vulkan; the md5 tessellation GPU bake reads the height map with it.
+	ImageHandle		images[2] = {};
 	const void *	pushConstants;		// params bound at push-constant offset 0 (NULL = none)
 	int				pushConstantSize;	// bytes, <= 128
 	unsigned int	groupsX, groupsY, groupsZ;

@@ -2223,6 +2223,12 @@ void RB_RHI_AddTessJob( unsigned int shader, unsigned int srcVB, const void *src
                         int numOutVerts, float dispStrength,
                         unsigned int prevPosBuf = 0, bool prevPoseInVB = false );	// prevPosBuf: deform-once motion vectors (kernel variant PREVPOS)
 void RB_RHI_FlushTessJobs( void );		// dispatch + clear the recorded deform jobs (backend, pre-scene)
+// DUDE: GPU bake of a mesh's deform-once subdivision (md5tessbake.comp), dispatched by RB_RHI_FlushTessJobs ahead
+// of the deform jobs. stSeam (vec4 per output vert) is R_FrameAlloc'd, indexes the mesh's triangle list; both are
+// uploaded by the flush. heightImage is an RHI image handle (0 = no relief).
+void RB_RHI_AddTessBakeJob( unsigned int shader, const void *stSeam, int numOutVerts, const void *indexes, int numIndexes,
+                            unsigned int outBarySeam, unsigned int outSrcTri, unsigned int outHeight, unsigned int heightImage,
+                            int numTessVerts, int level );
 
 
 /*
