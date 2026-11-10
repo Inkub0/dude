@@ -631,7 +631,10 @@ Two deliberate design choices, both departures worth stating:
   postpones the bake (fixed-function tessellation meanwhile, which loads it). The expanded index list is
   still built on the CPU (integer arithmetic). The CPU bake stays the fallback (no Vulkan, or the kernel
   missing), queued during a level load and filled on worker threads with each height image decoded once
-  (`R_MD5_FlushTessBakes`). The bump matrix is treated as identity (character bumps carry none), so the bump
+  (`R_MD5_FlushTessBakes`). The level follows `r_tessLevel` live: a change re-bakes the mesh on its next
+  deform (not in a frame where another entity's deform job already read its buffers), so the translucent
+  decals the fixed-function passes tessellate on the body (Quake 4's armor badges) stay on it; the Graphics
+  slider stores whole levels. The bump matrix is treated as identity (character bumps carry none), so the bump
   UV is the interpolated source `st`. Background: the uniform barycentric grids of NVIDIA's displaced
   micro-meshes (whose HeightmapRTX sample also bakes from a heightmap in a compute shader); the adaptive
   variant (Khoury, Dupuy & Riccio, "Adaptive GPU Tessellation with Compute Shaders", GPU Zen 2, 2019) needs
@@ -640,8 +643,8 @@ Two deliberate design choices, both departures worth stating:
 **Fidelity note:** uniform integer `L` == `equal_spacing`, bit-identical to the shipping
 `fractional_odd_spacing` only for **odd** `L` (default `r_tessLevel` 5 is odd). Even `L` shifts the
 vertex distribution and drops the smooth LOD slide-in; adaptive/screen-space LOD is out of scope for
-this milestone. The bake is load-time (needs the bind pose), so `r_tessDeformTest` must be set before
-the map loads, and an `r_tessLevel` change needs a reload.
+this milestone. The bake was load-time (needs the bind pose), so `r_tessDeformTest` had to be set before
+the map loads, and an `r_tessLevel` change needed a reload (since 2026-11-10 it re-bakes live, see below).
 
 ### B-2 — draw substitution (built, awaiting visual verdict)
 

@@ -231,6 +231,7 @@ private:
 	int							tessBakeLevel;		// L this bake used (rebuild on r_tessLevel change)
 	float						tessBakeMinEdge;	// r_tessMinEdge this bake used (rebuild on change)
 	bool						tessBakePending;	// DUDE: arrays allocated, fill queued for R_MD5_FlushTessBakes - no deform yet
+	int							tessJobFrame;		// DUDE: tr.frameCount a deform job last read this mesh's tessGpu* buffers
 	bool						tessGpuBake;		// DUDE: the per-vertex data (bary/seam, corners, relief) is baked on the GPU
 													// (md5tessbake.comp) straight into the tessGpu* buffers: no CPU arrays,
 													// no CPU height decode. false = the CPU bake (the fallback)

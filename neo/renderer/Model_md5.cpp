@@ -250,6 +250,7 @@ idMD5Mesh::idMD5Mesh() {
 	tessBakeMinEdge		= -1.0f;
 	tessBakePending		= false;
 	tessGpuBake			= false;
+	tessJobFrame		= -1;
 	tessBarySeam		= NULL;
 	tessSrcTri			= NULL;
 	tessHeight			= NULL;
@@ -1315,7 +1316,9 @@ void idMD5Mesh::BuildTessTopology( const idJointMat *bindJoints ) {
 		bindVerts[i].st = texCoords[i];
 	}
 	StampTessSeamMask( bindVerts );
-	TransformVerts( bindVerts, bindJoints );
+	if ( bindJoints != NULL ) {
+		TransformVerts( bindVerts, bindJoints );	// positions: only the layout; the fill reads st + seam (NULL on a live re-bake)
+	}
 	for ( int i = 0; i < numMir; i++ ) {
 		bindVerts[mbase + i] = bindVerts[deformInfo->mirroredVerts[i]];
 	}
@@ -1880,6 +1883,22 @@ void idMD5Mesh::UpdateSurface( const struct renderEntity_s *ent, const idJointMa
 	// tessellation (which also has the distance LOD the fixed-baked deform topology lacks). So the two
 	// GPU-offload features are wired together — deform-once only ever runs on top of GPU-resident source.
 	const bool tessDeformActive = r_tessDeform.GetBool() && r_gpuSkinning.GetBool();
+
+	// DUDE: the subdivision level follows r_tessLevel live (the Graphics slider). The bake was made at load for
+	// the level then, so a change re-bakes the mesh here, on its next deform: the fixed-function passes (the
+	// translucent badges and decals on the armor, which can't use the deform buffer) read the cvar every frame,
+	// and drawing the body at the old level left them curving at the new one - floating off or sinking into the
+	// armor. With the GPU bake that is the index list on the CPU and one dispatch; the per-surface buffers below
+	// resize to the new vertex count. (Not mid level load: a queued bake is filled at its end.)
+	if ( tessDeformActive && rhi::GetActiveBackendType() == rhi::BT_VULKAN && numTessOutVerts > 0 && !tessBakePending ) {
+		const int liveLevel = idMath::ClampInt( 1, 32, r_tessLevel.GetInteger() );
+		// not while a deform job recorded earlier this frame (another entity with this model) still has to read
+		// the current buffers: the first of them to draw next frame re-bakes, before any job
+		if ( liveLevel != tessBakeLevel && tessJobFrame != tr.frameCount ) {
+			BuildTessTopology( NULL );
+		}
+	}
+
 	if ( !tessDeformActive && tri->tessDeformVB ) {
 		// toggled off: release so the draw stops binding the frozen last deform and falls back
 		rhi::RHI *r = rhi::GetRHI();
@@ -1943,6 +1962,7 @@ void idMD5Mesh::UpdateSurface( const struct renderEntity_s *ent, const idJointMa
 		}
 		// one deform dispatch per surface per frame
 		if ( tri->tessDeformVB && tri->tessDeformFrame != tr.frameCount ) {
+			tessJobFrame = tr.frameCount;		// this frame's jobs read the mesh's tessGpu* buffers (see the re-bake above)
 			// tessDeformVB holds LAST frame's deformed pose only if it was deformed then, or deformed earlier and
 			// shown unchanged last frame (the cached dynamic model reused between a game's tics); never in a
 			// buffer just (re)allocated (tessDeformFrame -1). Otherwise the kernel stores the current pose.
