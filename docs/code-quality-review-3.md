@@ -219,6 +219,11 @@ Batch 2 (build green, same targets):
 - c4e9f571 cleanup(game): idPlayer::UpdateBodySelfShadow for the third-person body shadow flags
 - 7c00f8d9 cleanup(game): drop the always-true inner third-person test in the stopped-time view
 
+Fixes after the first Quake 4 run (it crashed at startup):
+
+- 404333fb fix(quake4): the settings bridge finds the sound cvars before the menu variables read them (262df64a dereferenced a not-yet-found pointer from Q4Settings_SetMenuGuiVars)
+- 833987e7 fix: the idList::AssureSize calls that replaced grow-only loops stay grow-only (AssureSize also shrinks; the seven converted sites would have truncated their lists)
+
 ## Needs an in-game A/B (I cannot run the game)
 
 - **GL3**: any post pass that binds a render target then an idImage on the same unit (SSAO, SSR,
