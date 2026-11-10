@@ -194,6 +194,7 @@ extern idCVar	pm_bobpitch;
 extern idCVar	pm_bobroll;
 extern idCVar	pm_thirdPersonRange;
 extern idCVar	pm_thirdPersonHeight;
+extern idCVar	pm_thirdPersonSide;
 extern idCVar	pm_thirdPersonAngle;
 extern idCVar	pm_thirdPersonClip;
 extern idCVar	pm_thirdPerson;

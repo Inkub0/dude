@@ -212,11 +212,16 @@ sits behind and above the eye) and a body that cast no shadow. DUDE makes it pla
   itself and receives the world's shadows (first person keeps the body's shadow off the view
   weapon as stock does).
 
-The camera itself is the stock one: `pm_thirdPersonRange` (distance, default 80),
-`pm_thirdPersonHeight`, `pm_thirdPersonAngle` (0 behind, 180 in front; with the camera in
-front of the player the aim point can fall behind it, and the crosshair then stays at the
-centre) and `pm_thirdPersonClip` (keep the camera out of walls, default on). In Quake 4,
-vehicles keep Raven's own third-person camera and crosshair.
+The camera frames the player over the shoulder, as modern third-person games do:
+`pm_thirdPersonSide` (default 32) slides the camera that far to the right of the player, so
+the body sits on the left of the screen and no longer covers what is ahead; the view stays
+parallel to the aim, so the crosshair still lands where the shots go. A negative value puts
+the camera over the left shoulder, `0` is the stock centred framing. The rest of the camera
+is the stock one: `pm_thirdPersonRange` (distance, default 80), `pm_thirdPersonHeight`,
+`pm_thirdPersonAngle` (0 behind, 180 in front; with the camera in front of the player the aim
+point can fall behind it, and the crosshair then stays at the centre) and `pm_thirdPersonClip`
+(keep the camera out of walls, default on). In Quake 4, vehicles keep Raven's own third-person
+camera and crosshair.
 
 ## Other CVars added in dhewm3
 

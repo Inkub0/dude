@@ -428,6 +428,7 @@ public:
 	idAngles				renderViewOffsetViewAnglesPrev;	// previous tic
 	float					renderViewOffsetAngle;			// OffsetThirdPersonView params for this tic's mode
 	float					renderViewOffsetHeight;
+	float					renderViewOffsetSide;			// pm_thirdPersonSide (0 for the death cam)
 	bool					renderViewOffsetClip;
 	float					renderViewOffsetRange;			// lerped between tics (the death cam ramps it)
 	float					renderViewOffsetRangePrev;
@@ -540,10 +541,10 @@ public:
 	void					CalculateViewWeaponPos( idVec3 &origin, idMat3 &axis );
 	idVec3					GetEyePosition( void ) const;
 	void					GetViewPos( idVec3 &origin, idMat3 &axis ) const;
-	void					OffsetThirdPersonView( float angle, float range, float height, bool clip );
+	void					OffsetThirdPersonView( float angle, float range, float height, float side, bool clip );
 	// com_interpolate: pure third-person view builder shared by the per-tic OffsetThirdPersonView and the
 	// per-frame re-derivation in InterpolateRenderView (see the render-interpolation cache members above).
-	void					ComputeThirdPersonView( const idVec3 &eyeOrigin, const idAngles &viewAng, const idMat3 &gravityAxis, float angle, float range, float height, bool clip );
+	void					ComputeThirdPersonView( const idVec3 &eyeOrigin, const idAngles &viewAng, const idMat3 &gravityAxis, float angle, float range, float height, float side, bool clip );
 
 	bool					Give( const char *statname, const char *value );
 	bool					GiveItem( idItem *item );
