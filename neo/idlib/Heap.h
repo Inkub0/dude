@@ -442,7 +442,13 @@ public:
 	int								GetNumUsedBlocks( void ) const { return numUsedBlocks; }
 	int								GetUsedBlockMemory( void ) const { return usedBlockMemory; }
 	int								GetNumFreeBlocks( void ) const { return numFreeBlocks; }
+#ifdef ID_DYNAMIC_BLOCK_ALLOC_SYSTEM
+									// no base blocks to be free in: what the fixed ones (SetFixedBlocks) would have
+									// left - the sound decoder opens an OGG stream only while that is large enough
+	int								GetFreeBlockMemory( void ) const { return Max( 0, baseBlockMemory - usedBlockMemory ); }
+#else
 	int								GetFreeBlockMemory( void ) const { return freeBlockMemory; }
+#endif
 	int								GetNumEmptyBaseBlocks( void ) const;
 
 private:
@@ -525,6 +531,13 @@ void idDynamicBlockAlloc<type, baseBlockSize, minBlockSize>::SetFixedBlocks( int
 	idDynamicBlock<type> *block;
 
 #ifdef ID_DYNAMIC_BLOCK_ALLOC_SYSTEM
+	// no base blocks, but keep their memory as the budget GetFreeBlockMemory reports against: the
+	// sound decoder refuses new OGG streams once less than MIN_OGGVORBIS_MEMORY is free, and with
+	// nothing ever free here every streamed sound stayed silent (long voice lines, ambient loops)
+	if ( numBlocks > numBaseBlocks ) {
+		baseBlockMemory += ( numBlocks - numBaseBlocks ) * ( baseBlockSize - (int)sizeof( idDynamicBlock<type> ) );
+		numBaseBlocks = numBlocks;
+	}
 	return;
 #endif
 
