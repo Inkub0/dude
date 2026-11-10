@@ -86,6 +86,47 @@ the toggle and the march steps come from the quality tier; strength, length and 
 tuning knobs. Config schema 8 moves configs on the old defaults (0.8 / 12 / 8) to the new ones and puts a
 config that is on a preset onto its tier's toggle and steps, once.
 
+## RT contact shadows (`r_rtContactShadows`)
+
+The same contact term for the ray-traced tiers (2026-11-10, user request: "contact shadows, but using RT so it can
+be used on the RTX rendering"). The screen-space march is switched off while RT shadows for all lights is on, and the
+blurred RT shadows (`r_rtShadowBlur`) soften contact detail away; this puts the contact grounding back with the
+occluder found by a ray instead of the depth buffer.
+
+- **What it traces:** in `interaction.frag` `rtContactOcclusion` (ray-query variant only), one ray from the lit
+  fragment toward the light, `r_rtContactShadowLength` world units (clamped short of the light), solid geometry only
+  (cull mask `0xFD`: grates are left to the shadow itself). The nearest hit's distance sets the fade.
+- **Soft edge:** the four pixels of each 2x2 quad trace four directions spread over a cone toward the light (half-angle
+  `r_rtContactShadowSoftness`, default 15 degrees; four points a quarter turn apart at 0.7 of the cone radius), and
+  `contactShadowTerm` averages them through the same quad average as the screen-space march. The first version traced
+  one exact ray per pixel: correct, but a hard-edged hit/miss (user, 2026-11-10: "very hard").
+- **Start point and self-hits:** the first version started the ray `r_rtSunShadowOffset` (1 unit) off the surface
+  along the normal, like the RT shadow rays. That lifted the start past small occluders: no shadow under the nose.
+  It also still left dark blobs where the drawn surface sits inside the ray-traced mesh (a tessellated, displaced
+  face over its BLAS: the lower eyelids). Now the start is nudged 0.05 units off the surface, and hits on the inside
+  of a mesh are ignored. Doom 3's outward face normal is `(v3 - v1) x (v2 - v1)` (`R_DeriveFacePlanes`), the opposite
+  of Vulkan's front side, so a real occluder seen from outside is hit on its Vulkan back face and a ray leaving the
+  inside of a mesh meets a front face. Every instance disables facing culling, so the shader tests
+  `rayQueryGetIntersectionFrontFaceEXT` on the candidates (no-opaque traversal) instead of using a cull flag.
+- **Same look as the screen-space version:** visibility `1 - strength * (1 - t / length)` with
+  `r_rtContactShadowStrength` (default 0.5) and length (default 4), the new screen-space defaults. No thickness
+  setting: a ray needs no depth-buffer guess, and it sees occluders off screen or behind other surfaces.
+- **Where it runs:** every non-ambient interaction while the scene TLAS exists (RTX On / Path Tracing) and the device
+  has the ray-query variant. The backend (`RB_RHI_FillContactShadowParms`) sets `u_contactParms = (-1, length, 0,
+  tan(softness), strength)`, fills the TLAS into `u_rtParms` when the draw's shadow mode didn't already, and binds
+  `interaction_rt` (its shadow-map / mask paths are unchanged). It **replaces** the screen-space march on those draws.
+- **Skipped** for lights that trace the full hard RT shadow ray (mode 4: `r_rtSunShadows`, `r_rtMovingLights`,
+  `r_rtAllLights` without the blur): that ray already finds every occluder the short one could. With the blur (modes
+  5 / 6) it runs and restores the contact the blur softened.
+- **Path Tracing:** ReSTIR DI lights the scene without per-light draws, so only the lights still drawn one by one get
+  it. Covering the DI-lit lights would need its own design (a per-pixel contact ray toward a stochastic light sample
+  brings the dots back).
+- **Presets (user, 2026-11-10):** on from **High to Nightmare** whenever the preset's ray tracing is on (RTX On or Path
+  Tracing): an `RtAugment` column, matched in preset detection; the raster block resets it off, so RTX off and the
+  lower tiers have it off. Config schema 9 turns it on once for a config already on such a tier with its ray tracing
+  applied. On/off in Graphics -> Shadows -> Ray Tracing; tuning (strength, ray length, softness) in Debugging ->
+  Ray Tracing -> RT Contact Shadows. GL3 and non-RT GPUs: inert.
+
 ## Backend wiring
 
 - **Unit 16** carries `_currentDepth`. Units 0–14 are the interaction material/shadow/decal samplers

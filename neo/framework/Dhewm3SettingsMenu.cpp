@@ -3491,6 +3491,8 @@ struct RtAugment {
 	float blurMinPenumbra;	// r_rtShadowBlurMinPenumbra when rtShadowBlur on: skip the blur for lights whose
 							// screen penumbra is finer than this (px). Free knob - the debug slider tweaks it
 							// without reading "Custom" (not matched in Detect). Inert where rtShadowBlur is off
+	bool  rtContactShadows;	// r_rtContactShadows: contact shadows traced through the RT scene (docs/contact-shadows.md),
+							// High to Nightmare (user, 2026-11-10). Matched in Detect; the raster block resets it off
 };
 
 // RT shadows + AO scale from Medium up (RTAO auto-builds the RT scene via R_RtSceneWanted; RT shadows
@@ -3502,13 +3504,13 @@ struct RtAugment {
 static const RtAugment rtAugment[PRESET_COUNT] = {
 // Ultra and Nightmare (RTX and Path Tracing alike) run the HDR look neutral - exposure 1.0, gamma
 // 1.0 - for their GI-lit scenes (user, 2026-10-29); Medium / High keep the raster tier's.
-//                  sun    mov    refl   rtao   aoRes  rtgi   giRes  blur   all    stag   vol    volL  vel    parlxSh hdrGam hdrExp fsrScale penumbra
-/* Potato    */   { false, false, false, false, 1.0f,  false, 0.75f, false, false, false, false, 0,    false, -1.0f, -1.0f, -1.0f, 1.0f,  1.0f },
-/* Low       */   { false, false, false, false, 1.0f,  false, 0.75f, false, false, false, false, 0,    false, -1.0f, -1.0f, -1.0f, 1.0f,  1.0f },
-/* Medium    */   { true,  true,  false, true,  0.75f, false, 0.75f, false, false, false, false, 0,    true,  -1.0f, -1.0f, -1.0f, 1.0f,  1.0f },
-/* High      */   { true,  true,  false, true,  0.8f,  false, 0.75f, true,  false, false, false, 0,    true,  -1.0f, -1.0f, -1.0f, 1.0f,  1.0f },
-/* Ultra     */   { true,  true,  true,  false, 1.0f,  true,  0.667f,true,  true,  true,  false, 0,    true,  0.5f,  1.0f,  1.0f,  1.0f,  4.0f },
-/* Nightmare */   { true,  true,  true,  false, 0.75f, true,  0.75f, true,  true,  false, true,  2,    true,  0.5f,  1.0f,  1.0f,  0.75f, 2.0f },
+//                  sun    mov    refl   rtao   aoRes  rtgi   giRes  blur   all    stag   vol    volL  vel    parlxSh hdrGam hdrExp fsrScale penumbra rtCS
+/* Potato    */   { false, false, false, false, 1.0f,  false, 0.75f, false, false, false, false, 0,    false, -1.0f, -1.0f, -1.0f, 1.0f,  1.0f, false },
+/* Low       */   { false, false, false, false, 1.0f,  false, 0.75f, false, false, false, false, 0,    false, -1.0f, -1.0f, -1.0f, 1.0f,  1.0f, false },
+/* Medium    */   { true,  true,  false, true,  0.75f, false, 0.75f, false, false, false, false, 0,    true,  -1.0f, -1.0f, -1.0f, 1.0f,  1.0f, false },
+/* High      */   { true,  true,  false, true,  0.8f,  false, 0.75f, true,  false, false, false, 0,    true,  -1.0f, -1.0f, -1.0f, 1.0f,  1.0f, true },
+/* Ultra     */   { true,  true,  true,  false, 1.0f,  true,  0.667f,true,  true,  true,  false, 0,    true,  0.5f,  1.0f,  1.0f,  1.0f,  4.0f, true },
+/* Nightmare */   { true,  true,  true,  false, 0.75f, true,  0.75f, true,  true,  false, true,  2,    true,  0.5f,  1.0f,  1.0f,  0.75f, 2.0f, true },
 };
 
 
@@ -3625,6 +3627,7 @@ static void ApplyEnhancementPreset( int idx, int rtMode )
 	com_interpolate.SetBool( p.interpolate );
 	r_decalLitHighlights.SetBool( p.decalLitHighlights );
 	r_contactShadows.SetBool( p.contactShadows );
+	r_rtContactShadows.SetBool( false );	// RT axis: the RT overlay below turns it on where the tier has it
 	r_contactShadowSteps.SetInteger( p.contactShadowSteps );	// free knob: not matched in Detect
 	r_rtao.SetBool( p.rtao );
 	r_rtaoResScale.SetFloat( p.rtaoResScale );
@@ -3717,6 +3720,7 @@ static void ApplyEnhancementPreset( int idx, int rtMode )
 		}
 		r_rtAllLights.SetBool( a.rtAllLights );
 		r_rtShadowBlurStagger.SetBool( a.rtBlurStagger );
+		r_rtContactShadows.SetBool( a.rtContactShadows );
 		r_volumetrics.SetBool( a.volumetrics );
 		// which lights scatter in the haze: a free tuning knob, but the top tier defaults it to
 		// "all lights" (point lights too). 0 = leave the user's value. Only meaningful with volumetrics on.
@@ -3873,7 +3877,7 @@ static int DetectEnhancementPreset( int* outRtMode = NULL )
 				!r_rtSunShadows.GetBool() && !r_rtMovingLights.GetBool() &&
 				!r_rtReflections.GetBool() && !r_rtao.GetBool() && !r_rtgi.GetBool() &&
 				!r_rtShadowBlur.GetBool() && !r_rtAllLights.GetBool() &&
-				!r_rtShadowBlurStagger.GetBool() && !r_volumetrics.GetBool() &&
+				!r_rtShadowBlurStagger.GetBool() && !r_volumetrics.GetBool() && !r_rtContactShadows.GetBool() &&
 				!r_rtReStirDI.GetBool() && !r_rtReStirDIApply.GetBool() && !r_rtgiCache.GetBool() && !r_rtLightGrid.GetBool() &&
 				r_ssr.GetBool()                    == p.ssr &&
 				idMath::Fabs( r_ssrIntensity.GetFloat() - ( p.ssr ? 0.8f : 0.5f ) ) < 0.01f &&
@@ -3904,6 +3908,7 @@ static int DetectEnhancementPreset( int* outRtMode = NULL )
 				r_rtAllLights.GetBool()            == a.rtAllLights &&
 				r_rtShadowBlurStagger.GetBool()    == a.rtBlurStagger &&
 				r_volumetrics.GetBool()            == a.volumetrics &&
+				r_rtContactShadows.GetBool()       == a.rtContactShadows &&
 				r_rtReStirDI.GetBool()             == ( rtMode == RTX_PATHTRACED ) &&
 				r_rtReStirDIApply.GetBool()        == ( rtMode == RTX_PATHTRACED ) &&
 				r_rtgiCache.GetBool()              == a.rtgi &&
@@ -4526,6 +4531,16 @@ static void DrawEnhGroup_Shadows()
 			"every frame. Changes "
 			"the look of shadows: hard-edged unless Soften RT Shadows is on, which then softens all "
 			"of them. Vulkan + RT hardware only." );
+
+		// r_rtContactShadows (docs/contact-shadows.md): the contact term traced through the RT scene; on/off here, the
+		// tuning in Debugging -> Ray Tracing -> RT Contact Shadows. Preset-owned: on from High up with RTX / Path Tracing.
+		CvarCheckbox( "RT Contact Shadows", r_rtContactShadows, "Contact shadows traced through the ray-traced scene: from each lit "
+			"pixel one short ray toward the light, darkening where something is in the way - the small things a shadow "
+			"misses or blurs away (dropped pickups, thin props, feet). Unlike the screen-space Contact Shadows it also sees "
+			"occluders that are off screen or hidden behind other surfaces. Works while ray tracing is on and replaces the "
+			"screen-space version there. Under Path Tracing it only reaches the few lights still drawn one by one (ReSTIR "
+			"lights the rest). Skipped for lights whose hard RT shadow ray already covers it. On from High up when the "
+			"preset's ray tracing is on. Off = vanilla. Vulkan + RT hardware only." );
 
 		// r_rtPerforatedShadows: not preset-owned (default on; it only matters while a light is ray-traced)
 		ImGui::BeginDisabled( !( r_rtSunShadows.GetBool() || r_rtMovingLights.GetBool() || r_rtAllLights.GetBool() ) );
@@ -5856,6 +5871,36 @@ static void DrawDbgGroup_ContactShadows()
 	}
 }
 
+static void DrawDbgGroup_RtContactShadows()
+{
+	// RT contact shadows (r_rtContactShadows, docs/contact-shadows.md): the contact term with the occluder found by a
+	// short ray query through the RT scene instead of the depth march. Vulkan + RT hardware, live while RTX builds the
+	// scene. The on/off also sits in Graphics -> Shadows -> Ray Tracing (RTX).
+	const bool rtCapable = R_SupportsRayTracing();
+	if ( BeginSettingsGroup( "RT Contact Shadows", &r_rtContactShadows,
+			"r_rtContactShadows: trace one short ray from each lit pixel toward the light through the ray-traced scene and "
+			"darken where something is in the way. Vulkan + RT hardware, while ray tracing is on; replaces the screen-space "
+			"contact shadows on those lights. Skipped for lights that trace a hard RT shadow ray anyway." ) ) {
+		if ( !rtCapable ) {
+			SettingsNoteDisabled( "Needs the Vulkan backend and a ray-tracing GPU." );
+		}
+		ImGui::BeginDisabled( !rtCapable );
+
+		CvarSliderF( "Strength", r_rtContactShadowStrength, 0.0f, 1.0f, "%.2f", "how much an occluder dims the light (0 = none, 1 = full "
+			"black at the contact). Faded by the hit distance so a nearer occluder darkens more. Default 0.5." );
+
+		CvarSliderF( "Ray Length", r_rtContactShadowLength, 1.0f, 128.0f, "%.0f", "how far toward the light the ray looks, world units. "
+			"Short = tight contact grounding; long = broader. Clamped to the distance to the light. Default 4." );
+
+		CvarSliderF( "Softness", r_rtContactShadowSoftness, 0.0f, 45.0f, "%.0f", "how soft the edge is: the half-angle in degrees "
+			"of the cone the rays spread over toward the light (each 2x2 pixel block traces four directions and averages "
+			"them). 0 = hard edge. Default 15." );
+
+		ImGui::EndDisabled();	// rtCapable
+		EndSettingsGroup();
+	}
+}
+
 static void DrawDbgGroup_DepthOfField()
 {
 	// Weapon-reload depth-of-field (r_dof): as a weapon reloads, the world beyond it
@@ -6708,6 +6753,7 @@ static void DrawDbgTab_RayTracing()
 {
 	DrawDbgGroup_RTScene();
 	DrawDbgGroup_RTShadows();
+	DrawDbgGroup_RtContactShadows();
 	DrawDbgGroup_RTAO();
 	DrawDbgGroup_RTGI();
 	DrawDbgGroup_ReStirDI();
@@ -7241,6 +7287,13 @@ int Com_DetectDudePreset( void )
 // DUDE: a raster tier's contact shadows - returns r_contactShadows (0 / 1) and fills *steps with
 // r_contactShadowSteps - or -1 for no such tier. For the config-schema step that moves an old config
 // onto its tier's values (Common.cpp).
+// DUDE: whether a raster tier's RT overlay turns RT contact shadows on (0 / 1), or -1 for no such tier.
+// For the config-schema step that moves an old config onto its tier's value (Common.cpp).
+int Com_DudePresetRtContactShadows( int tier )
+{
+	return ( tier >= 0 && tier < PRESET_COUNT ) ? ( rtAugment[tier].rtContactShadows ? 1 : 0 ) : -1;
+}
+
 int Com_DudePresetContactShadows( int tier, int *steps )
 {
 	if ( tier < 0 || tier >= PRESET_COUNT ) {
@@ -7732,6 +7785,11 @@ int Com_DetectDudePreset( void )
 }
 
 int Com_DudePresetContactShadows( int tier, int *steps )
+{
+	return -1;
+}
+
+int Com_DudePresetRtContactShadows( int tier )
 {
 	return -1;
 }

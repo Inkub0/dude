@@ -1504,6 +1504,8 @@ shutdown (otherwise the stamp would never reach disk and the wipe would re-fire 
 */
 // Dhewm3SettingsMenu.cpp: a raster tier's contact shadows (0 / 1, *steps), -1 for none (stub without ImGui)
 extern int Com_DudePresetContactShadows( int tier, int *steps );
+// Dhewm3SettingsMenu.cpp: whether a tier's RT overlay has RT contact shadows (0 / 1), -1 for none (stub without ImGui)
+extern int Com_DudePresetRtContactShadows( int tier );
 
 void idCommonLocal::CheckConfigSchema( void ) {
 	if ( dude_cfgSchema.GetInteger() >= DUDE_CONFIG_SCHEMA ) {
@@ -1528,6 +1530,17 @@ void idCommonLocal::CheckConfigSchema( void ) {
 	}
 
 	if ( from >= 3 ) {
+		// 8 -> 9: RT contact shadows (r_rtContactShadows) are part of the RT presets from High up. A config on such a
+		// tier with its ray tracing applied (RT sun shadows live - every RT tier from Medium has them) gets them on,
+		// once, so it keeps reading as that preset. A raster-only or non-RT config is left alone.
+		if ( from < 9 && dude_preset.GetInteger() >= 0 && dude_rtx.GetInteger() > 0
+		     && Com_DudePresetRtContactShadows( dude_preset.GetInteger() ) == 1 ) {
+			idCVar *rtSun = cvarSystem->Find( "r_rtSunShadows" );
+			idCVar *rtContact = cvarSystem->Find( "r_rtContactShadows" );
+			if ( rtSun != NULL && rtContact != NULL && rtSun->GetBool() ) {
+				rtContact->SetBool( true );
+			}
+		}
 		// 7 -> 8: screen-space contact shadows retuned once the march stopped dotting (soft scores + quad
 		// average, docs/contact-shadows.md): strength 0.8 -> 0.5, march length 12 -> 4, occluder thickness
 		// 8 -> 25 - a config still on an old default moves, a deliberate other value stays. And the quality
