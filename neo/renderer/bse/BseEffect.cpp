@@ -2087,23 +2087,26 @@ int idBseEffect::BuildSegment( const idBseSegment &segment, float time, const bs
 	const bool infinite = ( segment.tmpl->flags & EFFECT_SEGMENT_CONSTANT ) != 0;
 	const bool burn = tmplP.trailType == EFFECT_TRAIL_BURN;
 	int drawn = 0;
+	bseParticle_t extended;		// a constant segment's particle past its end, with the end moved on (the one case that needs a copy)
 	for ( int i = 0; i < segment.particles.Num(); i++ ) {
-		bseParticle_t p = segment.particles[i];
-		if ( infinite && time >= p.endTime - BSE_TIME_EPSILON ) {
-			p.endTime = time + 1.0f;	// a constant segment's particles live on
+		const bseParticle_t *p = &segment.particles[i];
+		if ( infinite && time >= p->endTime - BSE_TIME_EPSILON ) {
+			extended = *p;
+			extended.endTime = time + 1.0f;	// a constant segment's particles live on
+			p = &extended;
 		}
-		if ( !BuildParticle( segment, p, time, 1.0f, view, geo ) ) {
+		if ( !BuildParticle( segment, *p, time, 1.0f, view, geo ) ) {
 			continue;
 		}
 		drawn++;
-		if ( burn && p.trailCount > 0 && p.trailTime > 0.0f ) {
-			const float delta = p.trailTime / (float)p.trailCount;
-			for ( int k = 1; k <= p.trailCount; k++ ) {
+		if ( burn && p->trailCount > 0 && p->trailTime > 0.0f ) {
+			const float delta = p->trailTime / (float)p->trailCount;
+			for ( int k = 1; k <= p->trailCount; k++ ) {
 				const float then = time - (float)k * delta;
-				if ( then < p.startTime || then >= p.endTime ) {
+				if ( then < p->startTime || then >= p->endTime ) {
 					continue;
 				}
-				BuildParticle( segment, p, then, (float)( p.trailCount - k ) / (float)p.trailCount, view, geo );
+				BuildParticle( segment, *p, then, (float)( p->trailCount - k ) / (float)p->trailCount, view, geo );
 			}
 		}
 	}
@@ -2196,13 +2199,16 @@ bool idBseEffect::EvaluateLight( const idBseSegment &segment, float time, bseLig
 		return false;
 	}
 	const idEffectParticle &tmplP = segment.tmpl->particle;
-	bseParticle_t p = segment.particles[0];
-	if ( ( segment.tmpl->flags & EFFECT_SEGMENT_CONSTANT ) && time >= p.endTime - BSE_TIME_EPSILON ) {
-		p.endTime = time + 1.0f;
+	const bseParticle_t *p = &segment.particles[0];
+	bseParticle_t extended;
+	if ( ( segment.tmpl->flags & EFFECT_SEGMENT_CONSTANT ) && time >= p->endTime - BSE_TIME_EPSILON ) {
+		extended = *p;
+		extended.endTime = time + 1.0f;
+		p = &extended;
 	}
 	idVec3 position, size, rotate;
 	idVec4 color;
-	if ( !EvaluateParticle( p, tmplP, time, position, color, size, rotate ) ) {
+	if ( !EvaluateParticle( *p, tmplP, time, position, color, size, rotate ) ) {
 		return false;
 	}
 	light.origin = currentOrigin + currentAxis * position;
