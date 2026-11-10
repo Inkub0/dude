@@ -1650,13 +1650,17 @@ struct rbTessJob_t {
 	rhi::BufferHandle	outVB, barySeam, srcTri, height;
 	int					numOutVerts;
 	float				dispStrength;
+	rhi::BufferHandle	prevPos;		// deform-once motion vectors: receives last frame's positions (0 = plain kernel)
+	bool				prevPoseInVB;	// outVB still holds last frame's deformed pose
 };
 static idList<rbTessJob_t>	rbTessJobs;
 
 void RB_RHI_AddTessJob( unsigned int shader, unsigned int srcVB, const void *srcCpu, int numSrcVerts,
                         unsigned int outVB, unsigned int barySeam, unsigned int srcTri, unsigned int height,
-                        int numOutVerts, float dispStrength ) {
+                        int numOutVerts, float dispStrength,
+                        unsigned int prevPosBuf, bool prevPoseInVB ) {
 	rbTessJob_t j;
+	j.prevPos = prevPosBuf; j.prevPoseInVB = prevPoseInVB;
 	j.shader = shader; j.srcVB = srcVB; j.srcCpu = srcCpu; j.numSrcVerts = numSrcVerts;
 	j.outVB = outVB; j.barySeam = barySeam; j.srcTri = srcTri; j.height = height;
 	j.numOutVerts = numOutVerts; j.dispStrength = dispStrength;
@@ -1688,7 +1692,7 @@ void RB_RHI_FlushTessJobs( void ) {
 			if ( srcBuf == 0 ) {
 				continue;
 			}
-			struct { unsigned int numVerts; float dispStrength; } pc = { (unsigned int)j.numOutVerts, j.dispStrength };
+			struct { unsigned int numVerts; float dispStrength; unsigned int prevValid; } pc = { (unsigned int)j.numOutVerts, j.dispStrength, j.prevPoseInVB ? 1u : 0u };
 			rhi::ComputeArgs ca = {};
 			ca.shader = j.shader;
 			ca.storage[0] = srcBuf;
@@ -1698,6 +1702,7 @@ void RB_RHI_FlushTessJobs( void ) {
 			ca.storage[2] = j.srcTri;
 			ca.storage[3] = j.height;
 			ca.storage[4] = j.outVB;
+			ca.storage[5] = j.prevPos;			// 0 with the plain kernel (binding 5 not declared there)
 			ca.pushConstants = &pc;
 			ca.pushConstantSize = (int)sizeof( pc );
 			ca.groupsX = ( j.numOutVerts + 63 ) / 64; ca.groupsY = 1; ca.groupsZ = 1;

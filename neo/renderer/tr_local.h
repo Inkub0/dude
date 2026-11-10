@@ -2220,7 +2220,8 @@ void RB_RHI_FlushSkinJobs( void );		// dispatch + clear the recorded jobs (backe
 // static topology SSBOs are the mesh's; outVB is the per-surface expanded output. Impl rhi/RhiBackend.cpp.
 void RB_RHI_AddTessJob( unsigned int shader, unsigned int srcVB, const void *srcCpu, int numSrcVerts,
                         unsigned int outVB, unsigned int barySeam, unsigned int srcTri, unsigned int height,
-                        int numOutVerts, float dispStrength );
+                        int numOutVerts, float dispStrength,
+                        unsigned int prevPosBuf = 0, bool prevPoseInVB = false );	// prevPosBuf: deform-once motion vectors (kernel variant PREVPOS)
 void RB_RHI_FlushTessJobs( void );		// dispatch + clear the recorded deform jobs (backend, pre-scene)
 
 

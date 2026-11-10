@@ -1,0 +1,7 @@
+// MD5 GPU tessellation deform-once kernel, PREVPOS variant (loaded as "md5tessdeform_prevpos"). Same body
+// as md5tessdeform.comp, but also snapshots last frame's deformed position into binding 5 so the
+// normal/velocity prepass can emit a per-vertex animation motion vector for deform-once surfaces
+// (r_skinnedMotionVectors). A separate program because a storage binding a shader statically uses must be
+// bound at dispatch. See md5tessdeform_body.glsl.
+#define PREVPOS 1
+#include "md5tessdeform_body.glsl"
