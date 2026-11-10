@@ -166,6 +166,31 @@ fidelity impact.
 - **Files:** `ModelDecal.cpp`, `tr_render.cpp`, `rhi/RhiWorld.cpp`, `shaders/interaction.frag`;
   sliders in Debugging → Glass Reflections.
 
+### 1.8 Decal highlights follow the light (`r_decalLitHighlights`)
+
+- **Legacy:** some decals pair a darkening stage with an additive `_add` texture painted on as a
+  highlight. Quake 4's map-placed bullet holes (`textures/decals/wallbullets1`-`4`) do: a
+  `GL_DST_COLOR, GL_SRC_COLOR` stage darkens the wall and a `blend add` stage adds
+  `wallbullets*_add.tga`, the shine on the torn rims, at full strength, so the rims glow on a
+  wall in total darkness.
+- **New:** with `r_decalLitHighlights 1` that stage is drawn `GL_DST_COLOR, GL_ONE`
+  instead of `GL_ONE, GL_ONE`: the highlight is added in proportion to the light already on the
+  wall (`src * dst`), so it shows where the wall is lit and is gone in darkness. Not boosted by
+  `r_hdrOverbright` (it reflects light, it doesn't emit it).
+- **Which stages:** unlit `ONE, ONE` stages whose image name contains `_add`, in a `sort decal`
+  material that also darkens (filter / modulate / 2x modulate), and neither glass nor named like a
+  glow (`glow`, `ember`, `burn`, `spark`, `fire`, `flash`, `plasma`, `energy`, `lava`) -
+  `R_DecalLitHighlightStage`. In the stock data only Quake 4's `wallbullets1`-`4`; mod decals
+  built the same way follow. Real glows keep glowing.
+- **Fidelity impact:** non-vanilla look change, treated as a fix for an oversight in Raven's
+  material: **on by default and on every preset except Potato** (the faithful floor;
+  `r_decalLitHighlights 0` there). Config schema 7 turns it off once for a config already on
+  Potato. On dimly lit walls the rims are fainter than authored, on well-lit walls about the
+  same. opengl3/Vulkan only; the legacy ARB renderer is untouched.
+- **Files:** `RenderSystem_init.cpp`, `rhi/RhiBackend.cpp`, the preset table in
+  `Dhewm3SettingsMenu.cpp`, the schema step in `Common.cpp`; checkbox in the Debugging tab's
+  "Decals & Glass" group.
+
 ---
 
 ## 2. Equivalent result, different mechanism
