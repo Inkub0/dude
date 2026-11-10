@@ -1484,6 +1484,18 @@ static void Com_AutoBindGamepad( void ) {
 	cmdSystem->BufferCommandText( CMD_EXEC_NOW, va( "exec %s\n", cfg ) );
 }
 
+// a config value still on a cvar's OLD default moves to the new one; a deliberate other value stays
+// (the schema steps below retune defaults this way)
+struct comOldDefault_t { const char *name; float oldDefault; };
+static void Com_MoveOldDefaults( const comOldDefault_t *list, int num ) {
+	for ( int i = 0; i < num; i++ ) {
+		idCVar *cv = cvarSystem->Find( list[i].name );	// absent without the renderer
+		if ( cv != NULL && cv->GetFloat() == list[i].oldDefault ) {
+			cv->SetString( cv->GetResetString() );
+		}
+	}
+}
+
 /*
 ===============
 idCommonLocal::CheckConfigSchema
@@ -1544,16 +1556,11 @@ void idCommonLocal::CheckConfigSchema( void ) {
 		// moves; a deliberate other value stays. (The skip-below-penumbra default moved 1.0 -> 2.0 too, but the presets
 		// that blur set it themselves, so a config's value there is the preset's, not a default to move.)
 		if ( from < 10 ) {
-			static const struct { const char *name; float oldDefault; } rtRetune[] = {
+			static const comOldDefault_t rtRetune[] = {
 				{ "r_rtShadowBlurIntensity", 0.13f }, { "r_rtShadowBlurCurve", 0.5f },
 				{ "r_rtContactShadowStrength", 0.5f }, { "r_rtContactShadowLength", 4.0f }, { "r_rtContactShadowSoftness", 15.0f },
 			};
-			for ( int i = 0; i < (int)( sizeof( rtRetune ) / sizeof( rtRetune[0] ) ); i++ ) {
-				idCVar *cv = cvarSystem->Find( rtRetune[i].name );	// absent without the renderer
-				if ( cv != NULL && cv->GetFloat() == rtRetune[i].oldDefault ) {
-					cv->SetString( cv->GetResetString() );
-				}
-			}
+			Com_MoveOldDefaults( rtRetune, (int)( sizeof( rtRetune ) / sizeof( rtRetune[0] ) ) );
 		}
 		// 8 -> 9: RT contact shadows (r_rtContactShadows) are part of the RT presets from High up. A config on such a
 		// tier with its ray tracing applied (RT sun shadows live - every RT tier from Medium has them) gets them on,
@@ -1572,15 +1579,10 @@ void idCommonLocal::CheckConfigSchema( void ) {
 		// presets now own them (off on Potato / Low, on from Medium up with 2 / 4 / 6 / 8 march steps): a
 		// config on a preset gets that tier's values once, so it keeps reading as that preset.
 		if ( from < 8 ) {
-			static const struct { const char *name; float oldDefault; } contactRetune[] = {
+			static const comOldDefault_t contactRetune[] = {
 				{ "r_contactShadowStrength", 0.8f }, { "r_contactShadowLength", 12.0f }, { "r_contactShadowThickness", 8.0f },
 			};
-			for ( int i = 0; i < (int)( sizeof( contactRetune ) / sizeof( contactRetune[0] ) ); i++ ) {
-				idCVar *cv = cvarSystem->Find( contactRetune[i].name );	// absent without the renderer
-				if ( cv != NULL && cv->GetFloat() == contactRetune[i].oldDefault ) {
-					cv->SetString( cv->GetResetString() );
-				}
-			}
+			Com_MoveOldDefaults( contactRetune, (int)( sizeof( contactRetune ) / sizeof( contactRetune[0] ) ) );
 			idCVar *onOff = cvarSystem->Find( "r_contactShadows" );
 			idCVar *steps = cvarSystem->Find( "r_contactShadowSteps" );
 			int tierSteps = 0;
