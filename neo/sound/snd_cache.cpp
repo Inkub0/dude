@@ -731,34 +731,11 @@ void idSoundSample::DecodeCpu( void ) {
 			// decoder pool, no CRITICAL_SECTION_ONE), unlike the streaming idSampleDecoder path.
 			idSampleDecoder::DecodeFullOGG( this, destData );
 
-			// Downsample back to original frequency (save memory)
-			if ( objectInfo.nSamplesPerSec == 11025 ) {
-				for ( int i = 0; i < objectSize; i++ ) {
-					if ( destData[i*4] < -32768.0f )
-						((short *)destData)[i] = -32768;
-					else if ( destData[i*4] > 32767.0f )
-						((short *)destData)[i] = 32767;
-					else
-						((short *)destData)[i] = idMath::FtoiFast( destData[i*4] );
-				}
-			} else if ( objectInfo.nSamplesPerSec == 22050 ) {
-				for ( int i = 0; i < objectSize; i++ ) {
-					if ( destData[i*2] < -32768.0f )
-						((short *)destData)[i] = -32768;
-					else if ( destData[i*2] > 32767.0f )
-						((short *)destData)[i] = 32767;
-					else
-						((short *)destData)[i] = idMath::FtoiFast( destData[i*2] );
-				}
-			} else {
-				for ( int i = 0; i < objectSize; i++ ) {
-					if ( destData[i] < -32768.0f )
-						((short *)destData)[i] = -32768;
-					else if ( destData[i] > 32767.0f )
-						((short *)destData)[i] = 32767;
-					else
-						((short *)destData)[i] = idMath::FtoiFast( destData[i] );
-				}
+			// Downsample back to original frequency (save memory): every 4th / 2nd / each decoded sample
+			const int stride = ( objectInfo.nSamplesPerSec == 11025 ) ? 4 : ( objectInfo.nSamplesPerSec == 22050 ) ? 2 : 1;
+			for ( int i = 0; i < objectSize; i++ ) {
+				const float v = destData[i * stride];
+				((short *)destData)[i] = ( v < -32768.0f ) ? -32768 : ( v > 32767.0f ) ? 32767 : (short)idMath::FtoiFast( v );
 			}
 
 			// hand the decoded buffer to UploadAL(), which frees it after the OpenAL upload
