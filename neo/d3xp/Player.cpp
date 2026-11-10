@@ -8971,18 +8971,16 @@ void idPlayer::CalculateRenderView( void ) {
 		renderViewHadCamera = false;	// leaving the camera path: next entry snaps instead of interpolating from a stale view
 		renderViewCameraEntity = NULL;
 		renderViewHadOffset = false;	// default; set true below only for the third-person / death branches
-				// DUDE: the stopped-time view (g_stopTime: the F10 settings menu pauses the game with it) keeps
+		// DUDE: the stopped-time view (g_stopTime: the F10 settings menu pauses the game with it) keeps
 		// the third-person orbit below; stock forced first person here, so opening the menu switched views
 		if ( g_stopTime.GetBool() && !pm_thirdPerson.GetBool() ) {
 			renderView->vieworg = firstPersonViewOrigin;
 			renderView->viewaxis = firstPersonViewAxis;
 			renderViewInterpolatable = true;
 
-			if ( !pm_thirdPerson.GetBool() ) {
-				// set the viewID to the clientNum + 1, so we can suppress the right player bodies and
-				// allow the right player view weapons
-				renderView->viewID = entityNumber + 1;
-			}
+			// set the viewID to the clientNum + 1, so we can suppress the right player bodies and
+			// allow the right player view weapons
+			renderView->viewID = entityNumber + 1;
 		} else if ( pm_thirdPerson.GetBool() ) {
 			// cache the OffsetThirdPersonView params so InterpolateRenderView can re-derive the orbit
 			renderViewOffsetAngle = pm_thirdPersonAngle.GetFloat();
