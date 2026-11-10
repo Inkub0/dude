@@ -52,6 +52,14 @@ static idCVar *				q4_musicVolume = NULL;
 static idCVar *				q4_deviceName = NULL;
 static idCVar *				q4_sVolumeDb = NULL;		// the sound system's s_volume_dB / s_device, found once (Q4Settings_Frame runs every frame)
 static idCVar *				q4_sDevice = NULL;
+
+// the two sound-system cvars the bridge reads and writes, found on the first ask (the menu-variable
+// setter runs at startup, before the first frame); false without a sound system
+static bool Q4Settings_SoundCvars( void ) {
+	if ( q4_sVolumeDb == NULL ) { q4_sVolumeDb = cvarSystem->Find( "s_volume_dB" ); }
+	if ( q4_sDevice == NULL ) { q4_sDevice = cvarSystem->Find( "s_device" ); }
+	return q4_sVolumeDb != NULL && q4_sDevice != NULL;
+}
 static idCVar *				q4_skipSky = NULL;
 static idCVar *				q4_forceAmbient = NULL;
 
@@ -111,9 +119,7 @@ void Q4Settings_Frame( void ) {
 	if ( q4_volume == NULL ) {
 		return;
 	}
-	if ( q4_sVolumeDb == NULL ) { q4_sVolumeDb = cvarSystem->Find( "s_volume_dB" ); }
-	if ( q4_sDevice == NULL ) { q4_sDevice = cvarSystem->Find( "s_device" ); }
-	if ( q4_sVolumeDb == NULL || q4_sDevice == NULL ) {
+	if ( !Q4Settings_SoundCvars() ) {
 		return;		// no sound system
 	}
 
@@ -369,7 +375,7 @@ void Q4Settings_SetMenuGuiVars( idUserInterface *gui ) {
 		list += i == 0 ? devices[i] : Q4_MenuDeviceName( devices[i] );
 	}
 	gui->SetStateString( "device_name", list );
-	const char *device = q4_sDevice->GetString();
+	const char *device = Q4Settings_SoundCvars() ? q4_sDevice->GetString() : "";
 	for ( int i = 0; i < devices.Num(); i++ ) {
 		if ( devices[i].Icmp( device ) == 0 ) {
 			q4_deviceName->SetString( i == 0 ? "" : Q4_ChoiceValue( Q4_MenuDeviceName( devices[i] ) ).c_str() );
