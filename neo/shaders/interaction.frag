@@ -407,15 +407,22 @@ float contactOcclusion( float jitter ) {
 
 #if defined(VULKAN) && defined(DUDE_RT_SUN)
 // DUDE RT contact shadows (r_rtContactShadows, docs/contact-shadows.md): the contact term above with the occluder
-// found by ONE short ray query through the scene TLAS instead of the depth-buffer march - no thickness guess, and
+// found by a short ray query through the scene TLAS instead of the depth-buffer march - no thickness guess, and
 // occluders off screen or hidden behind other surfaces count. Same look: the light dims by the strength, faded by
-// how far along the ray the nearest occluder sits (an occluder at the surface darkens most). The ray starts off the
-// surface along the world normal (u_rtParms.z, shared with the RT shadow rays), solid geometry only (grates are
-// left to the shadow itself). u_contactParms = ( -1, ray length, 0, strength ). Deterministic: no noise to resolve.
-float rtContactShadowTerm( bool canReceive ) {
-	if ( !canReceive ) {
-		return 1.0;			// the light contributes nothing here anyway
-	}
+// how far along the ray the nearest occluder sits (an occluder at the surface darkens most), and the same 2x2 quad
+// average for a soft edge: each pixel of a quad traces one of four directions spread over a cone toward the light
+// (u_contactParms.z = tan of its half-angle, r_rtContactShadowSoftness), so a quad holds a four-ray penumbra.
+// u_contactParms = ( -1, ray length, tan(cone half-angle), strength ).
+//
+// Self-hits: the ray starts on the DRAWN surface, which is not exactly the ray-traced one (a tessellated, displaced
+// character over its BLAS; interpolated vs flat triangles), so it can start just inside a mesh. A big normal offset
+// (the RT shadow rays' r_rtSunShadowOffset, 1 unit) would hide that but also lift the start past small occluders -
+// the nose over the upper lip. Instead the start is nudged a hair off the surface and every hit on the INSIDE of a
+// mesh is ignored: Doom 3's outward face normal is (v3 - v1) x (v2 - v1) (R_DeriveFacePlanes), the opposite of
+// Vulkan's front side, so a real occluder seen from outside is hit on its Vulkan BACK face and a ray leaving the
+// inside of a mesh meets a FRONT face. Every instance disables facing culling (VulkanBackend), so the test is made
+// here on the candidates (no-opaque traversal), not with a cull flag. Returns occlusion, 0 = none .. 1 = at contact.
+float rtContactOcclusion( int qi ) {
 	vec4 mp = vec4( var_ModelPos, 1.0 );
 	vec3 wp = vec3( dot( u_modelMatrixRow0, mp ), dot( u_modelMatrixRow1, mp ), dot( u_modelMatrixRow2, mp ) );
 	vec4 lp = vec4( u_localLightOrigin.xyz, 1.0 );
@@ -424,49 +431,70 @@ float rtContactShadowTerm( bool canReceive ) {
 	float distLight = length( toLight );
 	float len = min( u_contactParms.y, distLight - 1.0 );	// never reach the light itself
 	if ( len <= 0.0 ) {
-		return 1.0;
+		return 0.0;
 	}
+	vec3 dir = toLight / distLight;
+	// this pixel's direction in the quad's cone: four points on a ring at 0.7 of the cone radius (the mean radius
+	// of a uniform disc), a quarter turn apart
+	vec3 up = ( abs( dir.z ) < 0.9 ) ? vec3( 0.0, 0.0, 1.0 ) : vec3( 1.0, 0.0, 0.0 );
+	vec3 tx = normalize( cross( up, dir ) );
+	vec3 ty = cross( dir, tx );
+	float ang = 1.5707963 * float( qi ) + 0.7853982;
+	dir = normalize( dir + ( tx * cos( ang ) + ty * sin( ang ) ) * ( 0.7 * u_contactParms.z ) );
 	vec3 wn = vec3( dot( u_modelMatrixRow0.xyz, var_ModelNormal.xyz ),
 	                dot( u_modelMatrixRow1.xyz, var_ModelNormal.xyz ),
 	                dot( u_modelMatrixRow2.xyz, var_ModelNormal.xyz ) );
 	float wnLen = length( wn );
 	wn = ( wnLen > 0.0 ) ? wn / wnLen : vec3( 0.0 );
-	// the NEAREST occluder is wanted (its distance sets the fade), so no terminate-on-first-hit; opaque solid-only
-	// traversal keeps it the hardware's fast path, and the ray is short
 	rayQueryEXT rq;
 	dudeRayQueryInit( rq,
 		accelerationStructureEXT( uvec2( floatBitsToUint( u_rtParms.x ), floatBitsToUint( u_rtParms.y ) ) ),
-		gl_RayFlagsOpaqueEXT, 0xFDu,
-		wp + wn * u_rtParms.z, 0.0, toLight / distLight, len );
-	while ( rayQueryProceedEXT( rq ) ) { }
-	if ( rayQueryGetIntersectionTypeEXT( rq, true ) == gl_RayQueryCommittedIntersectionNoneEXT ) {
-		return 1.0;
+		gl_RayFlagsNoOpaqueEXT, 0xFDu,
+		wp + wn * 0.05, 0.0, dir, len );
+	while ( rayQueryProceedEXT( rq ) ) {
+		// keep only hits on the outside of a mesh (Vulkan back face, see above); traversal goes on toward closer ones
+		if ( rayQueryGetIntersectionTypeEXT( rq, false ) == gl_RayQueryCandidateIntersectionTriangleEXT
+				&& !rayQueryGetIntersectionFrontFaceEXT( rq, false ) ) {
+			rayQueryConfirmIntersectionEXT( rq );
+		}
 	}
-	float fade = 1.0 - clamp( rayQueryGetIntersectionTEXT( rq, true ) / len, 0.0, 1.0 );	// nearer occluder -> darker
-	return clamp( 1.0 - u_contactParms.w * fade, 0.0, 1.0 );
+	if ( rayQueryGetIntersectionTypeEXT( rq, true ) == gl_RayQueryCommittedIntersectionNoneEXT ) {
+		return 0.0;
+	}
+	return 1.0 - clamp( rayQueryGetIntersectionTEXT( rq, true ) / len, 0.0, 1.0 );	// nearer occluder -> darker
 }
 #endif
 
-// Light visibility from the contact march: 1 = lit, down to (1 - strength) at a contact occluder.
-// Call from uniform control flow (the quad average takes derivatives).
+// Light visibility from the contact term: 1 = lit, down to (1 - strength) at a contact occluder. The screen-space
+// march (u_contactParms.x = steps) or, in the ray-query variant, the RT ray (u_contactParms.x = -1); both soften
+// through the same 2x2 quad average. Call from uniform control flow (the quad average takes derivatives).
 float contactShadowTerm( bool canReceive ) {
-	if ( u_contactParms.x < -0.5 ) {
-		// RT contact shadows (uniform per draw: the backend binds the ray-query variant for these draws)
-#if defined(VULKAN) && defined(DUDE_RT_SUN)
-		return rtContactShadowTerm( canReceive );
-#else
-		return 1.0;
-#endif
+	bool rtContact = u_contactParms.x < -0.5;
+#if !( defined(VULKAN) && defined(DUDE_RT_SUN) )
+	if ( rtContact ) {
+		return 1.0;			// RT contact needs the ray-query variant (the backend always binds it for these draws)
 	}
-	if ( u_contactParms.x < 0.5 ) {
+#endif
+	if ( !rtContact && u_contactParms.x < 0.5 ) {
 		return 1.0;			// disabled (uniform per draw)
 	}
-	// 2x2 ordered start offsets (0, 2, 3, 1 quarters, centred), averaged across the quad below
+	// the quad's four variants: 2x2 ordered start offsets for the march (0, 2, 3, 1 quarters, centred), cone
+	// directions for the ray - averaged across the quad below
 	ivec2 q = ivec2( gl_FragCoord.xy ) & 1;
-	float jitter = ( float( ( q.x ^ q.y ) * 2 + q.y ) + 0.5 ) * 0.25;
+	int   qi = ( q.x ^ q.y ) * 2 + q.y;
 	// a pixel the light doesn't reach scores nothing and is left out of its quad's average
 	float valid = canReceive ? 1.0 : 0.0;
-	float occ = canReceive ? contactOcclusion( jitter ) : 0.0;
+	float occ = 0.0;
+	if ( canReceive ) {
+#if defined(VULKAN) && defined(DUDE_RT_SUN)
+		if ( rtContact ) {
+			occ = rtContactOcclusion( qi );
+		} else
+#endif
+		{
+			occ = contactOcclusion( ( float( qi ) + 0.5 ) * 0.25 );
+		}
+	}
 	// per-pixel derivatives give this pixel's horizontal / vertical / diagonal quad neighbours:
 	// dFdx = right minus left in the pair, so the left pixel adds it and the right one subtracts
 	vec2 sgn = vec2( q.x == 0 ? 1.0 : -1.0, q.y == 0 ? 1.0 : -1.0 );

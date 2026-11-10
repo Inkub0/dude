@@ -1968,7 +1968,7 @@ static bool RB_RHI_FillContactShadowParms( rhi::RenderParams &parms, const drawI
 	// DUDE RT contact shadows (r_rtContactShadows, docs/contact-shadows.md): the same contact term, but the occluder is
 	// found by one short ray query through the scene TLAS (interaction.frag rtContactShadowTerm) instead of the depth
 	// march - so it needs the ray-query interaction variant and a live scene, i.e. RTX on. contactParms.x = -1 selects
-	// it; .y = ray length, .w = strength. A light that already traces the full hard ray (mode 4) gets nothing more:
+	// it; .y = ray length, .z = tan of the softness cone, .w = strength. A light that already traces the full hard ray (mode 4) gets nothing more:
 	// that ray sees every occluder the short one could. Takes precedence over the screen-space march on these draws.
 	if ( r_rtContactShadows.GetBool() && !din->ambientLight && ictx.interactionRtProg != 0
 	     && rhi::GetActiveBackendType() == rhi::BT_VULKAN && R_BackendSupportsEnhancements() ) {
@@ -1977,7 +1977,8 @@ static bool RB_RHI_FillContactShadowParms( rhi::RenderParams &parms, const drawI
 			if ( parms.shadowParms[0] != 4.0f ) {
 				parms.contactParms[0] = -1.0f;
 				parms.contactParms[1] = r_rtContactShadowLength.GetFloat();
-				parms.contactParms[2] = 0.0f;
+				// tan of the cone half-angle the quad's four rays spread over (the soft edge)
+				parms.contactParms[2] = idMath::Tan( DEG2RAD( idMath::ClampFloat( 0.0f, 45.0f, r_rtContactShadowSoftness.GetFloat() ) ) );
 				parms.contactParms[3] = idMath::ClampFloat( 0.0f, 1.0f, r_rtContactShadowStrength.GetFloat() );
 				if ( !rtSun ) {
 					// a shadow-map / mask / unshadowed draw: hand it the TLAS and the ray-origin normal offset (the

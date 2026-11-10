@@ -5887,6 +5887,10 @@ static void DrawDbgGroup_RtContactShadows()
 		CvarSliderF( "Ray Length", r_rtContactShadowLength, 1.0f, 128.0f, "%.0f", "how far toward the light the ray looks, world units. "
 			"Short = tight contact grounding; long = broader. Clamped to the distance to the light. Default 4." );
 
+		CvarSliderF( "Softness", r_rtContactShadowSoftness, 0.0f, 45.0f, "%.0f", "how soft the edge is: the half-angle in degrees "
+			"of the cone the rays spread over toward the light (each 2x2 pixel block traces four directions and averages "
+			"them). 0 = hard edge. Default 15." );
+
 		ImGui::EndDisabled();	// rtCapable
 		EndSettingsGroup();
 	}

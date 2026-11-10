@@ -93,17 +93,27 @@ be used on the RTX rendering"). The screen-space march is switched off while RT 
 blurred RT shadows (`r_rtShadowBlur`) soften contact detail away; this puts the contact grounding back with the
 occluder found by a ray instead of the depth buffer.
 
-- **What it traces:** in `interaction.frag` `rtContactShadowTerm` (ray-query variant only), one ray from the lit
-  fragment toward the light, `r_rtContactShadowLength` world units (clamped short of the light), opaque, solid
-  geometry only (cull mask `0xFD`: grates are left to the shadow itself), origin offset along the world normal by
-  `r_rtSunShadowOffset` like every RT shadow ray. No terminate-on-first-hit: the nearest hit's distance sets the fade.
+- **What it traces:** in `interaction.frag` `rtContactOcclusion` (ray-query variant only), one ray from the lit
+  fragment toward the light, `r_rtContactShadowLength` world units (clamped short of the light), solid geometry only
+  (cull mask `0xFD`: grates are left to the shadow itself). The nearest hit's distance sets the fade.
+- **Soft edge:** the four pixels of each 2x2 quad trace four directions spread over a cone toward the light (half-angle
+  `r_rtContactShadowSoftness`, default 15 degrees; four points a quarter turn apart at 0.7 of the cone radius), and
+  `contactShadowTerm` averages them through the same quad average as the screen-space march. The first version traced
+  one exact ray per pixel: correct, but a hard-edged hit/miss (user, 2026-11-10: "very hard").
+- **Start point and self-hits:** the first version started the ray `r_rtSunShadowOffset` (1 unit) off the surface
+  along the normal, like the RT shadow rays. That lifted the start past small occluders: no shadow under the nose.
+  It also still left dark blobs where the drawn surface sits inside the ray-traced mesh (a tessellated, displaced
+  face over its BLAS: the lower eyelids). Now the start is nudged 0.05 units off the surface, and hits on the inside
+  of a mesh are ignored. Doom 3's outward face normal is `(v3 - v1) x (v2 - v1)` (`R_DeriveFacePlanes`), the opposite
+  of Vulkan's front side, so a real occluder seen from outside is hit on its Vulkan back face and a ray leaving the
+  inside of a mesh meets a front face. Every instance disables facing culling, so the shader tests
+  `rayQueryGetIntersectionFrontFaceEXT` on the candidates (no-opaque traversal) instead of using a cull flag.
 - **Same look as the screen-space version:** visibility `1 - strength * (1 - t / length)` with
-  `r_rtContactShadowStrength` (default 0.5) and length (default 4), the new screen-space defaults. Deterministic,
-  so there is no dither and nothing to average. No thickness setting: a ray needs no depth-buffer guess, and it sees
-  occluders off screen or behind other surfaces.
+  `r_rtContactShadowStrength` (default 0.5) and length (default 4), the new screen-space defaults. No thickness
+  setting: a ray needs no depth-buffer guess, and it sees occluders off screen or behind other surfaces.
 - **Where it runs:** every non-ambient interaction while the scene TLAS exists (RTX On / Path Tracing) and the device
   has the ray-query variant. The backend (`RB_RHI_FillContactShadowParms`) sets `u_contactParms = (-1, length, 0,
-  strength)`, fills the TLAS + normal offset into `u_rtParms` when the draw's shadow mode didn't already, and binds
+  tan(softness), strength)`, fills the TLAS into `u_rtParms` when the draw's shadow mode didn't already, and binds
   `interaction_rt` (its shadow-map / mask paths are unchanged). It **replaces** the screen-space march on those draws.
 - **Skipped** for lights that trace the full hard RT shadow ray (mode 4: `r_rtSunShadows`, `r_rtMovingLights`,
   `r_rtAllLights` without the blur): that ray already finds every occluder the short one could. With the blur (modes
@@ -112,7 +122,7 @@ occluder found by a ray instead of the depth buffer.
   it. Covering the DI-lit lights would need its own design (a per-pixel contact ray toward a stochastic light sample
   brings the dots back).
 - **Not preset-wired:** opt-in, off by default (Graphics -> Shadows -> Ray Tracing, tuning in Debugging -> RT Contact
-  Shadows). GL3 and non-RT GPUs: inert.
+  Shadows: strength, ray length, softness). GL3 and non-RT GPUs: inert.
 
 ## Backend wiring
 
