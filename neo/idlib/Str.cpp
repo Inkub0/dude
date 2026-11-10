@@ -1755,16 +1755,20 @@ int D3_vsnprintfC99(char *dst, size_t size, const char *format, va_list ap)
 {
 #if defined(_WIN32) && (!defined(_MSC_VER) || _MSC_VER < 1900)
 	// The older Windows C runtimes (MSVC before 2015, msvcrt.dll as MinGW uses it) have only
-	// _vsnprintf: on truncation it leaves the text unterminated and returns -1. So the length
-	// is measured separately, on its own copy of the arguments, and the end is terminated here.
+	// _vsnprintf: on truncation it leaves the text unterminated and returns -1. Format first,
+	// on a copy of the arguments; only when that truncated (or there was no buffer) is the
+	// full length measured separately, so the common fits case formats once.
   #undef _vsnprintf
-	va_list measure;
-	va_copy( measure, ap );
-	const int needed = _vscprintf( format, measure );
-	va_end( measure );
+	int needed = -1;
 	if ( dst != NULL && size > 0 ) {
-		_vsnprintf( dst, size, format, ap );
+		va_list write;
+		va_copy( write, ap );
+		needed = _vsnprintf( dst, size, format, write );
+		va_end( write );
 		dst[ size - 1 ] = '\0';
+	}
+	if ( needed < 0 ) {
+		needed = _vscprintf( format, ap );
 	}
 	return needed;
   #define _vsnprintf	use_idStr_vsnPrintf
