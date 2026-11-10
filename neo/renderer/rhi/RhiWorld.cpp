@@ -479,9 +479,7 @@ static rhi::RenderTargetHandle rhiReStirDIRT = 0;	// the fresh 1-spp gather: Cre
 // no copies (the three full-screen "restir.di.sidecopy" passes, ~0.3 ms). rhiReStirDIRT = this gather's target.
 static rhi::RenderTargetHandle rhiReStirDIPairRT[2] = { 0, 0 };
 static int rhiReStirDILastWritten = -1;				// which of the pair the last gather wrote (-1 = none since (re)create)
-static bool rhiReStirDIShRT = false;				// rhiReStirDIRT is the SH (4-attachment) variant
 static bool rhiReStirDIShThisView = false;			// the gather ran in SH mode this view (the apply resolves SH1)
-static bool rhiReStirDIRelaxThisView = false;		// R2: the gather wrote the ReLAX encoding this view (linear + raw hitDist)
 static int   rhiReStirDIW = 0, rhiReStirDIH = 0;
 static bool  rhiReStirDIRanThisView = false;		// DI gather produced this view (debug-overlay gate)
 static bool  rhiReStirDIDenoisedThisView = false;	// the shared REBLUR_DIFFUSE denoise ran for DI this view -> GetRtgiOutputImage is the denoised DI
@@ -2159,8 +2157,8 @@ static rhi::ImageHandle RB_RHI_AmbientFloorSource( rhi::RHI *r, float &scale, bo
 		return 0;
 	}
 	if ( rhiReStirDIApplyThisView && rhiReStirDIRanThisView && rhiReStirDIRT != 0 ) {
-		// R2: ReLAX's non-SH output and the raw ReLAX-mode gather are LINEAR (as RB_RHI_ReStirDIApply decodes it)
-		linear = rhiReStirDIRelaxThisView && ( !rhiReStirDIDenoisedThisView || !rhiReStirDIShThisView );
+		// R2: ReLAX's non-SH output and the raw gather are LINEAR (as RB_RHI_ReStirDIApply decodes it); ReLAX's SH0 is YCoCg
+		linear = !rhiReStirDIDenoisedThisView || !rhiReStirDIShThisView;
 		return ( rhiReStirDIDenoisedThisView && r->GetRtgiOutputImage() != 0 ) ? r->GetRtgiOutputImage()
 			: r->GetRenderTargetImage( rhiReStirDIRT );
 	}
@@ -8891,7 +8889,7 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 			rhiReStirDIRT = 0;	rhiReStirDIPrevRT = 0;	rhiReStirDILastWritten = -1;	rhiReStirDIGatherPrevValid = false;
 			return;
 		}
-		rhiReStirDIW = rw;	rhiReStirDIH = rh;	rhiReStirDIShRT = shMode;
+		rhiReStirDIW = rw;	rhiReStirDIH = rh;
 		rhiReStirDILastWritten = -1;
 		rhiReStirDIGatherPrevValid = false;
 	}
@@ -8900,8 +8898,8 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	rhiReStirDIRT     = rhiReStirDIPairRT[ ( rhiReStirDILastWritten == 0 ) ? 1 : 0 ];
 	rhiReStirDIPrevRT = ( rhiReStirDILastWritten >= 0 ) ? rhiReStirDIPairRT[ rhiReStirDILastWritten ] : 0;
 	rhiReStirDIShThisView = shMode;
-	const bool relaxMode = true;		// R6: DI is ReLAX-only (ReBLUR path removed for DI; ReBLUR still serves RTAO/RTGI). ReLAX = the gather's encoding + the denoise
-	rhiReStirDIRelaxThisView = relaxMode;
+	// R6: DI is ReLAX-only (ReBLUR still serves RTAO/RTGI): the gather writes the ReLAX encoding (linear + raw hitDist)
+	// and the denoise, gradient confidence and apply all assume it
 
 	float invView[16];
 	if ( !RB_RHI_InvertMatrix( viewDef->worldSpace.modelViewMatrix, invView ) ) {
@@ -8987,7 +8985,7 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	// apply can rebuild a sharp GGX highlight at full res. The gradient inherits this (gp = parms), so its re-shade matches.
 	const bool specReshade = shMode && r_rtReStirDISpecReshade.GetBool();
 	parms.shadowFalloffS[2] = specReshade ? 2.0f : ( shMode ? 1.0f : 0.0f );
-	parms.shadowFalloffS[3] = relaxMode ? 1.0f : 0.0f;					// R2: linear + raw hitDist out (ReLAX input)
+	parms.shadowFalloffS[3] = 1.0f;										// R2: linear + raw hitDist out (ReLAX input)
 
 	// With r_rtgi on, the RTGI one-bounce is folded into this gather (rtgi_bounce.glsl) so ONE NRD denoise and ONE
 	// apply serve direct + indirect. RB_RHI_RtgiPass stands down while DI is on (the shared NRD slot), so this is the
@@ -9074,9 +9072,9 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 			nrdVel = r->GetRenderTargetImage( rhiReStirDIVelRT );
 		}
 	}
-	int diMainF = 0, diFastF = 0;		// NRD history cap (DI's own; mirrors RTGI's History Length); R0: r_rtReStirDIHistoryMs
+	int diMainF = 0, diFastUnused = 0;	// NRD history cap (DI's own; mirrors RTGI's History Length); R0: r_rtReStirDIHistoryMs
 	RB_RHI_NrdHistoryFrames( r_rtReStirDIHistory.GetInteger(), r_rtReStirDIHistoryMs.GetFloat(),
-		0, diMainF, diFastF );		// R6: DI is ReLAX-only; the fast history comes from r_rtReStirDIRelaxFast below (diFastF unused)
+		0, diMainF, diFastUnused );	// R6: DI is ReLAX-only; the fast history comes from r_rtReStirDIRelaxFast below
 	const bool diCut = RB_RHI_NrdHistoryReset( viewDef );
 
 	// ---- R3a disocclusion boost (docs/rtx-restir-di.md Plan R3, r_rtReStirDIBoost): K picks + rays on YOUNG pixels. Needs
@@ -9361,15 +9359,10 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 				}
 				r->GpuScopeEnd();
 				rhiReStirDIGradThisView = r->GetRenderTargetImage( rhiReStirDIGradRT[ src ] );
-				// 3. the confidence at the gather res, fed to NRD. Floor rule (NRD README, ReBLUR): never below
-				// historyFix / history, or the history-fix reconstruction fires on every detected change.
-				const int   hfCvar = r_rtReStirDIHistoryFix.GetInteger();
-				const int   fastF  = ( diFastF > 0 ) ? diFastF : 6;
-				const int   hfEff  = Min( ( hfCvar > 0 ) ? hfCvar : 3, Max( fastF - 1, 0 ) );
+				// 3. the confidence at the gather res, fed to NRD. ReLAX applies confidence directly and expects small
+				// values (the shader squares it), so the floor is the raw cvar (ReBLUR would need >= historyFix / history).
 				const float mainF  = (float)Max( 1, ( diMainF > 0 ) ? diMainF : 30 );
-				// ReBLUR: never below historyFix / history (or history fix fires); ReLAX applies confidence directly and expects
-				// smaller values (the shader squares it): the raw cvar floor
-				const float floorC = relaxMode ? r_rtReStirDIGradientFloor.GetFloat() : Max( r_rtReStirDIGradientFloor.GetFloat(), (float)hfEff / mainF );
+				const float floorC = r_rtReStirDIGradientFloor.GetFloat();
 				const float h      = r_rtReStirDIGradientHistory.GetFloat();
 				rhi::RenderParams cp;
 				memset( &cp, 0, sizeof( cp ) );
@@ -9381,7 +9374,7 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 				cp.localParam1[0] = 0.5f / mainF;									// NRD: dither by 0.5 / maxAccumulatedFrameNum
 				cp.localParam1[1] = rhiReStirDIGradConfValid ? 1.0f : 0.0f;
 				cp.localParam1[2] = idMath::ClampFloat( 0.0f, 0.9f, r_rtReStirDIGradientDeadzone.GetFloat() );
-				cp.localParam1[3] = relaxMode ? 1.0f : 0.0f;						// R2: square the confidence for ReLAX (NRD sample)
+				cp.localParam1[3] = 1.0f;											// R2: square the confidence for ReLAX (NRD sample)
 				cp.windowCoord[2] = -1.0f;
 				const int ci = rhiReStirDIGradConfIdx;
 				r->GpuScopeBegin( "restir.di.gradconf" );
@@ -9401,7 +9394,7 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 				// for the frame, so the stale shadow behind a walking NPC kept fading out for ~100 ms (and a confidence of 0
 				// without a history reset skips ReLAX's history fix, so it came out noisy).
 				const float resetThr = r_rtReStirDIGradientReset.GetFloat();
-				if ( relaxMode && resetThr > 0.0f ) {
+				if ( resetThr > 0.0f ) {
 					if ( !rhiReStirDIDisoccMixRT ) { rhiReStirDIDisoccMixRT = r->CreateRenderTarget( rhi::IF_R16F, rw, rh ); }
 					if ( rhiReStirDIDisoccMixRT ) {
 						rhi::RenderParams mp = cp;
@@ -10862,8 +10855,8 @@ void RB_RHI_ReStirDIApply( rhi::RHI *r, const viewDef_t *viewDef ) {
 	// buffer is diffuse-only, so the apply rebuilds a sharp GGX highlight from the SH direction + the full-res normal.
 	const bool diSpecReshade = shResolve && r_rtReStirDISpecReshade.GetBool();
 	parms.localParam1[3] = shResolve ? ( diSpecReshade ? 2.0f : 1.0f ) : 0.0f;
-	// R2: ReLAX's non-SH output and the raw ReLAX-mode gather are LINEAR; ReBLUR's output and ReLAX's SH0 are YCoCg
-	parms.occlusionParms[3] = ( rhiReStirDIRelaxThisView && ( !rhiReStirDIDenoisedThisView || !shResolve ) ) ? 1.0f : 0.0f;
+	// R2: ReLAX's non-SH output and the raw gather are LINEAR; ReLAX's SH0 is YCoCg
+	parms.occlusionParms[3] = ( !rhiReStirDIDenoisedThisView || !shResolve ) ? 1.0f : 0.0f;
 	if ( shResolve ) {
 		float invView[16];
 		if ( RB_RHI_InvertMatrix( viewDef->worldSpace.modelViewMatrix, invView ) ) {
@@ -11001,8 +10994,8 @@ void RB_RHI_ReStirDIDebugOverlay( rhi::RHI *r, const viewDef_t *viewDef ) {
 	parms.localParam0[2] = 8.0f;									// normal power
 	parms.localParam0[3] = (float)viewMode;							// R0: 0 DI radiance / 1 validation passthrough / 2 history ramp
 	parms.localParam1[0] = (float)Max( 1, rhiReStirDIHistFrames );	// history ramp denominator
-	// R2: the source is linear when the ReLAX-mode gather is shown raw, or ReLAX's non-SH denoised output; YCoCg otherwise
-	parms.localParam1[1] = ( rhiReStirDIRelaxThisView && ( dbgMode < 2 || !rhiReStirDIShThisView ) ) ? 1.0f : 0.0f;
+	// R2: the source is linear when the gather is shown raw, or ReLAX's non-SH denoised output; YCoCg (SH0) otherwise
+	parms.localParam1[1] = ( dbgMode < 2 || !rhiReStirDIShThisView ) ? 1.0f : 0.0f;
 	parms.screenCorrection[0] = ( rhiReStirDIW > 0 ) ? 1.0f / rhiReStirDIW : 1.0f;	// 1/(rw,rh) = reduced-res DI texel (uv)
 	parms.screenCorrection[1] = ( rhiReStirDIH > 0 ) ? 1.0f / rhiReStirDIH : 1.0f;
 	if ( uploadW > 0 && uploadH > 0 ) {
