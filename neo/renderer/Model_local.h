@@ -230,6 +230,7 @@ private:
 	int							numTessOutTris;		// generated triangles (expanded index count = *3)
 	int							tessBakeLevel;		// L this bake used (rebuild on r_tessLevel change)
 	float						tessBakeMinEdge;	// r_tessMinEdge this bake used (rebuild on change)
+	bool						tessBakePending;	// DUDE: arrays allocated, fill queued for R_MD5_FlushTessBakes - no deform yet
 	idVec4 *					tessBarySeam;		// [numTessOutVerts] (bary u,v,w in xyz; seam mask in w)
 	int *						tessSrcTri;			// [numTessOutVerts*3] the 3 source-corner output-vert indices
 	float *						tessHeight;			// [numTessOutVerts] CPU-sampled displacement relief scalar (pre-strength)
@@ -244,6 +245,12 @@ private:
 
 	void						BuildTessTopology( const idJointMat *bindJoints );
 	void						FreeTessData( void );
+public:
+	// DUDE: BuildTessTopology's fill, worker-safe (see R_MD5_FlushTessBakes); false on a count mismatch
+	bool						FillTessTopology( const idDrawVert *bindVerts, const byte *bumpPic, int bumpW, int bumpH );
+	void						DisableTessDeform( void ) { FreeTessData(); }
+	void						SetTessBakePending( bool pending ) { tessBakePending = pending; }
+private:
 	bool						EnsureTessBuffersUploaded( void );
 
 	void						TransformVerts( idDrawVert *verts, const idJointMat *joints );
@@ -516,5 +523,9 @@ public:
 	virtual	idRenderModel *	InstantiateDynamicModel( const struct renderEntity_s *ent, const struct viewDef_s *view, idRenderModel *cachedModel );
 	virtual	idBounds		Bounds( const struct renderEntity_s *ent ) const;
 };
+
+// DUDE: deform-once bakes (r_tessDeform) queued during a level load and filled at its end, in parallel
+void R_MD5_BeginTessBakes( void );		// idRenderModelManagerLocal::BeginLevelLoad
+void R_MD5_FlushTessBakes( void );		// idRenderModelManagerLocal::EndLevelLoad, after every model is in
 
 #endif /* !__MODEL_LOCAL_H__ */

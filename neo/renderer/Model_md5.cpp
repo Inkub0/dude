@@ -33,6 +33,15 @@ If you have questions concerning this license or the applicable additional terms
 
 #include "renderer/Model_local.h"
 #include "framework/LoadTiming.h"		// DUDE: md5 load sub-split timers
+#include "framework/FileSystem.h"		// DUDE: FS_SetThreadReadSafe (parallel tess bake)
+
+#include <thread>
+#include <atomic>
+#include <vector>
+
+// DUDE: the deferred, parallel deform-once bake (defined with R_MD5_FlushTessBakes below)
+static bool R_MD5_QueueTessBake( idMD5Mesh *mesh, idDrawVert *bindVerts, const idImage *heightImage );
+static void R_MD5_UnqueueTessBake( idMD5Mesh *mesh );
 
 // FIDELITY NOTE: GPU skinning uses option B (blended-LBS of a stored bind-pose TBN), which
 // diverges from stock's per-frame re-derive by a few degrees of surface normal on heavily
@@ -239,6 +248,7 @@ idMD5Mesh::idMD5Mesh() {
 	numTessOutTris		= 0;
 	tessBakeLevel		= 0;
 	tessBakeMinEdge		= -1.0f;
+	tessBakePending		= false;
 	tessBarySeam		= NULL;
 	tessSrcTri			= NULL;
 	tessHeight			= NULL;
@@ -255,6 +265,7 @@ idMD5Mesh::~idMD5Mesh
 ====================
 */
 idMD5Mesh::~idMD5Mesh() {
+	R_MD5_UnqueueTessBake( this );	// DUDE: a bake still queued for the level load's flush
 	Mem_Free16( scaledWeights );
 	Mem_Free16( weightIndex );
 	FreeGpuSkinData();
@@ -1024,6 +1035,176 @@ void idMD5Mesh::FreeTessData( void ) {
 }
 
 /*
+===============================================================================
+
+	DUDE: deferred, parallel deform-once bake (r_tessDeform)
+
+	BuildTessTopology decoded the mesh's height image (a level's character textures, a normal map turned
+	into a height field where no _h ships) and filled the subdivision for one mesh after the other on the
+	main thread - and decoded the same image again for every mesh sharing the material. During a level
+	load the fill is queued instead; the model manager's EndLevelLoad flushes the queue: each distinct
+	height image is decoded once, then every mesh is filled from the shared pixels, both phases on worker
+	threads (the parallel sound decode's pattern: heap and file reads thread-safe for the window, worker
+	prints buffered). The output is the same bytes.
+
+===============================================================================
+*/
+
+struct md5TessBakeJob_t {
+	idMD5Mesh *				mesh;
+	idDrawVert *			bindVerts;		// R_StaticAlloc'd by BuildTessTopology, freed by the flush
+	const idImage *			heightImage;	// NULL = no relief
+	int						pixelsIndex;	// into the flush's decoded images, -1 = none
+};
+static idList<md5TessBakeJob_t>	s_md5TessBakeJobs;
+static bool						s_md5TessBakeDeferred = false;
+
+void R_MD5_BeginTessBakes( void ) {
+	s_md5TessBakeDeferred = true;
+}
+
+// true = queued for R_MD5_FlushTessBakes (a level load is under way); false = bake now
+static bool R_MD5_QueueTessBake( idMD5Mesh *mesh, idDrawVert *bindVerts, const idImage *heightImage ) {
+	if ( !s_md5TessBakeDeferred ) {
+		return false;
+	}
+	md5TessBakeJob_t &job = s_md5TessBakeJobs.Alloc();
+	mesh->SetTessBakePending( true );
+	job.mesh = mesh;
+	job.bindVerts = bindVerts;
+	job.heightImage = heightImage;
+	job.pixelsIndex = -1;
+	return true;
+}
+
+// a mesh freed (or rebaked) while its bake is still queued drops out of the queue
+static void R_MD5_UnqueueTessBake( idMD5Mesh *mesh ) {
+	for ( int i = s_md5TessBakeJobs.Num() - 1; i >= 0; i-- ) {
+		if ( s_md5TessBakeJobs[i].mesh == mesh ) {
+			mesh->SetTessBakePending( false );
+			R_StaticFree( s_md5TessBakeJobs[i].bindVerts );
+			s_md5TessBakeJobs.RemoveIndex( i );
+		}
+	}
+}
+
+// run work( index ) for index 0..count-1 on worker threads
+template< class workFunc_t >
+static int R_MD5_RunOnWorkers( int count, const workFunc_t &work ) {
+	int nThreads = (int)std::thread::hardware_concurrency();
+	if ( nThreads < 2 ) { nThreads = 2; }
+	if ( nThreads > 32 ) { nThreads = 32; }
+	if ( nThreads > count ) { nThreads = count; }
+	std::atomic<int> nextIndex( 0 );
+	std::vector<std::thread> pool;
+	pool.reserve( nThreads );
+	for ( int k = 0; k < nThreads; k++ ) {
+		pool.push_back( std::thread( [&]() {
+			Com_BeginThreadCapture();
+			for ( ;; ) {
+				const int idx = nextIndex.fetch_add( 1, std::memory_order_relaxed );
+				if ( idx >= count ) {
+					break;
+				}
+				work( idx );
+			}
+			Com_EndThreadCapture();
+		} ) );
+	}
+	for ( size_t k = 0; k < pool.size(); k++ ) {
+		pool[k].join();
+	}
+	return nThreads;
+}
+
+/*
+====================
+R_MD5_FlushTessBakes
+
+The end of a level load (idRenderModelManagerLocal::EndLevelLoad): fill every queued mesh's deform-once
+subdivision. Also stops queuing - a model loaded later bakes on the spot.
+====================
+*/
+void R_MD5_FlushTessBakes( void ) {
+	s_md5TessBakeDeferred = false;
+	const int numJobs = s_md5TessBakeJobs.Num();
+	if ( numJobs == 0 ) {
+		return;
+	}
+	const double t0 = Sys_MillisecondsPrecise();
+
+	// the distinct height images
+	idList<const idImage *> images;
+	for ( int i = 0; i < numJobs; i++ ) {
+		md5TessBakeJob_t &job = s_md5TessBakeJobs[i];
+		if ( job.heightImage != NULL ) {
+			job.pixelsIndex = images.AddUnique( job.heightImage );
+		}
+	}
+	struct decodedHeight_t { byte *pic; int w, h; };
+	idList<decodedHeight_t> pixels;
+	pixels.SetNum( images.Num() );
+	for ( int i = 0; i < pixels.Num(); i++ ) {
+		pixels[i].pic = NULL;
+		pixels[i].w = pixels[i].h = 0;
+	}
+	idList<bool> filled;
+	filled.SetNum( numJobs );
+
+	// heap / filesystem become thread-safe only for this window (the parallel image and sound loaders' helpers)
+	Mem_SetThreadSafe( true );
+	FS_SetThreadReadSafe( true );
+
+	// phase 1: decode each height image once
+	int nThreads = 0;
+	if ( images.Num() > 0 ) {
+		nThreads = R_MD5_RunOnWorkers( images.Num(), [&]( int i ) {
+			R_TessHeightPixelsForImage( images[i], &pixels[i].pic, &pixels[i].w, &pixels[i].h );
+		} );
+	}
+	// phase 2: fill every mesh from the shared pixels (each job writes its own mesh's arrays only)
+	nThreads = Max( nThreads, R_MD5_RunOnWorkers( numJobs, [&]( int i ) {
+		const md5TessBakeJob_t &job = s_md5TessBakeJobs[i];
+		const decodedHeight_t *px = ( job.pixelsIndex >= 0 ) ? &pixels[job.pixelsIndex] : NULL;
+		filled[i] = job.mesh->FillTessTopology( job.bindVerts, px ? px->pic : NULL, px ? px->w : 0, px ? px->h : 0 );
+	} ) );
+
+	Mem_SetThreadSafe( false );
+	FS_SetThreadReadSafe( false );
+
+	// surface what the workers printed
+	const bool hadErr = Com_ThreadCaptureHadError();
+	Com_FlushThreadCapture();
+	if ( hadErr ) {
+		common->Warning( "parallel tess bake: a worker hit an error (see above)" );
+	}
+
+	int failed = 0;
+	for ( int i = 0; i < numJobs; i++ ) {
+		s_md5TessBakeJobs[i].mesh->SetTessBakePending( false );
+		if ( !filled[i] ) {
+			s_md5TessBakeJobs[i].mesh->DisableTessDeform();
+			failed++;
+		}
+		R_StaticFree( s_md5TessBakeJobs[i].bindVerts );
+	}
+	for ( int i = 0; i < pixels.Num(); i++ ) {
+		if ( pixels[i].pic ) {
+			R_StaticFree( pixels[i].pic );
+		}
+	}
+	s_md5TessBakeJobs.Clear();
+	if ( failed ) {
+		common->Warning( "parallel tess bake: %d mesh%s had a count mismatch -- deform disabled for them", failed, failed == 1 ? "" : "es" );
+	}
+
+	const double ms = Sys_MillisecondsPrecise() - t0;
+	loadTiming.md5TessMs += ms;		// the "md5 split" line's tessBake: the queue + this flush
+	common->Printf( "  parallel tess bake: %d meshes (%d height images) on %d threads in %.0f msec\n",
+	                numJobs, images.Num(), nThreads, ms );
+}
+
+/*
 ====================
 idMD5Mesh::BuildTessTopology
 
@@ -1036,6 +1217,7 @@ relief scalar (bump blue channel at the interpolated bump UV, seam-scaled). Also
 ====================
 */
 void idMD5Mesh::BuildTessTopology( const idJointMat *bindJoints ) {
+	R_MD5_UnqueueTessBake( this );	// DUDE: a rebake replaces a still-queued one
 	FreeTessData();
 	if ( !deformInfo || deformInfo->numOutputVerts <= 0 || deformInfo->numIndexes <= 0 ) {
 		return;
@@ -1068,8 +1250,8 @@ void idMD5Mesh::BuildTessTopology( const idJointMat *bindJoints ) {
 
 	// bind-pose OUTPUT-vertex positions + st + seam mask (positions for nothing runtime, but the st
 	// and seam are load-time; positions are only used to satisfy the same layout as UpdateSurface).
-	bool onStack;
-	idDrawVert *bindVerts = (idDrawVert *)Mem_MallocA( numOut * sizeof( idDrawVert ), onStack );
+	// A heap copy: a level load defers the fill below (R_MD5_FlushTessBakes) past the bind joints' life.
+	idDrawVert *bindVerts = (idDrawVert *)R_StaticAlloc( numOut * sizeof( idDrawVert ) );
 	for ( int i = 0; i < numSrc; i++ ) {
 		bindVerts[i].Clear();
 		bindVerts[i].st = texCoords[i];
@@ -1080,11 +1262,10 @@ void idMD5Mesh::BuildTessTopology( const idJointMat *bindJoints ) {
 		bindVerts[mbase + i] = bindVerts[deformInfo->mirroredVerts[i]];
 	}
 
-	// load the material's bump map pixels once (CPU) for the displacement relief. Absent bump =>
-	// relief 0 (no displacement); the material sampler matrix is treated as identity (character
-	// bumps have no texture matrix), so the bump UV is the interpolated source st.
-	byte *bumpPic = NULL;
-	int bumpW = 0, bumpH = 0;
+	// the material's height map for the displacement relief. Absent => relief 0 (no displacement); the
+	// material sampler matrix is treated as identity (character bumps have no texture matrix), so the
+	// bump UV is the interpolated source st.
+	const idImage *heightImage = NULL;
 	if ( shader ) {
 		for ( int s = 0; s < shader->GetNumStages(); s++ ) {
 			const shaderStage_t *st = shader->GetStage( s );
@@ -1092,11 +1273,48 @@ void idMD5Mesh::BuildTessTopology( const idJointMat *bindJoints ) {
 				// DUDE: the SIGNED height field, NOT the normal map -- the same pixels the
 				// fixed-function tess passes sample, so this pre-deform path displaces
 				// identically (docs/tessellation.md).
-				R_TessHeightPixelsForImage( shader->GetStageExtra( st ).tessHeightImage, &bumpPic, &bumpW, &bumpH );
+				heightImage = shader->GetStageExtra( st ).tessHeightImage;
 				break;
 			}
 		}
 	}
+
+	// During a level load the fill waits for R_MD5_FlushTessBakes (the model manager's EndLevelLoad), which
+	// decodes each height image ONCE for every mesh sharing it and fills all the meshes on worker threads.
+	// Decoding the image again for every mesh, one mesh after the other, was most of the load: 31 of 39 s
+	// on Quake 4's airdefense1 with r_tessLevel 6 (2026-11-10).
+	if ( R_MD5_QueueTessBake( this, bindVerts, heightImage ) ) {
+		return;
+	}
+
+	// not in a level load (a model loaded on demand): now, on this thread
+	byte *bumpPic = NULL;
+	int bumpW = 0, bumpH = 0;
+	if ( heightImage ) {
+		R_TessHeightPixelsForImage( heightImage, &bumpPic, &bumpW, &bumpH );
+	}
+	const bool filled = FillTessTopology( bindVerts, bumpPic, bumpW, bumpH );
+	if ( bumpPic ) { R_StaticFree( bumpPic ); }
+	R_StaticFree( bindVerts );
+	if ( !filled ) {
+		common->Warning( "BuildTessTopology: count mismatch -- disabling deform for this mesh" );
+		FreeTessData();
+	}
+}
+
+/*
+====================
+idMD5Mesh::FillTessTopology
+
+The per-triangle fill of BuildTessTopology's arrays (allocated there) from the bind-pose verts and the
+height pixels (NULL = no relief). Touches only this mesh's arrays and reads shared, unchanging input, so
+R_MD5_FlushTessBakes runs it for many meshes at once on worker threads. False on a count mismatch (the
+caller disables the deform for the mesh).
+====================
+*/
+bool idMD5Mesh::FillTessTopology( const idDrawVert *bindVerts, const byte *bumpPic, int bumpW, int bumpH ) {
+	const int L = tessBakeLevel;
+	const int numSrcTris = deformInfo->numIndexes / 3;
 
 	int vOut = 0, iOut = 0;
 	for ( int t = 0; t < numSrcTris; t++ ) {
@@ -1155,15 +1373,8 @@ void idMD5Mesh::BuildTessTopology( const idJointMat *bindJoints ) {
 		#undef TESS_IDX
 	}
 
-	if ( bumpPic ) { R_StaticFree( bumpPic ); }
-	Mem_FreeA( bindVerts, onStack );
-
 	// sanity: we filled exactly what we sized
-	if ( vOut != numTessOutVerts || iOut != numTessOutTris * 3 ) {
-		common->Warning( "BuildTessTopology: count mismatch (v %d/%d, i %d/%d) -- disabling deform for this mesh",
-		                 vOut, numTessOutVerts, iOut, numTessOutTris * 3 );
-		FreeTessData();
-	}
+	return vOut == numTessOutVerts && iOut == numTessOutTris * 3;
 }
 
 /*
@@ -1571,7 +1782,7 @@ void idMD5Mesh::UpdateSurface( const struct renderEntity_s *ent, const idJointMa
 	}
 
 	if ( tessDeformActive && rhi::GetActiveBackendType() == rhi::BT_VULKAN
-	     && tessBarySeam && numTessOutVerts > 0 && R_MD5_TessShader( rhi::GetRHI() ) != 0 && EnsureTessBuffersUploaded() ) {
+	     && tessBarySeam && numTessOutVerts > 0 && !tessBakePending && R_MD5_TessShader( rhi::GetRHI() ) != 0 && EnsureTessBuffersUploaded() ) {
 		rhi::RHI *r = rhi::GetRHI();
 		const int numTessV = numTessOutVerts;
 		const int numTessIdx = numTessOutTris * 3;
