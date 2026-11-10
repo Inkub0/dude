@@ -61,7 +61,9 @@ If you have questions concerning this license or the applicable additional terms
 // 8 (2026-11-10): TARGETED step - contact shadows retuned (strength 0.5, march length 4, occluder thickness 25; configs
 // on the old defaults move) and now owned by the quality preset (off Potato / Low, on Medium+ with 2 / 4 / 6 / 8 steps):
 // a config on a preset gets its tier's values, once.
-#define DUDE_CONFIG_SCHEMA				8
+// 9 (2026-11-10): TARGETED step - RT contact shadows (r_rtContactShadows) join the RT presets from High up: a config on
+// such a tier with its ray tracing applied gets them on, once.
+#define DUDE_CONFIG_SCHEMA				9
 
 #ifdef ID_REPRODUCIBLE_BUILD
 	// for reproducible builds we hardcode values that would otherwise come from __DATE__ and __TIME__

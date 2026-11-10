@@ -121,8 +121,11 @@ occluder found by a ray instead of the depth buffer.
 - **Path Tracing:** ReSTIR DI lights the scene without per-light draws, so only the lights still drawn one by one get
   it. Covering the DI-lit lights would need its own design (a per-pixel contact ray toward a stochastic light sample
   brings the dots back).
-- **Not preset-wired:** opt-in, off by default (Graphics -> Shadows -> Ray Tracing, tuning in Debugging -> RT Contact
-  Shadows: strength, ray length, softness). GL3 and non-RT GPUs: inert.
+- **Presets (user, 2026-11-10):** on from **High to Nightmare** whenever the preset's ray tracing is on (RTX On or Path
+  Tracing): an `RtAugment` column, matched in preset detection; the raster block resets it off, so RTX off and the
+  lower tiers have it off. Config schema 9 turns it on once for a config already on such a tier with its ray tracing
+  applied. On/off in Graphics -> Shadows -> Ray Tracing; tuning (strength, ray length, softness) in Debugging ->
+  Ray Tracing -> RT Contact Shadows. GL3 and non-RT GPUs: inert.
 
 ## Backend wiring
 
