@@ -292,6 +292,23 @@ float SCR_DrawFPS( float y ) {
 	return y + BIGCHAR_HEIGHT + 4;
 }
 
+// DUDE: a line of 2D debug text over a 1-px black halo - the RT emissive labels and the Light Editor's hover line read
+// over any tint this way. The console's TTF debug font centred in a rectangle, or the small char set at x, y.
+static void SCR_DrawHaloTextTtf( idDeviceContext *dc, const char *text, float scale, const idRectangle &rc, const idVec4 &color ) {
+	static const float ox[4] = { -1.0f, 1.0f, 0.0f, 0.0f }, oy[4] = { 0.0f, 0.0f, -1.0f, 1.0f };
+	for ( int k = 0; k < 4; k++ ) {
+		dc->DrawText( text, scale, idDeviceContext::ALIGN_CENTER, colorBlack, idRectangle( rc.x + ox[k], rc.y + oy[k], rc.w, rc.h ), false );
+	}
+	dc->DrawText( text, scale, idDeviceContext::ALIGN_CENTER, color, rc, false );
+}
+static void SCR_DrawHaloTextSmall( int x, int y, const char *text, const idVec4 &color ) {
+	renderSystem->DrawSmallStringExt( x - 1, y, text, colorBlack, true, localConsole.charSetShader );
+	renderSystem->DrawSmallStringExt( x + 1, y, text, colorBlack, true, localConsole.charSetShader );
+	renderSystem->DrawSmallStringExt( x, y - 1, text, colorBlack, true, localConsole.charSetShader );
+	renderSystem->DrawSmallStringExt( x, y + 1, text, colorBlack, true, localConsole.charSetShader );
+	renderSystem->DrawSmallStringExt( x, y, text, color, true, localConsole.charSetShader );
+}
+
 /*
 ==================
 SCR_DrawEmissiveLabels
@@ -321,19 +338,11 @@ static void SCR_DrawEmissiveLabels( void ) {
 			const int w = dc->TextWidth( text, scale, 0 ) + 4;
 			const int h = dc->MaxCharHeight( scale ) + 4;
 			const float x = labels[i].x - w * 0.5f, y = labels[i].y - h * 0.5f;
-			static const float ox[4] = { -1.0f, 1.0f, 0.0f, 0.0f }, oy[4] = { 0.0f, 0.0f, -1.0f, 1.0f };
-			for ( int k = 0; k < 4; k++ ) {
-				dc->DrawText( text, scale, idDeviceContext::ALIGN_CENTER, colorBlack, idRectangle( x + ox[k], y + oy[k], w, h ), false );
-			}
-			dc->DrawText( text, scale, idDeviceContext::ALIGN_CENTER, colorWhite, idRectangle( x, y, w, h ), false );
+			SCR_DrawHaloTextTtf( dc, text, scale, idRectangle( x, y, w, h ), colorWhite );
 		} else {
 			const int w = (int)strlen( text ) * SMALLCHAR_WIDTH;
 			const int x = idMath::FtoiFast( labels[i].x ) - w / 2, y = idMath::FtoiFast( labels[i].y ) - SMALLCHAR_HEIGHT / 2;
-			renderSystem->DrawSmallStringExt( x - 1, y, text, colorBlack, true, localConsole.charSetShader );
-			renderSystem->DrawSmallStringExt( x + 1, y, text, colorBlack, true, localConsole.charSetShader );
-			renderSystem->DrawSmallStringExt( x, y - 1, text, colorBlack, true, localConsole.charSetShader );
-			renderSystem->DrawSmallStringExt( x, y + 1, text, colorBlack, true, localConsole.charSetShader );
-			renderSystem->DrawSmallStringExt( x, y, text, colorWhite, true, localConsole.charSetShader );
+			SCR_DrawHaloTextSmall( x, y, text, colorWhite );
 		}
 	}
 }
@@ -359,19 +368,11 @@ static void SCR_DrawEmAuthHover( void ) {
 		const float scale = 0.12f;
 		const int h = dc->MaxCharHeight( scale ) + 4;
 		const idRectangle rc( 0.0f, 262.0f, 640.0f, (float)h );
-		static const float ox[4] = { -1.0f, 1.0f, 0.0f, 0.0f }, oy[4] = { 0.0f, 0.0f, -1.0f, 1.0f };
-		for ( int k = 0; k < 4; k++ ) {
-			dc->DrawText( text, scale, idDeviceContext::ALIGN_CENTER, colorBlack, idRectangle( rc.x + ox[k], rc.y + oy[k], rc.w, rc.h ), false );
-		}
-		dc->DrawText( text, scale, idDeviceContext::ALIGN_CENTER, cyan, rc, false );
+		SCR_DrawHaloTextTtf( dc, text, scale, rc, cyan );
 	} else {
 		const int w = (int)strlen( text ) * SMALLCHAR_WIDTH;
 		const int x = 320 - w / 2, y = 262;
-		renderSystem->DrawSmallStringExt( x - 1, y, text, colorBlack, true, localConsole.charSetShader );
-		renderSystem->DrawSmallStringExt( x + 1, y, text, colorBlack, true, localConsole.charSetShader );
-		renderSystem->DrawSmallStringExt( x, y - 1, text, colorBlack, true, localConsole.charSetShader );
-		renderSystem->DrawSmallStringExt( x, y + 1, text, colorBlack, true, localConsole.charSetShader );
-		renderSystem->DrawSmallStringExt( x, y, text, cyan, true, localConsole.charSetShader );
+		SCR_DrawHaloTextSmall( x, y, text, cyan );
 	}
 }
 
