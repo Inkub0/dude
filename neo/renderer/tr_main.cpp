@@ -44,6 +44,9 @@ If you have questions concerning this license or the applicable additional terms
 #include "renderer/tr_local.h"
 #include "renderer/rhi/RHI.h"
 
+// framework/CVarSystem.cpp: a value for this session only; the config keeps originalValue
+extern void CVar_SetSessionOnly( const char *name, const char *originalValue, const char *sessionValue );
+
 //====================================================================
 
 /*
@@ -4790,7 +4793,14 @@ static void R_RtWorldUpdate( void ) {
 		R_RtFreeWorldGeo();
 		s_rtWorldFailedMap = world->mapName;	// don't retry the failed build every frame (other RT cvars may keep the scene wanted)
 		r_rtWorld.SetBool( false );
-		r_rtSunShadows.SetBool( false );
+		// off for this session only: the config keeps the player's choice, so one failed build (a
+		// device loss, a driver hiccup) does not turn RT sun shadows off for good - which also left
+		// the quality preset reading "Custom" on every later launch
+		if ( r_rtSunShadows.GetBool() ) {
+			const idStr original = r_rtSunShadows.GetString();
+			r_rtSunShadows.SetBool( false );
+			CVar_SetSessionOnly( r_rtSunShadows.GetName(), original.c_str(), r_rtSunShadows.GetString() );
+		}
 		return;
 	}
 	s_rtWorldMap = world->mapName;

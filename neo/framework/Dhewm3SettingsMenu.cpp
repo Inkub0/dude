@@ -3840,7 +3840,9 @@ static int DetectEnhancementPreset( int* outRtMode = NULL )
 			r_tessellation.GetBool()           == p.tessellation &&
 			idMath::Fabs( r_tessDisplace.GetFloat() - p.tessDisplace ) < 0.01f &&
 			r_parallax.GetBool()               == p.parallax &&
-			r_gpuSkinning.GetBool()            == p.gpuSkin &&
+			// r_gpuSkinning (p.gpuSkin) is applied but NOT matched: it is deliberately not saved
+			// (back on at every launch), so matching it read Potato / Low as "Custom" after a restart
+			// - and the quality combo then fell back to High
 			r_fsr.GetBool()                    == p.fsr &&
 			r_shadowMapSplitDynDrop.GetInteger() == p.splitDynDrop &&
 			r_ssaoTemporalTrade.GetBool()      == p.ssaoTemporalTrade &&
@@ -4657,11 +4659,22 @@ static void DrawGraphicsMenu()
 
 		int detectedRt = RTX_OFF;
 		const int detected = DetectEnhancementPreset( &detectedRt );
+		// First draw: the live tier, or for hand-tuned (Custom) settings the tier the player last
+		// applied (dude_preset / dude_rtx, saved in the config) - not a fixed High, which made a
+		// tweaked Ultra or Nightmare look reset to High after every restart. High only when no
+		// preset was ever applied.
 		if ( selPreset < 0 ) {
-			selPreset = ( detected >= 0 ) ? detected : PRESET_HIGH;
+			if ( detected >= 0 ) {
+				selPreset = detected;
+			} else if ( dude_preset.GetInteger() >= 0 && dude_preset.GetInteger() < PRESET_COUNT ) {
+				selPreset = dude_preset.GetInteger();
+			} else {
+				selPreset = PRESET_HIGH;
+			}
 		}
 		if ( selRtx < 0 ) {
-			selRtx = detectedRt;
+			selRtx = ( detected >= 0 || dude_preset.GetInteger() < 0 )
+				? detectedRt : idMath::ClampInt( RTX_OFF, RTX_PATHTRACED, dude_rtx.GetInteger() );
 		}
 		// Re-sync the pending selectors to the live state whenever detection moves on either axis
 		// (a preset Apply, or a hand-toggle of a tier/RT cvar), so the combo + RTX tickbox keep
