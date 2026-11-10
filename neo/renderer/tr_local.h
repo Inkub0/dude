@@ -1357,6 +1357,9 @@ bool R_DecalIsBlood( const idMaterial *material );	// "blood" content flag or a 
 extern idCVar r_decalMatte;				// translucent non-blood decals lose specular + cube reflection
 // sheen multiplier for a material's specular interaction and texgen-reflect stage (1 = not a decal)
 float R_DecalSheenScale( const idMaterial *material );
+extern idCVar r_decalLitHighlights;		// decals' painted-on "_add" highlights scaled by the wall's light (0 = as authored)
+// an additive decal stage that fakes a highlight (see r_decalLitHighlights), not a glow
+bool R_DecalLitHighlightStage( const idMaterial *material, const shaderStage_t *stage );
 
 extern idCVar r_gl3ReflectionScale;		// GL3: cube-map glass reflection brightness (1=untouched, 0.7=-30%)
 

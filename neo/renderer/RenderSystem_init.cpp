@@ -839,6 +839,63 @@ float R_DecalSheenScale( const idMaterial *material ) {
 	return 1.0f;
 }
 
+// DUDE: decal highlights lit by the scene. Some decals pair a darkening stage with an additive
+// "_add" texture painted on as a fake highlight - Quake 4's map bullet holes (wallbullets1-4: the
+// rims of torn metal). Added at full strength, those highlights glow on a wall in total darkness.
+// With this on they are scaled by the light already on the wall instead, so they show only where
+// the wall is lit. Off = as authored (the classic look).
+idCVar r_decalLitHighlights( "r_decalLitHighlights", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "decals' painted-on highlights (an additive \"_add\" texture over a darkening decal, e.g. Quake 4's bullet holes) are scaled by the light on the wall, so they no longer glow in the dark; real glows (embers, sparks, burns, symbols) are untouched (non-vanilla, opengl3/Vulkan only; 0 = as authored)" );
+
+/*
+===================
+R_DecalLitHighlightStage
+
+True for an additive decal stage that fakes a highlight rather than emitting light: an unlit ONE,ONE
+stage whose image is named "_add", in a "sort decal" material that also darkens what is under it
+(filter, modulate or the 2x modulate GL_DST_COLOR,GL_SRC_COLOR). Anything that reads as a glow -
+"glow", "ember", "burn", "spark", "fire", "flash", "plasma", "energy", "lava" in the material or image
+name - and glass (its additive stages are the pane's sheen) are left alone. In the stock data only
+Quake 4's wallbullets1-4 qualify.
+===================
+*/
+static bool R_DecalNameLooksEmissive( const char *name ) {
+	static const char *const glowWords[] = { "glow", "ember", "burn", "spark", "fire", "flash", "plasma", "energy", "lava" };
+	for ( int i = 0; i < (int)( sizeof( glowWords ) / sizeof( glowWords[0] ) ); i++ ) {
+		if ( idStr::FindText( name, glowWords[i], false ) >= 0 ) {
+			return true;
+		}
+	}
+	return false;
+}
+
+bool R_DecalLitHighlightStage( const idMaterial *material, const shaderStage_t *stage ) {
+	if ( material == NULL || stage == NULL || material->GetSort() != SS_DECAL || stage->lighting != SL_AMBIENT ) {
+		return false;
+	}
+	if ( ( stage->drawStateBits & ( GLS_SRCBLEND_BITS | GLS_DSTBLEND_BITS ) ) != ( GLS_SRCBLEND_ONE | GLS_DSTBLEND_ONE ) ) {
+		return false;
+	}
+	const idImage *image = stage->texture.image;
+	if ( image == NULL || idStr::FindText( image->imgName.c_str(), "_add", false ) < 0 ) {
+		return false;
+	}
+	const char *name = material->GetName();
+	if ( material->GetSurfaceType() == SURFTYPE_GLASS || idStr::FindText( name, "glass", false ) >= 0
+			|| R_DecalNameLooksEmissive( name ) || R_DecalNameLooksEmissive( image->imgName.c_str() ) ) {
+		return false;
+	}
+	for ( int i = 0; i < material->GetNumStages(); i++ ) {
+		const int blend = material->GetStage( i )->drawStateBits & ( GLS_SRCBLEND_BITS | GLS_DSTBLEND_BITS );
+		if ( blend == ( GLS_SRCBLEND_ZERO | GLS_DSTBLEND_ONE_MINUS_SRC_COLOR )
+				|| blend == ( GLS_SRCBLEND_DST_COLOR | GLS_DSTBLEND_ZERO )
+				|| blend == ( GLS_SRCBLEND_ZERO | GLS_DSTBLEND_SRC_COLOR )
+				|| blend == ( GLS_SRCBLEND_DST_COLOR | GLS_DSTBLEND_SRC_COLOR ) ) {
+			return true;
+		}
+	}
+	return false;
+}
+
 // DUDE: gate for the non-vanilla "Enhancements" (see tr_local.h). True for the
 // RHI backends — opengl3 today, vulkan once it lands (Phase 4); the legacy ARB2
 // path stays vanilla-faithful.

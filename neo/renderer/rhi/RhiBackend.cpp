@@ -3093,7 +3093,8 @@ the later tess fill + AllocUniforms still see it.
 static void RB_RHI_FillStageParms( rhi::RenderParams &parms, const float mvp[16],
         const shaderStage_t *pStage, const float *regs, const float color[4],
         bool isBerserkBlit, rhi::ImageHandle berserkTrail,
-        bool isHelltimeDraw, rhi::ImageHandle helltimeTrail, float helltimeSsX, float helltimeSsY ) {
+        bool isHelltimeDraw, rhi::ImageHandle helltimeTrail, float helltimeSsX, float helltimeSsY,
+        bool litHighlight ) {
 	memset( &parms, 0, sizeof( parms ) );
 	memcpy( parms.mvpMatrix, mvp, sizeof( parms.mvpMatrix ) );
 
@@ -3170,7 +3171,8 @@ static void RB_RHI_FillStageParms( rhi::RenderParams &parms, const float mvp[16]
 	// additive blend. The >1 guard makes r_hdrOverbright 1 skip entirely, so it stays
 	// bit-identical whenever it is off. Boosts the old-style generic stages here; soft
 	// particles, custom-ARB and texgen stages took an earlier branch and stay unboosted.
-	if ( rbHdrActiveThisFrame && R_HdrOverbrightEnabled()
+	// (not a decal highlight scaled by the wall's light, r_decalLitHighlights: it reflects, it doesn't emit)
+	if ( rbHdrActiveThisFrame && R_HdrOverbrightEnabled() && !litHighlight
 	     && ( pStage->drawStateBits & ( GLS_SRCBLEND_BITS | GLS_DSTBLEND_BITS ) ) == ( GLS_SRCBLEND_ONE | GLS_DSTBLEND_ONE ) ) {
 		const float ob = r_hdrOverbright.GetFloat();
 		parms.color[0] *= ob;
@@ -3211,11 +3213,17 @@ Lifted verbatim from RB_RHI_RenderShaderPasses.
 */
 static void RB_RHI_BuildStagePipeline( rhi::RHI *r, const viewDef_t *viewDef,
         const idMaterial *shader, const shaderStage_t *pStage, const rhi::StageIR &si,
-        bool tess, bool isBerserkBlit, bool isHelltimeDraw ) {
+        bool tess, bool isBerserkBlit, bool isHelltimeDraw, bool litHighlight ) {
 	// 2D views: legacy disables depth test entirely; equivalent here is
 	// depth-always + no depth writes
 	rhi::PipelineDesc pd;
 	pd.stateBits = ( pStage->drawStateBits & ~GLS_ATEST_BITS );
+	if ( litHighlight ) {
+		// DUDE r_decalLitHighlights: the decal's painted-on highlight, ONE,ONE as authored, becomes
+		// DST_COLOR,ONE - added in proportion to the light already on the wall (src * dst), so it
+		// shows where the wall is lit and is gone on a wall in darkness
+		pd.stateBits = ( pd.stateBits & ~GLS_SRCBLEND_BITS ) | GLS_SRCBLEND_DST_COLOR;
+	}
 	if ( !viewDef->viewEntitys ) {
 		// 2D views (menu/console/HUD/loading): force depth-always. Clear any
 		// authored depth-func first -- a stage that carries GLS_DEPTHFUNC_EQUAL
@@ -3530,9 +3538,12 @@ static void RB_RHI_RenderShaderPasses( rhi::RHI *r, const viewDef_t *viewDef, co
 			}
 		}
 
+		// DUDE r_decalLitHighlights: a decal's painted-on highlight scaled by the wall's light
+		const bool litHighlight = r_decalLitHighlights.GetBool() && R_DecalLitHighlightStage( shader, pStage );
+
 		rhi::RenderParams parms;
 		RB_RHI_FillStageParms( parms, mvp, pStage, regs, color, isBerserkBlit, berserkTrail,
-		                       isHelltimeDraw, helltimeTrail, helltimeSsX, helltimeSsY );
+		                       isHelltimeDraw, helltimeTrail, helltimeSsX, helltimeSsY, litHighlight );
 
 		// DUDE tessellation (docs/tessellation.md): this pass draws a material's ambient/emissive
 		// stages. Two cases:
@@ -3582,7 +3593,7 @@ static void RB_RHI_RenderShaderPasses( rhi::RHI *r, const viewDef_t *viewDef, co
 			continue;
 		}
 
-		RB_RHI_BuildStagePipeline( r, viewDef, shader, pStage, si, tess, isBerserkBlit, isHelltimeDraw );
+		RB_RHI_BuildStagePipeline( r, viewDef, shader, pStage, si, tess, isBerserkBlit, isHelltimeDraw, litHighlight );
 
 		RB_RHI_EmitStageDraw( r, tri, surf, parms, ub, uniOfs, vb, vertOfs, ib, idxOfs,
 		                      stageImage, tess, tessBump, useDeform,

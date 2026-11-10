@@ -6367,6 +6367,11 @@ static void DrawDbgGroup_DecalsGlass()
 		"reflections break up across stains - on metal and on glossy non-metals alike. "
 		"0.00 = off, 1.00 = default. Needs PBR materials (High preset and up)." );
 
+	CvarCheckbox( "Decal highlights follow the light", r_decalLitHighlights, "Some decals paint a highlight on with an additive texture - Quake 4's bullet holes in the "
+		"map walls, whose rims shine. As authored that highlight glows even on a wall in total darkness. On: it is scaled by "
+		"the light already on the wall, so it shows only where the wall is lit. Real glows (embers, sparks, burns, symbols) "
+		"keep glowing. Off = default, as the game drew it." );
+
 	CvarSliderF( "Wet blood", r_decalWetBlood, 0.0f, 0.5f, "%.3f", "Blood decals glint off the lights around them as a wet film with its own relief - every blood decal, "
 		"stock or mod, map-placed or splattered during play. Strength of the highlight; 0 = off (matte, "
 		"stock-faithful blood), 0.057 = default. "
