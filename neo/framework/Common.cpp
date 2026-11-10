@@ -1525,6 +1525,15 @@ void idCommonLocal::CheckConfigSchema( void ) {
 	}
 
 	if ( from >= 3 ) {
+		// 6 -> 7: r_decalLitHighlights (decals' painted-on highlights follow the light) arrives on by default
+		// and off on Potato, the faithful floor. It is a new cvar, so every config gets the new default; one
+		// already on the Potato preset gets the preset's value instead, so it keeps reading "Potato".
+		if ( from < 7 && dude_preset.GetInteger() == 0 ) {
+			idCVar *litHighlights = cvarSystem->Find( "r_decalLitHighlights" );	// absent without the renderer
+			if ( litHighlights != NULL ) {
+				litHighlights->SetBool( false );
+			}
+		}
 		// 3 -> 4: 0.9.7 shipped r_rtReStirDIBoostHistory 4, ~1.9 ms per frame at Path Tracing for no visible gain once
 		// the 2026-10-28 gradient shadow-edge fix had stopped the shadow smear (docs/rtx-sigma-shadows.md, M1). The
 		// default is 2 again (0.9.6's); move a config still on the old default, keep a deliberate other value.

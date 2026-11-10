@@ -3433,6 +3433,11 @@ struct EnhancementPreset {
 	// uncompressed, as vanilla Doom 3's Ultra did (busy maps: Doom 3 ~350 MB, Quake 4 ~1 GB of textures).
 	// Not matched in Detect, so a hand change from the Graphics settings never reads "Custom".
 	bool  compressTextures;
+	// Decal highlights follow the light (appended, see note above; r_decalLitHighlights, GL3 + Vulkan):
+	// a decal's painted-on "_add" highlight (Quake 4's map bullet holes) is scaled by the light on the
+	// wall instead of glowing in the dark - a fix for an oversight in the material, so ON for every tier
+	// except Potato, the faithful floor. Matched in Detect.
+	bool  decalLitHighlights;
 };
 
 // Potato/Low keep the enhancements off but carry the cheap Medium sub-params, so
@@ -3441,13 +3446,13 @@ struct EnhancementPreset {
 // see anchor note above — the pipeline columns deliberately exceed the cvar
 // defaults, which keep every enhancement off).
 static const EnhancementPreset enhancementPresets[PRESET_COUNT] = {
-	//                soft   smoke  emiss  ssao   shadow  aoRes aoSl aoSt aoNB   aoBN   smSz  smPt  pcf ptLim emLim grain  chrom  refl  shd sScl  sExp   szScl szRad   occl   hdr    pbr    ssr    ssrRes  grainSz aa aoRad   aoTmp   tess   tessDsp  parlx  parlxSh gpuSkn dMip   mv     fsr    dynDrop rtSun  rtMov  rtRefl aoTrade interp rtao   rtBlur rtAll  stagger  volum  rtaoRes  skin   rtgi  hdrGam aniso cmpTex
-	{ "Potato",       false, false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.0f,  0.0f,  1.0f, 0,  1.0f, 62.0f, true, 380.0f, false, false, false, false, 1.0f,   1.5f,   0, 48.0f,  false,  false, 0.0f, false, 0.0f, false, false, false, false, 1,     false, false, false, true,  false, false, false, false, false, false, 1.0f, 0.0f, false, 1.20f, 1, true  },
-	{ "Low",          true,  false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.05f, 0.0f,  1.0f, 1,  1.2f, 42.0f, true, 380.0f, true,  false, false, false, 1.0f,   1.5f,   2, 48.0f,  false,  false, 0.12f, false, 0.0f, false, false, false, false, 1,     false, false, false, true,  true , false, false, false, false, false, 1.0f, 0.6f, false, 1.20f, 1, true  },
-	{ "Medium",       true,  false, true,  true,  true,   0.5f, 2,   4,   false, true,  512,  512,  8,  16,   16,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  false, false, 1.0f,   1.5f,   2, 48.0f,  true,   false, 0.12f, true, 0.0f, true, true,  false, false, 1,     false, false, false, true,  true , false, false, false, false, false, 1.0f, 0.6f, false, 1.20f, 2, true  },
-	{ "High",         true,  false, true,  true,  true,   0.667f, 3,   6,   true,  true,  1024, 1200, 10,  64,   24,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  true,  false, 1.0f,   1.5f,   2, 48.0f,  false,  true,  0.12f, true, 1.0f, true, true,  false, false, 1,     false, false, false, true,  true , false, false, false, false, false, 1.0f, 0.6f, false, 1.20f, 4, false },
-	{ "Ultra",        true,  true,  true,  true,  true,   0.75f, 4,   8,   true,  true,  2400, 2400, 11,  96,   32,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.5f,   1.5f,   2, 48.0f,  false,  true,  0.12f, true, 1.0f, true, true,  true,  false, 1,     false, false, false, true,  true , false, false, false, false, false, 1.0f, 0.6f, false, 1.20f, 8, false },
-	{ "Nightmare", true, true, true, true,  true,   0.8f, 5,   10,  true,  true,  3600, 3600, 12, 128,  48,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.5f, 1.5f,   2, 48.0f, false,  true,  0.12f, true, 1.0f, true, true,  true,  true,  0,     false, false, false, false, true , false, false, false, false, false, 1.0f, 0.6f, false, 1.20f, 16, false },
+	//                soft   smoke  emiss  ssao   shadow  aoRes aoSl aoSt aoNB   aoBN   smSz  smPt  pcf ptLim emLim grain  chrom  refl  shd sScl  sExp   szScl szRad   occl   hdr    pbr    ssr    ssrRes  grainSz aa aoRad   aoTmp   tess   tessDsp  parlx  parlxSh gpuSkn dMip   mv     fsr    dynDrop rtSun  rtMov  rtRefl aoTrade interp rtao   rtBlur rtAll  stagger  volum  rtaoRes  skin   rtgi  hdrGam aniso cmpTex decLit
+	{ "Potato",       false, false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.0f,  0.0f,  1.0f, 0,  1.0f, 62.0f, true, 380.0f, false, false, false, false, 1.0f,   1.5f,   0, 48.0f,  false,  false, 0.0f, false, 0.0f, false, false, false, false, 1,     false, false, false, true,  false, false, false, false, false, false, 1.0f, 0.0f, false, 1.20f, 1, true, false  },
+	{ "Low",          true,  false, false, false, false,  0.5f, 3,   1,   false, true,  512,  512,  5,  16,   16,   0.05f, 0.0f,  1.0f, 1,  1.2f, 42.0f, true, 380.0f, true,  false, false, false, 1.0f,   1.5f,   2, 48.0f,  false,  false, 0.12f, false, 0.0f, false, false, false, false, 1,     false, false, false, true,  true , false, false, false, false, false, 1.0f, 0.6f, false, 1.20f, 1, true, true  },
+	{ "Medium",       true,  false, true,  true,  true,   0.5f, 2,   4,   false, true,  512,  512,  8,  16,   16,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  false, false, 1.0f,   1.5f,   2, 48.0f,  true,   false, 0.12f, true, 0.0f, true, true,  false, false, 1,     false, false, false, true,  true , false, false, false, false, false, 1.0f, 0.6f, false, 1.20f, 2, true, true  },
+	{ "High",         true,  false, true,  true,  true,   0.667f, 3,   6,   true,  true,  1024, 1200, 10,  64,   24,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 380.0f, true,  true,  true,  false, 1.0f,   1.5f,   2, 48.0f,  false,  true,  0.12f, true, 1.0f, true, true,  false, false, 1,     false, false, false, true,  true , false, false, false, false, false, 1.0f, 0.6f, false, 1.20f, 4, false, true },
+	{ "Ultra",        true,  true,  true,  true,  true,   0.75f, 4,   8,   true,  true,  2400, 2400, 11,  96,   32,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.5f,   1.5f,   2, 48.0f,  false,  true,  0.12f, true, 1.0f, true, true,  true,  false, 1,     false, false, false, true,  true , false, false, false, false, false, 1.0f, 0.6f, false, 1.20f, 8, false, true },
+	{ "Nightmare", true, true, true, true,  true,   0.8f, 5,   10,  true,  true,  3600, 3600, 12, 128,  48,   0.05f, 0.0f,  0.7f, 1,  1.2f, 42.0f, true, 480.0f, true,  true,  true,  true,  0.5f, 1.5f,   2, 48.0f, false,  true,  0.12f, true, 1.0f, true, true,  true,  true,  0,     false, false, false, false, true , false, false, false, false, false, 1.0f, 0.6f, false, 1.20f, 16, false, true },
 };
 
 // Ray-tracing augmentation layered on top of a raster tier when RTX is on and the device is
@@ -3609,6 +3614,7 @@ static void ApplyEnhancementPreset( int idx, int rtMode )
 	r_rtReflResScale.SetFloat( p.rtReflections ? 0.5f : 1.0f );
 	r_ssaoTemporalTrade.SetBool( p.ssaoTemporalTrade );
 	com_interpolate.SetBool( p.interpolate );
+	r_decalLitHighlights.SetBool( p.decalLitHighlights );
 	r_rtao.SetBool( p.rtao );
 	r_rtaoResScale.SetFloat( p.rtaoResScale );
 	r_rtgi.SetBool( p.rtgi );		// H6e: Path Tracing enables GI (and carries rtao=false — GI replaces it)
@@ -3837,6 +3843,7 @@ static int DetectEnhancementPreset( int* outRtMode = NULL )
 			r_shadowMapSplitDynDrop.GetInteger() == p.splitDynDrop &&
 			r_ssaoTemporalTrade.GetBool()      == p.ssaoTemporalTrade &&
 			com_interpolate.GetBool()          == p.interpolate &&
+			r_decalLitHighlights.GetBool()     == p.decalLitHighlights &&
 			cvarSystem->GetCVarInteger( "image_anisotropy" ) == p.anisotropy &&
 			idMath::Fabs( r_skinShading.GetFloat() - p.skinShading ) < 0.01f;
 		if ( !rasterMatch ) {
@@ -6370,7 +6377,7 @@ static void DrawDbgGroup_DecalsGlass()
 	CvarCheckbox( "Decal highlights follow the light", r_decalLitHighlights, "Some decals paint a highlight on with an additive texture - Quake 4's bullet holes in the "
 		"map walls, whose rims shine. As authored that highlight glows even on a wall in total darkness. On: it is scaled by "
 		"the light already on the wall, so it shows only where the wall is lit. Real glows (embers, sparks, burns, symbols) "
-		"keep glowing. Off = default, as the game drew it." );
+		"keep glowing. On by default and on every preset except Potato; off = as the game drew it." );
 
 	CvarSliderF( "Wet blood", r_decalWetBlood, 0.0f, 0.5f, "%.3f", "Blood decals glint off the lights around them as a wet film with its own relief - every blood decal, "
 		"stock or mod, map-placed or splattered during play. Strength of the highlight; 0 = off (matte, "

@@ -843,8 +843,9 @@ float R_DecalSheenScale( const idMaterial *material ) {
 // "_add" texture painted on as a fake highlight - Quake 4's map bullet holes (wallbullets1-4: the
 // rims of torn metal). Added at full strength, those highlights glow on a wall in total darkness.
 // With this on they are scaled by the light already on the wall instead, so they show only where
-// the wall is lit. Off = as authored (the classic look).
-idCVar r_decalLitHighlights( "r_decalLitHighlights", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "decals' painted-on highlights (an additive \"_add\" texture over a darkening decal, e.g. Quake 4's bullet holes) are scaled by the light on the wall, so they no longer glow in the dark; real glows (embers, sparks, burns, symbols) are untouched (non-vanilla, opengl3/Vulkan only; 0 = as authored)" );
+// the wall is lit. A fix for an oversight in the material, so it is on by default and on every preset
+// except Potato, the faithful floor; 0 = as authored.
+idCVar r_decalLitHighlights( "r_decalLitHighlights", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "decals' painted-on highlights (an additive \"_add\" texture over a darkening decal, e.g. Quake 4's bullet holes) are scaled by the light on the wall, so they no longer glow in the dark; real glows (embers, sparks, burns, symbols) are untouched (non-vanilla, opengl3/Vulkan only; 0 = as authored, the Potato preset's value)" );
 
 /*
 ===================

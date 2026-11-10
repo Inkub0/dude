@@ -56,7 +56,9 @@ If you have questions concerning this license or the applicable additional terms
 // 0.9.6 configs archive the old values; the renderer, GPU and VRR choices are kept from now on.
 // 4 (2026-10-29): TARGETED step, no reset - r_rtReStirDIBoostHistory 4 -> 2 where a config still holds 0.9.7's default
 // (~1.9 ms at Path Tracing for no visible gain). From 3 on, a bump may be such a step (CheckConfigSchema, from >= 3).
-#define DUDE_CONFIG_SCHEMA				6
+// 7 (2026-11-10): TARGETED step - r_decalLitHighlights is on by default, off on Potato (the faithful floor): a config
+// already on the Potato preset gets it off, once.
+#define DUDE_CONFIG_SCHEMA				7
 
 #ifdef ID_REPRODUCIBLE_BUILD
 	// for reproducible builds we hardcode values that would otherwise come from __DATE__ and __TIME__
