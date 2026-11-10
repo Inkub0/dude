@@ -616,6 +616,10 @@ void idRenderWorldLocal::UpdateForcedAmbient( float level ) {
 		|| forcedAmbientHandle < 0 || forcedAmbientHandle >= lightDefs.Num() || lightDefs[forcedAmbientHandle] == NULL ) {
 		forcedAmbientHandle = -1;
 	}
+	// the light is in place at this level: nothing to do (the common per-frame call)
+	if ( forcedAmbientHandle >= 0 && level > 0.0f && forcedAmbientLevel == level ) {
+		return;
+	}
 
 	idBounds bounds;
 	bounds.Clear();
