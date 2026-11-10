@@ -214,11 +214,11 @@ sits behind and above the eye) and a body that cast no shadow. DUDE makes it pla
   weapon as stock does).
 
 The camera frames the player over the shoulder, as modern third-person games do:
-`pm_thirdPersonSide` (default 32) slides the camera that far to the right of the player, so
+`pm_thirdPersonSide` (default 24) slides the camera that far to the right of the player, so
 the body sits on the left of the screen and no longer covers what is ahead; the view stays
 parallel to the aim, so the crosshair still lands where the shots go. A negative value puts
 the camera over the left shoulder, `0` is the stock centred framing. The rest of the camera
-is the stock one: `pm_thirdPersonRange` (distance, default 80), `pm_thirdPersonHeight`,
+is the stock one: `pm_thirdPersonRange` (distance, default 48), `pm_thirdPersonHeight` (default -3),
 `pm_thirdPersonAngle` (0 behind, 180 in front; with the camera in front of the player the aim
 point can fall behind it, and the crosshair then stays at the centre) and `pm_thirdPersonClip`
 (keep the camera out of walls, default on). In Quake 4, vehicles keep Raven's own third-person
