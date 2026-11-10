@@ -187,7 +187,9 @@ idSoundEmitterQ4 *idSoundSystemQ4Local::EmitterForIndex( int worldId, int handle
 		return NULL;
 	}
 	idList<idSoundEmitterQ4Local *> &list = emitters[worldId];
-	list.AssureSize( handle + 1, NULL );
+	if ( handle >= list.Num() ) {
+		list.AssureSize( handle + 1, NULL );		// grow only: AssureSize would also shrink the list
+	}
 	if ( list[handle] == NULL ) {
 		list[handle] = new idSoundEmitterQ4Local( worldId, handle );
 	}

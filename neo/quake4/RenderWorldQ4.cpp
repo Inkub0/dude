@@ -294,7 +294,9 @@ qhandle_t idRenderWorldQ4Local::AddEntityDef( const renderEntityQ4_t *re ) {
 		return handle;
 	}
 
-	entities.AssureSize( handle + 1, NULL );
+	if ( handle >= entities.Num() ) {
+		entities.AssureSize( handle + 1, NULL );		// grow only: AssureSize would also shrink the list
+	}
 	if ( entities[handle] != NULL ) {
 		// a stale game entity under a recycled handle (never expected)
 		if ( entities[handle]->overlayHandle >= 0 ) {
@@ -311,7 +313,9 @@ void idRenderWorldQ4Local::UpdateEntityDef( qhandle_t entityHandle, const render
 	if ( entityHandle < 0 ) {
 		return;
 	}
-	entities.AssureSize( entityHandle + 1, NULL );
+	if ( entityHandle >= entities.Num() ) {
+		entities.AssureSize( entityHandle + 1, NULL );	// grow only
+	}
 	entityQ4_t *ent = entities[entityHandle];
 	if ( ent == NULL ) {
 		ent = entities[entityHandle] = new entityQ4_t;
