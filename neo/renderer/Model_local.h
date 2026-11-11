@@ -261,6 +261,12 @@ private:
 
 	void						TransformVerts( idDrawVert *verts, const idJointMat *joints );
 	void						TransformScaledVerts( idDrawVert *verts, const idJointMat *joints, float scale );
+	// DUDE: idMD5Mesh::UpdateSurface's stages (Model_md5.cpp)
+	void						SkinSurfaceCpu( const struct renderEntity_s *ent, const idJointMat *joints, srfTriangles_t *tri );
+	void						MatchDecalNormals( const idJointMat *joints, srfTriangles_t *tri ) const;
+	void						ReconstructLbsNormals( const idJointMat *joints, srfTriangles_t *tri ) const;
+	void						QueueGpuSkin( const struct renderEntity_s *ent, const idJointMat *joints, srfTriangles_t *tri );
+	void						QueueTessDeform( srfTriangles_t *tri, bool tessDeformActive, bool shownLastFrame );
 };
 
 class idRenderModelMD5 : public idRenderModelStatic {

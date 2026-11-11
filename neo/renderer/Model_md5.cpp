@@ -1493,19 +1493,12 @@ bool idMD5Mesh::BakeTessOnGpu( void ) {
 
 /*
 ====================
-idMD5Mesh::UpdateSurface
+R_MD5_ReuseSurfaceTris
+
+DUDE: re-use the surface's triangles (and their index cache) when the counts match, else allocate afresh
 ====================
 */
-void idMD5Mesh::UpdateSurface( const struct renderEntity_s *ent, const idJointMat *entJoints, modelSurface_t *surf ) {
-	int i, base;
-	srfTriangles_t *tri;
-
-	tr.pc.c_deformedSurfaces++;
-	tr.pc.c_deformedVerts += deformInfo->numOutputVerts;
-	tr.pc.c_deformedIndexes += deformInfo->numIndexes;
-
-	surf->shader = shader;
-
+static void R_MD5_ReuseSurfaceTris( modelSurface_t *surf, const deformInfo_t *deformInfo ) {
 	if ( surf->geometry ) {
 		// if the number of verts and indexes are the same we can re-use the triangle surface
 		// the number of indexes must be the same to assure the correct amount of memory is allocated for the facePlanes
@@ -1530,8 +1523,18 @@ void idMD5Mesh::UpdateSurface( const struct renderEntity_s *ent, const idJointMa
 	} else {
 		surf->geometry = R_AllocStaticTriSurf();
 	}
+}
 
-	tri = surf->geometry;
+/*
+====================
+idMD5Mesh::SkinSurfaceCpu
+
+DUDE: the CPU position skin (always runs: culling, stencil shadows, bounds, decals and the game's hit traces read
+tri->verts), the mirror seam replication, the bounds and the tangent derive
+====================
+*/
+void idMD5Mesh::SkinSurfaceCpu( const struct renderEntity_s *ent, const idJointMat *entJoints, srfTriangles_t *tri ) {
+	int i, base;
 
 	// note that some of the data is references, and should not be freed
 	tri->deformedSurface = true;
@@ -1612,7 +1615,97 @@ void idMD5Mesh::UpdateSurface( const struct renderEntity_s *ent, const idJointMa
 		// set face planes, vertex normals, tangents
 		R_DeriveTangents( tri );
 	}
+}
 
+/*
+====================
+idMD5Mesh::ReconstructLbsNormals
+
+DUDE: tri->verts.normal = the SAME LBS-of-welded-bind normal the GPU skin kernel writes (decal-vs-body parity)
+====================
+*/
+void idMD5Mesh::ReconstructLbsNormals( const idJointMat *entJoints, srfTriangles_t *tri ) const {
+	// EXACT decal-vs-body parity: reconstruct on the CPU the SAME LBS-of-welded-bind normal the
+	// GPU skin kernel (md5skin.comp) writes into gpuSkinVB, and store it in tri->verts.normal --
+	// the source the blood decal copies (ModelOverlay.cpp). The geometry-derived R_DeriveTangents
+	// normal drifts a few degrees from the LBS normal on heavily-deforming multi-joint regions
+	// (shoulders/hands), and dudeTessPN bends the surface using ONLY corner normals, so that drift
+	// pushed the decal's PN silhouette off the body's and it clipped through. Copying the identical
+	// LBS normal makes the decal ride the exact body surface (the union-find weld below only killed
+	// the coincident-seam-split share; this closes the residual method mismatch). No-op on the drawn
+	// body (it rasterizes gpuSkinVB, not tri->verts) and on the always-on CPU consumers (culling/
+	// shadow/bounds read xyz only); only the decal copy + the unused ambient cache change.
+	// skinExpandLocalTBN is already welded, so this yields welded normals for free. NORMAL ONLY:
+	// PN ignores tangents and the body's gpuSkinVB tangents are unwelded.
+	const int numOut = numOutputVerts;
+	for ( int i = 0; i < numOut; i++ ) {
+		idVec3 nrm( 0.0f, 0.0f, 0.0f );
+		for ( unsigned int j = skinWeightStart[i]; j < (unsigned int)skinExpandCount; j++ ) {
+			const int jointIdx = skinExpandWDesc[j * 2 + 0] / 12;	// FLOAT base = joint*12 (not the byte joint*48)
+			const float w = skinExpandWeights[j].w;
+			nrm += w * ( entJoints[jointIdx] * skinExpandLocalTBN[j * 3 + 0].ToVec3() );	// jrot = idJointMat::operator*(vec3)
+			if ( skinExpandWDesc[j * 2 + 1] == 1 ) { break; }		// terminator: last weight of this vert's run
+		}
+		nrm.Normalize();
+		tri->verts[i].normal = nrm;
+	}
+}
+
+/*
+====================
+R_MD5_WeldNormals
+
+DUDE: weld the coincident (UV-split + mirror-seam) vertex normals with the bind weld's union-find groups
+====================
+*/
+static void R_MD5_WeldNormals( const deformInfo_t *deformInfo, srfTriangles_t *tri ) {
+	// Weld coincident groups so they agree -- ONLY when tessellation is active (matches the GPU derive
+	// kernel's doWeld gating, and the CPU-deform path's own need). With tessellation off the posed
+	// per-vertex normals are left as the CPU skinner leaves them, so the decal rides the same unwelded
+	// body and no hard-edge seam is rounded into a cut. Same union-find groups as the bind weld, no
+	// angle gate, 1e-12 cancel guard.
+	const int numOut = deformInfo->numOutputVerts;
+	const int numMir = deformInfo->numMirroredVerts;
+	const int weldBase = numOut - numMir;
+	int *parent = (int *)Mem_Alloc16( numOut * sizeof( int ) );
+	idVec3 *sum = (idVec3 *)Mem_Alloc16( numOut * sizeof( idVec3 ) );
+	for ( int wi = 0; wi < numOut; wi++ ) { parent[wi] = wi; sum[wi].Zero(); }
+	for ( int wi = 0; wi < deformInfo->numDupVerts; wi++ ) {
+		const int a = deformInfo->dupVerts[wi * 2 + 0];
+		const int b = deformInfo->dupVerts[wi * 2 + 1];
+		if ( a < numOut && b < numOut ) {
+			const int ra = R_MD5_UFFind( parent, a ), rb = R_MD5_UFFind( parent, b );
+			if ( ra != rb ) { parent[rb] = ra; }
+		}
+	}
+	for ( int wi = 0; wi < numMir; wi++ ) {
+		const int a = weldBase + wi;
+		const int b = deformInfo->mirroredVerts[wi];
+		if ( a < numOut && b < numOut ) {
+			const int ra = R_MD5_UFFind( parent, a ), rb = R_MD5_UFFind( parent, b );
+			if ( ra != rb ) { parent[rb] = ra; }
+		}
+	}
+	for ( int wi = 0; wi < numOut; wi++ ) { sum[R_MD5_UFFind( parent, wi )] += tri->verts[wi].normal; }
+	for ( int wi = 0; wi < numOut; wi++ ) {
+		idVec3 n = sum[R_MD5_UFFind( parent, wi )];
+		if ( n.LengthSqr() > 1e-12f ) {		// a fold whose normals cancel: leave it, never hand a NaN
+			n.Normalize();
+			tri->verts[wi].normal = n;
+		}
+	}
+	Mem_Free16( parent );
+	Mem_Free16( sum );
+}
+
+/*
+====================
+idMD5Mesh::MatchDecalNormals
+
+DUDE: make tri->verts.normal (what a blood decal copies) match the surface the GPU-skinned / tessellated body draws
+====================
+*/
+void idMD5Mesh::MatchDecalNormals( const idJointMat *entJoints, srfTriangles_t *tri ) const {
 	// DUDE tessellation / blood-decal parity (docs/tessellation.md): weld this frame's coincident
 	// (UV-split + mirror-seam) vertex NORMALS with the SAME union-find groups the GPU bind weld uses
 	// (BuildGpuSkinData, no angle gate). Two reasons: (1) it keeps the mesh's seams from opening under
@@ -1653,75 +1746,21 @@ void idMD5Mesh::UpdateSurface( const struct renderEntity_s *ent, const idJointMa
 		const bool wantWeld = deriveActive ? ( r_gpuSkinWeld.GetBool() && tessActive ) : tessActive;
 		if ( !deriveActive && r_gpuSkinning.GetBool() && skinExpandLocalTBN && skinWeightStart && skinExpandWDesc
 		     && skinExpandWeights && skinExpandCount > 0 && numOutputVerts == deformInfo->numOutputVerts ) {
-			// EXACT decal-vs-body parity: reconstruct on the CPU the SAME LBS-of-welded-bind normal the
-			// GPU skin kernel (md5skin.comp) writes into gpuSkinVB, and store it in tri->verts.normal --
-			// the source the blood decal copies (ModelOverlay.cpp). The geometry-derived R_DeriveTangents
-			// normal drifts a few degrees from the LBS normal on heavily-deforming multi-joint regions
-			// (shoulders/hands), and dudeTessPN bends the surface using ONLY corner normals, so that drift
-			// pushed the decal's PN silhouette off the body's and it clipped through. Copying the identical
-			// LBS normal makes the decal ride the exact body surface (the union-find weld below only killed
-			// the coincident-seam-split share; this closes the residual method mismatch). No-op on the drawn
-			// body (it rasterizes gpuSkinVB, not tri->verts) and on the always-on CPU consumers (culling/
-			// shadow/bounds read xyz only); only the decal copy + the unused ambient cache change.
-			// skinExpandLocalTBN is already welded, so this yields welded normals for free. NORMAL ONLY:
-			// PN ignores tangents and the body's gpuSkinVB tangents are unwelded.
-			const int numOut = numOutputVerts;
-			for ( int i = 0; i < numOut; i++ ) {
-				idVec3 nrm( 0.0f, 0.0f, 0.0f );
-				for ( unsigned int j = skinWeightStart[i]; j < (unsigned int)skinExpandCount; j++ ) {
-					const int jointIdx = skinExpandWDesc[j * 2 + 0] / 12;	// FLOAT base = joint*12 (not the byte joint*48)
-					const float w = skinExpandWeights[j].w;
-					nrm += w * ( entJoints[jointIdx] * skinExpandLocalTBN[j * 3 + 0].ToVec3() );	// jrot = idJointMat::operator*(vec3)
-					if ( skinExpandWDesc[j * 2 + 1] == 1 ) { break; }		// terminator: last weight of this vert's run
-				}
-				nrm.Normalize();
-				tri->verts[i].normal = nrm;
-			}
+			ReconstructLbsNormals( entJoints, tri );
 		} else if ( wantWeld && ( deformInfo->numDupVerts > 0 || deformInfo->numMirroredVerts > 0 ) ) {
-			// Weld coincident groups so they agree -- ONLY when tessellation is active (matches the GPU derive
-			// kernel's doWeld gating, and the CPU-deform path's own need). With tessellation off the posed
-			// per-vertex normals are left as the CPU skinner leaves them, so the decal rides the same unwelded
-			// body and no hard-edge seam is rounded into a cut. Same union-find groups as the bind weld, no
-			// angle gate, 1e-12 cancel guard.
-			const int numOut = deformInfo->numOutputVerts;
-			const int numMir = deformInfo->numMirroredVerts;
-			const int weldBase = numOut - numMir;
-			int *parent = (int *)Mem_Alloc16( numOut * sizeof( int ) );
-			idVec3 *sum = (idVec3 *)Mem_Alloc16( numOut * sizeof( idVec3 ) );
-			for ( int wi = 0; wi < numOut; wi++ ) { parent[wi] = wi; sum[wi].Zero(); }
-			for ( int wi = 0; wi < deformInfo->numDupVerts; wi++ ) {
-				const int a = deformInfo->dupVerts[wi * 2 + 0];
-				const int b = deformInfo->dupVerts[wi * 2 + 1];
-				if ( a < numOut && b < numOut ) {
-					const int ra = R_MD5_UFFind( parent, a ), rb = R_MD5_UFFind( parent, b );
-					if ( ra != rb ) { parent[rb] = ra; }
-				}
-			}
-			for ( int wi = 0; wi < numMir; wi++ ) {
-				const int a = weldBase + wi;
-				const int b = deformInfo->mirroredVerts[wi];
-				if ( a < numOut && b < numOut ) {
-					const int ra = R_MD5_UFFind( parent, a ), rb = R_MD5_UFFind( parent, b );
-					if ( ra != rb ) { parent[rb] = ra; }
-				}
-			}
-			for ( int wi = 0; wi < numOut; wi++ ) { sum[R_MD5_UFFind( parent, wi )] += tri->verts[wi].normal; }
-			for ( int wi = 0; wi < numOut; wi++ ) {
-				idVec3 n = sum[R_MD5_UFFind( parent, wi )];
-				if ( n.LengthSqr() > 1e-12f ) {		// a fold whose normals cancel: leave it, never hand a NaN
-					n.Normalize();
-					tri->verts[wi].normal = n;
-				}
-			}
-			Mem_Free16( parent );
-			Mem_Free16( sum );
+			R_MD5_WeldNormals( deformInfo, tri );
 		}
 	}
+}
 
-	// Phase 2 GPU skinning (docs/gpu-offload-plan.md): additionally skin this surface on the GPU
-	// into a persistent BU_SKIN buffer that the draw passes prefer (RB_RHI_StreamAmbient). The CPU
-	// path above stays intact as the safety net (stencil, bounds, fallback). With r_gpuSkinning
-	// off, or on GL3, or before the skin data is built, gpuSkinVB stays 0 = no behavior change.
+/*
+====================
+R_MD5_ReleaseGpuSkin
+
+DUDE: GPU skinning toggled off: release the frozen GPU pose so the CPU-skinned verts drive the draw again
+====================
+*/
+static void R_MD5_ReleaseGpuSkin( srfTriangles_t *tri ) {
 	if ( !r_gpuSkinning.GetBool() && tri->gpuSkinVB ) {
 		// The toggle just went off. RB_RHI_StreamAmbient prefers gpuSkinVB whenever it exists, but
 		// nothing below refreshes it any more, so leaving it attached would rasterize the frozen
@@ -1736,12 +1775,17 @@ void idMD5Mesh::UpdateSurface( const struct renderEntity_s *ent, const idJointMa
 		if ( tri->gpuSkinPrevVB ) { rhi::GetRHI()->DestroyBuffer( tri->gpuSkinPrevVB ); }
 		tri->gpuSkinPrevVB = 0;	tri->gpuSkinPrevAddr = 0;	tri->gpuSkinPrevValid = false;
 	}
+}
 
-	// deform-once motion vectors (below): whether this surface was drawn last frame, read before the skin
-	// block stamps this frame - a pose reused unchanged from the cached dynamic model (Quake 4 between its
-	// tics) leaves last frame's deform in tessDeformVB
-	const bool shownLastFrame = ( tri->gpuSkinShownFrame == tr.frameCount - 1 );
+/*
+====================
+idMD5Mesh::QueueGpuSkin
 
+DUDE Phase 2 GPU skinning (docs/gpu-offload-plan.md): skin this surface on the GPU into its persistent BU_SKIN buffer,
+once per frame (+ last frame's positions for the skinned motion vectors)
+====================
+*/
+void idMD5Mesh::QueueGpuSkin( const struct renderEntity_s *ent, const idJointMat *entJoints, srfTriangles_t *tri ) {
 	if ( r_gpuSkinning.GetBool() && rhi::GetActiveBackendType() == rhi::BT_VULKAN
 	     && skinExpandLocalTBN && R_MD5_SkinShader( rhi::GetRHI() ) != 0 && EnsureSkinBuffersUploaded() ) {
 		rhi::RHI *r = rhi::GetRHI();
@@ -1828,81 +1872,78 @@ void idMD5Mesh::UpdateSurface( const struct renderEntity_s *ent, const idJointMa
 			                          && ( r_tessellation.GetBool() || r_tessDeform.GetBool() );
 		}
 	}
+}
 
-	// Roadmap B (docs/tessellation.md): deform this surface once/frame in a compute pass into an
-	// expanded buffer every classifier-approved pass draws (RB_RHI_ApplyDeform), retiring the per-pass
-	// fixed-function tessellation. Source verts are the current pose: gpuSkinVB when GPU-skinned
-	// (fast, GPU-resident, ordered by the skin->deform barrier), else the CPU-skinned tri->verts
-	// (needs current-pose tangents; snapshotted to frame memory, uploaded by the flush). The
-	// fixed-function tess path stays intact as the fallback (r_tessDeform off / not baked / GL3).
-	//
-	// GUARDRAIL: deform-once REQUIRES GPU skinning. Without it the source is the CPU-skinned verts,
-	// which the flush must upload as a fresh storage buffer (CreateBuffer/DestroyBuffer) per surface
-	// EVERY frame — allocation churn that made deform-once ~20x SLOWER than plain fixed-function tess
-	// in a multi-NPC scene (measured, Phobos reception). Gating on r_gpuSkinning removes that footgun:
-	// with skinning off, no deform buffer is ever built and every pass falls back to fixed-function
-	// tessellation (which also has the distance LOD the fixed-baked deform topology lacks). So the two
-	// GPU-offload features are wired together — deform-once only ever runs on top of GPU-resident source.
-	const bool tessDeformActive = r_tessDeform.GetBool() && r_gpuSkinning.GetBool();
+/*
+====================
+R_MD5_ReleaseTessDeform
 
-	// DUDE: the subdivision level follows r_tessLevel live (the Graphics slider). The bake was made at load for
-	// the level then, so a change re-bakes the mesh here, on its next deform: the fixed-function passes (the
-	// translucent badges and decals on the armor, which can't use the deform buffer) read the cvar every frame,
-	// and drawing the body at the old level left them curving at the new one - floating off or sinking into the
-	// armor. With the GPU bake that is the index list on the CPU and one dispatch; the per-surface buffers below
-	// resize to the new vertex count. (Not mid level load: a queued bake is filled at its end.)
-	if ( tessDeformActive && rhi::GetActiveBackendType() == rhi::BT_VULKAN && numTessOutVerts > 0 && !tessBakePending ) {
-		const int liveLevel = idMath::ClampInt( 1, 32, r_tessLevel.GetInteger() );
-		// not while a deform job recorded earlier this frame (another entity with this model) still has to read
-		// the current buffers: the first of them to draw next frame re-bakes, before any job
-		if ( liveLevel != tessBakeLevel && tessJobFrame != tr.frameCount ) {
-			BuildTessTopology( NULL );
-		}
+DUDE: deform-once toggled off: release so the draw stops binding the frozen last deform and falls back
+====================
+*/
+static void R_MD5_ReleaseTessDeform( srfTriangles_t *tri ) {
+	// toggled off: release so the draw stops binding the frozen last deform and falls back
+	rhi::RHI *r = rhi::GetRHI();
+	if ( r ) {
+		r->DestroyBuffer( tri->tessDeformVB );
+		if ( tri->tessDeformIB ) { r->DestroyBuffer( tri->tessDeformIB ); }
+		if ( tri->tessDeformPrevVB ) { r->DestroyBuffer( tri->tessDeformPrevVB ); }
 	}
+	tri->tessDeformVB = tri->tessDeformIB = 0;
+	tri->tessDeformVerts = tri->tessDeformIndexes = 0;
+	tri->tessDeformFrame = -1;
+	tri->tessDeformPrevVB = 0;	tri->tessDeformPrevAddr = 0;
+}
 
-	if ( !tessDeformActive && tri->tessDeformVB ) {
-		// toggled off: release so the draw stops binding the frozen last deform and falls back
-		rhi::RHI *r = rhi::GetRHI();
-		if ( r ) {
-			r->DestroyBuffer( tri->tessDeformVB );
-			if ( tri->tessDeformIB ) { r->DestroyBuffer( tri->tessDeformIB ); }
-			if ( tri->tessDeformPrevVB ) { r->DestroyBuffer( tri->tessDeformPrevVB ); }
-		}
+/*
+====================
+R_MD5_EnsureTessDeformBuffers
+
+DUDE: the per-surface deform-once output VB + IB, (re)allocated when missing or resized (a re-bake at another L)
+====================
+*/
+static void R_MD5_EnsureTessDeformBuffers( rhi::RHI *r, srfTriangles_t *tri, int numTessV, int numTessIdx, const glIndex_t *tessExpandIndexes ) {
+	// (re)allocate the per-surface output VB + IB if missing or resized (e.g. re-baked at another L)
+	if ( tri->tessDeformVB && tri->tessDeformVerts != numTessV ) {
+		r->DestroyBuffer( tri->tessDeformVB );
+		if ( tri->tessDeformIB ) { r->DestroyBuffer( tri->tessDeformIB ); }
 		tri->tessDeformVB = tri->tessDeformIB = 0;
-		tri->tessDeformVerts = tri->tessDeformIndexes = 0;
-		tri->tessDeformFrame = -1;
+		if ( tri->tessDeformPrevVB ) { r->DestroyBuffer( tri->tessDeformPrevVB ); }
 		tri->tessDeformPrevVB = 0;	tri->tessDeformPrevAddr = 0;
 	}
+	if ( !tri->tessDeformVB ) {
+		idDrawVert *seed = (idDrawVert *)Mem_Alloc16( numTessV * sizeof( idDrawVert ) );
+		for ( int k = 0; k < numTessV; k++ ) { seed[k].Clear(); }
+		tri->tessDeformVB = r->CreateBuffer( rhi::BU_SKIN, numTessV * (int)sizeof( idDrawVert ), seed );
+		Mem_Free16( seed );
+		tri->tessDeformIB = r->CreateBuffer( rhi::BU_INDEX, numTessIdx * (int)sizeof( glIndex_t ), tessExpandIndexes );
+		tri->tessDeformVerts = numTessV;
+		tri->tessDeformIndexes = numTessIdx;
+		tri->tessDeformFrame = -1;
+		if ( !tri->tessDeformVB || !tri->tessDeformIB ) {
+			if ( tri->tessDeformVB ) { r->DestroyBuffer( tri->tessDeformVB ); }
+			if ( tri->tessDeformIB ) { r->DestroyBuffer( tri->tessDeformIB ); }
+			tri->tessDeformVB = tri->tessDeformIB = 0;
+			tri->tessDeformVerts = tri->tessDeformIndexes = 0;
+		}
+	}
+}
 
+/*
+====================
+idMD5Mesh::QueueTessDeform
+
+DUDE Roadmap B (docs/tessellation.md): deform this surface once per frame in a compute pass into an expanded buffer
+every classifier-approved pass draws (RB_RHI_ApplyDeform); needs GPU skinning (see the guardrail at the caller)
+====================
+*/
+void idMD5Mesh::QueueTessDeform( srfTriangles_t *tri, bool tessDeformActive, bool shownLastFrame ) {
 	if ( tessDeformActive && rhi::GetActiveBackendType() == rhi::BT_VULKAN
 	     && ( tessBarySeam || tessGpuBake ) && numTessOutVerts > 0 && !tessBakePending && R_MD5_TessShader( rhi::GetRHI() ) != 0 && EnsureTessBuffersUploaded() ) {
 		rhi::RHI *r = rhi::GetRHI();
 		const int numTessV = numTessOutVerts;
 		const int numTessIdx = numTessOutTris * 3;
-		// (re)allocate the per-surface output VB + IB if missing or resized (e.g. re-baked at another L)
-		if ( tri->tessDeformVB && tri->tessDeformVerts != numTessV ) {
-			r->DestroyBuffer( tri->tessDeformVB );
-			if ( tri->tessDeformIB ) { r->DestroyBuffer( tri->tessDeformIB ); }
-			tri->tessDeformVB = tri->tessDeformIB = 0;
-			if ( tri->tessDeformPrevVB ) { r->DestroyBuffer( tri->tessDeformPrevVB ); }
-			tri->tessDeformPrevVB = 0;	tri->tessDeformPrevAddr = 0;
-		}
-		if ( !tri->tessDeformVB ) {
-			idDrawVert *seed = (idDrawVert *)Mem_Alloc16( numTessV * sizeof( idDrawVert ) );
-			for ( int k = 0; k < numTessV; k++ ) { seed[k].Clear(); }
-			tri->tessDeformVB = r->CreateBuffer( rhi::BU_SKIN, numTessV * (int)sizeof( idDrawVert ), seed );
-			Mem_Free16( seed );
-			tri->tessDeformIB = r->CreateBuffer( rhi::BU_INDEX, numTessIdx * (int)sizeof( glIndex_t ), tessExpandIndexes );
-			tri->tessDeformVerts = numTessV;
-			tri->tessDeformIndexes = numTessIdx;
-			tri->tessDeformFrame = -1;
-			if ( !tri->tessDeformVB || !tri->tessDeformIB ) {
-				if ( tri->tessDeformVB ) { r->DestroyBuffer( tri->tessDeformVB ); }
-				if ( tri->tessDeformIB ) { r->DestroyBuffer( tri->tessDeformIB ); }
-				tri->tessDeformVB = tri->tessDeformIB = 0;
-				tri->tessDeformVerts = tri->tessDeformIndexes = 0;
-			}
-		}
+		R_MD5_EnsureTessDeformBuffers( r, tri, numTessV, numTessIdx, tessExpandIndexes );
 		// deform-once motion vectors: a second per-surface buffer receives last frame's deformed positions (the
 		// PREVPOS kernel copies them out of tessDeformVB before overwriting it); gbuffer.vert reads it by device
 		// address. Same lifetime rules as gpuSkinPrevVB.
@@ -1952,7 +1993,79 @@ void idMD5Mesh::UpdateSurface( const struct renderEntity_s *ent, const idJointMa
 			}
 		}
 	}
+}
 
+/*
+====================
+idMD5Mesh::UpdateSurface
+====================
+*/
+void idMD5Mesh::UpdateSurface( const struct renderEntity_s *ent, const idJointMat *entJoints, modelSurface_t *surf ) {
+	srfTriangles_t *tri;
+
+	tr.pc.c_deformedSurfaces++;
+	tr.pc.c_deformedVerts += deformInfo->numOutputVerts;
+	tr.pc.c_deformedIndexes += deformInfo->numIndexes;
+
+	surf->shader = shader;
+
+	R_MD5_ReuseSurfaceTris( surf, deformInfo );
+
+	tri = surf->geometry;
+
+	SkinSurfaceCpu( ent, entJoints, tri );
+
+	MatchDecalNormals( entJoints, tri );
+
+	// Phase 2 GPU skinning (docs/gpu-offload-plan.md): additionally skin this surface on the GPU
+	// into a persistent BU_SKIN buffer that the draw passes prefer (RB_RHI_StreamAmbient). The CPU
+	// path above stays intact as the safety net (stencil, bounds, fallback). With r_gpuSkinning
+	// off, or on GL3, or before the skin data is built, gpuSkinVB stays 0 = no behavior change.
+	R_MD5_ReleaseGpuSkin( tri );
+
+	// deform-once motion vectors (below): whether this surface was drawn last frame, read before the skin
+	// block stamps this frame - a pose reused unchanged from the cached dynamic model (Quake 4 between its
+	// tics) leaves last frame's deform in tessDeformVB
+	const bool shownLastFrame = ( tri->gpuSkinShownFrame == tr.frameCount - 1 );
+
+	QueueGpuSkin( ent, entJoints, tri );
+
+	// Roadmap B (docs/tessellation.md): deform this surface once/frame in a compute pass into an
+	// expanded buffer every classifier-approved pass draws (RB_RHI_ApplyDeform), retiring the per-pass
+	// fixed-function tessellation. Source verts are the current pose: gpuSkinVB when GPU-skinned
+	// (fast, GPU-resident, ordered by the skin->deform barrier), else the CPU-skinned tri->verts
+	// (needs current-pose tangents; snapshotted to frame memory, uploaded by the flush). The
+	// fixed-function tess path stays intact as the fallback (r_tessDeform off / not baked / GL3).
+	//
+	// GUARDRAIL: deform-once REQUIRES GPU skinning. Without it the source is the CPU-skinned verts,
+	// which the flush must upload as a fresh storage buffer (CreateBuffer/DestroyBuffer) per surface
+	// EVERY frame — allocation churn that made deform-once ~20x SLOWER than plain fixed-function tess
+	// in a multi-NPC scene (measured, Phobos reception). Gating on r_gpuSkinning removes that footgun:
+	// with skinning off, no deform buffer is ever built and every pass falls back to fixed-function
+	// tessellation (which also has the distance LOD the fixed-baked deform topology lacks). So the two
+	// GPU-offload features are wired together — deform-once only ever runs on top of GPU-resident source.
+	const bool tessDeformActive = r_tessDeform.GetBool() && r_gpuSkinning.GetBool();
+
+	// DUDE: the subdivision level follows r_tessLevel live (the Graphics slider). The bake was made at load for
+	// the level then, so a change re-bakes the mesh here, on its next deform: the fixed-function passes (the
+	// translucent badges and decals on the armor, which can't use the deform buffer) read the cvar every frame,
+	// and drawing the body at the old level left them curving at the new one - floating off or sinking into the
+	// armor. With the GPU bake that is the index list on the CPU and one dispatch; the per-surface buffers below
+	// resize to the new vertex count. (Not mid level load: a queued bake is filled at its end.)
+	if ( tessDeformActive && rhi::GetActiveBackendType() == rhi::BT_VULKAN && numTessOutVerts > 0 && !tessBakePending ) {
+		const int liveLevel = idMath::ClampInt( 1, 32, r_tessLevel.GetInteger() );
+		// not while a deform job recorded earlier this frame (another entity with this model) still has to read
+		// the current buffers: the first of them to draw next frame re-bakes, before any job
+		if ( liveLevel != tessBakeLevel && tessJobFrame != tr.frameCount ) {
+			BuildTessTopology( NULL );
+		}
+	}
+
+	if ( !tessDeformActive && tri->tessDeformVB ) {
+		R_MD5_ReleaseTessDeform( tri );
+	}
+
+	QueueTessDeform( tri, tessDeformActive, shownLastFrame );
 }
 
 /*
