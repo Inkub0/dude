@@ -617,7 +617,6 @@ void idEffectSegment::Clear( void ) {
 	hasParticles = false;
 	complex = false;
 	ignoreDuration = false;
-	temporary = false;
 	durationIsSound = false;
 }
 
@@ -1079,7 +1078,6 @@ static void FinishEffectSegment( idEffectSegment &segment ) {
 	segment.hasParticles = false;
 	segment.complex = false;
 	segment.ignoreDuration = false;
-	segment.temporary = false;
 	// a sound shader sets a sound segment's duration to the sound's length, unless it has its own
 	// (retail reads the length when the decl is parsed; DUDE when the segment plays, once the
 	// level's samples are in)
@@ -1097,16 +1095,12 @@ static void FinishEffectSegment( idEffectSegment &segment ) {
 		case EFFECT_SEG_SOUND:
 			segment.ignoreDuration = true;
 			break;
-		case EFFECT_SEG_DECAL:
-			segment.temporary = true;
-			break;
 		default:
 			break;
 	}
 	if ( particle.type == EFFECT_PARTICLE_DEBRIS ) {
 		// debris becomes game entities
 		segment.hasParticles = false;
-		segment.temporary = true;
 	}
 	segment.complex = ( segment.flags & EFFECT_SEGMENT_CONSTANT ) || particle.trailType == EFFECT_TRAIL_SEGMENT ||
 		particle.hasPhysics || particle.timeoutEffects.Num() > 0 ||

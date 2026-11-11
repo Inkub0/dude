@@ -188,6 +188,7 @@ idSoundEmitterQ4 *idSoundSystemQ4Local::EmitterForIndex( int worldId, int handle
 	}
 	idList<idSoundEmitterQ4Local *> &list = emitters[worldId];
 	if ( handle >= list.Num() ) {
+		// every new slot NULL (idList::AssureSize leaves the slots inside the old capacity as they were)
 		const int oldNum = list.Num();
 		list.SetNum( handle + 1 );
 		for ( int i = oldNum; i < list.Num(); i++ ) {

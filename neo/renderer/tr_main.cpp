@@ -2856,7 +2856,6 @@ static int						s_rtEmissiveLastRebuildMs = -100000;	// Sys_Milliseconds of the 
 // first build of a map, after a table cvar changed, or with r_rtEmissiveTableDebug; the rebuilds a map makes on its
 // own print one timed line instead - writing ~250 console + log lines was part of each rebuild's hitch
 static bool						s_rtEmissiveReport = true;
-static int						s_rtEmissiveRowBuilds = 0;		// R_RtEmissiveBuildRows calls, for the mover-upkeep timing (R_RtEmissiveRefreshMovers)
 static idStr					s_rtEmissiveReportedMap;
 static void R_RtEmissiveReport( const char *fmt, ... ) id_attribute((format(printf,1,2)));
 static void R_RtEmissiveReport( const char *fmt, ... ) {
@@ -3347,13 +3346,20 @@ static float R_RtEmissiveTableDistance( const idVec3 &p ) {
 }
 static bool R_RtEmissiveNearTable( const idVec3 &p, float reach ) { return R_RtEmissiveTableDistance( p ) < reach; }
 
-static void R_RtEmissiveFree( void ) {
-	rhi::RHI *r = rhi::GetRHI();
-	if ( r != NULL ) {
-		if ( s_rtEmissiveBuf != 0 )   { r->DestroyBuffer( s_rtEmissiveBuf ); }
-		if ( s_rtEmissiveDbgVB != 0 ) { r->DestroyBuffer( s_rtEmissiveDbgVB ); }
-		if ( s_rtEmissiveDbgIB != 0 ) { r->DestroyBuffer( s_rtEmissiveDbgIB ); }
+// drop the table's GPU handles WITHOUT destroying them (a new backend owns the slots now, R_RtResetSceneState) and
+// clear every CPU-side list, so the next RT frame rebuilds from nothing
+// r_rtEmissiveScale as the table uses it (the clamp the cvar's range would give it)
+// the seen-model list reaches entity index i, the new slots NULL (not idList::AssureSize: it leaves the slots inside
+// the old capacity as they were)
+static void R_RtEmissiveSeenGrow( int i ) {
+	while ( s_rtEmissiveSeenModel.Num() <= i ) {
+		s_rtEmissiveSeenModel.Append( NULL );
 	}
+}
+
+static float R_RtEmissiveScale( void ) { return idMath::ClampFloat( 0.0f, 64.0f, r_rtEmissiveScale.GetFloat() ); }
+
+static void R_RtEmissiveForget( void ) {
 	s_rtEmissiveBuf = 0;	s_rtEmissiveAddr = 0;	s_rtEmissiveTotalFlux = 0.0f;
 	s_rtEmissiveRows.Clear();
 	s_rtEmissiveRowAnim.Clear();
@@ -3369,6 +3375,16 @@ static void R_RtEmissiveFree( void ) {
 	s_rtEmissiveFlareCount = 0;
 	s_rtEmissiveMovedGroups = 0;
 	s_rtEmissiveMap.Clear();
+}
+
+static void R_RtEmissiveFree( void ) {
+	rhi::RHI *r = rhi::GetRHI();
+	if ( r != NULL ) {
+		if ( s_rtEmissiveBuf != 0 )   { r->DestroyBuffer( s_rtEmissiveBuf ); }
+		if ( s_rtEmissiveDbgVB != 0 ) { r->DestroyBuffer( s_rtEmissiveDbgVB ); }
+		if ( s_rtEmissiveDbgIB != 0 ) { r->DestroyBuffer( s_rtEmissiveDbgIB ); }
+	}
+	R_RtEmissiveForget();
 }
 
 static int R_RtCmpEmissiveCensus( const void *pa, const void *pb ) {
@@ -3577,7 +3593,7 @@ static bool R_RtEmissiveUploadTable( rhi::RHI *r, int *bytesOut ) {
 
 static void R_RtEmissiveBuild( const idRenderWorldLocal *world, rhi::RHI *r ) {
 	const int msStart = Sys_Milliseconds();
-	const float scale = idMath::ClampFloat( 0.0f, 64.0f, r_rtEmissiveScale.GetFloat() );
+	const float scale = R_RtEmissiveScale();
 	idList<rtEmissiveCensus_t> census;
 	int overflow = 0, worldTris = 0, entityTris = 0, entities = 0, screens = 0;
 	s_rtEmissiveNotResident.Clear();
@@ -3759,7 +3775,6 @@ float R_RtEmissiveLightAnimatedAverage( const idRenderLightLocal *ld ) {
 }
 
 static void R_RtEmissiveBuildRows( void ) {
-	s_rtEmissiveRowBuilds++;
 	s_rtEmissiveRows.SetNum( 0, false );
 	if ( s_rtEmissiveLabels.Num() == 0 || s_rtEmissiveBuf == 0 ) {
 		return;
@@ -3929,7 +3944,7 @@ static bool R_RtEmissiveRegatherGroup( rtEmissiveGroup_t &g, const idRenderEntit
 	scratch.SetNum( 0, false );
 	scratchLocal.SetNum( 0, false );
 	scratchCensus.SetNum( 0, false );
-	const float scale = idMath::ClampFloat( 0.0f, 64.0f, r_rtEmissiveScale.GetFloat() );
+	const float scale = R_RtEmissiveScale();
 	float modelMatrix[16];
 	R_AxisToModelMatrix( def->parms.axis, def->parms.origin, modelMatrix );
 	int overflow = 0;
@@ -4097,34 +4112,15 @@ static void R_RtEmissiveRefreshMoversBody( const idRenderWorldLocal *world, rhi:
 	}
 }
 
-// DUDE (2026-10-27): the per-frame mover upkeep is map-wide (any emissive mover anywhere re-bakes its slice, and any
-// change regenerates the emitter rows the light grid reads). Timed here; with r_rtEmissiveTableDebug on, a summary
-// line every 5 s: the average and worst cost per frame and on how many frames the rows were regenerated.
+// DUDE: the per-frame mover upkeep is map-wide (any emissive mover anywhere re-bakes its slice, and any change
+// regenerates the emitter rows the light grid reads), so it runs once per frame however many views draw.
 static void R_RtEmissiveRefreshMovers( const idRenderWorldLocal *world, rhi::RHI *r ) {
-	static int lastFrame = -1, frames = 0, rowFrames = 0, windowStartMs = 0;
-	static double sumMs = 0.0, maxMs = 0.0;
+	static int lastFrame = -1;
 	if ( tr.frameCount == lastFrame ) {
 		return;
 	}
 	lastFrame = tr.frameCount;
-	const int rowsBefore = s_rtEmissiveRowBuilds;
-	const double t0 = Sys_MillisecondsPrecise();
 	R_RtEmissiveRefreshMoversBody( world, r );
-	const double ms = Sys_MillisecondsPrecise() - t0;
-	sumMs += ms;
-	maxMs = Max( maxMs, ms );
-	frames++;
-	rowFrames += ( s_rtEmissiveRowBuilds != rowsBefore ) ? 1 : 0;
-	const int now = Sys_Milliseconds();
-	if ( now - windowStartMs >= 5000 ) {
-		if ( r_rtEmissiveTableDebug.GetInteger() > 0 && frames > 0 && windowStartMs != 0 ) {
-			common->Printf( "r_rtEmissiveTable: mover upkeep over %.1f s: %.3f ms/frame average, %.3f ms worst; emitter rows regenerated on %d of %d frames\n",
-				( now - windowStartMs ) * 0.001f, sumMs / frames, maxMs, rowFrames, frames );
-		}
-		windowStartMs = now;
-		sumMs = maxMs = 0.0;
-		frames = rowFrames = 0;
-	}
 }
 
 // A group whose entity is gone: its slot was freed, or now holds another model (R_RtEmissiveRefreshMovers darkened it).
@@ -4163,9 +4159,7 @@ static rtEmissiveGroup_t *R_RtEmissiveAdoptGroup( const idRenderWorldLocal *worl
 	if ( best->entityIndex >= 0 && best->entityIndex < s_rtEmissiveSeenModel.Num() && s_rtEmissiveSeenModel[ best->entityIndex ] == best->model ) {
 		s_rtEmissiveSeenModel[ best->entityIndex ] = NULL;
 	}
-	while ( s_rtEmissiveSeenModel.Num() <= entityIndex ) {
-		s_rtEmissiveSeenModel.Append( NULL );
-	}
+	R_RtEmissiveSeenGrow( entityIndex );
 	s_rtEmissiveSeenModel[ entityIndex ] = def->parms.hModel;
 	best->entityIndex = entityIndex;
 	best->regather = true;
@@ -4183,13 +4177,11 @@ static rtEmissiveGroup_t *R_RtEmissiveAdoptGroup( const idRenderWorldLocal *worl
 // eleven times in the demo1 timedemo (r_hitchTrace, 2026-11-02). false = the upload failed: the caller rebuilds.
 static bool R_RtEmissiveAppendEntity( const idRenderWorldLocal *world, rhi::RHI *r, int i ) {
 	const double t0 = Sys_MillisecondsPrecise();
-	const float scale = idMath::ClampFloat( 0.0f, 64.0f, r_rtEmissiveScale.GetFloat() );
+	const float scale = R_RtEmissiveScale();
 	idList<rtEmissiveCensus_t> census;
 	int overflow = 0, screens = 0, runsSplit = 0, fixtures = 0;
 	const int added = R_RtEmissiveGatherEntity( world, i, scale, census, overflow, screens, runsSplit, fixtures, NULL );
-	while ( s_rtEmissiveSeenModel.Num() <= i ) {
-		s_rtEmissiveSeenModel.Append( NULL );
-	}
+	R_RtEmissiveSeenGrow( i );
 	s_rtEmissiveSeenModel[i] = world->entityDefs[i] ? world->entityDefs[i]->parms.hModel : NULL;
 	if ( added <= 0 ) {
 		return true;				// the scan's emissive stage gathers nothing here (clipped away / overflow): nothing to add
@@ -4236,9 +4228,7 @@ static void R_RtEmissiveScanNewEntities( const idRenderWorldLocal *world, idList
 			continue;
 		}
 		if ( trackedModel[i] == def->parms.hModel ) {
-			while ( s_rtEmissiveSeenModel.Num() <= i ) {
-				s_rtEmissiveSeenModel.Append( NULL );
-			}
+			R_RtEmissiveSeenGrow( i );
 			s_rtEmissiveSeenModel[i] = def->parms.hModel;
 			continue;
 		}
@@ -4258,9 +4248,7 @@ static void R_RtEmissiveScanNewEntities( const idRenderWorldLocal *world, idList
 		}
 		if ( !emissive ) {
 			// examined and dark, as the build records it: not tested again every 90 frames
-			while ( s_rtEmissiveSeenModel.Num() <= i ) {
-				s_rtEmissiveSeenModel.Append( NULL );
-			}
+			R_RtEmissiveSeenGrow( i );
 			s_rtEmissiveSeenModel[i] = model;
 		} else if ( R_RtEmissiveAdoptGroup( world, i, def ) == NULL ) {
 			newEntities.Append( i );
@@ -4630,7 +4618,7 @@ void R_RtEmissiveProbe_f( const idCmdArgs &args ) {
 				if ( rowIdx >= 0 ) {
 					const rtEmissiveRow_t &row = s_rtEmissiveRows[rowIdx];
 					common->Printf( "  power match at the default reach: radiance x%.2f on the glow mean (the map's authored radiance / reach replace it)\n", R_RtEmissiveMatchedScale( row, 0.0f, 0.0f ) );
-					const float sc = Max( idMath::ClampFloat( 0.0f, 64.0f, r_rtEmissiveScale.GetFloat() ), 1e-3f );
+					const float sc = Max( R_RtEmissiveScale(), 1e-3f );
 					const float meanLum = row.meanRadiance.x * 0.2126f + row.meanRadiance.y * 0.7152f + row.meanRadiance.z * 0.0722f;
 					common->Printf( "  ROW %d: fixture %016llx, %d triangles, area %.0f units^2, effective %.0f, mean lum %.2f, bound %.0f, centroid %.0f %.0f %.0f%s\n",
 						rowIdx, row.fixtureId, row.numTris, row.area, row.flux / sc, meanLum, row.boundRadius,
@@ -4688,9 +4676,7 @@ void R_RtResetSceneState( void ) {
 	s_rtWorldMap = "";
 	s_rtWorldFailedMap = "";
 	// E1 emissive table: handles are stale too; the CPU copy goes with them so the next RT frame rebuilds
-	s_rtEmissiveBuf = 0; s_rtEmissiveAddr = 0; s_rtEmissiveDbgVB = s_rtEmissiveDbgIB = 0; s_rtEmissiveDbgIndexes = 0;
-	s_rtEmissiveTris.Clear(); s_rtEmissiveTriSrc.Clear(); s_rtEmissiveGroups.Clear(); s_rtEmissiveLocalVerts.Clear(); s_rtEmissiveLabels.Clear(); s_rtEmissiveScreenLabels.Clear(); s_rtEmissiveMap.Clear(); s_rtEmissiveTotalFlux = 0.0f;
-	s_rtEmissiveRows.Clear();
+	R_RtEmissiveForget();
 }
 
 // DUDE: the six cvars that imply the persistent ray-query scene. r_rtWorld is the explicit

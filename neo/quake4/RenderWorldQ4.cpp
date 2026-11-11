@@ -121,6 +121,7 @@ private:
 	};
 
 	entityQ4_t *			Entity( qhandle_t entityHandle ) const;
+	idRenderEffectQ4 *		Effect( qhandle_t effectHandle ) const;		// NULL for an invalid or freed handle
 	static void				ToEngine( entityQ4_t *ent, renderEntity_t &out );
 	static void				ToEngineOverlay( entityQ4_t *ent, renderEntity_t &out );
 	void					SyncEngine( qhandle_t entityHandle, entityQ4_t *ent );
@@ -161,6 +162,13 @@ idRenderWorldQ4Local::entityQ4_t *idRenderWorldQ4Local::Entity( qhandle_t entity
 		return NULL;
 	}
 	return entities[entityHandle];
+}
+
+idRenderEffectQ4 *idRenderWorldQ4Local::Effect( qhandle_t effectHandle ) const {
+	if ( effectHandle < 0 || effectHandle >= effects.Num() ) {
+		return NULL;
+	}
+	return effects[effectHandle];
 }
 
 /*
@@ -241,11 +249,16 @@ idRenderWorldQ4Local::SyncEngine
 After the engine entity is added or updated: its hidden surfaces, and the overlay entity.
 ===============
 */
+// the game's suppressSurfaceMask on an engine entity (a Quake 4 field renderEntity_t has no room for)
+static void SetSuppressSurfaceMask( idRenderWorldLocal *world, qhandle_t entityHandle, int mask ) {
+	if ( entityHandle >= 0 && entityHandle < world->entityDefs.Num() && world->entityDefs[entityHandle] != NULL ) {
+		world->entityDefs[entityHandle]->suppressSurfaceMask = mask;
+	}
+}
+
 void idRenderWorldQ4Local::SyncEngine( qhandle_t entityHandle, entityQ4_t *ent ) {
 	idRenderWorldLocal *world = static_cast<idRenderWorldLocal *>( renderWorld );
-	if ( entityHandle >= 0 && entityHandle < world->entityDefs.Num() && world->entityDefs[entityHandle] != NULL ) {
-		world->entityDefs[entityHandle]->suppressSurfaceMask = ent->parms.suppressSurfaceMask;
-	}
+	SetSuppressSurfaceMask( world, entityHandle, ent->parms.suppressSurfaceMask );
 
 	const bool wantOverlay = ent->parms.overlayShader != NULL && ( ent->parms.hModel != NULL || ent->parms.callback != NULL );
 	if ( wantOverlay ) {
@@ -256,9 +269,7 @@ void idRenderWorldQ4Local::SyncEngine( qhandle_t entityHandle, entityQ4_t *ent )
 		} else {
 			renderWorld->UpdateEntityDef( ent->overlayHandle, &overlay );
 		}
-		if ( ent->overlayHandle >= 0 && ent->overlayHandle < world->entityDefs.Num() && world->entityDefs[ent->overlayHandle] != NULL ) {
-			world->entityDefs[ent->overlayHandle]->suppressSurfaceMask = ent->parms.suppressSurfaceMask;
-		}
+		SetSuppressSurfaceMask( world, ent->overlayHandle, ent->parms.suppressSurfaceMask );
 	} else if ( ent->overlayHandle >= 0 ) {
 		renderWorld->FreeEntityDef( ent->overlayHandle );
 		ent->overlayHandle = -1;
@@ -284,6 +295,7 @@ qhandle_t idRenderWorldQ4Local::AddEntityDef( const renderEntityQ4_t *re ) {
 	}
 
 	if ( handle >= entities.Num() ) {
+		// every new slot NULL (idList::AssureSize leaves the slots inside the old capacity as they were)
 		const int oldNum = entities.Num();
 		entities.SetNum( handle + 1 );
 		for ( int i = oldNum; i < entities.Num(); i++ ) {
@@ -307,6 +319,7 @@ void idRenderWorldQ4Local::UpdateEntityDef( qhandle_t entityHandle, const render
 		return;
 	}
 	if ( entityHandle >= entities.Num() ) {
+		// every new slot NULL (idList::AssureSize leaves the slots inside the old capacity as they were)
 		const int oldNum = entities.Num();
 		entities.SetNum( entityHandle + 1 );
 		for ( int i = oldNum; i < entities.Num(); i++ ) {
@@ -444,40 +457,40 @@ qhandle_t idRenderWorldQ4Local::AddEffectDef( const renderEffect_t *reffect, int
 }
 
 bool idRenderWorldQ4Local::UpdateEffectDef( qhandle_t effectHandle, const renderEffect_t *reffect, int time ) {
-	if ( effectHandle < 0 || effectHandle >= effects.Num() || effects[effectHandle] == NULL ) {
+	idRenderEffectQ4 *def = Effect( effectHandle );
+	if ( def == NULL ) {
 		return true;
 	}
-	idRenderEffectQ4 *def = effects[effectHandle];
 	bseEffectParms_t parms;
 	R_RenderEffectQ4ToBse( *reffect, def->decl, parms );
 	return BSE_UpdateEffect( def->effect, parms, time );
 }
 
 void idRenderWorldQ4Local::SetEffectDefDrawFrame( qhandle_t effectHandle, const idVec3 &origin, const idMat3 &axis ) {
-	if ( effectHandle >= 0 && effectHandle < effects.Num() && effects[effectHandle] != NULL ) {
-		BSE_SetEffectDrawFrame( effects[effectHandle]->effect, origin, axis );
+	idRenderEffectQ4 *def = Effect( effectHandle );
+	if ( def != NULL ) {
+		BSE_SetEffectDrawFrame( def->effect, origin, axis );
 	}
 }
 
 void idRenderWorldQ4Local::StopEffectDef( qhandle_t effectHandle ) {
-	if ( effectHandle >= 0 && effectHandle < effects.Num() && effects[effectHandle] != NULL ) {
-		BSE_StopEffect( effects[effectHandle]->effect );
+	idRenderEffectQ4 *def = Effect( effectHandle );
+	if ( def != NULL ) {
+		BSE_StopEffect( def->effect );
 	}
 }
 
 const idRenderEffectQ4 *idRenderWorldQ4Local::GetEffectDef( qhandle_t effectHandle ) const {
-	if ( effectHandle < 0 || effectHandle >= effects.Num() ) {
-		return NULL;
-	}
-	return effects[effectHandle];
+	return Effect( effectHandle );
 }
 
 void idRenderWorldQ4Local::FreeEffectDef( qhandle_t effectHandle ) {
-	if ( effectHandle < 0 || effectHandle >= effects.Num() || effects[effectHandle] == NULL ) {
+	idRenderEffectQ4 *def = Effect( effectHandle );
+	if ( def == NULL ) {
 		return;
 	}
-	BSE_FreeEffect( effects[effectHandle]->effect );
-	delete effects[effectHandle];
+	BSE_FreeEffect( def->effect );
+	delete def;
 	effects[effectHandle] = NULL;
 }
 
@@ -625,29 +638,28 @@ guiPoint_t idRenderWorldQ4Local::GuiTrace( qhandle_t entityHandle, const idVec3 
 	return renderWorld->GuiTrace( entityHandle, start, end );
 }
 
+// the engine's trace as the game reads it; `entity` = the game entity hit (NULL for the world's own surfaces)
+static void ModelTraceToQ4( const modelTrace_t &src, bool hit, const renderEntityQ4_t *entity, modelTraceQ4_t &dst ) {
+	dst.fraction = src.fraction;
+	dst.point = src.point;
+	dst.normal = src.normal;
+	dst.material = src.material;
+	dst.entity = hit ? entity : NULL;
+	dst.jointNumber = src.jointNumber;
+	dst.materialType = hit ? MaterialTypeQ4( src.material ) : NULL;
+}
+
 bool idRenderWorldQ4Local::ModelTrace( modelTraceQ4_t &trace, qhandle_t entityHandle, const idVec3 &start, const idVec3 &end, const float radius ) const {
 	modelTrace_t engineTrace;
 	const bool hit = renderWorld->ModelTrace( engineTrace, entityHandle, start, end, radius );
-	trace.fraction = engineTrace.fraction;
-	trace.point = engineTrace.point;
-	trace.normal = engineTrace.normal;
-	trace.material = engineTrace.material;
-	trace.entity = hit ? GetRenderEntity( entityHandle ) : NULL;
-	trace.jointNumber = engineTrace.jointNumber;
-	trace.materialType = hit ? MaterialTypeQ4( engineTrace.material ) : NULL;
+	ModelTraceToQ4( engineTrace, hit, hit ? GetRenderEntity( entityHandle ) : NULL, trace );
 	return hit;
 }
 
 bool idRenderWorldQ4Local::FastWorldTrace( modelTraceQ4_t &trace, const idVec3 &start, const idVec3 &end ) const {
 	modelTrace_t engineTrace;
 	const bool hit = renderWorld->FastWorldTrace( engineTrace, start, end );
-	trace.fraction = engineTrace.fraction;
-	trace.point = engineTrace.point;
-	trace.normal = engineTrace.normal;
-	trace.material = engineTrace.material;
-	trace.entity = NULL;			// the world's own surfaces, no game entity
-	trace.jointNumber = engineTrace.jointNumber;
-	trace.materialType = hit ? MaterialTypeQ4( engineTrace.material ) : NULL;
+	ModelTraceToQ4( engineTrace, hit, NULL, trace );		// the world's own surfaces, no game entity
 	return hit;
 }
 

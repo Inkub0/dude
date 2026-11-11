@@ -396,6 +396,7 @@ public:
 
 	void					Spawn( void );
 	void					Think( void );
+	void					UpdateBodySelfShadow( renderEntity_t *headRenderEnt );	// DUDE: third person: the body shadows like any character
 
 	// save games
 	void					Save( idSaveGame *savefile ) const;					// archives object for save game file

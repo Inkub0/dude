@@ -354,6 +354,9 @@ static void RB_RHI_BindRTImage( rhi::RHI *r, int unit, rhi::ImageHandle img ) {
 	qglBindTexture( GL_TEXTURE_2D, (GLuint)img );
 	rhi::gl3ActiveTexture( GL_TEXTURE0 );
 	backEnd.glState.currenttmu = 0;
+	if ( unit >= 0 && unit < MAX_MULTITEXTURE_UNITS ) {
+		backEnd.glState.tmu[unit].current2DMap = -1;	// the direct bind bypassed the tmu cache: the next idImage bind on this unit re-issues
+	}
 }
 
 // bind a render-target texture (GetRenderTargetImage handle) on a multitexture unit.
@@ -476,9 +479,7 @@ static rhi::RenderTargetHandle rhiReStirDIRT = 0;	// the fresh 1-spp gather: Cre
 // no copies (the three full-screen "restir.di.sidecopy" passes, ~0.3 ms). rhiReStirDIRT = this gather's target.
 static rhi::RenderTargetHandle rhiReStirDIPairRT[2] = { 0, 0 };
 static int rhiReStirDILastWritten = -1;				// which of the pair the last gather wrote (-1 = none since (re)create)
-static bool rhiReStirDIShRT = false;				// rhiReStirDIRT is the SH (4-attachment) variant
 static bool rhiReStirDIShThisView = false;			// the gather ran in SH mode this view (the apply resolves SH1)
-static bool rhiReStirDIRelaxThisView = false;		// R2: the gather wrote the ReLAX encoding this view (linear + raw hitDist)
 static int   rhiReStirDIW = 0, rhiReStirDIH = 0;
 static bool  rhiReStirDIRanThisView = false;		// DI gather produced this view (debug-overlay gate)
 static bool  rhiReStirDIDenoisedThisView = false;	// the shared REBLUR_DIFFUSE denoise ran for DI this view -> GetRtgiOutputImage is the denoised DI
@@ -2156,8 +2157,8 @@ static rhi::ImageHandle RB_RHI_AmbientFloorSource( rhi::RHI *r, float &scale, bo
 		return 0;
 	}
 	if ( rhiReStirDIApplyThisView && rhiReStirDIRanThisView && rhiReStirDIRT != 0 ) {
-		// R2: ReLAX's non-SH output and the raw ReLAX-mode gather are LINEAR (as RB_RHI_ReStirDIApply decodes it)
-		linear = rhiReStirDIRelaxThisView && ( !rhiReStirDIDenoisedThisView || !rhiReStirDIShThisView );
+		// R2: ReLAX's non-SH output and the raw gather are LINEAR (as RB_RHI_ReStirDIApply decodes it); ReLAX's SH0 is YCoCg
+		linear = !rhiReStirDIDenoisedThisView || !rhiReStirDIShThisView;
 		return ( rhiReStirDIDenoisedThisView && r->GetRtgiOutputImage() != 0 ) ? r->GetRtgiOutputImage()
 			: r->GetRenderTargetImage( rhiReStirDIRT );
 	}
@@ -2312,7 +2313,6 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 		// r_rtgiAmbient floor: the RT lighting buffer on unit 5 in place of the specular map (the ambient shader reads
 		// none). Without it the specular map stays bound - a complete descriptor the shader then never samples.
 		RB_RHI_BindRTImage( ictx.r, 5, ambientFloorImg );
-		backEnd.glState.tmu[5].current2DMap = -1;			// direct bind bypassed the tmu cache
 	}
 	// unit 10: per-material baked occlusion map (u_occlusionMap). Only bound when this
 	// surface has one and r_occlusionMaps is on; the shader gates on u_occlusionParms.x,
@@ -6035,9 +6035,6 @@ rhi::ImageHandle RB_RHI_BerserkAccum( rhi::RHI *r, const viewDef_t *viewDef,
 	RB_RHI_BindUnit( 0, globalImages->scratchImage );		// current scene (both backends)
 	RB_RHI_BindRTUnit( r, 1, rhiBerserkTrailRT[readIdx] );	// previous frame (cleared -> valid on first use)
 	RB_RHI_BindUnit( 2, maskImg );							// berserk2 radial mask
-	if ( !vkMode ) {
-		backEnd.glState.tmu[1].current2DMap = -1;			// direct bind bypassed the tmu cache
-	}
 	RB_RHI_DrawFullscreen( r, accumProg, parms, 0 );
 	r->EndPass();
 
@@ -6050,9 +6047,6 @@ rhi::ImageHandle RB_RHI_BerserkAccum( rhi::RHI *r, const viewDef_t *viewDef,
 	// bind it on unit 1 for the display draw that follows in the surface loop: GL keeps
 	// the binding live; the Vulkan caller re-supplies it via DrawArgs.textures[1].
 	RB_RHI_BindRTImage( r, 1, trailImg );
-	if ( !vkMode ) {
-		backEnd.glState.tmu[1].current2DMap = -1;
-	}
 	return trailImg;
 }
 
@@ -6201,9 +6195,6 @@ rhi::ImageHandle RB_RHI_HelltimeAccum( rhi::RHI *r, const viewDef_t *viewDef, in
 	RB_RHI_BindUnit( 0, sceneImg );							// _currentRender (both backends)
 	RB_RHI_BindRTUnit( r, 1, rhiHelltimeTrailRT[readIdx] );	// previous frame
 	RB_RHI_BindUnit( 2, maskImg );							// bloodorb3 radial mask
-	if ( !vkMode ) {
-		backEnd.glState.tmu[1].current2DMap = -1;			// direct bind bypassed the tmu cache
-	}
 	RB_RHI_DrawFullscreen( r, accumProg, parms, 0 );
 	r->EndPass();
 
@@ -6213,9 +6204,6 @@ rhi::ImageHandle RB_RHI_HelltimeAccum( rhi::RHI *r, const viewDef_t *viewDef, in
 
 	rhi::ImageHandle trailImg = r->GetRenderTargetImage( rhiHelltimeTrailRT[writeIdx] );
 	RB_RHI_BindRTImage( r, 1, trailImg );
-	if ( !vkMode ) {
-		backEnd.glState.tmu[1].current2DMap = -1;
-	}
 	return trailImg;
 }
 
@@ -7242,9 +7230,6 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 	// exact march via u_localParam1.w = 0 and never samples it). Mirrors the SSAO unit-2 idiom.
 	if ( doSsrHiZ ) {
 		RB_RHI_BindRTUnit( r, 4, rhiSsrDepthMinRT );
-		if ( !vkMode ) {
-			backEnd.glState.tmu[4].current2DMap = -1;	// direct bind bypassed the tmu cache
-		}
 	} else {
 		RB_RHI_BindUnit( 4, globalImages->currentDepthImage );
 	}
@@ -7416,7 +7401,6 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 	// dim in ssr_composite.frag); otherwise bind white so ao = 1 leaves the reflection unchanged.
 	if ( rhiSsaoAppliedThisView ) {
 		RB_RHI_BindRTUnit( r, 4, rhiSsaoResultRT );
-		if ( !vkMode ) { backEnd.glState.tmu[4].current2DMap = -1; }	// direct bind bypassed the tmu cache (mirrors the Hi-Z idiom above)
 	} else {
 		RB_RHI_BindUnit( 4, globalImages->whiteImage );
 	}
@@ -8055,7 +8039,6 @@ static void RB_RHI_SSAOPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		RB_RHI_BindUnit( 0, globalImages->currentDepthImage );
 		if ( useNormalBuf ) {
 			RB_RHI_BindRTUnit( r, 1, rhiNormalResultRT );
-			backEnd.glState.tmu[1].current2DMap = -1;	// direct bind bypassed the tmu cache
 		} else {
 			RB_RHI_BindUnit( 1, globalImages->currentDepthImage );
 		}
@@ -8085,15 +8068,12 @@ static void RB_RHI_SSAOPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	RB_RHI_BindUnit( 0, globalImages->currentDepthImage );
 	if ( useNormalBuf ) {
 		RB_RHI_BindRTUnit( r, 1, rhiNormalResultRT );	// normal G-buffer (GL raw bind / VK rhiVkUnits[1])
-		// direct bind bypassed the tmu cache; forget unit 1 so the blur's depth bind re-issues
-		backEnd.glState.tmu[1].current2DMap = -1;
 	}
 	// SSAO Phase 1: the prefiltered depth mip on unit 2 for the far-step taps. When off,
 	// bind _currentDepth there as an unused dummy so the descriptor slot stays valid
 	// (ssao.frag routes to the raw path via depthTexRecip.z, never sampling it).
 	if ( doDepthMip ) {
 		RB_RHI_BindRTUnit( r, 2, rhiSsaoDepthMipRT );
-		backEnd.glState.tmu[2].current2DMap = -1;	// direct bind bypassed the tmu cache
 	} else {
 		RB_RHI_BindUnit( 2, globalImages->currentDepthImage );
 	}
@@ -8112,7 +8092,6 @@ static void RB_RHI_SSAOPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	r->BeginTargetPass( rhiSsaoBlurRT, NULL );
 	if ( doDepthMip ) {
 		RB_RHI_BindRTUnit( r, 1, rhiSsaoDepthMipRT );
-		backEnd.glState.tmu[1].current2DMap = -1;	// direct bind bypassed the tmu cache
 	} else {
 		RB_RHI_BindUnit( 1, globalImages->currentDepthImage );
 	}
@@ -8123,7 +8102,6 @@ static void RB_RHI_SSAOPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	r->BeginTargetPass( rhiSsaoRT, NULL );
 	if ( doDepthMip ) {
 		RB_RHI_BindRTUnit( r, 1, rhiSsaoDepthMipRT );
-		backEnd.glState.tmu[1].current2DMap = -1;	// direct bind bypassed the tmu cache
 	} else {
 		RB_RHI_BindUnit( 1, globalImages->currentDepthImage );
 	}
@@ -8170,7 +8148,6 @@ static void RB_RHI_SSAOPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 			r->BeginTargetPass( rhiSsaoHistRT[writeIdx], NULL );
 			RB_RHI_BindUnit( 2, globalImages->currentDepthImage );
 			RB_RHI_BindRTUnit( r, 1, rhiSsaoHistRT[readIdx] );	// history read (GL raw / VK rhiVkUnits[1])
-			backEnd.glState.tmu[1].current2DMap = -1;			// direct bind bypassed the tmu cache
 			// unit 3 = velocity MRT, or a dummy (u_velocity is a statically-used sampler VK validates)
 			if ( velImg ) { RB_RHI_BindRTImage( r, 3, velImg ); }
 			else          { RB_RHI_BindUnit( 3, globalImages->currentDepthImage ); }
@@ -8351,7 +8328,6 @@ static void RB_RHI_RtaoPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	r->BeginTargetPass( rhiRtaoRayRT, NULL );
 	RB_RHI_BindUnit( 0, globalImages->currentDepthImage );
 	RB_RHI_BindRTUnit( r, 1, rhiNormalResultRT );
-	backEnd.glState.tmu[1].current2DMap = -1;		// direct bind bypassed the tmu cache
 	RB_RHI_DrawFullscreen( r, prog, parms, 0 );
 	r->EndPass();
 	rhiRtaoRanThisView = true;
@@ -8454,7 +8430,6 @@ static void RB_RHI_RtaoPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 				rp.depthTexRecip[1] = 1.0f / uploadH;
 				r->BeginTargetPass( rhiRtaoResolveRT, NULL );
 				RB_RHI_BindRTUnit( r, 1, rhiNormalResultRT );
-				backEnd.glState.tmu[1].current2DMap = -1;
 				RB_RHI_BindUnit( 2, globalImages->currentDepthImage );
 				RB_RHI_DrawFullscreen( r, resProg, rp, r->GetRtaoOutputImage() );
 				r->EndPass();
@@ -8647,10 +8622,8 @@ static void RB_RHI_RtgiPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	r->BeginTargetPass( rhiRtgiRayRT, NULL );
 	RB_RHI_BindUnit( 0, globalImages->currentDepthImage );
 	RB_RHI_BindRTUnit( r, 1, rhiNormalResultRT );
-	backEnd.glState.tmu[1].current2DMap = -1;		// direct bind bypassed the tmu cache
 	// unit 10 = the velocity for the cache's mover test (white placeholder keeps the set complete; sampled only with flag 8)
 	if ( giCacheVel != 0 ) { RB_RHI_BindRTImage( r, 10, giCacheVel ); } else { RB_RHI_BindUnit( 10, globalImages->whiteImage ); }
-	backEnd.glState.tmu[10].current2DMap = -1;
 	RB_RHI_DrawFullscreen( r, prog, parms, 0 );		// set 2 (bindless materials) is auto-bound by the backend
 	r->EndPass();
 	r->GpuScopeEnd();
@@ -8684,7 +8657,6 @@ static void RB_RHI_RtgiPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 			r->BeginTargetPass( rhiRtgiGuideRT, NULL );
 			RB_RHI_BindUnit( 0, globalImages->currentDepthImage );
 			RB_RHI_BindRTUnit( r, 1, rhiNormalResultRT );
-			backEnd.glState.tmu[1].current2DMap = -1;
 			RB_RHI_DrawFullscreen( r, guideProg, gp, 0 );
 			r->EndPass();
 			r->GpuScopeEnd();
@@ -8917,7 +8889,7 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 			rhiReStirDIRT = 0;	rhiReStirDIPrevRT = 0;	rhiReStirDILastWritten = -1;	rhiReStirDIGatherPrevValid = false;
 			return;
 		}
-		rhiReStirDIW = rw;	rhiReStirDIH = rh;	rhiReStirDIShRT = shMode;
+		rhiReStirDIW = rw;	rhiReStirDIH = rh;
 		rhiReStirDILastWritten = -1;
 		rhiReStirDIGatherPrevValid = false;
 	}
@@ -8926,8 +8898,8 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	rhiReStirDIRT     = rhiReStirDIPairRT[ ( rhiReStirDILastWritten == 0 ) ? 1 : 0 ];
 	rhiReStirDIPrevRT = ( rhiReStirDILastWritten >= 0 ) ? rhiReStirDIPairRT[ rhiReStirDILastWritten ] : 0;
 	rhiReStirDIShThisView = shMode;
-	const bool relaxMode = true;		// R6: DI is ReLAX-only (ReBLUR path removed for DI; ReBLUR still serves RTAO/RTGI). ReLAX = the gather's encoding + the denoise
-	rhiReStirDIRelaxThisView = relaxMode;
+	// R6: DI is ReLAX-only (ReBLUR still serves RTAO/RTGI): the gather writes the ReLAX encoding (linear + raw hitDist)
+	// and the denoise, gradient confidence and apply all assume it
 
 	float invView[16];
 	if ( !RB_RHI_InvertMatrix( viewDef->worldSpace.modelViewMatrix, invView ) ) {
@@ -9013,7 +8985,7 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	// apply can rebuild a sharp GGX highlight at full res. The gradient inherits this (gp = parms), so its re-shade matches.
 	const bool specReshade = shMode && r_rtReStirDISpecReshade.GetBool();
 	parms.shadowFalloffS[2] = specReshade ? 2.0f : ( shMode ? 1.0f : 0.0f );
-	parms.shadowFalloffS[3] = relaxMode ? 1.0f : 0.0f;					// R2: linear + raw hitDist out (ReLAX input)
+	parms.shadowFalloffS[3] = 1.0f;										// R2: linear + raw hitDist out (ReLAX input)
 
 	// With r_rtgi on, the RTGI one-bounce is folded into this gather (rtgi_bounce.glsl) so ONE NRD denoise and ONE
 	// apply serve direct + indirect. RB_RHI_RtgiPass stands down while DI is on (the shared NRD slot), so this is the
@@ -9100,9 +9072,9 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 			nrdVel = r->GetRenderTargetImage( rhiReStirDIVelRT );
 		}
 	}
-	int diMainF = 0, diFastF = 0;		// NRD history cap (DI's own; mirrors RTGI's History Length); R0: r_rtReStirDIHistoryMs
+	int diMainF = 0, diFastUnused = 0;	// NRD history cap (DI's own; mirrors RTGI's History Length); R0: r_rtReStirDIHistoryMs
 	RB_RHI_NrdHistoryFrames( r_rtReStirDIHistory.GetInteger(), r_rtReStirDIHistoryMs.GetFloat(),
-		0, diMainF, diFastF );		// R6: DI is ReLAX-only; the fast history comes from r_rtReStirDIRelaxFast below (diFastF unused)
+		0, diMainF, diFastUnused );	// R6: DI is ReLAX-only; the fast history comes from r_rtReStirDIRelaxFast below
 	const bool diCut = RB_RHI_NrdHistoryReset( viewDef );
 
 	// ---- R3a disocclusion boost (docs/rtx-restir-di.md Plan R3, r_rtReStirDIBoost): K picks + rays on YOUNG pixels. Needs
@@ -9212,7 +9184,6 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	// the gather's inputs (units 0-10), bound once for the young pass and the gather alike (Vulkan binds are draw-time state)
 	RB_RHI_BindUnit( 0, diDepthImg );
 	RB_RHI_BindRTUnit( r, 1, rhiNormalResultRT );
-	backEnd.glState.tmu[1].current2DMap = -1;		// direct bind bypassed the tmu cache
 	// units 2/3 = the G-buffer albedo + material for apply mode; white placeholders otherwise so the descriptor
 	// set is always complete (the shader only samples them when u_localParam1.w > 0.5)
 	if ( diApply ) {
@@ -9222,8 +9193,6 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		RB_RHI_BindUnit( 2, globalImages->whiteImage );
 		RB_RHI_BindUnit( 3, globalImages->whiteImage );
 	}
-	backEnd.glState.tmu[2].current2DMap = -1;
-	backEnd.glState.tmu[3].current2DMap = -1;
 	// R3a inputs on units 4 / 5 / 6 / 9 / 10 / 11 - never 7 / 8 / 12, the interaction draws' depth-compare shadow samplers that
 	// an unshadowed light inherits (the weapon-dark bug). White placeholders keep the descriptor set complete when the boost is
 	// off or has no side data; the shaders sample them only when u_tessParms says so.
@@ -9239,8 +9208,6 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		}
 		// the velocity rides unit 10 whenever the view has one (the R3a boost AND the irradiance cache's mover test read it)
 		if ( nrdVel != 0 ) { RB_RHI_BindRTImage( r, 10, nrdVel ); } else { RB_RHI_BindUnit( 10, globalImages->whiteImage ); }
-		backEnd.glState.tmu[4].current2DMap = -1;	backEnd.glState.tmu[5].current2DMap = -1;	backEnd.glState.tmu[6].current2DMap = -1;
-		backEnd.glState.tmu[9].current2DMap = -1;	backEnd.glState.tmu[10].current2DMap = -1;
 	}
 	// R3a: the YOUNG pass writes every pixel's reason (cheap, uniform, no rays) into a target of the gather's layout, BEFORE
 	// the gather (its inputs are last frame's side data + this frame's G-buffer / velocity, nothing the gather writes): the
@@ -9254,7 +9221,6 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		r->BeginTargetPass( rhiReStirDIYoungRT[ yi ], NULL );
 		if ( rhiReStirDIYoungValid && !boostAll ) { RB_RHI_BindRTImage( r, 11, r->GetRenderTargetImage( rhiReStirDIYoungRT[ yi ^ 1 ] ) ); }	// last frame's young
 		else { RB_RHI_BindUnit( 11, globalImages->blackImage ); }					// no history of holds: black = reason 0
-		backEnd.glState.tmu[11].current2DMap = -1;
 		RB_RHI_DrawFullscreen( r, youngProg, parms, 0 );
 		r->EndPass();
 		r->GpuScopeEnd();
@@ -9267,7 +9233,6 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	// unit 11: THIS frame's young verdict (the plain gather draws the boost's picks where it is clustered); black = none
 	if ( boostRun ) { RB_RHI_BindRTImage( r, 11, r->GetRenderTargetImage( rhiReStirDIYoungRT[ yi ] ) ); }
 	else { RB_RHI_BindUnit( 11, globalImages->blackImage ); }
-	backEnd.glState.tmu[11].current2DMap = -1;
 	RB_RHI_DrawFullscreen( r, prog, parms, 0 );
 	r->EndPass();
 	r->GpuScopeEnd();
@@ -9281,7 +9246,6 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		r->SetNextTargetPassLoad();
 		r->BeginTargetPass( rhiReStirDIRT, NULL );
 		RB_RHI_BindRTImage( r, 11, r->GetRenderTargetImage( rhiReStirDIYoungRT[ yi ] ) );	// THIS frame's young
-		backEnd.glState.tmu[11].current2DMap = -1;
 		RB_RHI_DrawFullscreen( r, boostProg, parms, 0 );
 		r->EndPass();
 		r->GpuScopeEnd();
@@ -9364,10 +9328,8 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 				r->BeginTargetPass( rhiReStirDIGradRT[0], NULL );
 				RB_RHI_BindUnit( 0, diDepthImg );
 				RB_RHI_BindRTUnit( r, 1, rhiNormalResultRT );
-				backEnd.glState.tmu[1].current2DMap = -1;
 				if ( diApply ) { RB_RHI_BindRTImage( r, 2, diAlbedoImg ); RB_RHI_BindRTImage( r, 3, diMatImg ); }
 				else { RB_RHI_BindUnit( 2, globalImages->whiteImage ); RB_RHI_BindUnit( 3, globalImages->whiteImage ); }
-				backEnd.glState.tmu[2].current2DMap = -1;	backEnd.glState.tmu[3].current2DMap = -1;
 				RB_RHI_BindRTImage( r, 4, r->GetRenderTargetImage2( rhiReStirDIRT ) );		// THIS frame's ( viewZ, lum )
 				RB_RHI_BindRTImage( r, 5, diPrevSide[0] );	// last frame's ( viewZ, lum )
 				RB_RHI_BindRTImage( r, 6, diPrevSide[1] );	// last frame's packed normal
@@ -9397,15 +9359,10 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 				}
 				r->GpuScopeEnd();
 				rhiReStirDIGradThisView = r->GetRenderTargetImage( rhiReStirDIGradRT[ src ] );
-				// 3. the confidence at the gather res, fed to NRD. Floor rule (NRD README, ReBLUR): never below
-				// historyFix / history, or the history-fix reconstruction fires on every detected change.
-				const int   hfCvar = r_rtReStirDIHistoryFix.GetInteger();
-				const int   fastF  = ( diFastF > 0 ) ? diFastF : 6;
-				const int   hfEff  = Min( ( hfCvar > 0 ) ? hfCvar : 3, Max( fastF - 1, 0 ) );
+				// 3. the confidence at the gather res, fed to NRD. ReLAX applies confidence directly and expects small
+				// values (the shader squares it), so the floor is the raw cvar (ReBLUR would need >= historyFix / history).
 				const float mainF  = (float)Max( 1, ( diMainF > 0 ) ? diMainF : 30 );
-				// ReBLUR: never below historyFix / history (or history fix fires); ReLAX applies confidence directly and expects
-				// smaller values (the shader squares it): the raw cvar floor
-				const float floorC = relaxMode ? r_rtReStirDIGradientFloor.GetFloat() : Max( r_rtReStirDIGradientFloor.GetFloat(), (float)hfEff / mainF );
+				const float floorC = r_rtReStirDIGradientFloor.GetFloat();
 				const float h      = r_rtReStirDIGradientHistory.GetFloat();
 				rhi::RenderParams cp;
 				memset( &cp, 0, sizeof( cp ) );
@@ -9417,7 +9374,7 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 				cp.localParam1[0] = 0.5f / mainF;									// NRD: dither by 0.5 / maxAccumulatedFrameNum
 				cp.localParam1[1] = rhiReStirDIGradConfValid ? 1.0f : 0.0f;
 				cp.localParam1[2] = idMath::ClampFloat( 0.0f, 0.9f, r_rtReStirDIGradientDeadzone.GetFloat() );
-				cp.localParam1[3] = relaxMode ? 1.0f : 0.0f;						// R2: square the confidence for ReLAX (NRD sample)
+				cp.localParam1[3] = 1.0f;											// R2: square the confidence for ReLAX (NRD sample)
 				cp.windowCoord[2] = -1.0f;
 				const int ci = rhiReStirDIGradConfIdx;
 				r->GpuScopeBegin( "restir.di.gradconf" );
@@ -9425,7 +9382,7 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 				// last frame's confidence - only once it exists: the first frame after the targets are (re)created the partner was
 				// never written (UNDEFINED layout at submit, validation 09600); the shader skips it then anyway (localParam1.y = 0)
 				if ( rhiReStirDIGradConfValid ) { RB_RHI_BindRTImage( r, 1, r->GetRenderTargetImage( rhiReStirDIGradConfRT[ ci ^ 1 ] ) ); }
-				else { RB_RHI_BindUnit( 1, globalImages->whiteImage ); backEnd.glState.tmu[1].current2DMap = -1; }
+				else { RB_RHI_BindUnit( 1, globalImages->whiteImage ); }
 				RB_RHI_BindRTImage( r, 2, nrdVel );
 				RB_RHI_DrawFullscreen( r, confProg, cp, rhiReStirDIGradThisView );
 				r->EndPass();
@@ -9437,7 +9394,7 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 				// for the frame, so the stale shadow behind a walking NPC kept fading out for ~100 ms (and a confidence of 0
 				// without a history reset skips ReLAX's history fix, so it came out noisy).
 				const float resetThr = r_rtReStirDIGradientReset.GetFloat();
-				if ( relaxMode && resetThr > 0.0f ) {
+				if ( resetThr > 0.0f ) {
 					if ( !rhiReStirDIDisoccMixRT ) { rhiReStirDIDisoccMixRT = r->CreateRenderTarget( rhi::IF_R16F, rw, rh ); }
 					if ( rhiReStirDIDisoccMixRT ) {
 						rhi::RenderParams mp = cp;
@@ -9500,7 +9457,6 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 				r->BeginTargetPass( rhiReStirDIGuideRT, NULL );
 				RB_RHI_BindUnit( 0, diDepthImg );
 				RB_RHI_BindRTUnit( r, 1, rhiNormalResultRT );
-				backEnd.glState.tmu[1].current2DMap = -1;
 				RB_RHI_DrawFullscreen( r, guideProg, gp, 0 );
 				r->EndPass();
 				r->GpuScopeEnd();
@@ -10197,7 +10153,6 @@ void RB_RHI_RtgiApply( rhi::RHI *r, const viewDef_t *viewDef ) {
 	// unit 3 = full-res view normal (bilateral weight). Bound even when bilat is off (the shader just doesn't
 	// sample it then) so the descriptor set is always complete; falls back to depth if the normal RT is absent.
 	RB_RHI_BindRTUnit( r, 3, rhiNormalResultRT != 0 ? rhiNormalResultRT : rhiRtgiRayRT );
-	backEnd.glState.tmu[3].current2DMap = -1;				// direct bind bypassed the tmu cache
 	// unit 0 = GI radiance (rtInput0); additive (ONE/ONE) into the live HDR scene target
 	RB_RHI_DrawFullscreen( r, prog, parms, giImg, GLS_SRCBLEND_ONE | GLS_DSTBLEND_ONE );
 	RB_RHI_ForgetTexBinds();
@@ -10432,7 +10387,6 @@ void RB_RHI_RtgiCacheDebugOverlay( rhi::RHI *r, const viewDef_t *viewDef ) {
 
 	RB_RHI_BindUnit( 0, globalImages->currentDepthImage );
 	RB_RHI_BindRTUnit( r, 1, rhiNormalResultRT );
-	backEnd.glState.tmu[1].current2DMap = -1;			// direct bind bypassed the tmu cache
 	RB_RHI_DrawFullscreen( r, prog, parms, 0 );
 	RB_RHI_ForgetTexBinds();
 }
@@ -10604,7 +10558,6 @@ void RB_RHI_LightGridDebugOverlay( rhi::RHI *r, const viewDef_t *viewDef ) {
 
 	RB_RHI_BindUnit( 0, globalImages->currentDepthImage );
 	RB_RHI_BindRTUnit( r, 1, rhiNormalResultRT );
-	backEnd.glState.tmu[1].current2DMap = -1;
 	RB_RHI_DrawFullscreen( r, prog, parms, 0 );
 	RB_RHI_ForgetTexBinds();
 }
@@ -10902,8 +10855,8 @@ void RB_RHI_ReStirDIApply( rhi::RHI *r, const viewDef_t *viewDef ) {
 	// buffer is diffuse-only, so the apply rebuilds a sharp GGX highlight from the SH direction + the full-res normal.
 	const bool diSpecReshade = shResolve && r_rtReStirDISpecReshade.GetBool();
 	parms.localParam1[3] = shResolve ? ( diSpecReshade ? 2.0f : 1.0f ) : 0.0f;
-	// R2: ReLAX's non-SH output and the raw ReLAX-mode gather are LINEAR; ReBLUR's output and ReLAX's SH0 are YCoCg
-	parms.occlusionParms[3] = ( rhiReStirDIRelaxThisView && ( !rhiReStirDIDenoisedThisView || !shResolve ) ) ? 1.0f : 0.0f;
+	// R2: ReLAX's non-SH output and the raw gather are LINEAR; ReLAX's SH0 is YCoCg
+	parms.occlusionParms[3] = ( !rhiReStirDIDenoisedThisView || !shResolve ) ? 1.0f : 0.0f;
 	if ( shResolve ) {
 		float invView[16];
 		if ( RB_RHI_InvertMatrix( viewDef->worldSpace.modelViewMatrix, invView ) ) {
@@ -10966,7 +10919,6 @@ void RB_RHI_ReStirDIApply( rhi::RHI *r, const viewDef_t *viewDef ) {
 	} else {
 		RB_RHI_BindUnit( 6, globalImages->blackImage );
 	}
-	for ( int u = 2; u <= 6; u++ ) { backEnd.glState.tmu[u].current2DMap = -1; }	// direct binds bypassed the tmu cache
 	RB_RHI_DrawFullscreen( r, prog, parms, srcImg, GLS_SRCBLEND_ONE | GLS_DSTBLEND_ONE );
 	RB_RHI_ForgetTexBinds();
 	rhiReStirDIAppliedThisView = true;
@@ -11042,8 +10994,8 @@ void RB_RHI_ReStirDIDebugOverlay( rhi::RHI *r, const viewDef_t *viewDef ) {
 	parms.localParam0[2] = 8.0f;									// normal power
 	parms.localParam0[3] = (float)viewMode;							// R0: 0 DI radiance / 1 validation passthrough / 2 history ramp
 	parms.localParam1[0] = (float)Max( 1, rhiReStirDIHistFrames );	// history ramp denominator
-	// R2: the source is linear when the ReLAX-mode gather is shown raw, or ReLAX's non-SH denoised output; YCoCg otherwise
-	parms.localParam1[1] = ( rhiReStirDIRelaxThisView && ( dbgMode < 2 || !rhiReStirDIShThisView ) ) ? 1.0f : 0.0f;
+	// R2: the source is linear when the gather is shown raw, or ReLAX's non-SH denoised output; YCoCg (SH0) otherwise
+	parms.localParam1[1] = ( dbgMode < 2 || !rhiReStirDIShThisView ) ? 1.0f : 0.0f;
 	parms.screenCorrection[0] = ( rhiReStirDIW > 0 ) ? 1.0f / rhiReStirDIW : 1.0f;	// 1/(rw,rh) = reduced-res DI texel (uv)
 	parms.screenCorrection[1] = ( rhiReStirDIH > 0 ) ? 1.0f / rhiReStirDIH : 1.0f;
 	if ( uploadW > 0 && uploadH > 0 ) {
@@ -11062,7 +11014,6 @@ void RB_RHI_ReStirDIDebugOverlay( rhi::RHI *r, const viewDef_t *viewDef ) {
 	// not only for the bilateral weights. The DI pass gated on the depth + normal prepass, so both are valid here.
 	RB_RHI_BindUnit( 1, globalImages->currentDepthImage );
 	RB_RHI_BindRTUnit( r, 2, rhiNormalResultRT );					// full-res normal (a = weapon mask)
-	backEnd.glState.tmu[2].current2DMap = -1;						// direct bind bypassed the tmu cache
 	RB_RHI_DrawFullscreen( r, prog, parms, srcImg );	// u_src = DI radiance (weapon reads as no-DI, like rtgi_debug)
 	RB_RHI_ForgetTexBinds();
 }

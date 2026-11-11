@@ -911,6 +911,10 @@ void Posix_InitSignalHandlers( void )
 		if(consoleLog == NULL) {
 			printf("WARNING: Couldn't open/create '%s', error was: %d (%s)\n", logFileName, errno, strerror(errno));
 		} else {
+			// DUDE: line-buffered, so a crash that takes the signal handler with it (a fault inside the
+			// unwinder, a stack overflow) still leaves the last line printed on disk; the few hundred
+			// lines a level load prints cost nothing measurable as single writes
+			setvbuf(consoleLog, NULL, _IOLBF, 0);
 			time_t tt = time(NULL);
 			const struct tm* tms = localtime(&tt);
 			char timeStr[64] = {};

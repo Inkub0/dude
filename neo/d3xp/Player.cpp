@@ -7376,6 +7376,22 @@ void idPlayer::StartFxOnBone( const char *fx, const char *bone ) {
 
 /*
 ==============
+idPlayer::UpdateBodySelfShadow
+
+DUDE: in third person the body is a character in the scene like any other -- it casts its shadow,
+shadows itself and takes the world's shadows (noSelfShadow lifts an entity out of the last two).
+First person keeps the stock flag, which keeps the body's shadow off the view weapon.
+==============
+*/
+void idPlayer::UpdateBodySelfShadow( renderEntity_t *headRenderEnt ) {
+	renderEntity.noSelfShadow = !pm_thirdPerson.GetBool();
+	if ( headRenderEnt ) {
+		headRenderEnt->noSelfShadow = renderEntity.noSelfShadow;
+	}
+}
+
+/*
+==============
 idPlayer::Think
 
 Called every tic for each player
@@ -7606,13 +7622,7 @@ void idPlayer::Think( void ) {
 			headRenderEnt->suppressShadowInViewID = entityNumber+1;
 		}
 	}
-	// DUDE: in third person the body is a character in the scene like any other -- it casts its shadow,
-	// shadows itself and takes the world's shadows (noSelfShadow lifts an entity out of the last two).
-	// First person keeps the stock flag, which keeps the body's shadow off the view weapon.
-	renderEntity.noSelfShadow = !pm_thirdPerson.GetBool();
-	if ( headRenderEnt ) {
-		headRenderEnt->noSelfShadow = renderEntity.noSelfShadow;
-	}
+	UpdateBodySelfShadow( headRenderEnt );
 	// never cast shadows from our first-person muzzle flashes
 	renderEntity.suppressShadowInLightID = LIGHTID_VIEW_MUZZLE_FLASH + entityNumber;
 	if ( headRenderEnt ) {
@@ -8961,18 +8971,16 @@ void idPlayer::CalculateRenderView( void ) {
 		renderViewHadCamera = false;	// leaving the camera path: next entry snaps instead of interpolating from a stale view
 		renderViewCameraEntity = NULL;
 		renderViewHadOffset = false;	// default; set true below only for the third-person / death branches
-				// DUDE: the stopped-time view (g_stopTime: the F10 settings menu pauses the game with it) keeps
+		// DUDE: the stopped-time view (g_stopTime: the F10 settings menu pauses the game with it) keeps
 		// the third-person orbit below; stock forced first person here, so opening the menu switched views
 		if ( g_stopTime.GetBool() && !pm_thirdPerson.GetBool() ) {
 			renderView->vieworg = firstPersonViewOrigin;
 			renderView->viewaxis = firstPersonViewAxis;
 			renderViewInterpolatable = true;
 
-			if ( !pm_thirdPerson.GetBool() ) {
-				// set the viewID to the clientNum + 1, so we can suppress the right player bodies and
-				// allow the right player view weapons
-				renderView->viewID = entityNumber + 1;
-			}
+			// set the viewID to the clientNum + 1, so we can suppress the right player bodies and
+			// allow the right player view weapons
+			renderView->viewID = entityNumber + 1;
 		} else if ( pm_thirdPerson.GetBool() ) {
 			// cache the OffsetThirdPersonView params so InterpolateRenderView can re-derive the orbit
 			renderViewOffsetAngle = pm_thirdPersonAngle.GetFloat();
@@ -9877,13 +9885,7 @@ void idPlayer::ClientPredictionThink( void ) {
 			headRenderEnt->suppressShadowInViewID = entityNumber+1;
 		}
 	}
-	// DUDE: in third person the body is a character in the scene like any other -- it casts its shadow,
-	// shadows itself and takes the world's shadows (noSelfShadow lifts an entity out of the last two).
-	// First person keeps the stock flag, which keeps the body's shadow off the view weapon.
-	renderEntity.noSelfShadow = !pm_thirdPerson.GetBool();
-	if ( headRenderEnt ) {
-		headRenderEnt->noSelfShadow = renderEntity.noSelfShadow;
-	}
+	UpdateBodySelfShadow( headRenderEnt );
 	// never cast shadows from our first-person muzzle flashes
 	renderEntity.suppressShadowInLightID = LIGHTID_VIEW_MUZZLE_FLASH + entityNumber;
 	if ( headRenderEnt ) {

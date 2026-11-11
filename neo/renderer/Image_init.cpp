@@ -39,6 +39,7 @@ If you have questions concerning this license or the applicable additional terms
 
 #include "framework/GameCallbacks_local.h"
 
+#include "framework/ParallelFor.h"	// DUDE: parallel image load
 #include <atomic>						// DUDE: parallel image load
 #include <thread>
 #include <vector>
@@ -2223,51 +2224,17 @@ void idImageManager::EndLevelLoad() {
 		}
 
 		if ( !par.empty() ) {
-			int nThreads = r_parallelImageLoadThreads.GetInteger();
-			if ( nThreads <= 0 ) {
-				nThreads = (int)std::thread::hardware_concurrency();
-			}
-			if ( nThreads < 2 ) { nThreads = 2; }
-			if ( nThreads > 32 ) { nThreads = 32; }
-			if ( nThreads > (int)par.size() ) { nThreads = (int)par.size(); }
-
 			idImage ** const	list = par.data();
 			const int			count = (int)par.size();
-			std::atomic<int>	nextIndex( 0 );
 
-			// heap / filesystem / print become thread-safe only for this window
-			Mem_SetThreadSafe( true );
-			FS_SetThreadReadSafe( true );
-
-			// phase 1: worker threads decode + build mip pyramids
-			std::vector<std::thread> pool;
-			pool.reserve( nThreads );
-			for ( int k = 0 ; k < nThreads ; k++ ) {
-				pool.push_back( std::thread( [&]() {
-					Com_BeginThreadCapture();
-					for ( ;; ) {
-						const int idx = nextIndex.fetch_add( 1, std::memory_order_relaxed );
-						if ( idx >= count ) {
-							break;
-						}
-						list[idx]->LoadImageCpu();
-					}
-					Com_EndThreadCapture();
-				} ) );
+			// phase 1: worker threads decode + build mip pyramids (heap / filesystem thread-safe for the window)
+			{
+				idParallelWindow window;
+				Com_ParallelFor( count, [&]( int idx ) { list[idx]->LoadImageCpu(); }, r_parallelImageLoadThreads.GetInteger() );
 			}
-			for ( size_t k = 0 ; k < pool.size() ; k++ ) {
-				pool[k].join();
-			}
-
-			Mem_SetThreadSafe( false );
-			FS_SetThreadReadSafe( false );
 
 			// surface any prints/warnings the workers buffered (order-independent)
-			const bool hadErr = Com_ThreadCaptureHadError();
-			Com_FlushThreadCapture();
-			if ( hadErr ) {
-				common->Warning( "r_parallelImageLoad: a worker hit an error during decode (see above); affected images use the default texture" );
-			}
+			Com_FlushThreadCaptureWarn( "r_parallelImageLoad: a worker hit an error during decode (see above); affected images use the default texture" );
 
 			// phase 2: upload the decoded pyramids on the main thread (GPU submit is
 			// not thread-safe)

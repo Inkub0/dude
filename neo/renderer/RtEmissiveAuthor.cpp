@@ -237,8 +237,21 @@ static int EmAuth_FindLight( const char *key ) {
 	for ( int i = 0; i < s_emLights.Num(); i++ ) { if ( s_emLights[i].key.Icmp( key ) == 0 ) { return i; } }
 	return -1;
 }
+// the gather asks for a fixture per emitter row, per frame: a hash over the list, rebuilt when the data changed (any
+// edit bumps s_emGen; the count catches an entry added before its EmAuth_Changed)
+static idHashIndex	s_emFixtureHash;
+static unsigned int	s_emFixtureHashGen = 0;
+static int			s_emFixtureHashNum = -1;
+static int EmAuth_FixtureHashKey( unsigned long long id ) { return (int)( id ^ ( id >> 32 ) ); }
 static int EmAuth_FindFixture( unsigned long long id ) {
-	for ( int i = 0; i < s_emFixtures.Num(); i++ ) { if ( s_emFixtures[i].id == id ) { return i; } }
+	if ( s_emFixtureHashGen != s_emGen || s_emFixtureHashNum != s_emFixtures.Num() ) {
+		s_emFixtureHash.Clear();
+		for ( int i = 0; i < s_emFixtures.Num(); i++ ) { s_emFixtureHash.Add( EmAuth_FixtureHashKey( s_emFixtures[i].id ), i ); }
+		s_emFixtureHashGen = s_emGen;	s_emFixtureHashNum = s_emFixtures.Num();
+	}
+	for ( int i = s_emFixtureHash.First( EmAuth_FixtureHashKey( id ) ); i >= 0; i = s_emFixtureHash.Next( i ) ) {
+		if ( s_emFixtures[i].id == id ) { return i; }
+	}
 	return -1;
 }
 static int EmAuth_FindMaterial( const char *name ) {
@@ -512,18 +525,15 @@ static int EmAuth_LightIndexByKey( const idRenderWorldLocal *world, const char *
 	return -1;
 }
 
-/*
-===================
-R_EmAuthFixtureEmits
-
-Does this emitter-table fixture emit under the map's authored setup? Its own emit / off line wins, else its material's.
-Out: the fixture's scale (1 = unset), reach (0 = unset) and the lightDef index whose animation it follows (-1 = none).
-===================
-*/
+// a material's authored entry: an entry read from the file names the material; its pointer is resolved on the first ask
+// and kept (a decl lives as long as the process), so the per-row asks compare pointers
 static const emAuthMaterial_t *EmAuth_MaterialEntry( const idMaterial *mat ) {
 	if ( mat == NULL ) { return NULL; }
 	for ( int i = 0; i < s_emMaterials.Num(); i++ ) {
-		if ( s_emMaterials[i].mat == mat || ( s_emMaterials[i].mat == NULL && s_emMaterials[i].name.Icmp( mat->GetName() ) == 0 ) ) { return &s_emMaterials[i]; }
+		if ( s_emMaterials[i].mat == mat ) { return &s_emMaterials[i]; }
+	}
+	for ( int i = 0; i < s_emMaterials.Num(); i++ ) {
+		if ( s_emMaterials[i].mat == NULL && s_emMaterials[i].name.Icmp( mat->GetName() ) == 0 ) { s_emMaterials[i].mat = mat; return &s_emMaterials[i]; }
 	}
 	return NULL;
 }
@@ -1014,17 +1024,49 @@ static void EmAuth_LightPick_f( const idCmdArgs &args ) {
 }
 
 // delete / restore placed light `i` (false = nothing to do: restoring a light that is active)
+// an entry's index, created on demand; and the drop of an entry that no longer says anything (the file would skip it)
+static int EmAuth_LightIndexRef( const char *key ) {
+	int a = EmAuth_FindLight( key );
+	if ( a < 0 ) { EmAuth_NewLight( s_emLights.Alloc(), key ); a = s_emLights.Num() - 1; }
+	return a;
+}
+static int EmAuth_MaterialIndexRef( const idMaterial *mat ) {
+	int mi = EmAuth_FindMaterial( mat->GetName() );
+	if ( mi < 0 ) {
+		emAuthMaterial_t &em = s_emMaterials.Alloc();
+		em.name = mat->GetName(); em.mat = mat; em.emit = false;
+		EmAuth_ClearLook( em.look );
+		mi = s_emMaterials.Num() - 1;
+	}
+	return mi;
+}
+static int EmAuth_FixtureIndexRef( unsigned long long id ) {
+	int fi = EmAuth_FindFixture( id );
+	if ( fi < 0 ) { EmAuth_NewFixture( s_emFixtures.Alloc(), id ); fi = s_emFixtures.Num() - 1; }
+	return fi;
+}
+static void EmAuth_PruneLight( int a ) {
+	if ( a >= 0 && !s_emLights[a].deleted && !EmAuth_LightOverridden( s_emLights[a] ) ) { s_emLights.RemoveIndex( a ); }
+}
+static void EmAuth_PruneMaterial( int mi ) {
+	if ( mi >= 0 && !s_emMaterials[mi].emit && !EmAuth_LookSet( s_emMaterials[mi].look ) ) { s_emMaterials.RemoveIndex( mi ); }
+}
+static void EmAuth_PruneFixture( int fi ) {
+	if ( fi < 0 ) { return; }
+	const emAuthFixture_t &x = s_emFixtures[fi];
+	if ( x.emit == 0 && x.scale <= 0.0f && x.reach <= 0.0f && x.follow.Length() == 0 && !EmAuth_LookSet( x.look ) ) { s_emFixtures.RemoveIndex( fi ); }
+}
+
 static bool EmAuth_SetLightDeleted( const idRenderWorldLocal *world, int i, bool deleted ) {
 	const emLightCache_t *c = EmAuth_LightCache( world, i );
 	if ( c == NULL ) { return false; }
 	int a = EmAuth_FindLight( c->key );
 	if ( a < 0 ) {
 		if ( !deleted ) { return false; }
-		EmAuth_NewLight( s_emLights.Alloc(), c->key );
-		a = s_emLights.Num() - 1;
+		a = EmAuth_LightIndexRef( c->key );
 	}
 	s_emLights[a].deleted = deleted;
-	if ( !deleted && !EmAuth_LightOverridden( s_emLights[a] ) ) { s_emLights.RemoveIndex( a ); }
+	EmAuth_PruneLight( a );
 	EmAuth_Changed();
 	return true;
 }
@@ -1051,8 +1093,7 @@ static emAuthFixture_t *EmAuth_PickFixture( bool create, const idMaterial **matO
 	int fi = EmAuth_FindFixture( id );
 	if ( fi < 0 ) {
 		if ( !create ) { return NULL; }
-		EmAuth_NewFixture( s_emFixtures.Alloc(), id );
-		fi = s_emFixtures.Num() - 1;
+		fi = EmAuth_FixtureIndexRef( id );
 	}
 	return &s_emFixtures[ fi ];
 }
@@ -1092,27 +1133,15 @@ static void EmAuth_SetMaterialEmit( const idMaterial *mat, bool on ) {
 	int mi = EmAuth_FindMaterial( mat->GetName() );
 	if ( mi < 0 ) {
 		if ( !on ) { return; }
-		emAuthMaterial_t &em = s_emMaterials.Alloc();
-		em.name = mat->GetName(); em.mat = mat; em.emit = false;
-		EmAuth_ClearLook( em.look );
-		mi = s_emMaterials.Num() - 1;
+		mi = EmAuth_MaterialIndexRef( mat );
 	}
 	s_emMaterials[ mi ].emit = on;
-	if ( !on && !EmAuth_LookSet( s_emMaterials[ mi ].look ) ) { s_emMaterials.RemoveIndex( mi ); }
+	EmAuth_PruneMaterial( mi );
 	EmAuth_Changed();
 }
 
 // the material's entry, created on demand (emit off)
-static emAuthMaterial_t &EmAuth_MaterialRef( const idMaterial *mat ) {
-	int mi = EmAuth_FindMaterial( mat->GetName() );
-	if ( mi < 0 ) {
-		emAuthMaterial_t &em = s_emMaterials.Alloc();
-		em.name = mat->GetName(); em.mat = mat; em.emit = false;
-		EmAuth_ClearLook( em.look );
-		mi = s_emMaterials.Num() - 1;
-	}
-	return s_emMaterials[ mi ];
-}
+static emAuthMaterial_t &EmAuth_MaterialRef( const idMaterial *mat ) { return s_emMaterials[ EmAuth_MaterialIndexRef( mat ) ]; }
 
 static bool EmAuth_MaterialEmits( const idMaterial *mat ) {
 	const int mi = ( mat != NULL ) ? EmAuth_FindMaterial( mat->GetName() ) : -1;
@@ -1120,14 +1149,7 @@ static bool EmAuth_MaterialEmits( const idMaterial *mat ) {
 }
 
 // a fixture's entry, created on demand
-static emAuthFixture_t &EmAuth_FixtureRef( unsigned long long id ) {
-	int fi = EmAuth_FindFixture( id );
-	if ( fi < 0 ) {
-		EmAuth_NewFixture( s_emFixtures.Alloc(), id );
-		fi = s_emFixtures.Num() - 1;
-	}
-	return s_emFixtures[ fi ];
-}
+static emAuthFixture_t &EmAuth_FixtureRef( unsigned long long id ) { return s_emFixtures[ EmAuth_FixtureIndexRef( id ) ]; }
 
 // the power match's multiplier under the AUTHORED setup (the gather's authoredRowScale without an entry): a row at its
 // authored reach, its own colour, no inherited light - where a switch to physical radiance starts, so the look holds
@@ -1414,13 +1436,14 @@ bool R_EmAuthKey( int key, bool down ) {
 	}
 	if ( s_emHoverFixture != 0 ) {
 		const idMaterial *mat = EmAuth_HoverMaterial();
-		emAuthFixture_t &f = EmAuth_FixtureRef( s_emHoverFixture );
+		const int fi = EmAuth_FixtureIndexRef( s_emHoverFixture );
 		if ( key == 2 ) {
-			f.emit = 1;
+			s_emFixtures[ fi ].emit = 1;
 			EmAuth_Changed();
 			EmAuth_DefaultPhysical( false, s_emHoverFixture, mat );
 		} else {
-			f.emit = EmAuth_MaterialEmits( mat ) ? -1 : 0;			// off: an exception when its material emits, else just unset
+			s_emFixtures[ fi ].emit = EmAuth_MaterialEmits( mat ) ? -1 : 0;	// off: an exception when its material emits, else just unset
+			EmAuth_PruneFixture( fi );									// a surface that never emitted: no entry to keep
 			EmAuth_Changed();
 		}
 		common->Printf( "%s: fixture %016llx '%s' %s\n", key == 2 ? "Ins" : "Del", s_emHoverFixture, EmAuth_ShortMaterial( mat ), key == 2 ? "emits" : "does not emit" );
@@ -1443,12 +1466,11 @@ bool R_EmAuthWheel( int dir, bool material ) {
 	if ( s_emHoverLight >= 0 && s_emHoverLight < world->lightDefs.Num() && world->lightDefs[ s_emHoverLight ] != NULL ) {
 		const emLightCache_t *c = EmAuth_LightCache( world, s_emHoverLight );
 		if ( c == NULL ) { return true; }
-		int a = EmAuth_FindLight( c->key );
-		if ( a < 0 ) { EmAuth_NewLight( s_emLights.Alloc(), c->key ); a = s_emLights.Num() - 1; }
+		const int a = EmAuth_LightIndexRef( c->key );
 		emAuthLight_t &l = s_emLights[a];
 		const float b = idMath::ClampFloat( 0.01f, 64.0f, ( ( l.brightness > 0.0f ) ? l.brightness : 1.0f ) * step );
 		l.brightness = ( idMath::Fabs( b - 1.0f ) < 0.02f ) ? 0.0f : b;		// back at x1: unset
-		if ( !l.deleted && !EmAuth_LightOverridden( l ) ) { s_emLights.RemoveIndex( a ); }
+		EmAuth_PruneLight( a );
 		EmAuth_Changed();
 		return true;
 	}

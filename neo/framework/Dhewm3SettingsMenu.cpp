@@ -3521,6 +3521,11 @@ static const RtAugment rtAugment[PRESET_COUNT] = {
 };
 
 
+// the two preset-derived values Apply writes and Detect checks against, in one place: the RT reflection reads brighter
+// than the screen-space one at the same intensity, so SSR tiers use 0.8 and the RT tier 0.5; the RT trace runs at half res
+static float PresetSsrIntensity( bool ssrOn )    { return ssrOn ? 0.8f : 0.5f; }
+static float PresetRtReflResScale( bool rtRefl ) { return rtRefl ? 0.5f : 1.0f; }
+
 static void ApplyEnhancementPreset( int idx, int rtMode )
 {
 	if ( idx < 0 || idx >= PRESET_COUNT ) {
@@ -3590,7 +3595,7 @@ static void ApplyEnhancementPreset( int idx, int rtMode )
 	// SSR vs RT reflection luminance: the ray-traced reflection (Path Tracing, rtReflections) reads
 	// brighter than the screen-space one at the same intensity, so the SSR tiers use 0.8 and the RT tier
 	// 0.5 to match. Lower/SSR-off tiers carry 0.5 (the cvar default), inert until SSR is hand-enabled.
-	r_ssrIntensity.SetFloat( ( p.ssr && !p.rtReflections ) ? 0.8f : 0.5f );
+	r_ssrIntensity.SetFloat( PresetSsrIntensity( p.ssr && !p.rtReflections ) );
 
 	// GPU tessellation (Vulkan-only; inert on GL3): character smoothing from High,
 	// normal-map displacement from Ultra.
@@ -3629,7 +3634,7 @@ static void ApplyEnhancementPreset( int idx, int rtMode )
 	// RT reflection trace resolution: Half wherever the preset turns RT reflections on (Path Tracing) - a
 	// quarter of the rays, temporally upscaled to full res with no visible loss (docs/rtx-reflections.md RR6c).
 	// Inert on the other tiers, which get the Full default back.
-	r_rtReflResScale.SetFloat( p.rtReflections ? 0.5f : 1.0f );
+	r_rtReflResScale.SetFloat( PresetRtReflResScale( p.rtReflections ) );
 	r_ssaoTemporalTrade.SetBool( p.ssaoTemporalTrade );
 	com_interpolate.SetBool( p.interpolate );
 	r_decalLitHighlights.SetBool( p.decalLitHighlights );
@@ -3772,8 +3777,8 @@ static void ApplyEnhancementPreset( int idx, int rtMode )
 		// RT-vs-SSR luminance match + half-res reflection trace follow (mirrors the raster
 		// derivation above, but against the augment's rtReflections instead of the row's).
 		r_ssr.SetBool( p.ssr && !a.rtReflections );
-		r_ssrIntensity.SetFloat( ( p.ssr && !a.rtReflections ) ? 0.8f : 0.5f );
-		r_rtReflResScale.SetFloat( a.rtReflections ? 0.5f : 1.0f );
+		r_ssrIntensity.SetFloat( PresetSsrIntensity( p.ssr && !a.rtReflections ) );
+		r_rtReflResScale.SetFloat( PresetRtReflResScale( a.rtReflections ) );
 
 		// The NRD denoiser (RTAO / RTGI) needs motion vectors; force the velocity producer on
 		// where the raster tier didn't already fund it (e.g. Ultra, which carries mv/fsr off).
@@ -3889,7 +3894,7 @@ static int DetectEnhancementPreset( int* outRtMode = NULL )
 				!r_rtShadowBlurStagger.GetBool() && !r_volumetrics.GetBool() && !r_rtContactShadows.GetBool() &&
 				!r_rtReStirDI.GetBool() && !r_rtReStirDIApply.GetBool() && !r_rtgiCache.GetBool() && !r_rtLightGrid.GetBool() &&
 				r_ssr.GetBool()                    == p.ssr &&
-				idMath::Fabs( r_ssrIntensity.GetFloat() - ( p.ssr ? 0.8f : 0.5f ) ) < 0.01f &&
+				idMath::Fabs( r_ssrIntensity.GetFloat() - PresetSsrIntensity( p.ssr ) ) < 0.01f &&
 				idMath::Fabs( r_rtReflResScale.GetFloat() - 1.0f ) < 0.01f &&
 				r_motionVectors.GetBool()          == p.motionVectors &&
 				idMath::Fabs( cvarSystem->GetCVarFloat( "r_hdrGamma" ) - p.hdrGamma ) < 0.01f &&
@@ -3908,7 +3913,7 @@ static int DetectEnhancementPreset( int* outRtMode = NULL )
 				r_rtSunShadows.GetBool()           == a.rtSunShadows &&
 				r_rtMovingLights.GetBool()         == a.rtMovingLights &&
 				r_rtReflections.GetBool()          == a.rtReflections &&
-				idMath::Fabs( r_rtReflResScale.GetFloat() - ( a.rtReflections ? 0.5f : 1.0f ) ) < 0.01f &&
+				idMath::Fabs( r_rtReflResScale.GetFloat() - PresetRtReflResScale( a.rtReflections ) ) < 0.01f &&
 				r_rtao.GetBool()                   == a.rtao &&
 				( !a.rtao || idMath::Fabs( r_rtaoResScale.GetFloat() - a.rtaoResScale ) < 0.01f ) &&
 				r_rtgi.GetBool()                   == a.rtgi &&
@@ -3923,7 +3928,7 @@ static int DetectEnhancementPreset( int* outRtMode = NULL )
 				r_rtgiCache.GetBool()              == a.rtgi &&
 				r_rtLightGrid.GetBool()            == ( rtMode == RTX_PATHTRACED ) &&
 				r_ssr.GetBool()                    == expSsr &&
-				idMath::Fabs( r_ssrIntensity.GetFloat() - ( expSsr ? 0.8f : 0.5f ) ) < 0.01f &&
+				idMath::Fabs( r_ssrIntensity.GetFloat() - PresetSsrIntensity( expSsr ) ) < 0.01f &&
 				r_motionVectors.GetBool()          == expMv &&
 				idMath::Fabs( cvarSystem->GetCVarFloat( "r_hdrGamma" ) - expGamma ) < 0.01f &&
 				idMath::Fabs( NamedCvar( "r_hdrExposure" ).GetFloat() - expExpo ) < 0.01f &&
@@ -4951,14 +4956,9 @@ static void DrawDbgGroup_Performance()
 		"every stage adds full frame-stage coverage." );
 	CvarCheckbox( "GPU Frame Time (OpenGL 3)", NamedCvar( "r_gl3GpuTime" ), nullptr );
 
-	if ( SettingsRow( "Vulkan Deep-Dive HUD", "r_vkDebugHud" ) ) {
-		bool vkDebugHud = cvarSystem->GetCVarBool( "r_vkDebugHud" );
-		if ( ImGui::Checkbox( "Vulkan Deep-Dive HUD (GPU clock / temp / VRAM / errors)", &vkDebugHud ) ) {
-			cvarSystem->SetCVarBool( "r_vkDebugHud", vkDebugHud );
-		}
-		CvarTipNamed( "r_vkDebugHud", "Always-on overlay with live GPU clock/temp/power (NVIDIA), VRAM usage and validation-error count. "
-			"The clock turns amber/red as it climbs toward the boost range - useful for telling a hardware/driver reset apart from a code fault." );
-	}
+	CvarCheckbox( "Vulkan Deep-Dive HUD (GPU clock / temp / VRAM / errors)", NamedCvar( "r_vkDebugHud" ),
+		"Always-on overlay with live GPU clock/temp/power (NVIDIA), VRAM usage and validation-error count. "
+		"The clock turns amber/red as it climbs toward the boost range - useful for telling a hardware/driver reset apart from a code fault." );
 
 	CvarSliderI( "Shadow-Map Coverage Print", r_shadowMapDebug, 0, 2, "Print once a second how many lights got a shadow map, stencil "
 		"shadows or none, and why lit lights stay on the forward path. 2 = per light." );
@@ -4974,14 +4974,9 @@ static void DrawDbgGroup_Diagnostics()
 
 	// Vulkan crash logging (opt-in) - writes a dudelog-crash-YYYYMMDD-HHMMSS.txt next to dudelog.txt
 	// when a VK_ERROR_DEVICE_LOST is detected by the backend. Default OFF.
-	if ( SettingsRow( "Vulkan Crash Logging", "r_vkCrashLogging" ) ) {
-		bool vkCrashLog = cvarSystem->GetCVarBool( "r_vkCrashLogging" );
-		if ( ImGui::Checkbox( "Vulkan Crash Logging (write crash dumps)", &vkCrashLog ) ) {
-			cvarSystem->SetCVarBool( "r_vkCrashLogging", vkCrashLog );
-		}
-		CvarTipNamed( "r_vkCrashLogging", "When enabled, writes a dudelog-crash-YYYYMMDD-HHMMSS.txt on device-lost events, with the last "
-			"GPU pass markers. Enable only when debugging driver resets." );
-	}
+	CvarCheckbox( "Vulkan Crash Logging (write crash dumps)", NamedCvar( "r_vkCrashLogging" ),
+		"When enabled, writes a dudelog-crash-YYYYMMDD-HHMMSS.txt on device-lost events, with the last "
+		"GPU pass markers. Enable only when debugging driver resets." );
 	CvarCheckbox( "Vulkan Validation Layer (restart)", NamedCvar( "r_vkValidation" ), "Enable the Khronos validation layer if installed. Takes effect "
 		"on the next renderer restart; costs a lot of FPS." );
 	CvarCheckbox( "Dump the Next Frame (vkdump.tga)", NamedCvar( "r_vkDumpNextFrame" ), nullptr );
@@ -5077,30 +5072,17 @@ static void DrawDbgGroup_Materials()
 
 	SettingsHeading( "Skin" );
 	ImGui::BeginDisabled( r_skinShading.GetFloat() <= 0.0f );
-	if ( SettingsRow( "Skin SSS Strength", "r_skinShading" ) ) {
-	float sss = r_skinShading.GetFloat();
-	if ( ImGui::SliderFloat( "Skin SSS Strength", &sss, 0.0f, 1.0f, "%.2f" ) ) {
-		r_skinShading.SetFloat( idMath::ClampFloat( 0.0f, 1.0f, sss ) );
-	}
-	CvarTip( r_skinShading, "how strongly skin and flesh scatter light under the surface, warming and "
+	CvarSliderF( "Skin SSS Strength", r_skinShading, 0.0f, 1.0f, "%.2f",
+		"how strongly skin and flesh scatter light under the surface, warming and "
 		"softening the lighting terminator so faces stop reading as plastic. Doubles as the on/off, so "
 		"dragging this to 0 also unticks it in the Graphics tab. Default 0.6. Preset-owned (Potato 0 = "
 		"faithful floor, Low+ 0.6), so moving it reads as a Custom preset." );
-	CvarResetButton( r_skinShading );
 
-	}
-
-	if ( SettingsRow( "Skin Scatter Reach", "r_skinScatter" ) ) {
-	float reach = r_skinScatter.GetFloat();
-	if ( ImGui::SliderFloat( "Skin Scatter Reach", &reach, 0.0f, 1.0f, "%.2f" ) ) {
-		r_skinScatter.SetFloat( idMath::ClampFloat( 0.0f, 1.0f, reach ) );
-	}
-	CvarTip( r_skinScatter, "how far light wraps around the terminator - higher = a softer, redder, "
+	CvarSliderF( "Skin Scatter Reach", r_skinScatter, 0.0f, 1.0f, "%.2f",
+		"how far light wraps around the terminator - higher = a softer, redder, "
 		"wider glow, lower = tighter. The red channel's reach; green and blue derive shorter, which is "
 		"what makes the falloff warm. Flesh scatters ~30% deeper than face skin. Default 0.32. NOT "
 		"preset-owned, so it survives a preset change." );
-	CvarResetButton( r_skinScatter );
-	}
 	ImGui::EndDisabled();
 	EndSettingsGroup();
 	}
