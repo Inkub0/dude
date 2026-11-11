@@ -308,9 +308,22 @@ bool    ImGui_ImplOpenGL3_Init(const char* glsl_version)
     IMGUI_CHECKVERSION();
     IM_ASSERT(io.BackendRendererUserData == nullptr && "Already initialized a renderer backend!");
 
-    // Initialize loader
+    // Initialize loader. DUDE: re-resolve the GL entry points on EVERY Init, not only the first. A full
+    // vid_restart destroys the window and context; the GL vendor library behind glXGetProcAddress /
+    // eglGetProcAddress can be unloaded with them and come back at another address, and the pointers the
+    // first Init cached then point into unmapped memory (the GL3 preset-change crash: glGetString below).
+    // The lazy per-frame checks keep ImGui_ImplOpenGL3_InitLoader's once-only guard.
+#ifdef IMGUI_IMPL_OPENGL_LOADER_IMGL3W
+    close_libgl();      // drop the handles of the previous resolve (open_libs forgets them)
+    if (imgl3wInit() != 0)
+    {
+        fprintf(stderr, "Failed to initialize OpenGL loader!\n");
+        return false;
+    }
+#else
     if (!ImGui_ImplOpenGL3_InitLoader())
         return false;
+#endif
 
     // Setup backend capabilities flags
     ImGui_ImplOpenGL3_Data* bd = IM_NEW(ImGui_ImplOpenGL3_Data)();
