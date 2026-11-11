@@ -231,6 +231,12 @@ public:
 	ImageHandle				UploadTexture2DLevels( int w, int h, const PrebuiltMip *levels,
 	                                               int numLevels, int textureFilter,
 	                                               int textureRepeat, bool singleChannel );	// shared by the two above
+	virtual bool			TextureCompressionAvailable( void ) const { return haveBC; }
+	virtual ImageHandle		CreateTexture2DCompressed( int w, int h, CompressedFormat format, const CompressedMip *levels,
+	                                                   int numLevels, int textureFilter, int textureRepeat );
+	struct uploadLevel_t { const byte *data; int w, h; VkDeviceSize bytes; };
+	ImageHandle				UploadTexture2DImpl( int w, int h, VkFormat format, const std::vector<uploadLevel_t> &levels,
+	                                             bool packRed, int textureFilter, int textureRepeat );	// the GPU half of the three above
 	virtual void			BeginTextureUploadBatch( void );
 	virtual void			EndTextureUploadBatch( void );
 	virtual ImageHandle		CreateTextureCube( int size, const void * const pics[6],
@@ -935,6 +941,7 @@ private:
 	// tessellation feature: without it no tess pipeline is ever built and the
 	// tess shader modules are skipped. maxTessGenLevel bounds the slider.
 	bool						haveTessellation = false;
+	bool						haveBC = false;			// DUDE: textureCompressionBC, BC1-BC7 sampled images (the .dds path)
 	uint32_t					maxTessGenLevel = 64;
 	// GPU-driven indirect draw (docs/gpu-offload-plan.md Phase 3). The 1.4 floor guarantees
 	// the vkCmdDrawIndexedIndirect[Count] *commands* exist, but the FEATURES are still explicit
@@ -1996,6 +2003,9 @@ bool VulkanBackend::CreateDeviceAndVma() {
 	// prop meshes. Optional feature, but present on every desktop GPU we target.
 	haveTessellation = supported.tessellationShader == VK_TRUE;
 	enabled.tessellationShader = haveTessellation ? VK_TRUE : VK_FALSE;
+	// DUDE precompressed .dds: block-compressed sampled images (one feature bit covers BC1-BC7)
+	haveBC = supported.textureCompressionBC == VK_TRUE;
+	enabled.textureCompressionBC = haveBC ? VK_TRUE : VK_FALSE;
 	if ( haveTessellation ) {
 		maxTessGenLevel = physProps.limits.maxTessellationGenerationLevel;
 	}
@@ -9936,10 +9946,9 @@ void VulkanBackend::EndTextureUploadBatch( void ) {
 ====================
 VulkanBackend::UploadTexture2DLevels
 
-Shared GPU upload for CreateTexture2D / CreateTexture2DPrebuilt: stage the supplied
-RGBA8 mip levels and copy them into a new sampled image with a blocking submit. Does
-not own the level buffers (the caller frees them once this returns). singleChannel
-keeps only each texel's red byte, in an R8 image (TD_MONO: baked AO maps).
+RGBA8 levels (CreateTexture2D / CreateTexture2DPrebuilt) into an R8G8B8A8 image, or, with
+singleChannel, only each texel's red byte into an R8 image (TD_MONO: baked AO maps). Does
+not own the level buffers (the caller frees them once this returns).
 ====================
 */
 ImageHandle VulkanBackend::UploadTexture2DLevels( int w, int h, const PrebuiltMip *inLevels,
@@ -9949,23 +9958,66 @@ ImageHandle VulkanBackend::UploadTexture2DLevels( int w, int h, const PrebuiltMi
 			|| inLevels[0].data == NULL || uploadCb == VK_NULL_HANDLE ) {
 		return 0;
 	}
-
-	// mirror into the local descriptor type the rest of this function already uses;
-	// owned stays empty because the caller owns the level pixel buffers
-	struct level_t { const byte *data; int w, h; };
-	std::vector<level_t> levels;
+	const int texelBytes = singleChannel ? 1 : 4;
+	std::vector<uploadLevel_t> levels;
 	levels.reserve( numLevels );
 	for ( int i = 0; i < numLevels; i++ ) {
-		levels.push_back( { (const byte *)inLevels[i].data, inLevels[i].w, inLevels[i].h } );
+		levels.push_back( { (const byte *)inLevels[i].data, inLevels[i].w, inLevels[i].h,
+			(VkDeviceSize)inLevels[i].w * inLevels[i].h * texelBytes } );
 	}
-	std::vector<byte *> owned;
+	return UploadTexture2DImpl( w, h, singleChannel ? VK_FORMAT_R8_UNORM : VK_FORMAT_R8G8B8A8_UNORM, levels,
+		singleChannel, textureFilter, textureRepeat );
+}
 
-	const VkFormat format = singleChannel ? VK_FORMAT_R8_UNORM : VK_FORMAT_R8G8B8A8_UNORM;
-	const int texelBytes = singleChannel ? 1 : 4;
+/*
+====================
+VulkanBackend::CreateTexture2DCompressed
+
+DUDE precompressed .dds on Vulkan: the block levels go up as they are, into an image of
+the matching BC format (the textureCompressionBC feature, haveBC). The engine's DDS reader
+already filtered the file to these formats.
+====================
+*/
+ImageHandle VulkanBackend::CreateTexture2DCompressed( int w, int h, CompressedFormat format, const CompressedMip *inLevels,
+                                                      int numLevels, int textureFilter, int textureRepeat ) {
+	if ( !haveBC || device == VK_NULL_HANDLE || w <= 0 || h <= 0 || numLevels < 1 || inLevels == NULL
+			|| inLevels[0].data == NULL || uploadCb == VK_NULL_HANDLE ) {
+		return 0;
+	}
+	VkFormat vkFormat;
+	switch ( format ) {
+		case CF_BC1_RGB:	vkFormat = VK_FORMAT_BC1_RGB_UNORM_BLOCK; break;
+		case CF_BC1_RGBA:	vkFormat = VK_FORMAT_BC1_RGBA_UNORM_BLOCK; break;
+		case CF_BC2:		vkFormat = VK_FORMAT_BC2_UNORM_BLOCK; break;
+		case CF_BC3:		vkFormat = VK_FORMAT_BC3_UNORM_BLOCK; break;
+		case CF_BC7:		vkFormat = VK_FORMAT_BC7_UNORM_BLOCK; break;
+		default:			return 0;
+	}
+	std::vector<uploadLevel_t> levels;
+	levels.reserve( numLevels );
+	for ( int i = 0; i < numLevels; i++ ) {
+		levels.push_back( { (const byte *)inLevels[i].data, inLevels[i].w, inLevels[i].h, (VkDeviceSize)inLevels[i].bytes } );
+	}
+	return UploadTexture2DImpl( w, h, vkFormat, levels, false, textureFilter, textureRepeat );
+}
+
+/*
+====================
+VulkanBackend::UploadTexture2DImpl
+
+Shared GPU upload for the texture creates above: stage the supplied levels (each level's
+bytes as given, or with packRed only the red byte of every RGBA8 texel) and copy them into a
+new sampled image of the given format with a blocking submit, or into the open texture
+upload batch. Does not own the level buffers (the caller frees them once this returns).
+====================
+*/
+ImageHandle VulkanBackend::UploadTexture2DImpl( int w, int h, VkFormat format, const std::vector<uploadLevel_t> &levels,
+                                                bool packRed, int textureFilter, int textureRepeat ) {
+	std::vector<byte *> owned;		// nothing is owned here; the callers free their level buffers
 
 	VkDeviceSize total = 0;
 	for ( size_t i = 0; i < levels.size(); i++ ) {
-		total += (VkDeviceSize)levels[i].w * levels[i].h * texelBytes;
+		total += levels[i].bytes;
 	}
 
 	// staging buffer
@@ -9987,16 +10039,16 @@ ImageHandle VulkanBackend::UploadTexture2DLevels( int w, int h, const PrebuiltMi
 		}
 		byte *dst = (byte *)info.pMappedData;
 		for ( size_t i = 0; i < levels.size(); i++ ) {
-			const size_t texels = (size_t)levels[i].w * levels[i].h;
-			if ( singleChannel ) {
+			if ( packRed ) {
+				const size_t texels = (size_t)levels[i].w * levels[i].h;
 				const byte *src = levels[i].data;
 				for ( size_t t = 0; t < texels; t++ ) {
 					dst[t] = src[t * 4];
 				}
 			} else {
-				memcpy( dst, levels[i].data, texels * 4 );
+				memcpy( dst, levels[i].data, (size_t)levels[i].bytes );
 			}
-			dst += texels * texelBytes;
+			dst += levels[i].bytes;
 		}
 	}
 	for ( size_t i = 0; i < owned.size(); i++ ) { R_StaticFree( owned[i] ); }
@@ -10067,7 +10119,7 @@ ImageHandle VulkanBackend::UploadTexture2DLevels( int w, int h, const PrebuiltMi
 			c.imageSubresource.layerCount = 1;
 			c.imageExtent = { (uint32_t)levels[i].w, (uint32_t)levels[i].h, 1 };
 			vkCmdCopyBufferToImage( cb, staging, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &c );
-			bufOfs += (VkDeviceSize)levels[i].w * levels[i].h * texelBytes;
+			bufOfs += levels[i].bytes;
 		}
 
 		VkImageMemoryBarrier toRead = toDst;

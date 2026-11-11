@@ -244,6 +244,7 @@ public:
 	// .dds on a worker and keep the GL upload (UploadPrecompressedImage) on the main thread.
 	bool		ReadPrecompressedImage( byte **dataOut, int *lenOut );
 	void		UploadPrecompressedImage( byte *data, int len );
+	void		UploadPrecompressedImageRhi( const byte *data, int len );	// DUDE: the Vulkan half (BC blocks through the RHI)
 	void		ActuallyLoadImage( bool checkForPrecompressed, bool fromBackEnd );
 	void		StartBackgroundImageLoad();
 	int			BitsForInternalFormat( int internalFormat ) const;
@@ -560,6 +561,7 @@ public:
 extern idImageManager	*globalImages;		// pointer to global list for the rest of the system
 
 int MakePowerOfTwo( int num );
+bool R_DecodeDDSLevelRGBA( const byte *blocks, int w, int h, unsigned int fourCC, byte *out );	// DUDE: Image_files.cpp
 
 /*
 ====================================================================

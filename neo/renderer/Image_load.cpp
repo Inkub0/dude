@@ -1260,6 +1260,9 @@ void idImage::WritePrecompressedImage() {
 	if ( !glConfig.isInitialized ) {
 		return;
 	}
+	if ( qglGenTextures == NULL ) {
+		return;		// DUDE: reads the texture back through qgl; nothing to read on Vulkan
+	}
 
 	char filename[MAX_IMAGE_NAME];
 	ImageProgramStringToCompressedFileName( imgName, filename );
@@ -1657,6 +1660,21 @@ bool idImage::ReadPrecompressedImage( byte **dataOut, int *lenOut ) {
 		R_StaticFree( data );
 		return false;
 	}
+	// DUDE Vulkan: the backend uploads DXT1/3/5, RXGB and BC7 blocks as they are
+	// (UploadPrecompressedImageRhi); any other .dds (uncompressed, index colour) is left
+	// alone and the source decodes instead
+	if ( qglGenTextures == NULL && glConfig.rhiBackend ) {
+		const bool blockFormat = ( ddspf_dwFlags & DDSF_FOURCC ) && !( ddspf_dwFlags & DDSF_ID_INDEXCOLOR )
+			&& ( isBC7
+			     || ddspf_dwFourCC == DDS_MAKEFOURCC( 'D', 'X', 'T', '1' )
+			     || ddspf_dwFourCC == DDS_MAKEFOURCC( 'D', 'X', 'T', '3' )
+			     || ddspf_dwFourCC == DDS_MAKEFOURCC( 'D', 'X', 'T', '5' )
+			     || ddspf_dwFourCC == DDS_MAKEFOURCC( 'R', 'X', 'G', 'B' ) );
+		if ( !blockFormat ) {
+			R_StaticFree( data );
+			return false;
+		}
+	}
 	if ( glConfig.bptcTextureCompressionAvailable
 	    && globalImages->image_usePrecompressedTextures.GetInteger() == 2 )
 	{
@@ -1704,7 +1722,175 @@ or by the backend after a background read of the file
 has completed
 ===================
 */
+/*
+===============
+R_DdsEmissiveStats
+
+DUDE: the mean colour and glow extents a decoded source would have given (averageColor /
+glowExtents, the emissive GUI fill-light tint and the RT emissive table's clip rectangle),
+taken from the first mip of a DXT1/3/5/RXGB .dds that is 256 texels or smaller - the
+rectangle is a texel-threshold bound, which a quarter-size mip places within one texel of
+st. false (stats untouched) for a BC7 file, which has no CPU decoder here.
+===============
+*/
+static bool R_DdsEmissiveStats( const byte *data, int len, float averageColor[3], imageEmissiveExtents_t *ext ) {
+	if ( len < (int)sizeof( ddsFileHeader_t ) + 4 ) {
+		return false;
+	}
+	const ddsFileHeader_t *header = (const ddsFileHeader_t *)( data + 4 );
+	const unsigned int pfFlags = LittleInt( header->ddspf.dwFlags );
+	const unsigned int fourCC = LittleInt( header->ddspf.dwFourCC );
+	if ( !( pfFlags & DDSF_FOURCC ) ) {
+		return false;
+	}
+	int blockBytes;
+	if ( fourCC == DDS_MAKEFOURCC( 'D', 'X', 'T', '1' ) ) {
+		blockBytes = 8;
+	} else if ( fourCC == DDS_MAKEFOURCC( 'D', 'X', 'T', '3' ) || fourCC == DDS_MAKEFOURCC( 'D', 'X', 'T', '5' )
+	            || fourCC == DDS_MAKEFOURCC( 'R', 'X', 'G', 'B' ) ) {
+		blockBytes = 16;
+	} else {
+		return false;
+	}
+	const int numMipmaps = ( LittleInt( header->dwFlags ) & DDSF_MIPMAPCOUNT ) ? LittleInt( header->dwMipMapCount ) : 1;
+	int w = LittleInt( header->dwWidth ), h = LittleInt( header->dwHeight );
+	const byte *level = data + sizeof( ddsFileHeader_t ) + 4;
+	const byte *end = data + len;
+	for ( int i = 0; i < numMipmaps; i++ ) {
+		const int size = ( ( w + 3 ) / 4 ) * ( ( h + 3 ) / 4 ) * blockBytes;
+		if ( level + size > end || w < 1 || h < 1 ) {
+			return false;
+		}
+		if ( ( w <= 256 && h <= 256 ) || i == numMipmaps - 1 ) {
+			byte *rgba = (byte *)R_StaticAlloc( w * h * 4 );
+			const bool ok = R_DecodeDDSLevelRGBA( level, w, h, fourCC, rgba );
+			if ( ok ) {
+				R_ImageAverageColorRGBA( rgba, w * h, averageColor );
+				R_ImageEmissiveExtentsRGBA( rgba, w, h, R_EMISSIVE_GLOW_THRESHOLD, ext );
+			}
+			R_StaticFree( rgba );
+			return ok;
+		}
+		level += size;
+		w = w > 1 ? w >> 1 : 1;
+		h = h > 1 ? h >> 1 : 1;
+	}
+	return false;
+}
+
+/*
+===============
+idImage::UploadPrecompressedImageRhi
+
+DUDE: the Vulkan half of UploadPrecompressedImage. The .dds blocks go to the RHI as they
+are (CreateTexture2DCompressed, BC1/2/3/7); ReadPrecompressedImage already rejected every
+other format on this backend. Mirrors the GL upload's decisions: the downsize skips the
+top levels, a single level turns mipmapping off, a truncated chain uploads what is there.
+===============
+*/
+void idImage::UploadPrecompressedImageRhi( const byte *data, int len ) {
+	const ddsFileHeader_t *header = (const ddsFileHeader_t *)( data + 4 );
+	const unsigned int pfFlags = LittleInt( header->ddspf.dwFlags );
+	const unsigned int fourCC = LittleInt( header->ddspf.dwFourCC );
+	const int width = LittleInt( header->dwWidth );
+	const int height = LittleInt( header->dwHeight );
+	const int numMipmaps = ( LittleInt( header->dwFlags ) & DDSF_MIPMAPCOUNT ) ? LittleInt( header->dwMipMapCount ) : 1;
+	size_t additionalHeaderOffset = 0;
+	rhi::RHI::CompressedFormat format;
+	int blockBytes;
+
+	if ( fourCC == DDS_MAKEFOURCC( 'D', 'X', 'T', '1' ) ) {
+		const bool alpha = ( pfFlags & DDSF_ALPHAPIXELS ) != 0;
+		format = alpha ? rhi::RHI::CF_BC1_RGBA : rhi::RHI::CF_BC1_RGB;
+		internalFormat = alpha ? GL_COMPRESSED_RGBA_S3TC_DXT1_EXT : GL_COMPRESSED_RGB_S3TC_DXT1_EXT;
+		blockBytes = 8;
+	} else if ( fourCC == DDS_MAKEFOURCC( 'D', 'X', 'T', '3' ) ) {
+		format = rhi::RHI::CF_BC2;
+		internalFormat = GL_COMPRESSED_RGBA_S3TC_DXT3_EXT;
+		blockBytes = 16;
+	} else if ( fourCC == DDS_MAKEFOURCC( 'D', 'X', 'T', '5' ) || fourCC == DDS_MAKEFOURCC( 'R', 'X', 'G', 'B' ) ) {
+		format = rhi::RHI::CF_BC3;
+		internalFormat = GL_COMPRESSED_RGBA_S3TC_DXT5_EXT;
+		blockBytes = 16;
+	} else if ( fourCC == DDS_MAKEFOURCC( 'B', 'C', '7', '0' ) || fourCC == DDS_MAKEFOURCC( 'B', 'C', '7', 'L' )
+	            || fourCC == DDS_MAKEFOURCC( 'D', 'X', '1', '0' ) ) {
+		// a DX10 header is BC7 UNORM here: CheckPrecompressedImage accepts nothing else under it
+		format = rhi::RHI::CF_BC7;
+		internalFormat = GL_COMPRESSED_RGBA_BPTC_UNORM;
+		blockBytes = 16;
+		if ( fourCC == DDS_MAKEFOURCC( 'D', 'X', '1', '0' ) ) {
+			additionalHeaderOffset = 20;
+		}
+	} else {
+		common->Warning( "UploadPrecompressedImageRhi( %s ): unsupported .dds format", imgName.c_str() );
+		MakeDefault();
+		return;
+	}
+
+	// the downsize skips the top levels, as the GL upload does
+	uploadWidth = width;
+	uploadHeight = height;
+	GetDownsize( uploadWidth, uploadHeight );
+
+	static const int MAX_LEVELS = 16;		// 32768 texels
+	rhi::RHI::CompressedMip levels[MAX_LEVELS];
+	int numLevels = 0;
+	const byte *imagedata = data + sizeof( ddsFileHeader_t ) + 4 + additionalHeaderOffset;
+	const byte *end = data + len;
+	int uw = width, uh = height;
+	for ( int i = 0; i < numMipmaps && numLevels < MAX_LEVELS; i++ ) {
+		const int size = ( ( uw + 3 ) / 4 ) * ( ( uh + 3 ) / 4 ) * blockBytes;
+		if ( imagedata + size > end ) {
+			break;		// truncated: upload what is there
+		}
+		if ( uw <= uploadWidth && uh <= uploadHeight ) {
+			levels[numLevels].data = imagedata;
+			levels[numLevels].w = uw;
+			levels[numLevels].h = uh;
+			levels[numLevels].bytes = size;
+			numLevels++;
+		}
+		imagedata += size;
+		uw = uw > 1 ? uw >> 1 : 1;
+		uh = uh > 1 ? uh >> 1 : 1;
+	}
+	if ( numLevels == 0 ) {
+		common->Warning( "UploadPrecompressedImageRhi( %s ): no usable mip level", imgName.c_str() );
+		MakeDefault();
+		return;
+	}
+	if ( numLevels == 1 && filter == TF_DEFAULT ) {
+		filter = TF_LINEAR;		// one level: no mipmapping, as the GL upload decides
+	}
+
+	if ( rhiHandle ) {
+		rhi::GetRHI()->DestroyImage( rhiHandle );
+		rhiHandle = 0;
+	}
+	rhiHandle = rhi::GetRHI()->CreateTexture2DCompressed( levels[0].w, levels[0].h, format, levels, numLevels, (int)filter, (int)repeat );
+	if ( rhiHandle == 0 ) {
+		common->Warning( "UploadPrecompressedImageRhi( %s ): the backend refused the upload", imgName.c_str() );
+		MakeDefault();
+		return;
+	}
+	type = TT_2D;
+	uploadWidth = levels[0].w;
+	uploadHeight = levels[0].h;
+	precompressedFile = true;
+
+	// the stats the decoded source would have given (see R_DdsEmissiveStats); a normal map has no use for them
+	if ( depth != TD_BUMP ) {
+		R_DdsEmissiveStats( data, len, averageColor, &glowExtents );
+	}
+}
+
 void idImage::UploadPrecompressedImage( byte *data, int len ) {
+	// DUDE: the Vulkan backend has no qgl; its RHI takes the blocks as they are
+	if ( qglGenTextures == NULL && glConfig.rhiBackend ) {
+		UploadPrecompressedImageRhi( data, len );
+		return;
+	}
+
 	ddsFileHeader_t	*header = (ddsFileHeader_t *)(data + 4);
 
 	// ( not byte swapping dwReserved1 dwReserved2 )
@@ -2118,27 +2304,37 @@ bool idImage::LoadImageCpu() {
 
 	const bool isVulkan = ( glConfig.rhiBackend && rhi::GetActiveBackendType() == rhi::BT_VULKAN );
 
-	// 1) GL3 backend. A precompressed .dds, when the cvars allow one (the serial load's gate:
-	//    a tier that turned precompressed files off decodes the source instead, so the level
-	//    load and a later reload agree on the texture), is read + inflated here on the worker
-	//    and the main thread uploads the compressed blocks (UploadPrecompressedImage is
-	//    qgl-based, a no-op on Vulkan, so this branch is GL-only). Any other GL image takes
-	//    LoadImageCpuGL, GenerateImage's CPU half, and the main thread uploads its levels; the
-	//    few cases that stay serial are listed there.
-	if ( !isVulkan ) {
+	// 1) A precompressed .dds, when the cvars allow one (the serial load's gate: a tier that
+	//    turned precompressed files off decodes the source instead, so the level load and a
+	//    later reload agree on the texture), is read + inflated here on the worker and the
+	//    main thread uploads the blocks: GL through UploadPrecompressedImage (qgl), Vulkan
+	//    through UploadPrecompressedImageRhi (BC formats, when the device has them -
+	//    ReadPrecompressedImage returns false otherwise). A level-content generator has no file.
+	if ( !generatorCpu && globalImages->image_usePrecompressedTextures.GetBool() ) {
 		byte *dds = NULL;
 		int   ddsLen = 0;
-		// (a level-content generator has no file: it produces its pixels in LoadImageCpuGL)
-		if ( !generatorCpu && globalImages->image_usePrecompressedTextures.GetBool() && ReadPrecompressedImage( &dds, &ddsLen ) ) {
+		if ( ReadPrecompressedImage( &dds, &ddsLen ) ) {
 			parallelData->precompressedData = dds;
 			parallelData->precompressedLen = ddsLen;
-		} else if ( !LoadImageCpuGL() ) {
+			// Vulkan's RT emissive table wants the mean colour and glow extents the decoded
+			// source would have given: take them from a small mip of the blocks, here on the worker
+			if ( isVulkan && depth != TD_BUMP ) {
+				parallelData->hasAverageColor = R_DdsEmissiveStats( dds, ddsLen, parallelData->averageColor, &parallelData->glowExtents );
+			}
+			return true;
+		}
+	}
+
+	// 2) GL3 without a .dds: LoadImageCpuGL, GenerateImage's CPU half, and the main thread
+	//    uploads its levels; the few cases that stay serial are listed there.
+	if ( !isVulkan ) {
+		if ( !LoadImageCpuGL() ) {
 			parallelData->needsSerial = true;
 		}
 		return true;
 	}
 
-	// 2) Vulkan: decode the source and build the RGBA8 mip pyramid.
+	// 3) Vulkan without a .dds: decode the source and build the RGBA8 mip pyramid.
 	byte *pic = NULL;
 	int width = 0, height = 0;
 
@@ -2228,7 +2424,8 @@ void idImage::UploadImageCpu() {
 		// the cheap ReadPrecompressedImage miss, then decodes + uploads via GL)
 		ActuallyLoadImage( true, false );
 	} else if ( parallelData->precompressedData ) {
-		// GL3: upload the worker-read .dds, exactly as CheckPrecompressedImage would
+		// upload the worker-read .dds, exactly as CheckPrecompressedImage would (GL: the
+		// compressed blocks through qgl; Vulkan: through the RHI, see UploadPrecompressedImageRhi)
 		UploadPrecompressedImage( parallelData->precompressedData, parallelData->precompressedLen );
 	} else if ( parallelData->glPyramid ) {
 		// GL3: the worker-built pyramid (LoadImageCpuGL) goes up as GenerateImage's GL upload does

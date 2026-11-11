@@ -3693,7 +3693,8 @@ static void ApplyEnhancementPreset( int idx, int rtMode )
 			const int want = p.compressTextures ? ( cur != 0 ? cur : 1 ) : 0;
 			if ( cur != want ) {
 				compressionCvars[i]->SetInteger( want );
-				// only OpenGL compresses: Vulkan uploads uncompressed whatever these say
+				// a backend without block-compressed textures uploads uncompressed whatever these
+				// say (Vulkan on a device without textureCompressionBC), so nothing to reload there
 				reloadTextures |= glConfig.textureCompressionAvailable;
 			}
 		}

@@ -407,6 +407,19 @@ public:
 	virtual void			BeginTextureUploadBatch( void ) {}
 	virtual void			EndTextureUploadBatch( void ) {}
 
+	// DUDE: precompressed textures. A backend that samples block-compressed images natively
+	// returns true (Vulkan: the textureCompressionBC feature, BC1-BC7); the engine then takes
+	// the pak's .dds files at the compressing presets as the GL backend does, which saves the
+	// VRAM and the decode. The formats are the ones the engine's DDS reader accepts; levels[0]
+	// is the base level w x h, each following level half-size, bytes = the level's block data.
+	// The blocks are sampled as they are (RXGB is BC3 with the normal's x in alpha, which the
+	// shaders already decode).
+	virtual bool			TextureCompressionAvailable( void ) const { return false; }
+	enum CompressedFormat { CF_BC1_RGB, CF_BC1_RGBA, CF_BC2, CF_BC3, CF_BC7 };
+	struct CompressedMip { const void *data; int w, h; int bytes; };
+	virtual ImageHandle		CreateTexture2DCompressed( int w, int h, CompressedFormat format, const CompressedMip *levels,
+	                                                   int numLevels, int textureFilter, int textureRepeat ) { return 0; }
+
 	// Phase 4 M4: cube-map upload (normalization/ambient cube maps, env maps).
 	// pics are six size×size RGBA8 faces in GL_TEXTURE_CUBE_MAP_POSITIVE_X..
 	// order; sampler is always clamp-to-edge (the only mode that makes sense
