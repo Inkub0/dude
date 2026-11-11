@@ -234,6 +234,10 @@ and those formats were only chosen when the relevant channels are identical,
 so promoting to RGBA8 samples the exact same values — costs memory only.
 ===============
 */
+// DUDE Vulkan "compress on upload" helpers, defined beside idImage::VulkanBlockFormat below
+static int  R_BcGlFormat( int format );
+static void R_EncodeBlockLevels( int format, byte **levelData, const int *levelW, const int *levelH, int *levelBytes, int numLevels );
+
 static GLenum R_CoreSafeInternalFormat( GLenum f ) {
 	if ( !glConfig.coreProfile ) {
 		return f;
@@ -706,8 +710,52 @@ void idImage::GenerateImage( const byte *pic, int width, int height,
 				}
 				upload = swizzled;
 			}
-			rhiHandle = rhi::GetRHI()->CreateTexture2D( width, height, upload,
-				(int)filter, (int)repeat, filter == TF_DEFAULT, depth == TD_MONO );
+			const int bcFormat = VulkanBlockFormat( upload, width, height );
+			if ( bcFormat >= 0 ) {
+				// DUDE "compress on upload" at a compressing tier: the mip chain CreateTexture2D
+				// would have built, encoded here (R_CompressBcLevel) and uploaded as blocks - the
+				// serial twin of LoadImageCpu's, so a demand load matches the level load
+				static const int MAX_LEVELS = 16;
+				byte *levelData[MAX_LEVELS];
+				int levelW[MAX_LEVELS], levelH[MAX_LEVELS], levelBytes[MAX_LEVELS];
+				int numLevels = 1;
+				levelData[0] = (byte *)R_StaticAlloc( width * height * 4 );
+				memcpy( levelData[0], upload, width * height * 4 );
+				levelW[0] = width;
+				levelH[0] = height;
+				if ( filter == TF_DEFAULT ) {
+					const bool preserveBorder = ( repeat == TR_CLAMP_TO_ZERO );
+					const byte *src = levelData[0];
+					int lw = width, lh = height;
+					while ( ( lw > 1 || lh > 1 ) && numLevels < MAX_LEVELS ) {
+						byte *shrunk = R_MipMap( src, lw, lh, preserveBorder );
+						lw = lw > 1 ? lw >> 1 : 1;
+						lh = lh > 1 ? lh >> 1 : 1;
+						levelData[numLevels] = shrunk;
+						levelW[numLevels] = lw;
+						levelH[numLevels] = lh;
+						numLevels++;
+						src = shrunk;
+					}
+				}
+				R_EncodeBlockLevels( bcFormat, levelData, levelW, levelH, levelBytes, numLevels );
+				rhi::RHI::CompressedMip mips[MAX_LEVELS];
+				for ( int i = 0; i < numLevels; i++ ) {
+					mips[i].data = levelData[i];
+					mips[i].w = levelW[i];
+					mips[i].h = levelH[i];
+					mips[i].bytes = levelBytes[i];
+				}
+				rhiHandle = rhi::GetRHI()->CreateTexture2DCompressed( width, height, (rhi::RHI::CompressedFormat)bcFormat,
+					mips, numLevels, (int)filter, (int)repeat );
+				for ( int i = 0; i < numLevels; i++ ) {
+					R_StaticFree( levelData[i] );
+				}
+				internalFormat = R_BcGlFormat( bcFormat );
+			} else {
+				rhiHandle = rhi::GetRHI()->CreateTexture2D( width, height, upload,
+					(int)filter, (int)repeat, filter == TF_DEFAULT, depth == TD_MONO );
+			}
 			if ( swizzled ) {
 				R_StaticFree( swizzled );
 			}
@@ -2150,6 +2198,78 @@ void	idImage::ActuallyLoadImage( bool checkForPrecompressed, bool fromBackEnd ) 
 
 /*
 ==============
+idImage::VulkanBlockFormat
+
+DUDE "compress on upload" on Vulkan. The GL driver compresses a texture as it uploads it
+when a tier asks for it (image_useCompression; SelectInternalFormat picks the format);
+Vulkan has no such upload, so the engine encodes the levels itself (R_CompressBcLevel,
+Image_compress.cpp) in the format the same decision would have picked, and uploads the
+blocks (CreateTexture2DCompressed). Returns the rhi::RHI::CompressedFormat, or -1 to upload
+the RGBA8 (or R8) levels as before: the non-compressing tiers, TD_MONO, and the formats the
+GL decision leaves uncompressed. There is no BC7 encoder here, so image_useCompression 2
+takes the S3TC the decision makes without it.
+==============
+*/
+int idImage::VulkanBlockFormat( const byte *pic, int width, int height ) const {
+	if ( !globalImages->image_useCompression.GetBool() || !glConfig.textureCompressionAvailable || depth == TD_MONO ) {
+		return -1;
+	}
+	const byte *scan = pic;
+	switch ( SelectInternalFormat( &scan, 1, width, height, depth ) ) {
+		case GL_COMPRESSED_RGB_S3TC_DXT1_EXT:
+			return rhi::RHI::CF_BC1_RGB;
+		case GL_COMPRESSED_RGBA_S3TC_DXT1_EXT:
+			return rhi::RHI::CF_BC3;		// not a choice the decision makes; the alpha is kept
+		case GL_COMPRESSED_RGBA_S3TC_DXT3_EXT:
+			return rhi::RHI::CF_BC2;
+		case GL_COMPRESSED_RGBA_S3TC_DXT5_EXT:
+			return rhi::RHI::CF_BC3;
+		case GL_COMPRESSED_RGBA_BPTC_UNORM: {
+			// what the decision makes without BC7: normal maps DXT5, specular DXT1, the rest by alpha
+			if ( depth == TD_BUMP ) {
+				return rhi::RHI::CF_BC3;
+			}
+			if ( depth == TD_SPECULAR ) {
+				return rhi::RHI::CF_BC1_RGB;
+			}
+			int aOr = 0, aAnd = 255;
+			const int count = width * height;
+			for ( int i = 0; i < count; i++ ) {
+				aOr |= pic[i * 4 + 3];
+				aAnd &= pic[i * 4 + 3];
+			}
+			return ( aAnd == 255 || aOr == 0 ) ? rhi::RHI::CF_BC1_RGB : rhi::RHI::CF_BC2;
+		}
+		default:
+			return -1;
+	}
+}
+
+// the GL enum listImages reports for a block format
+static int R_BcGlFormat( int format ) {
+	switch ( format ) {
+		case rhi::RHI::CF_BC1_RGB:	return GL_COMPRESSED_RGB_S3TC_DXT1_EXT;
+		case rhi::RHI::CF_BC1_RGBA:	return GL_COMPRESSED_RGBA_S3TC_DXT1_EXT;
+		case rhi::RHI::CF_BC2:		return GL_COMPRESSED_RGBA_S3TC_DXT3_EXT;
+		case rhi::RHI::CF_BC3:		return GL_COMPRESSED_RGBA_S3TC_DXT5_EXT;
+		default:					return GL_COMPRESSED_RGBA_BPTC_UNORM;
+	}
+}
+
+// replaces each RGBA8 level with its blocks (R_CompressBcLevel); levelBytes = the block sizes
+static void R_EncodeBlockLevels( int format, byte **levelData, const int *levelW, const int *levelH, int *levelBytes, int numLevels ) {
+	for ( int i = 0; i < numLevels; i++ ) {
+		const int bytes = R_BcLevelBytes( format, levelW[i], levelH[i] );
+		byte *blocks = (byte *)R_StaticAlloc( bytes );
+		R_CompressBcLevel( format, levelData[i], levelW[i], levelH[i], blocks );
+		R_StaticFree( levelData[i] );
+		levelData[i] = blocks;
+		levelBytes[i] = bytes;
+	}
+}
+
+/*
+==============
 idImage::LoadImageCpuGL
 
 DUDE parallel texture load, GL3 without a .dds: the worker half of GenerateImage. Decodes
@@ -2302,6 +2422,7 @@ excluded generator/cube/partial images (those stay on the serial path).
 bool idImage::LoadImageCpu() {
 	parallelData = (parallelLoad_t *)R_StaticAlloc( sizeof( parallelLoad_t ) );
 	memset( parallelData, 0, sizeof( *parallelData ) );
+	parallelData->bcFormat = -1;
 
 	const bool isVulkan = ( glConfig.rhiBackend && rhi::GetActiveBackendType() == rhi::BT_VULKAN );
 
@@ -2397,6 +2518,15 @@ bool idImage::LoadImageCpu() {
 		}
 	}
 
+	// DUDE Vulkan "compress on upload": at a compressing tier the worker encodes the levels to
+	// the block format the GL decision would have picked (VulkanBlockFormat), and the main
+	// thread uploads the blocks
+	parallelData->bcFormat = VulkanBlockFormat( pic, width, height );
+	if ( parallelData->bcFormat >= 0 ) {
+		R_EncodeBlockLevels( parallelData->bcFormat, parallelData->levelData, parallelData->levelW, parallelData->levelH,
+			parallelData->levelBytes, parallelData->numLevels );
+	}
+
 	parallelData->width = width;
 	parallelData->height = height;
 	return true;
@@ -2446,18 +2576,31 @@ void idImage::UploadImageCpu() {
 		precompressedFile = false;
 		GL_CheckErrors();
 	} else {
-		// Vulkan: upload the worker-built RGBA8 mip pyramid
+		// Vulkan: upload the worker-built mip pyramid - the RGBA8 (or R8) levels, or at a
+		// compressing tier the blocks the worker encoded them to (bcFormat, VulkanBlockFormat)
 		PurgeImage();		// drop any previous binding, matching GenerateImage
 
-		rhi::RHI::PrebuiltMip mips[PARALLEL_MAX_LEVELS];
-		for ( int i = 0; i < parallelData->numLevels; i++ ) {
-			mips[i].data = parallelData->levelData[i];
-			mips[i].w = parallelData->levelW[i];
-			mips[i].h = parallelData->levelH[i];
+		if ( parallelData->bcFormat >= 0 ) {
+			rhi::RHI::CompressedMip mips[PARALLEL_MAX_LEVELS];
+			for ( int i = 0; i < parallelData->numLevels; i++ ) {
+				mips[i].data = parallelData->levelData[i];
+				mips[i].w = parallelData->levelW[i];
+				mips[i].h = parallelData->levelH[i];
+				mips[i].bytes = parallelData->levelBytes[i];
+			}
+			rhiHandle = rhi::GetRHI()->CreateTexture2DCompressed( parallelData->width, parallelData->height,
+				(rhi::RHI::CompressedFormat)parallelData->bcFormat, mips, parallelData->numLevels, (int)filter, (int)repeat );
+			internalFormat = R_BcGlFormat( parallelData->bcFormat );
+		} else {
+			rhi::RHI::PrebuiltMip mips[PARALLEL_MAX_LEVELS];
+			for ( int i = 0; i < parallelData->numLevels; i++ ) {
+				mips[i].data = parallelData->levelData[i];
+				mips[i].w = parallelData->levelW[i];
+				mips[i].h = parallelData->levelH[i];
+			}
+			rhiHandle = rhi::GetRHI()->CreateTexture2DPrebuilt( parallelData->width, parallelData->height,
+				mips, parallelData->numLevels, (int)filter, (int)repeat, depth == TD_MONO );
 		}
-
-		rhiHandle = rhi::GetRHI()->CreateTexture2DPrebuilt( parallelData->width, parallelData->height,
-			mips, parallelData->numLevels, (int)filter, (int)repeat, depth == TD_MONO );
 		type = TT_2D;
 		uploadWidth = parallelData->width;
 		uploadHeight = parallelData->height;

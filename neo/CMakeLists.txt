@@ -803,6 +803,7 @@ endif()
 set(src_renderer
 	renderer/Cinematic.cpp
 	renderer/GuiModel.cpp
+	renderer/Image_compress.cpp
 	renderer/Image_files.cpp
 	renderer/Image_init.cpp
 	renderer/Image_load.cpp
