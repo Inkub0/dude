@@ -5073,28 +5073,130 @@ static bool RB_RHI_PointLightInBudget( const viewDef_t *viewDef, const viewLight
 	return inBudget;
 }
 
-static bool RB_RHI_EnsureNormalTarget( rhi::RHI *r, int w, int h, bool wantMrt, bool wantVel, bool wantAlbedo ) {
-	if ( rhiNormalRT && r->GetRenderTargetImage( rhiNormalRT ) == 0 ) {
-		rhiNormalRT = 0;					// lost context (vid_restart)
-		rhiNormalW = rhiNormalH = 0;
+// --- Render-target lifecycle helpers ---------------------------------------
+// Every pass below (re)allocates its targets by one recipe: a target is rebuilt when it is
+// missing, lost (a vid_restart drops the texture but leaves the handle set) or sized to a
+// stale resolution, rolling everything back to 0/unsized on a failed create. The recipe
+// lives here once, for a single target or for two that live and die together, with the
+// create call supplied by the pass (plain, mipped, or one of the MRT layouts).
+
+// The one recipe, with the create call supplied: (re)allocate when the target is missing, lost, sized to a stale
+// resolution, or 'stale' says its layout changed; roll back to 0 / unsized on a failed create.
+template<class CreateFn>
+static bool RB_RHI_EnsureRTWith( rhi::RHI *r, rhi::RenderTargetHandle &rt, int &curW, int &curH, int w, int h, bool stale, CreateFn create ) {
+	if ( rt && r->GetRenderTargetImage( rt ) == 0 ) {	// lost context (vid_restart)
+		rt = 0;
+		curW = curH = 0;
 	}
-	if ( rhiNormalRT && rhiNormalW == w && rhiNormalH == h && rhiNormalMrt == wantMrt && rhiNormalVel == wantVel && rhiNormalAlbedo == wantAlbedo ) {
+	if ( rt && curW == w && curH == h && !stale ) {
 		return true;
 	}
-	if ( rhiNormalRT ) { r->DestroyRenderTarget( rhiNormalRT ); rhiNormalRT = 0; }
+	if ( rt ) { r->DestroyRenderTarget( rt ); rt = 0; }
+	rt = create();
+	if ( !rt ) {
+		curW = curH = 0;
+		return false;
+	}
+	curW = w;
+	curH = h;
+	return true;
+}
+
+// Single plain color target tracked by (handle, curW, curH).
+static bool RB_RHI_EnsureRT( rhi::RHI *r, rhi::RenderTargetHandle &rt, int &curW, int &curH,
+		rhi::ImageFormat fmt, int w, int h ) {
+	return RB_RHI_EnsureRTWith( r, rt, curW, curH, w, h, false, [&]() { return r->CreateRenderTarget( fmt, w, h ); } );
+}
+
+// Drop a target the pass no longer wants (a lost one is only forgotten).
+static void RB_RHI_ReleaseRT( rhi::RHI *r, rhi::RenderTargetHandle &rt, int &curW, int &curH ) {
+	if ( rt && r->GetRenderTargetImage( rt ) != 0 ) { r->DestroyRenderTarget( rt ); }
+	rt = 0;
+	curW = curH = 0;
+}
+
+// Two targets that live and die together (a ping-pong, or a pass + its blur), tracked by (a, b, curW, curH). 'valid'
+// (optional) is cleared by any (re)allocation: a temporal history then reprojects nothing and passes the current frame
+// through; a caller that must clear or seed fresh slots passes a local set to true and tests it after.
+template<class CreateFn>
+static bool RB_RHI_EnsurePairWith( rhi::RHI *r, rhi::RenderTargetHandle &a, rhi::RenderTargetHandle &b, int &curW, int &curH,
+		int w, int h, bool *valid, CreateFn create ) {
+	if ( a && r->GetRenderTargetImage( a ) == 0 ) {	// lost context (vid_restart)
+		a = b = 0;
+		curW = curH = 0;
+	}
+	if ( a && b && curW == w && curH == h ) {
+		return true;
+	}
+	if ( a ) { r->DestroyRenderTarget( a ); a = 0; }
+	if ( b ) { r->DestroyRenderTarget( b ); b = 0; }
+	a = create();
+	b = create();
+	if ( valid ) { *valid = false; }	// freshly (re)allocated: nothing to reproject yet
+	if ( !a || !b ) {
+		if ( a ) { r->DestroyRenderTarget( a ); a = 0; }
+		if ( b ) { r->DestroyRenderTarget( b ); b = 0; }
+		curW = curH = 0;
+		return false;
+	}
+	curW = w;
+	curH = h;
+	return true;
+}
+
+static bool RB_RHI_EnsurePair( rhi::RHI *r, rhi::RenderTargetHandle &a, rhi::RenderTargetHandle &b, int &curW, int &curH,
+		rhi::ImageFormat fmt, int w, int h, bool *valid = NULL ) {
+	return RB_RHI_EnsurePairWith( r, a, b, curW, curH, w, h, valid, [&]() { return r->CreateRenderTarget( fmt, w, h ); } );
+}
+
+// Temporal history ping-pong (two slots) tracked by (pair[2], curW, curH, valid). Any
+// (re)allocation clears 'valid' so the first resolve reprojects nothing and passes the
+// current frame through rather than blending stale or mis-sized data.
+static bool RB_RHI_EnsureHistoryPair( rhi::RHI *r, rhi::RenderTargetHandle pair[2],
+		int &curW, int &curH, bool &valid, rhi::ImageFormat fmt, int w, int h ) {
+	return RB_RHI_EnsurePair( r, pair[0], pair[1], curW, curH, fmt, w, h, &valid );
+}
+
+// Mipped target tracked by (handle, curW, curH, curLevels). The level count is derived
+// from the larger dimension, capped at maxLevels (<= 6); because it is a pure function of
+// (w,h,maxLevels) the level check in the early-out never trips spuriously. Returns false
+// when the backend has no mipped-target capability (CreateRenderTargetMipped -> 0) so the
+// caller falls back to its full-res path.
+static bool RB_RHI_EnsureMippedRT( rhi::RHI *r, rhi::RenderTargetHandle &rt, int &curW, int &curH,
+		int &curLevels, rhi::ImageFormat fmt, int w, int h, int maxLevels ) {
+	if ( rt && r->GetRenderTargetImage( rt ) == 0 ) {	// lost context (vid_restart)
+		rt = 0;
+		curW = curH = curLevels = 0;
+	}
+	int levels = 1;
+	for ( int d = ( w > h ? w : h ); d > 1 && levels < maxLevels; d >>= 1 ) { levels++; }
+	if ( rt && curW == w && curH == h && curLevels == levels ) {
+		return true;
+	}
+	if ( rt ) { r->DestroyRenderTarget( rt ); rt = 0; }
+	rt = r->CreateRenderTargetMipped( fmt, w, h, levels );
+	if ( !rt ) {
+		curW = curH = curLevels = 0;
+		return false;
+	}
+	curW = w;
+	curH = h;
+	curLevels = levels;
+	return true;
+}
+
+static bool RB_RHI_EnsureNormalTarget( rhi::RHI *r, int w, int h, bool wantMrt, bool wantVel, bool wantAlbedo ) {
 	// wantMrt adds the SSR roughness/metalness attachment (docs/ssr.md); wantVel adds the RG16F
 	// velocity attachment (R1/A2) as a 3rd MRT. colorCount 3 selects A0's mixed-format layout
 	// [RGBA8, RGBA8, RG16F]; else the 1/2-attachment RGBA8 layout, byte-identical to before.
 	// wantAlbedo (docs/rtx-rtgi.md H6c) forces the fixed 4-attachment layout normal/mat/vel/albedo (RGBA8,
 	// RGBA8, RG16F, RGBA8): the caller also forced wantMrt + wantVel, so att1/att2 exist under att3.
 	const int colorCount = wantAlbedo ? 4 : ( wantVel ? 3 : ( wantMrt ? 2 : 1 ) );
-	rhiNormalRT = r->CreateRenderTargetColorDepth( rhi::IF_RGBA8, w, h, colorCount );
-	if ( !rhiNormalRT ) {
-		rhiNormalW = rhiNormalH = 0;
+	const bool layoutChanged = rhiNormalMrt != wantMrt || rhiNormalVel != wantVel || rhiNormalAlbedo != wantAlbedo;
+	if ( !RB_RHI_EnsureRTWith( r, rhiNormalRT, rhiNormalW, rhiNormalH, w, h, layoutChanged,
+			[&]() { return r->CreateRenderTargetColorDepth( rhi::IF_RGBA8, w, h, colorCount ); } ) ) {
 		return false;
 	}
-	rhiNormalW = w;
-	rhiNormalH = h;
 	rhiNormalMrt = wantMrt;
 	rhiNormalVel = wantVel;
 	rhiNormalAlbedo = wantAlbedo;
@@ -5722,114 +5824,8 @@ static bool RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef, int pha
 	return didMerge;
 }
 
-// --- Render-target lifecycle helpers ---------------------------------------
-// The Ensure* passes below share three exact recipes: (re)allocate a target when it is
-// missing, lost (a vid_restart drops the texture but leaves the handle set), or sized to
-// a stale resolution, rolling everything back to 0/unsized on a failed create. Each
-// per-feature wrapper keeps its name (and all its call sites) but delegates its body here
-// so the recipe lives in one place.
-
-// Single plain color target tracked by (handle, curW, curH).
-static bool RB_RHI_EnsureRT( rhi::RHI *r, rhi::RenderTargetHandle &rt, int &curW, int &curH,
-		rhi::ImageFormat fmt, int w, int h ) {
-	if ( rt && r->GetRenderTargetImage( rt ) == 0 ) {	// lost context (vid_restart)
-		rt = 0;
-		curW = curH = 0;
-	}
-	if ( rt && curW == w && curH == h ) {
-		return true;
-	}
-	if ( rt ) { r->DestroyRenderTarget( rt ); rt = 0; }
-	rt = r->CreateRenderTarget( fmt, w, h );
-	if ( !rt ) {
-		curW = curH = 0;
-		return false;
-	}
-	curW = w;
-	curH = h;
-	return true;
-}
-
-// Temporal history ping-pong (two slots) tracked by (pair[2], curW, curH, valid). Any
-// (re)allocation clears 'valid' so the first resolve reprojects nothing and passes the
-// current frame through rather than blending stale or mis-sized data.
-static bool RB_RHI_EnsureHistoryPair( rhi::RHI *r, rhi::RenderTargetHandle pair[2],
-		int &curW, int &curH, bool &valid, rhi::ImageFormat fmt, int w, int h ) {
-	if ( pair[0] && r->GetRenderTargetImage( pair[0] ) == 0 ) {	// lost context (vid_restart)
-		pair[0] = pair[1] = 0;
-		curW = curH = 0;
-	}
-	if ( pair[0] && pair[1] && curW == w && curH == h ) {
-		return true;
-	}
-	for ( int i = 0; i < 2; i++ ) {
-		if ( pair[i] ) { r->DestroyRenderTarget( pair[i] ); pair[i] = 0; }
-	}
-	pair[0] = r->CreateRenderTarget( fmt, w, h );
-	pair[1] = r->CreateRenderTarget( fmt, w, h );
-	valid = false;	// freshly (re)allocated: nothing to reproject yet
-	if ( !pair[0] || !pair[1] ) {
-		for ( int i = 0; i < 2; i++ ) {
-			if ( pair[i] ) { r->DestroyRenderTarget( pair[i] ); pair[i] = 0; }
-		}
-		curW = curH = 0;
-		return false;
-	}
-	curW = w;
-	curH = h;
-	return true;
-}
-
-// Mipped target tracked by (handle, curW, curH, curLevels). The level count is derived
-// from the larger dimension, capped at maxLevels (<= 6); because it is a pure function of
-// (w,h,maxLevels) the level check in the early-out never trips spuriously. Returns false
-// when the backend has no mipped-target capability (CreateRenderTargetMipped -> 0) so the
-// caller falls back to its full-res path.
-static bool RB_RHI_EnsureMippedRT( rhi::RHI *r, rhi::RenderTargetHandle &rt, int &curW, int &curH,
-		int &curLevels, rhi::ImageFormat fmt, int w, int h, int maxLevels ) {
-	if ( rt && r->GetRenderTargetImage( rt ) == 0 ) {	// lost context (vid_restart)
-		rt = 0;
-		curW = curH = curLevels = 0;
-	}
-	int levels = 1;
-	for ( int d = ( w > h ? w : h ); d > 1 && levels < maxLevels; d >>= 1 ) { levels++; }
-	if ( rt && curW == w && curH == h && curLevels == levels ) {
-		return true;
-	}
-	if ( rt ) { r->DestroyRenderTarget( rt ); rt = 0; }
-	rt = r->CreateRenderTargetMipped( fmt, w, h, levels );
-	if ( !rt ) {
-		curW = curH = curLevels = 0;
-		return false;
-	}
-	curW = w;
-	curH = h;
-	curLevels = levels;
-	return true;
-}
-
 static bool RB_RHI_EnsureSsaoTargets( rhi::RHI *r, int w, int h ) {
-	// a lost context (vid_restart) leaves the handle set but its texture gone
-	if ( rhiSsaoRT && r->GetRenderTargetImage( rhiSsaoRT ) == 0 ) {
-		rhiSsaoRT = rhiSsaoBlurRT = 0;
-		rhiSsaoW = rhiSsaoH = 0;
-	}
-	if ( rhiSsaoRT && rhiSsaoBlurRT && rhiSsaoW == w && rhiSsaoH == h ) {
-		return true;
-	}
-	if ( rhiSsaoRT )     { r->DestroyRenderTarget( rhiSsaoRT );     rhiSsaoRT = 0; }
-	if ( rhiSsaoBlurRT ) { r->DestroyRenderTarget( rhiSsaoBlurRT ); rhiSsaoBlurRT = 0; }
-	rhiSsaoRT     = r->CreateRenderTarget( rhi::IF_RGBA8, w, h );
-	rhiSsaoBlurRT = r->CreateRenderTarget( rhi::IF_RGBA8, w, h );
-	if ( !rhiSsaoRT || !rhiSsaoBlurRT ) {
-		if ( rhiSsaoRT )     { r->DestroyRenderTarget( rhiSsaoRT );     rhiSsaoRT = 0; }
-		if ( rhiSsaoBlurRT ) { r->DestroyRenderTarget( rhiSsaoBlurRT ); rhiSsaoBlurRT = 0; }
-		rhiSsaoW = rhiSsaoH = 0;
-		return false;
-	}
-	rhiSsaoW = w;
-	rhiSsaoH = h;
-	return true;
+	return RB_RHI_EnsurePair( r, rhiSsaoRT, rhiSsaoBlurRT, rhiSsaoW, rhiSsaoH, rhi::IF_RGBA8, w, h );
 }
 
 // SSAO Phase 1: (re)allocate the prefiltered linear-depth mip target at the AO size.
@@ -5940,18 +5936,8 @@ static rhi::ImageHandle RB_RHI_DecalResolveMaterial( rhi::RHI *r, rhi::ImageHand
 	if ( !prog ) {
 		return matImg;
 	}
-	if ( rhiDecalMatRT && r->GetRenderTargetImage( rhiDecalMatRT ) == 0 ) {
-		rhiDecalMatRT = 0;					// lost context (vid_restart)
-	}
-	if ( !rhiDecalMatRT || rhiDecalMatW != w || rhiDecalMatH != h ) {
-		if ( rhiDecalMatRT ) { r->DestroyRenderTarget( rhiDecalMatRT ); }
-		rhiDecalMatRT = r->CreateRenderTarget( rhi::IF_RGBA8, w, h );
-		rhiDecalMatW = w;
-		rhiDecalMatH = h;
-		if ( !rhiDecalMatRT ) {
-			rhiDecalMatW = rhiDecalMatH = 0;
-			return matImg;
-		}
+	if ( !RB_RHI_EnsureRT( r, rhiDecalMatRT, rhiDecalMatW, rhiDecalMatH, rhi::IF_RGBA8, w, h ) ) {
+		return matImg;
 	}
 	rhi::RenderParams parms;
 	memset( &parms, 0, sizeof( parms ) );
@@ -5975,31 +5961,18 @@ static rhi::ImageHandle RB_RHI_DecalResolveMaterial( rhi::RHI *r, rhi::ImageHand
 // creation so the first history read is defined on Vulkan (an unwritten color target's
 // layout is UNDEFINED and would trip validation) and starts from nothing on GL.
 static bool RB_RHI_EnsureBerserkTrail( rhi::RHI *r, int w, int h ) {
-	if ( rhiBerserkTrailRT[0] && r->GetRenderTargetImage( rhiBerserkTrailRT[0] ) == 0 ) {
-		rhiBerserkTrailRT[0] = rhiBerserkTrailRT[1] = 0;	// lost context (vid_restart)
-		rhiBerserkW = rhiBerserkH = 0;
-	}
-	if ( rhiBerserkTrailRT[0] && rhiBerserkTrailRT[1] && rhiBerserkW == w && rhiBerserkH == h ) {
-		return true;
-	}
-	for ( int i = 0; i < 2; i++ ) {
-		if ( rhiBerserkTrailRT[i] ) { r->DestroyRenderTarget( rhiBerserkTrailRT[i] ); rhiBerserkTrailRT[i] = 0; }
-	}
-	rhiBerserkTrailRT[0] = r->CreateRenderTarget( rhi::IF_RGBA8, w, h );
-	rhiBerserkTrailRT[1] = r->CreateRenderTarget( rhi::IF_RGBA8, w, h );
-	if ( !rhiBerserkTrailRT[0] || !rhiBerserkTrailRT[1] ) {
-		for ( int i = 0; i < 2; i++ ) {
-			if ( rhiBerserkTrailRT[i] ) { r->DestroyRenderTarget( rhiBerserkTrailRT[i] ); rhiBerserkTrailRT[i] = 0; }
-		}
-		rhiBerserkW = rhiBerserkH = 0;
+	bool kept = true;	// cleared by a (re)allocation: fresh slots need their first clear + the reset below
+	if ( !RB_RHI_EnsurePair( r, rhiBerserkTrailRT[0], rhiBerserkTrailRT[1], rhiBerserkW, rhiBerserkH, rhi::IF_RGBA8, w, h, &kept ) ) {
 		return false;
+	}
+	if ( kept ) {
+		return true;
 	}
 	rhi::ClearArgs clear;
 	memset( &clear, 0, sizeof( clear ) );
 	clear.color = true;
 	r->BeginTargetPass( rhiBerserkTrailRT[0], &clear ); r->EndPass();
 	r->BeginTargetPass( rhiBerserkTrailRT[1], &clear ); r->EndPass();
-	rhiBerserkW = w;			rhiBerserkH = h;
 	rhiBerserkIdx = 0;			rhiBerserkValid = false;
 	rhiBerserkLastTick = -100000;
 	return true;
@@ -6116,31 +6089,18 @@ rhi::ImageHandle RB_RHI_BerserkAccum( rhi::RHI *r, const viewDef_t *viewDef,
 
 // (re)allocate the hell-time temporal trail ping-pong (mirrors RB_RHI_EnsureBerserkTrail).
 static bool RB_RHI_EnsureHelltimeTrail( rhi::RHI *r, int w, int h ) {
-	if ( rhiHelltimeTrailRT[0] && r->GetRenderTargetImage( rhiHelltimeTrailRT[0] ) == 0 ) {
-		rhiHelltimeTrailRT[0] = rhiHelltimeTrailRT[1] = 0;	// lost context (vid_restart)
-		rhiHelltimeW = rhiHelltimeH = 0;
-	}
-	if ( rhiHelltimeTrailRT[0] && rhiHelltimeTrailRT[1] && rhiHelltimeW == w && rhiHelltimeH == h ) {
-		return true;
-	}
-	for ( int i = 0; i < 2; i++ ) {
-		if ( rhiHelltimeTrailRT[i] ) { r->DestroyRenderTarget( rhiHelltimeTrailRT[i] ); rhiHelltimeTrailRT[i] = 0; }
-	}
-	rhiHelltimeTrailRT[0] = r->CreateRenderTarget( rhi::IF_RGBA8, w, h );
-	rhiHelltimeTrailRT[1] = r->CreateRenderTarget( rhi::IF_RGBA8, w, h );
-	if ( !rhiHelltimeTrailRT[0] || !rhiHelltimeTrailRT[1] ) {
-		for ( int i = 0; i < 2; i++ ) {
-			if ( rhiHelltimeTrailRT[i] ) { r->DestroyRenderTarget( rhiHelltimeTrailRT[i] ); rhiHelltimeTrailRT[i] = 0; }
-		}
-		rhiHelltimeW = rhiHelltimeH = 0;
+	bool kept = true;	// cleared by a (re)allocation: fresh slots need their first clear + the reset below
+	if ( !RB_RHI_EnsurePair( r, rhiHelltimeTrailRT[0], rhiHelltimeTrailRT[1], rhiHelltimeW, rhiHelltimeH, rhi::IF_RGBA8, w, h, &kept ) ) {
 		return false;
+	}
+	if ( kept ) {
+		return true;
 	}
 	rhi::ClearArgs clear;
 	memset( &clear, 0, sizeof( clear ) );
 	clear.color = true;
 	r->BeginTargetPass( rhiHelltimeTrailRT[0], &clear ); r->EndPass();
 	r->BeginTargetPass( rhiHelltimeTrailRT[1], &clear ); r->EndPass();
-	rhiHelltimeW = w;			rhiHelltimeH = h;
 	rhiHelltimeIdx = 0;			rhiHelltimeValid = false;
 	rhiHelltimeLastTick = -100000;
 	return true;
@@ -8492,36 +8452,21 @@ static void RB_RHI_RtaoPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	// input must match. Downsample the full-res velocity (normal prepass attachment) with a plain
 	// copy. If the target can't be allocated, fall back to full res this frame (a full-res velocity
 	// must never feed a scaled NRD).
-	if ( rhiRtaoVelRT && r->GetRenderTargetImage( rhiRtaoVelRT ) == 0 ) { rhiRtaoVelRT = 0; rhiRtaoVelW = rhiRtaoVelH = 0; }
-	if ( rhiRtaoVelRT && ( !rtaoScaled || rhiRtaoVelW != rw || rhiRtaoVelH != rh ) ) {
-		r->DestroyRenderTarget( rhiRtaoVelRT ); rhiRtaoVelRT = 0; rhiRtaoVelW = rhiRtaoVelH = 0;
-	}
-	if ( rtaoScaled && !rhiRtaoVelRT ) {
-		rhiRtaoVelRT = r->CreateRenderTarget( rhi::IF_RG16F, rw, rh );
-		if ( rhiRtaoVelRT ) { rhiRtaoVelW = rw; rhiRtaoVelH = rh; }
-		else { rw = w; rh = h; rtaoScaled = false; }		// OOM: this frame runs full res
+	if ( !rtaoScaled ) {
+		RB_RHI_ReleaseRT( r, rhiRtaoVelRT, rhiRtaoVelW, rhiRtaoVelH );
+	} else if ( !RB_RHI_EnsureRT( r, rhiRtaoVelRT, rhiRtaoVelW, rhiRtaoVelH, rhi::IF_RG16F, rw, rh ) ) {
+		rw = w; rh = h; rtaoScaled = false;		// OOM: this frame runs full res
 	}
 	// (re)create the R16F ray target on first use / resize / scale change / lost context
-	if ( rhiRtaoRayRT && r->GetRenderTargetImage( rhiRtaoRayRT ) == 0 ) {
-		rhiRtaoRayRT = 0;
-		rhiRtaoW = rhiRtaoH = 0;
-	}
 	// The ray target is a 3-attachment MRT: the ray pass writes the two NRD guides itself (view z @1, packed
 	// world normal @2) - it already fetches depth + normal per pixel - instead of two more fullscreen passes.
-	if ( rhiRtaoRayRT && ( rhiRtaoW != rw || rhiRtaoH != rh ) ) {
-		r->DestroyRenderTarget( rhiRtaoRayRT );
-		rhiRtaoRayRT = 0;
-		// the resolve target is full-res (it upscales); recreate it only if truly lost. But NRD is
-		// sized to the ray resolution, so a scale change must reset its history (old-res reprojection).
+	// A scale change (a live target at another size - not a lost context) resets NRD's history: it is sized to the ray
+	// resolution, so the old-res reprojection would be wrong. The resolve target is full-res and recreates only if lost.
+	if ( rhiRtaoRayRT && r->GetRenderTargetImage( rhiRtaoRayRT ) != 0 && ( rhiRtaoW != rw || rhiRtaoH != rh ) ) {
 		rhiRtaoPrevValid = false;
 	}
-	if ( !rhiRtaoRayRT ) {
-		rhiRtaoRayRT = r->CreateRenderTargetRtaoMrt( rw, rh );
-		if ( !rhiRtaoRayRT ) {
-			return;
-		}
-		rhiRtaoW = rw;
-		rhiRtaoH = rh;
+	if ( !RB_RHI_EnsureRTWith( r, rhiRtaoRayRT, rhiRtaoW, rhiRtaoH, rw, rh, false, [&]() { return r->CreateRenderTargetRtaoMrt( rw, rh ); } ) ) {
+		return;
 	}
 
 	float invView[16];
@@ -8646,14 +8591,8 @@ static void RB_RHI_RtaoPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		if ( resProg != 0 && r->GetRtaoOutputImage() != 0 ) {
 			// the resolve target is FULL-res (it upscales the scaled NRD output) - independent of the ray/NRD
 			// scale, so it recreates only on a lost context or a real view resize
-			if ( rhiRtaoResolveRT && r->GetRenderTargetImage( rhiRtaoResolveRT ) == 0 ) { rhiRtaoResolveRT = 0; rhiRtaoResolveW = rhiRtaoResolveH = 0; }
-			if ( rhiRtaoResolveRT && ( rhiRtaoResolveW != w || rhiRtaoResolveH != h ) ) {
-				r->DestroyRenderTarget( rhiRtaoResolveRT ); rhiRtaoResolveRT = 0; rhiRtaoResolveW = rhiRtaoResolveH = 0;
-			}
-			if ( rhiRtaoResolveRT == 0 ) {
-				rhiRtaoResolveRT = r->CreateRenderTargetMipped( rhi::IF_RGBA8, w, h, 1 );
-				if ( rhiRtaoResolveRT ) { rhiRtaoResolveW = w; rhiRtaoResolveH = h; }
-			}
+			RB_RHI_EnsureRTWith( r, rhiRtaoResolveRT, rhiRtaoResolveW, rhiRtaoResolveH, w, h, false,
+				[&]() { return r->CreateRenderTargetMipped( rhi::IF_RGBA8, w, h, 1 ); } );
 			if ( rhiRtaoResolveRT != 0 ) {
 				rhi::RenderParams rp;
 				memset( &rp, 0, sizeof( rp ) );
@@ -8725,12 +8664,7 @@ static rhi::RenderTargetHandle RB_RHI_RtgiGuides( rhi::RHI *r, const float invVi
 	{
 		// the guides are NRD's "full resolution" for checkerboard = the rw x rh gather resolution (the radiance
 		// is the half-packed part). Same coordinate mapping as the gather so guide and radiance line up.
-		if ( rhiRtgiGuideRT && r->GetRenderTargetImage( rhiRtgiGuideRT ) == 0 ) { rhiRtgiGuideRT = 0; rhiRtgiGuideW = rhiRtgiGuideH = 0; }
-		if ( rhiRtgiGuideRT && ( rhiRtgiGuideW != rw || rhiRtgiGuideH != rh ) ) { r->DestroyRenderTarget( rhiRtgiGuideRT ); rhiRtgiGuideRT = 0; rhiRtgiGuideW = rhiRtgiGuideH = 0; }
-		if ( !rhiRtgiGuideRT ) {
-			rhiRtgiGuideRT = r->CreateRenderTargetRtgiMrt( rw, rh );
-			if ( rhiRtgiGuideRT ) { rhiRtgiGuideW = rw; rhiRtgiGuideH = rh; }
-		}
+		RB_RHI_EnsureRTWith( r, rhiRtgiGuideRT, rhiRtgiGuideW, rhiRtgiGuideH, rw, rh, false, [&]() { return r->CreateRenderTargetRtgiMrt( rw, rh ); } );
 		rhi::ShaderHandle guideProg = rhiRtgiGuideRT ? r->LoadShader( "rtgi_guides" ) : 0;
 		if ( guideProg != 0 ) {
 			rhi::RenderParams gp;
@@ -8757,12 +8691,7 @@ static rhi::ImageHandle RB_RHI_RtgiVelocityAtRes( rhi::RHI *r, rhi::ImageHandle 
 	rhi::ImageHandle nrdVel = giVelImg;
 	if ( rw != w || rh != h ) {
 		// downsample the full-res velocity to the GI ray/NRD resolution (smaa_copy = texture(src, uv))
-		if ( rhiRtgiVelRT && r->GetRenderTargetImage( rhiRtgiVelRT ) == 0 ) { rhiRtgiVelRT = 0; rhiRtgiVelW = rhiRtgiVelH = 0; }
-		if ( rhiRtgiVelRT && ( rhiRtgiVelW != rw || rhiRtgiVelH != rh ) ) { r->DestroyRenderTarget( rhiRtgiVelRT ); rhiRtgiVelRT = 0; rhiRtgiVelW = rhiRtgiVelH = 0; }
-		if ( !rhiRtgiVelRT ) {
-			rhiRtgiVelRT = r->CreateRenderTarget( rhi::IF_RG16F, rw, rh );
-			if ( rhiRtgiVelRT ) { rhiRtgiVelW = rw; rhiRtgiVelH = rh; }
-		}
+		RB_RHI_EnsureRT( r, rhiRtgiVelRT, rhiRtgiVelW, rhiRtgiVelH, rhi::IF_RG16F, rw, rh );
 		rhi::ShaderHandle copyProg = rhiRtgiVelRT ? r->LoadShader( "smaa_copy" ) : 0;
 		if ( copyProg != 0 ) {
 			rhi::RenderParams cp;
@@ -8794,12 +8723,7 @@ static rhi::ImageHandle RB_RHI_RtgiConfidence( rhi::RHI *r, int rw, int rh, bool
 	// only computes confidence at this frame's TRACED cells (reading the packed sample) and trusts history
 	// on the reconstructed cells.
 	if ( r_rtgiConfidence.GetFloat() > 0.0f && rhiRtgiPrevValid && giPrevDenoised != 0 ) {
-		if ( rhiRtgiConfRT && r->GetRenderTargetImage( rhiRtgiConfRT ) == 0 ) { rhiRtgiConfRT = 0; rhiRtgiConfW = rhiRtgiConfH = 0; }
-		if ( rhiRtgiConfRT && ( rhiRtgiConfW != rw || rhiRtgiConfH != rh ) ) { r->DestroyRenderTarget( rhiRtgiConfRT ); rhiRtgiConfRT = 0; rhiRtgiConfW = rhiRtgiConfH = 0; }
-		if ( !rhiRtgiConfRT ) {
-			rhiRtgiConfRT = r->CreateRenderTarget( rhi::IF_R16F, rw, rh );	// R8+ per NRD; R16F is the single-channel target we have
-			if ( rhiRtgiConfRT ) { rhiRtgiConfW = rw; rhiRtgiConfH = rh; }
-		}
+		RB_RHI_EnsureRT( r, rhiRtgiConfRT, rhiRtgiConfW, rhiRtgiConfH, rhi::IF_R16F, rw, rh );	// R8+ per NRD; R16F is the single-channel target we have
 		rhi::ShaderHandle confProg = rhiRtgiConfRT ? r->LoadShader( "rtgi_confidence" ) : 0;
 		if ( confProg != 0 ) {
 			rhi::RenderParams confParms;
@@ -8915,18 +8839,8 @@ static void RB_RHI_RtgiPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	if ( rh < 1 ) rh = 1;
 	if ( cbActive ) { rw &= ~1; if ( rw < 2 ) rw = 2; }		// even width: the 2x1 checkerboard packs cleanly into the left half
 	// (re)create the RGBA16F radiance MRT on first use / resize / scale change / lost context.
-	if ( rhiRtgiRayRT && r->GetRenderTargetImage( rhiRtgiRayRT ) == 0 ) {
-		rhiRtgiRayRT = 0; rhiRtgiW = rhiRtgiH = 0;
-	}
-	if ( rhiRtgiRayRT && ( rhiRtgiW != rw || rhiRtgiH != rh ) ) {
-		r->DestroyRenderTarget( rhiRtgiRayRT ); rhiRtgiRayRT = 0; rhiRtgiW = rhiRtgiH = 0;
-	}
-	if ( !rhiRtgiRayRT ) {
-		rhiRtgiRayRT = r->CreateRenderTargetRtgiMrt( rw, rh );
-		if ( !rhiRtgiRayRT ) {
-			return;
-		}
-		rhiRtgiW = rw; rhiRtgiH = rh;
+	if ( !RB_RHI_EnsureRTWith( r, rhiRtgiRayRT, rhiRtgiW, rhiRtgiH, rw, rh, false, [&]() { return r->CreateRenderTargetRtgiMrt( rw, rh ); } ) ) {
+		return;
 	}
 
 	float invView[16];
@@ -9100,22 +9014,15 @@ struct diBoost_t {
 
 // the gather MRT pair at the gather res (recreated on loss / resize); false = no targets this frame
 static bool RB_RHI_ReStirDIEnsureTargets( rhi::RHI *r, int rw, int rh ) {
-	// the pair lives and dies together (a lost context, a resolution change)
-	const bool pairStale = ( rhiReStirDIPairRT[0] && r->GetRenderTargetImage( rhiReStirDIPairRT[0] ) == 0 )
-		|| ( rhiReStirDIPairRT[1] && r->GetRenderTargetImage( rhiReStirDIPairRT[1] ) == 0 ) || rhiReStirDIW != rw || rhiReStirDIH != rh;
-	if ( ( rhiReStirDIPairRT[0] || rhiReStirDIPairRT[1] ) && pairStale ) {
-		for ( int k = 0; k < 2; k++ ) { if ( rhiReStirDIPairRT[k] ) { r->DestroyRenderTarget( rhiReStirDIPairRT[k] ); rhiReStirDIPairRT[k] = 0; } }
-		rhiReStirDIRT = 0;	rhiReStirDIPrevRT = 0;	rhiReStirDIW = rhiReStirDIH = 0;	rhiReStirDILastWritten = -1;
-		rhiReStirDIGatherPrevValid = false;
+	// the pair lives and dies together (a lost context, a resolution change); the caller picks this frame's slot
+	// (rhiReStirDIRT / PrevRT) from the pair right after, so only the failure path has to zero them
+	bool kept = true;
+	if ( !RB_RHI_EnsurePairWith( r, rhiReStirDIPairRT[0], rhiReStirDIPairRT[1], rhiReStirDIW, rhiReStirDIH, rw, rh, &kept,
+			[&]() { return r->CreateRenderTargetReStirDIMrt( rw, rh ); } ) ) {
+		rhiReStirDIRT = 0;	rhiReStirDIPrevRT = 0;	rhiReStirDILastWritten = -1;	rhiReStirDIGatherPrevValid = false;
+		return false;
 	}
-	if ( !rhiReStirDIPairRT[0] || !rhiReStirDIPairRT[1] ) {
-		for ( int k = 0; k < 2; k++ ) { if ( !rhiReStirDIPairRT[k] ) { rhiReStirDIPairRT[k] = r->CreateRenderTargetReStirDIMrt( rw, rh ); } }
-		if ( !rhiReStirDIPairRT[0] || !rhiReStirDIPairRT[1] ) {
-			for ( int k = 0; k < 2; k++ ) { if ( rhiReStirDIPairRT[k] ) { r->DestroyRenderTarget( rhiReStirDIPairRT[k] ); rhiReStirDIPairRT[k] = 0; } }
-			rhiReStirDIRT = 0;	rhiReStirDIPrevRT = 0;	rhiReStirDILastWritten = -1;	rhiReStirDIGatherPrevValid = false;
-			return false;
-		}
-		rhiReStirDIW = rw;	rhiReStirDIH = rh;
+	if ( !kept ) {		// a fresh pair: no side data from last frame, the first gather writes slot 0
 		rhiReStirDILastWritten = -1;
 		rhiReStirDIGatherPrevValid = false;
 	}
@@ -9278,12 +9185,7 @@ static rhi::ImageHandle RB_RHI_ReStirDIVelocityAtRes( rhi::RHI *r, rhi::ImageHan
 	if ( diVelImg != 0 && nrdFree && ( rw != w || rh != h ) ) {
 		// velocity for NRD IN_MV + the gradient / confidence reproject. At reduced res, downsample the full-res velocity
 		// to rw x rh (smaa_copy = texture(src, uv)); at full res (rw==w) it is used directly.
-		if ( rhiReStirDIVelRT && r->GetRenderTargetImage( rhiReStirDIVelRT ) == 0 ) { rhiReStirDIVelRT = 0; rhiReStirDIVelW = rhiReStirDIVelH = 0; }
-		if ( rhiReStirDIVelRT && ( rhiReStirDIVelW != rw || rhiReStirDIVelH != rh ) ) { r->DestroyRenderTarget( rhiReStirDIVelRT ); rhiReStirDIVelRT = 0; rhiReStirDIVelW = rhiReStirDIVelH = 0; }
-		if ( !rhiReStirDIVelRT ) {
-			rhiReStirDIVelRT = r->CreateRenderTarget( rhi::IF_RG16F, rw, rh );
-			if ( rhiReStirDIVelRT ) { rhiReStirDIVelW = rw; rhiReStirDIVelH = rh; }
-		}
+		RB_RHI_EnsureRT( r, rhiReStirDIVelRT, rhiReStirDIVelW, rhiReStirDIVelH, rhi::IF_RG16F, rw, rh );
 		rhi::ShaderHandle copyProg = rhiReStirDIVelRT ? r->LoadShader( "smaa_copy" ) : 0;
 		if ( copyProg != 0 ) {
 			rhi::RenderParams cp;
@@ -9313,15 +9215,7 @@ static void RB_RHI_ReStirDIBoostBegin( rhi::RHI *r, int rw, int rh, bool diFullT
 	b.youngProg = ( b.boostK > 0 ) ? r->LoadShader( "restir_di_young" ) : 0;
 	// the per-pixel young reason (R8, gather layout) the boost pass reads back clustered (3x3 majority)
 	if ( b.boostK > 0 && b.youngProg != 0 ) {
-		for ( int k = 0; k < 2; k++ ) {
-			if ( rhiReStirDIYoungRT[k] && r->GetRenderTargetImage( rhiReStirDIYoungRT[k] ) == 0 ) { rhiReStirDIYoungRT[k] = 0; rhiReStirDIYoungValid = false; }
-		}
-		if ( rhiReStirDIYoungW != rw || rhiReStirDIYoungH != rh ) {
-			for ( int k = 0; k < 2; k++ ) { if ( rhiReStirDIYoungRT[k] ) { r->DestroyRenderTarget( rhiReStirDIYoungRT[k] ); rhiReStirDIYoungRT[k] = 0; } }
-			rhiReStirDIYoungW = rhiReStirDIYoungH = 0;	rhiReStirDIYoungValid = false;
-		}
-		for ( int k = 0; k < 2; k++ ) { if ( !rhiReStirDIYoungRT[k] ) { rhiReStirDIYoungRT[k] = r->CreateRenderTarget( rhi::IF_RGBA8, rw, rh ); } }
-		if ( rhiReStirDIYoungRT[0] && rhiReStirDIYoungRT[1] ) { rhiReStirDIYoungW = rw;	rhiReStirDIYoungH = rh; }
+		RB_RHI_EnsurePair( r, rhiReStirDIYoungRT[0], rhiReStirDIYoungRT[1], rhiReStirDIYoungW, rhiReStirDIYoungH, rhi::IF_RGBA8, rw, rh, &rhiReStirDIYoungValid );
 	}
 	b.boostWant = b.boostK > 0 && b.boostProg != 0 && b.youngProg != 0 && rhiReStirDIYoungRT[0] != 0 && rhiReStirDIYoungRT[1] != 0 && nrdVel != 0 && nrdFree;
 	if ( !b.boostWant ) { rhiReStirDIYoungValid = false; }		// a gap breaks the age chain: next run starts with no holds
@@ -9691,12 +9585,7 @@ static rhi::RenderTargetHandle RB_RHI_ReStirDIGuides( rhi::RHI *r, const diPassC
 	// internal-res (rw x rh) MRT that NRD points its guides at. Non-cb keeps the gather's own att1/att2 guides.
 	rhi::RenderTargetHandle diGuideRT = 0;
 	if ( cbActive ) {
-		if ( rhiReStirDIGuideRT && r->GetRenderTargetImage( rhiReStirDIGuideRT ) == 0 ) { rhiReStirDIGuideRT = 0; rhiReStirDIGuideW = rhiReStirDIGuideH = 0; }
-		if ( rhiReStirDIGuideRT && ( rhiReStirDIGuideW != rw || rhiReStirDIGuideH != rh ) ) { r->DestroyRenderTarget( rhiReStirDIGuideRT ); rhiReStirDIGuideRT = 0; rhiReStirDIGuideW = rhiReStirDIGuideH = 0; }
-		if ( !rhiReStirDIGuideRT ) {
-			rhiReStirDIGuideRT = r->CreateRenderTargetRtgiMrt( rw, rh );
-			if ( rhiReStirDIGuideRT ) { rhiReStirDIGuideW = rw; rhiReStirDIGuideH = rh; }
-		}
+		RB_RHI_EnsureRTWith( r, rhiReStirDIGuideRT, rhiReStirDIGuideW, rhiReStirDIGuideH, rw, rh, false, [&]() { return r->CreateRenderTargetRtgiMrt( rw, rh ); } );
 		rhi::ShaderHandle guideProg = rhiReStirDIGuideRT ? r->LoadShader( "rtgi_guides" ) : 0;
 		if ( guideProg != 0 ) {
 			rhi::RenderParams gp;
@@ -12209,18 +12098,8 @@ static void RB_RHI_DecalMaskPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	}
 	const int w = viewDef->viewport.x2 - viewDef->viewport.x1 + 1;
 	const int h = viewDef->viewport.y2 - viewDef->viewport.y1 + 1;
-	if ( rhiDecalMaskRT && r->GetRenderTargetImage( rhiDecalMaskRT ) == 0 ) {
-		rhiDecalMaskRT = 0;					// lost context (vid_restart)
-	}
-	if ( !rhiDecalMaskRT || rhiDecalMaskW != w || rhiDecalMaskH != h ) {
-		if ( rhiDecalMaskRT ) { r->DestroyRenderTarget( rhiDecalMaskRT ); }
-		rhiDecalMaskRT = r->CreateRenderTarget( rhi::IF_RGBA8, w, h );
-		rhiDecalMaskW = w;
-		rhiDecalMaskH = h;
-		if ( !rhiDecalMaskRT ) {
-			rhiDecalMaskW = rhiDecalMaskH = 0;
-			return;
-		}
+	if ( !RB_RHI_EnsureRT( r, rhiDecalMaskRT, rhiDecalMaskW, rhiDecalMaskH, rhi::IF_RGBA8, w, h ) ) {
+		return;
 	}
 
 	rhi::ClearArgs clear;
