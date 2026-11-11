@@ -19,6 +19,21 @@ Doom 3 GPL Source Code (see ArbProgram.cpp for license header)
 #include "renderer/Model.h"		// shadowCache_t
 #include "renderer/rhi/RenderParams.h"	// immediate-mode UBO (Chunk G)
 
+// DUDE: a raw glBindTexture here bypasses idImage's per-unit cache (backEnd.glState.tmu), which
+// idImage::Bind trusts to skip a bind it believes is already current. Forget what the unit held
+// so the next engine bind on it re-issues: with the cache stale, a smoke sprite whose texture
+// was the last engine bind on unit 0 sampled whatever render target a screen-space pass had
+// raw-bound there since - an opaque black quad for a frame (the GL3 muzzle-flash black squares).
+static void GL3_TmuForget( int unit, bool cube ) {
+	if ( unit >= 0 && unit < MAX_MULTITEXTURE_UNITS ) {
+		if ( cube ) {
+			backEnd.glState.tmu[unit].currentCubeMap = -1;
+		} else {
+			backEnd.glState.tmu[unit].current2DMap = -1;
+		}
+	}
+}
+
 namespace rhi {
 
 // ---- core GL 3.3 function pointers (declared in GL3Local.h) ----
@@ -527,6 +542,7 @@ public:
 		qglGenTextures( 1, &tex );
 		gl3ActiveTexture( GL_TEXTURE0 );
 		qglBindTexture( GL_TEXTURE_2D, tex );
+		GL3_TmuForget( 0, false );
 		if ( colorTarget ) {
 			qglTexImage2D( GL_TEXTURE_2D, 0, fmt == IF_RGBA16F ? GL_RGBA16F : GL_RGBA8, w, h, 0,
 			               GL_RGBA, fmt == IF_RGBA16F ? GL_HALF_FLOAT : GL_UNSIGNED_BYTE, NULL );
@@ -565,6 +581,7 @@ public:
 		GLenum status = gl3CheckFramebufferStatus( GL_FRAMEBUFFER );
 		gl3BindFramebuffer( GL_FRAMEBUFFER, 0 );
 		qglBindTexture( GL_TEXTURE_2D, 0 );
+		GL3_TmuForget( 0, false );
 
 		if ( status != GL_FRAMEBUFFER_COMPLETE ) {
 			common->Warning( "GL3 CreateRenderTarget: incomplete FBO (0x%x), %dx%d", status, w, h );
@@ -623,6 +640,7 @@ public:
 		qglGenTextures( 1, &tex );
 		gl3ActiveTexture( GL_TEXTURE0 );
 		qglBindTexture( GL_TEXTURE_2D, tex );
+		GL3_TmuForget( 0, false );
 		// allocate every level (glTexStorage2D is GL 4.2 / not loaded; a per-level
 		// glTexImage2D loop needs no new entry point)
 		for ( int i = 0; i < mipLevels; i++ ) {
@@ -644,6 +662,7 @@ public:
 		GLenum status = gl3CheckFramebufferStatus( GL_FRAMEBUFFER );
 		gl3BindFramebuffer( GL_FRAMEBUFFER, 0 );
 		qglBindTexture( GL_TEXTURE_2D, 0 );
+		GL3_TmuForget( 0, false );
 
 		if ( status != GL_FRAMEBUFFER_COMPLETE ) {
 			common->Warning( "GL3 CreateRenderTargetMipped: incomplete FBO (0x%x), %dx%d", status, w, h );
@@ -719,6 +738,7 @@ public:
 		qglGenTextures( 1, &tex );
 		gl3ActiveTexture( GL_TEXTURE0 );
 		qglBindTexture( GL_TEXTURE_CUBE_MAP, tex );
+		GL3_TmuForget( 0, true );
 		for ( int face = 0; face < 6; face++ ) {
 			qglTexImage2D( GL_TEXTURE_CUBE_MAP_POSITIVE_X + face, 0, GL_DEPTH_COMPONENT24,
 			               size, size, 0, GL_DEPTH_COMPONENT, GL_UNSIGNED_INT, NULL );
@@ -742,6 +762,7 @@ public:
 		GLenum status = gl3CheckFramebufferStatus( GL_FRAMEBUFFER );
 		gl3BindFramebuffer( GL_FRAMEBUFFER, 0 );
 		qglBindTexture( GL_TEXTURE_CUBE_MAP, 0 );
+		GL3_TmuForget( 0, true );
 
 		if ( status != GL_FRAMEBUFFER_COMPLETE ) {
 			common->Warning( "GL3 CreateRenderTargetCube: incomplete FBO (0x%x), %d^2x6", status, size );
@@ -793,6 +814,7 @@ public:
 		qglGenTextures( 1, &tex );
 		gl3ActiveTexture( GL_TEXTURE0 );
 		qglBindTexture( GL_TEXTURE_2D, tex );
+		GL3_TmuForget( 0, false );
 		qglTexImage2D( GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL );
 		qglTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR );
 		qglTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR );
@@ -804,6 +826,7 @@ public:
 		if ( colorCount == 2 ) {
 			qglGenTextures( 1, &tex2 );
 			qglBindTexture( GL_TEXTURE_2D, tex2 );
+			GL3_TmuForget( 0, false );
 			qglTexImage2D( GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL );
 			qglTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR );
 			qglTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR );
@@ -814,6 +837,7 @@ public:
 		GLuint depthTex = 0;
 		qglGenTextures( 1, &depthTex );
 		qglBindTexture( GL_TEXTURE_2D, depthTex );
+		GL3_TmuForget( 0, false );
 		qglTexImage2D( GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, w, h, 0,
 		               GL_DEPTH_COMPONENT, GL_UNSIGNED_INT, NULL );
 		qglTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST );
@@ -835,6 +859,7 @@ public:
 		GLenum status = gl3CheckFramebufferStatus( GL_FRAMEBUFFER );
 		gl3BindFramebuffer( GL_FRAMEBUFFER, 0 );
 		qglBindTexture( GL_TEXTURE_2D, 0 );
+		GL3_TmuForget( 0, false );
 
 		if ( status != GL_FRAMEBUFFER_COMPLETE ) {
 			common->Warning( "GL3 CreateRenderTargetColorDepth: incomplete FBO (0x%x), %dx%d", status, w, h );
@@ -889,6 +914,7 @@ public:
 		qglGenTextures( 1, &tex );
 		gl3ActiveTexture( GL_TEXTURE0 );
 		qglBindTexture( GL_TEXTURE_2D, tex );
+		GL3_TmuForget( 0, false );
 		qglTexImage2D( GL_TEXTURE_2D, 0, internalFmt, w, h, 0, GL_RGBA, pixelType, NULL );
 		qglTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR );
 		qglTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR );
@@ -898,6 +924,7 @@ public:
 		GLuint depthTex = 0;
 		qglGenTextures( 1, &depthTex );
 		qglBindTexture( GL_TEXTURE_2D, depthTex );
+		GL3_TmuForget( 0, false );
 		qglTexImage2D( GL_TEXTURE_2D, 0, GL_DEPTH24_STENCIL8, w, h, 0,
 		               GL_DEPTH_STENCIL, GL_UNSIGNED_INT_24_8, NULL );
 		qglTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST );
@@ -913,6 +940,7 @@ public:
 		GLenum status = gl3CheckFramebufferStatus( GL_FRAMEBUFFER );
 		gl3BindFramebuffer( GL_FRAMEBUFFER, frameTarget ? renderTargets[frameTarget].fbo : 0 );
 		qglBindTexture( GL_TEXTURE_2D, 0 );
+		GL3_TmuForget( 0, false );
 
 		if ( status != GL_FRAMEBUFFER_COMPLETE ) {
 			common->Warning( "GL3 CreateRenderTargetColorDepthStencil: incomplete FBO (0x%x), %dx%d", status, w, h );
@@ -994,6 +1022,7 @@ public:
 			if ( args.textures[i] ) {
 				gl3ActiveTexture( GL_TEXTURE0 + i );
 				qglBindTexture( GL_TEXTURE_2D, args.textures[i] );
+				GL3_TmuForget( i, false );
 			}
 		}
 		// unit 8: point-light cube shadow map (samplerCubeShadow in interaction.frag).
@@ -1002,12 +1031,14 @@ public:
 		if ( args.shadowCube ) {
 			gl3ActiveTexture( GL_TEXTURE0 + 8 );
 			qglBindTexture( GL_TEXTURE_CUBE_MAP, args.shadowCube );
+			GL3_TmuForget( 8, true );
 		}
 		// unit 12: dynamic-layer cube (static/dynamic split, lever B). Only bound for lights
 		// with a movers-only layer; interaction.frag skips it unless u_pbrParms2.z is set.
 		if ( args.shadowCubeDyn ) {
 			gl3ActiveTexture( GL_TEXTURE0 + 12 );
 			qglBindTexture( GL_TEXTURE_CUBE_MAP, args.shadowCubeDyn );
+			GL3_TmuForget( 12, true );
 		}
 
 		qglDrawElements( GL_TRIANGLES, args.indexCount, GL_UNSIGNED_INT,
