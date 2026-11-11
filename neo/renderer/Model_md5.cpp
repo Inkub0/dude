@@ -1527,6 +1527,37 @@ static void R_MD5_ReuseSurfaceTris( modelSurface_t *surf, const deformInfo_t *de
 
 /*
 ====================
+R_MD5_SyncPrevBuffer
+
+DUDE: skinned / deform-once motion vectors: keep or drop a surface's previous-position buffer (16 bytes per
+vertex; the PREVPOS kernels copy last frame's positions into it, gbuffer.vert reads it by device address).
+want = the feature is on and the PREVPOS kernel exists: the buffer is created once and dropped again when it
+has no device address (unusable without one); otherwise a buffer left from before is destroyed (toggled off).
+valid, when given, is cleared on (re)allocation and on release. Returns whether the buffer is live, i.e.
+whether the caller dispatches the PREVPOS kernel.
+====================
+*/
+static bool R_MD5_SyncPrevBuffer( rhi::RHI *r, bool want, int numVerts, unsigned int &vb, unsigned long long &addr, bool *valid ) {
+	if ( want ) {
+		if ( !vb ) {
+			vb   = r->CreateBuffer( rhi::BU_STORAGE, numVerts * 16, NULL );
+			addr = vb ? r->GetBufferDeviceAddress( vb ) : 0;
+			if ( valid ) { *valid = false; }
+			if ( vb && addr == 0 ) {		// no buffer-device-address: unusable
+				r->DestroyBuffer( vb );
+				vb = 0;
+			}
+		}
+	} else if ( vb ) {										// toggled off
+		r->DestroyBuffer( vb );
+		vb = 0;	addr = 0;
+		if ( valid ) { *valid = false; }
+	}
+	return vb != 0;
+}
+
+/*
+====================
 idMD5Mesh::SkinSurfaceCpu
 
 DUDE: the CPU position skin (always runs: culling, stencil shadows, bounds, decals and the game's hit traces read
@@ -1807,20 +1838,9 @@ void idMD5Mesh::QueueGpuSkin( const struct renderEntity_s *ent, const idJointMat
 		// skinned motion vectors: a second per-surface buffer receives last frame's positions (the kernel
 		// copies them out of gpuSkinVB before overwriting it). Needs a device address for gbuffer.vert.
 		rhi::ShaderHandle jobShader = skinShader;
-		if ( r_skinnedMotionVectors.GetBool() && tri->gpuSkinVB && R_MD5_SkinPrevShader( r ) != 0 ) {
-			if ( !tri->gpuSkinPrevVB ) {
-				tri->gpuSkinPrevVB   = r->CreateBuffer( rhi::BU_STORAGE, numOut * 16, NULL );
-				tri->gpuSkinPrevAddr = tri->gpuSkinPrevVB ? r->GetBufferDeviceAddress( tri->gpuSkinPrevVB ) : 0;
-				tri->gpuSkinPrevValid = false;
-				if ( tri->gpuSkinPrevVB && tri->gpuSkinPrevAddr == 0 ) {		// no buffer-device-address: unusable
-					r->DestroyBuffer( tri->gpuSkinPrevVB );
-					tri->gpuSkinPrevVB = 0;
-				}
-			}
-			if ( tri->gpuSkinPrevVB ) { jobShader = r_md5SkinPrevShader; }
-		} else if ( tri->gpuSkinPrevVB ) {										// toggled off
-			r->DestroyBuffer( tri->gpuSkinPrevVB );
-			tri->gpuSkinPrevVB = 0;	tri->gpuSkinPrevAddr = 0;	tri->gpuSkinPrevValid = false;
+		if ( R_MD5_SyncPrevBuffer( r, r_skinnedMotionVectors.GetBool() && tri->gpuSkinVB && R_MD5_SkinPrevShader( r ) != 0,
+		                           numOut, tri->gpuSkinPrevVB, tri->gpuSkinPrevAddr, &tri->gpuSkinPrevValid ) ) {
+			jobShader = r_md5SkinPrevShader;
 		}
 		if ( tri->gpuSkinVB && tri->gpuSkinFrame != tr.frameCount ) {
 			// gpuSkinVB holds the PREVIOUS frame's pose only if it was drawn last frame - skinned then, or
@@ -1946,21 +1966,12 @@ void idMD5Mesh::QueueTessDeform( srfTriangles_t *tri, bool tessDeformActive, boo
 		R_MD5_EnsureTessDeformBuffers( r, tri, numTessV, numTessIdx, tessExpandIndexes );
 		// deform-once motion vectors: a second per-surface buffer receives last frame's deformed positions (the
 		// PREVPOS kernel copies them out of tessDeformVB before overwriting it); gbuffer.vert reads it by device
-		// address. Same lifetime rules as gpuSkinPrevVB.
+		// address. Same lifetime rules as gpuSkinPrevVB (R_MD5_SyncPrevBuffer); no valid flag: the deform job
+		// decides from tessDeformFrame below.
 		rhi::ShaderHandle tessShader = r_md5TessShader;
-		if ( r_skinnedMotionVectors.GetBool() && tri->tessDeformVB && R_MD5_TessPrevShader( r ) != 0 ) {
-			if ( !tri->tessDeformPrevVB ) {
-				tri->tessDeformPrevVB   = r->CreateBuffer( rhi::BU_STORAGE, numTessV * 16, NULL );
-				tri->tessDeformPrevAddr = tri->tessDeformPrevVB ? r->GetBufferDeviceAddress( tri->tessDeformPrevVB ) : 0;
-				if ( tri->tessDeformPrevVB && tri->tessDeformPrevAddr == 0 ) {	// no buffer-device-address: unusable
-					r->DestroyBuffer( tri->tessDeformPrevVB );
-					tri->tessDeformPrevVB = 0;
-				}
-			}
-			if ( tri->tessDeformPrevVB ) { tessShader = r_md5TessPrevShader; }
-		} else if ( tri->tessDeformPrevVB ) {										// toggled off
-			r->DestroyBuffer( tri->tessDeformPrevVB );
-			tri->tessDeformPrevVB = 0;	tri->tessDeformPrevAddr = 0;
+		if ( R_MD5_SyncPrevBuffer( r, r_skinnedMotionVectors.GetBool() && tri->tessDeformVB && R_MD5_TessPrevShader( r ) != 0,
+		                           numTessV, tri->tessDeformPrevVB, tri->tessDeformPrevAddr, NULL ) ) {
+			tessShader = r_md5TessPrevShader;
 		}
 		// one deform dispatch per surface per frame
 		if ( tri->tessDeformVB && tri->tessDeformFrame != tr.frameCount ) {
