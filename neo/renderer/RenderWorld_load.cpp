@@ -174,8 +174,13 @@ idRenderModel *idRenderWorldLocal::ParseModel( idLexer *src ) {
 			float	vec[8];
 
 			// ( x y z s t nx ny nz ), as Parse1DMatrix( 8 ) reads it; DUDE: a Quake 4 .proc
-			// may add the vertex colour, ( ... r g b a ) in 0-255, and its uncoloured
-			// vertices are white, as model loaders leave a mesh without colours
+			// may add the vertex colour, ( ... r g b a ) in 0-255. Raven's writer leaves the
+			// colour out when it is the vertex default, and that default is BLACK, not white:
+			// airdefense1 writes "255 255 255 255" on thousands of vertices and never a pure
+			// black, while its terrain surfaces mix coloured and uncoloured vertices freely.
+			// The terrain materials (textures/rock/*_to_*) weight their first layer by
+			// vertexColor and the second by inverseVertexColor, so a white default showed the
+			// rock layer everywhere and never the sand (the Reddit "blend maps" report).
 			src->ExpectTokenString( "(" );
 			for ( int k = 0; k < 8; k++ ) {
 				vec[k] = src->ParseFloat();
@@ -186,7 +191,8 @@ idRenderModel *idRenderWorldLocal::ParseModel( idLexer *src ) {
 				}
 				src->ExpectTokenString( ")" );
 			} else if ( procVersion >= 4 ) {
-				tri->verts[j].color[0] = tri->verts[j].color[1] = tri->verts[j].color[2] = tri->verts[j].color[3] = 255;
+				tri->verts[j].color[0] = tri->verts[j].color[1] = tri->verts[j].color[2] = 0;
+				tri->verts[j].color[3] = 255;
 			}
 
 			tri->verts[j].xyz[0] = vec[0];
