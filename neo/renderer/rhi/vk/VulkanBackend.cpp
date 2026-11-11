@@ -1445,6 +1445,51 @@ private:
 	bool						CreateDescriptorPools();
 	bool						CreateUploadPlumbing();
 	bool						CreateDummyImages();
+	// NrdCreate
+	bool						NrdCreateInstance( bool wantSigma, bool wantRelax );
+	bool						NrdCreateSamplers( const nrd::LibraryDesc &lib, const nrd::InstanceDesc &inst );
+	bool						NrdCreatePipelines( const nrd::LibraryDesc &lib, const nrd::InstanceDesc &inst, uint32_t cbSpace, uint32_t resSpace );
+	bool						NrdCreateTexturePools( const nrd::InstanceDesc &inst, int w, int h );
+	bool						NrdCreateConstantRing( const nrd::InstanceDesc &inst );
+	bool						NrdCreateDescriptorPools( const nrd::InstanceDesc &inst );
+	// RtaoDenoise: the resolved inputs its stage helpers share
+	struct rtaoDenoiseCtx_t {
+		RenderTarget *ray, *vz, *norm;
+		ImageRec *vel, *conf, *mix;
+		int vzAtt, nmAtt;
+		bool haveConf, haveMix, shMode, relax, validation, mvScratch;
+		VkImage outImg;
+		VkImageView outView;
+		bool *outReady;
+		nrd::Identifier denId;
+	};
+	bool						RtaoDenoiseCommonSettings( const rhi::RtaoDenoiseArgs &a, rtaoDenoiseCtx_t &c );
+	bool						RtaoDenoiseRelaxSettings( const rhi::RtaoDenoiseArgs &a, const rtaoDenoiseCtx_t &c );
+	bool						RtaoDenoiseReblurSettings( const rhi::RtaoDenoiseArgs &a, const rtaoDenoiseCtx_t &c );
+	void						RtaoDenoiseBindViews( const rhi::RtaoDenoiseArgs &a, const rtaoDenoiseCtx_t &c );
+	void						RtaoDenoiseStageVelocity( VkCommandBuffer cb, const rtaoDenoiseCtx_t &c );
+	void						RtaoDenoisePreBarriers( VkCommandBuffer cb, const rhi::RtaoDenoiseArgs &a, const rtaoDenoiseCtx_t &c );
+	void						RtaoDenoisePostBarriers( VkCommandBuffer cb, const rhi::RtaoDenoiseArgs &a, const rtaoDenoiseCtx_t &c );
+	// RunFsr2: the resolved inputs of one dispatch
+	struct fsr2Inputs_t {
+		RenderTarget *scene, *out;
+		VkImage velImage;
+		VkImageView velView;
+		uint32_t dw, dh;
+	};
+	bool						Fsr2ResolveInputs( const Fsr2DispatchArgs &args, fsr2Inputs_t &in );
+	bool						Fsr2EnsureDepthView( const RenderTarget *scene );
+	void						Fsr2PreBarriers( VkCommandBuffer cb, const RenderTarget *scene, VkImageMemoryBarrier pre[2] );
+	void						Fsr2GenerateReactive( VkCommandBuffer cb, const Fsr2DispatchArgs &args, FfxFsr2DispatchDescription &dd, uint32_t w, uint32_t h );
+	void						Fsr2DispatchParms( const Fsr2DispatchArgs &args, FfxFsr2DispatchDescription &dd, uint32_t w, uint32_t h ) const;
+	void						Fsr2DispatchFailed( VkCommandBuffer cb, const VkImageMemoryBarrier &depthPre, FfxErrorCode err );
+	void						Fsr2CopyOut( VkCommandBuffer cb, const RenderTarget *scene, const RenderTarget *out, uint32_t dw, uint32_t dh );
+	// GetPipeline
+	static uint32_t				PipelineStages( const ShaderRec &sh, bool tessellate, VkPipelineShaderStageCreateInfo stages[4] );
+	static void					PipelineVertexInput( const PipelineDesc &desc, VkVertexInputBindingDescription &binding, VkVertexInputAttributeDescription attrs[6], VkPipelineVertexInputStateCreateInfo &vin );
+	static void					PipelineInputAssembly( const PipelineDesc &desc, bool tessellate, VkPipelineInputAssemblyStateCreateInfo &ia );
+	static void					PipelineDepthStencil( const PipelineDesc &desc, unsigned int bits, VkPipelineDepthStencilStateCreateInfo &ds );
+	static void					PipelineBlendAttachment( unsigned int bits, VkPipelineColorBlendAttachmentState &att );
 };
 
 static VulkanBackend vkBackend;
@@ -7469,33 +7514,8 @@ static VkFormat NrdFormatToVk( nrd::Format f ) {
 	return table[i];
 }
 
-/*
-====================
-VulkanBackend::NrdCreate
-
-Builds every VK object the NRD instance describes, at the given render size: one compute
-pipeline per PipelineDesc (shader module straight from the embedded SPIR-V — NRD already
-resolved the ShaderMake permutation), descriptor-set layouts laid out by the library's
-SPIRV register shifts across its two register spaces / sets (resources set: textures t20+,
-storage u3+; shared CB+samplers set: CB b2, samplers s0+), the permanent/transient texture
-pools (VMA, SAMPLED|STORAGE), the two immutable samplers, a host-visible per-dispatch
-constant ring, and a descriptor pool sized from the instance's own limits. No command
-recording here.
-====================
-*/
-bool VulkanBackend::NrdCreate( int w, int h ) {
-	const bool wantSigma = r_nrdSigma.GetBool();
-	const bool wantRelax = r_rtReStirDI.GetBool();		// R6: DI is ReLAX-only, so the ReLAX pair joins the instance whenever DI is on
-	if ( nrdInstance != NULL && nrdW == w && nrdH == h && nrdSigma == wantSigma && nrdRelax == wantRelax ) {
-		return true;
-	}
-	NrdDestroy( false );
-
-	if ( !haveComputeDerivatives ) {
-		common->Warning( "NRD: device lacks VK_KHR_compute_shader_derivatives (quads) - denoiser disabled" );
-		return false;
-	}
-
+// the NRD instance with the denoiser lineup this configuration wants
+bool VulkanBackend::NrdCreateInstance( bool wantSigma, bool wantRelax ) {
 	// One instance hosts every denoiser; a given frame dispatches exactly ONE ReBLUR variant
 	// (RTAO occlusion OR GI diffuse, never both — the r_rtgi swap), so there is no two-denoiser
 	// resolution thrash or descriptor-pool conflict. REBLUR_DIFFUSE is the H6b GI denoiser.
@@ -7524,34 +7544,11 @@ bool VulkanBackend::NrdCreate( int w, int h ) {
 		nrdInstance = NULL;
 		return false;
 	}
+	return true;
+}
 
-	// the vendored SPIR-V was compiled with these register shifts + encodings and the C++
-	// lib's defines must agree (libs/nrd/README-DUDE.md); if this trips, the nrd target's
-	// compile definitions drifted from the prebuilt shaders
-	const nrd::LibraryDesc &lib = *nrd::GetLibraryDesc();
-	if ( lib.spirvBindingOffsets.samplerOffset != 0 || lib.spirvBindingOffsets.textureOffset != 20
-			|| lib.spirvBindingOffsets.constantBufferOffset != 2 || lib.spirvBindingOffsets.storageTextureAndBufferOffset != 3
-			|| lib.normalEncoding != nrd::NormalEncoding::R10_G10_B10_A2_UNORM ) {
-		common->Warning( "NRD: library config mismatch vs vendored shaders (offsets %u/%u/%u/%u, normal enc %u)",
-			lib.spirvBindingOffsets.samplerOffset, lib.spirvBindingOffsets.textureOffset,
-			lib.spirvBindingOffsets.constantBufferOffset, lib.spirvBindingOffsets.storageTextureAndBufferOffset,
-			(uint32_t)lib.normalEncoding );
-		NrdDestroy( false );
-		return false;
-	}
-
-	// NRD's SPIR-V splits its bindings across two register spaces = two descriptor sets:
-	// resources (SRV/UAV) in one, the constant buffer + samplers in the other (1/0 as
-	// built). Anything beyond two sets means the packaging changed — refuse.
-	const nrd::InstanceDesc &inst = *nrd::GetInstanceDesc( *nrdInstance );
-	const uint32_t cbSpace  = inst.constantBufferAndSamplersSpaceIndex;
-	const uint32_t resSpace = inst.resourcesSpaceIndex;
-	if ( cbSpace > 1 || resSpace > 1 || cbSpace == resSpace ) {
-		common->Warning( "NRD: unexpected register spaces (cb %u / resources %u)", cbSpace, resSpace );
-		NrdDestroy( false );
-		return false;
-	}
-
+// the immutable samplers and the shared constant-buffer + samplers set layout
+bool VulkanBackend::NrdCreateSamplers( const nrd::LibraryDesc &lib, const nrd::InstanceDesc &inst ) {
 	// immutable samplers (NEAREST_CLAMP / LINEAR_CLAMP today)
 	nrdSamplerCount = inst.samplersNum;
 	if ( nrdSamplerCount > sizeof( nrdSamplers ) / sizeof( nrdSamplers[0] ) ) {
@@ -7601,7 +7598,11 @@ bool VulkanBackend::NrdCreate( int w, int h ) {
 			return false;
 		}
 	}
+	return true;
+}
 
+// one tight resources set layout + pipeline layout + compute pipeline per NRD PipelineDesc
+bool VulkanBackend::NrdCreatePipelines( const nrd::LibraryDesc &lib, const nrd::InstanceDesc &inst, uint32_t cbSpace, uint32_t resSpace ) {
 	// one tight resources set layout + pipeline per PipelineDesc
 	nrdPipes.resize( inst.pipelinesNum );
 	for ( uint32_t p = 0; p < inst.pipelinesNum; p++ ) {
@@ -7675,7 +7676,11 @@ bool VulkanBackend::NrdCreate( int w, int h ) {
 			return false;
 		}
 	}
+	return true;
+}
 
+// the permanent (history) and transient (per-frame scratch) texture pools at this resolution
+bool VulkanBackend::NrdCreateTexturePools( const nrd::InstanceDesc &inst, int w, int h ) {
 	// texture pools: permanent (history, survives frames) + transient (per-frame scratch)
 	auto createPool = [&]( const nrd::TextureDesc *descs, uint32_t count, std::vector<NrdTexture> &out, const char *what ) -> bool {
 		out.resize( count );
@@ -7726,7 +7731,11 @@ bool VulkanBackend::NrdCreate( int w, int h ) {
 		NrdDestroy( false );
 		return false;
 	}
+	return true;
+}
 
+// the per-dispatch constant ring (one UBO-aligned slice per set, per frame slot)
+bool VulkanBackend::NrdCreateConstantRing( const nrd::InstanceDesc &inst ) {
 	// per-dispatch constant ring: one UBO-aligned slice per descriptor set, per frame slot
 	// (a recorded frame's constants must survive until its fence is waited)
 	// sized for NRD_FRAME_PASSES denoise passes on one frame cb (portal-sky + main view)
@@ -7750,7 +7759,11 @@ bool VulkanBackend::NrdCreate( int w, int h ) {
 		}
 		nrdCbMapped = ai.pMappedData;
 	}
+	return true;
+}
 
+// the per-slot descriptor pools, sized from the instance's limits
+bool VulkanBackend::NrdCreateDescriptorPools( const nrd::InstanceDesc &inst ) {
 	// descriptor pools sized from the instance's own tight-layout limits (+ the CB/samplers
 	// every set may carry) — one pool per frame slot (see the member comment)
 	for ( int f = 0; f < FRAMES_IN_FLIGHT; f++ ) {
@@ -7770,6 +7783,86 @@ bool VulkanBackend::NrdCreate( int w, int h ) {
 			NrdDestroy( false );
 			return false;
 		}
+	}
+	return true;
+}
+
+/*
+====================
+VulkanBackend::NrdCreate
+
+Builds every VK object the NRD instance describes, at the given render size: one compute
+pipeline per PipelineDesc (shader module straight from the embedded SPIR-V — NRD already
+resolved the ShaderMake permutation), descriptor-set layouts laid out by the library's
+SPIRV register shifts across its two register spaces / sets (resources set: textures t20+,
+storage u3+; shared CB+samplers set: CB b2, samplers s0+), the permanent/transient texture
+pools (VMA, SAMPLED|STORAGE), the two immutable samplers, a host-visible per-dispatch
+constant ring, and a descriptor pool sized from the instance's own limits. No command
+recording here.
+====================
+*/
+bool VulkanBackend::NrdCreate( int w, int h ) {
+	const bool wantSigma = r_nrdSigma.GetBool();
+	const bool wantRelax = r_rtReStirDI.GetBool();		// R6: DI is ReLAX-only, so the ReLAX pair joins the instance whenever DI is on
+	if ( nrdInstance != NULL && nrdW == w && nrdH == h && nrdSigma == wantSigma && nrdRelax == wantRelax ) {
+		return true;
+	}
+	NrdDestroy( false );
+
+	if ( !haveComputeDerivatives ) {
+		common->Warning( "NRD: device lacks VK_KHR_compute_shader_derivatives (quads) - denoiser disabled" );
+		return false;
+	}
+
+	if ( !NrdCreateInstance( wantSigma, wantRelax ) ) {
+		return false;
+	}
+
+	// the vendored SPIR-V was compiled with these register shifts + encodings and the C++
+	// lib's defines must agree (libs/nrd/README-DUDE.md); if this trips, the nrd target's
+	// compile definitions drifted from the prebuilt shaders
+	const nrd::LibraryDesc &lib = *nrd::GetLibraryDesc();
+	if ( lib.spirvBindingOffsets.samplerOffset != 0 || lib.spirvBindingOffsets.textureOffset != 20
+			|| lib.spirvBindingOffsets.constantBufferOffset != 2 || lib.spirvBindingOffsets.storageTextureAndBufferOffset != 3
+			|| lib.normalEncoding != nrd::NormalEncoding::R10_G10_B10_A2_UNORM ) {
+		common->Warning( "NRD: library config mismatch vs vendored shaders (offsets %u/%u/%u/%u, normal enc %u)",
+			lib.spirvBindingOffsets.samplerOffset, lib.spirvBindingOffsets.textureOffset,
+			lib.spirvBindingOffsets.constantBufferOffset, lib.spirvBindingOffsets.storageTextureAndBufferOffset,
+			(uint32_t)lib.normalEncoding );
+		NrdDestroy( false );
+		return false;
+	}
+
+	// NRD's SPIR-V splits its bindings across two register spaces = two descriptor sets:
+	// resources (SRV/UAV) in one, the constant buffer + samplers in the other (1/0 as
+	// built). Anything beyond two sets means the packaging changed — refuse.
+	const nrd::InstanceDesc &inst = *nrd::GetInstanceDesc( *nrdInstance );
+	const uint32_t cbSpace  = inst.constantBufferAndSamplersSpaceIndex;
+	const uint32_t resSpace = inst.resourcesSpaceIndex;
+	if ( cbSpace > 1 || resSpace > 1 || cbSpace == resSpace ) {
+		common->Warning( "NRD: unexpected register spaces (cb %u / resources %u)", cbSpace, resSpace );
+		NrdDestroy( false );
+		return false;
+	}
+
+	if ( !NrdCreateSamplers( lib, inst ) ) {
+		return false;
+	}
+
+	if ( !NrdCreatePipelines( lib, inst, cbSpace, resSpace ) ) {
+		return false;
+	}
+
+	if ( !NrdCreateTexturePools( inst, w, h ) ) {
+		return false;
+	}
+
+	if ( !NrdCreateConstantRing( inst ) ) {
+		return false;
+	}
+
+	if ( !NrdCreateDescriptorPools( inst ) ) {
+		return false;
 	}
 
 	nrdW = w;
@@ -8336,65 +8429,16 @@ void VulkanBackend::NrdDestroyValidation() {
 	nrdValidReady = false;
 }
 
-bool VulkanBackend::RtaoDenoise( const rhi::RtaoDenoiseArgs &a ) {
-	// bring-up observability: every failure branch says WHY once (the caller's debug
-	// overlay silently falls back to the raw rays, which masks a dead denoiser)
-	static int warned = 0;
-	#define RTAO_FAIL( bit, msg ) { if ( !( warned & ( 1 << bit ) ) ) { warned |= 1 << bit; common->Warning( "RTAO denoise: %s", msg ); } return false; }
-	if ( !frameOpen || skipFrame || device == VK_NULL_HANDLE ) {
-		return false;
-	}
-	if ( !haveComputeDerivatives ) {
-		RTAO_FAIL( 0, "device lacks compute-shader derivatives (quads)" );
-	}
-	if ( !NrdCreate( a.w, a.h ) ) {
-		RTAO_FAIL( 1, "NrdCreate failed (see warnings above)" );
-	}
-	if ( !( a.giMode ? RtgiEnsureOutput( a.w, a.h ) : RtaoEnsureOutput( a.w, a.h ) ) ) {
-		RTAO_FAIL( 2, "output image creation failed" );
-	}
+// RtaoDenoise bring-up observability: every failure branch says WHY once (the caller's debug overlay silently falls back to
+// the raw rays, which masks a dead denoiser). File scope so the stage helpers share the once-only state.
+static int s_rtaoDenoiseWarned = 0;
+#define RTAO_FAIL( bit, msg ) { if ( !( s_rtaoDenoiseWarned & ( 1 << bit ) ) ) { s_rtaoDenoiseWarned |= 1 << bit; common->Warning( "RTAO denoise: %s", msg ); } return false; }
 
-	// resolve the caller's images (color attachment 0 of each single-color target)
-	RenderTarget *ray  = LookupTarget( a.rayRT );
-	RenderTarget *vz   = LookupTarget( a.viewzRT );
-	RenderTarget *norm = LookupTarget( a.normalRT );
-	if ( ray == NULL || vz == NULL || norm == NULL
-			|| a.velImage < 1 || a.velImage > (ImageHandle)imageTable.size()
-			|| !imageTable[a.velImage - 1].live ) {
-		RTAO_FAIL( 3, "input target/velocity lookup failed" );
-	}
-	ImageRec &vel = imageTable[a.velImage - 1];
-	// H6f: optional per-pixel history confidence (GI path only). Present only when the caller ran the
-	// confidence pass this frame (needs a prior denoised frame to reproject) — otherwise NRD antilag only.
-	const bool haveConf = a.giMode && a.confImage >= 1 && a.confImage <= (ImageHandle)imageTable.size()
-		&& imageTable[a.confImage - 1].live;
-	ImageRec *conf = haveConf ? &imageTable[a.confImage - 1] : NULL;
-	// ReSTIR DI R1: optional per-pixel forced history reset (IN_DISOCCLUSION_THRESHOLD_MIX, ReLAX only - its temporal pass
-	// mixes the disocclusion threshold toward a ZERO alternate where the mix is 1, so every reprojection tap fails there)
-	const bool haveMix = a.giMode && a.denoiser == 1 && nrdRelax && a.disoccMixImage >= 1
-		&& a.disoccMixImage <= (ImageHandle)imageTable.size() && imageTable[a.disoccMixImage - 1].live;
-	ImageRec *mix = haveMix ? &imageTable[a.disoccMixImage - 1] : NULL;
-	// the guides may live in attachments 1/2 of the ray target itself (CreateRenderTargetRtaoMrt)
-	const int vzAtt = a.viewzAtt, nmAtt = a.normalAtt;
-	if ( vzAtt < 0 || vzAtt >= vz->colorCount || nmAtt < 0 || nmAtt >= norm->colorCount ) {
-		RTAO_FAIL( 9, "guide attachment index out of range" );
-	}
-	auto targetView = []( RenderTarget *t, int att ) {
-		return t->colorSampleView[att] != VK_NULL_HANDLE ? t->colorSampleView[att] : t->colorView[att];
-	};
-
-	// H6b (docs/rtx-rtgi.md): giMode swaps the output image + denoiser id + the DIFF resource enums so the
-	// single NRD instance denoises GI radiance this frame instead of RTAO occlusion. RTAO (giMode false)
-	// is byte-identical below.
-	VkImage      outImg   = a.giMode ? rtgiOutImage : rtaoOutImage;
-	VkImageView  outView  = a.giMode ? rtgiOutView  : rtaoOutView;
-	bool        &outReady = a.giMode ? rtgiOutReady : rtaoOutReady;
-	const bool shMode = a.giMode && a.shMode && rtgiOutSh1View != VK_NULL_HANDLE;
-	// R2: the ReLAX family on request (and only if the instance was created with it - a flip rebuilds via the gfx signature)
-	const bool relax = a.giMode && a.denoiser == 1 && nrdRelax;
-	const nrd::Identifier denId = a.giMode ? ( relax ? ( shMode ? NRD_ID_RELAX_DI_SH : NRD_ID_RELAX_DI )
-	                                                : ( shMode ? NRD_ID_REBLUR_GI_SH : NRD_ID_REBLUR_GI ) ) : NRD_ID_REBLUR_AO;
-
+// the NRD common (frame) settings; decides c.validation
+bool VulkanBackend::RtaoDenoiseCommonSettings( const rhi::RtaoDenoiseArgs &a, rtaoDenoiseCtx_t &c ) {
+	const bool haveConf = c.haveConf;
+	const bool haveMix = c.haveMix;
+	const nrd::Identifier denId = c.denId;
 	// frame settings
 	nrd::CommonSettings cs = {};
 	memcpy( cs.viewToClipMatrix,      a.viewToClip,      sizeof( cs.viewToClipMatrix ) );
@@ -8428,50 +8472,61 @@ bool VulkanBackend::RtaoDenoise( const rhi::RtaoDenoiseArgs &a ) {
 	}
 	// R0: NRD's own validation overlay (OUT_VALIDATION) on request - the debug view that shows accumulated frames /
 	// history resets / antilag per pixel, so a lag problem is SEEN instead of inferred from the lit result
-	const bool validation = a.validation && NrdEnsureValidation( a.w, a.h );
-	cs.enableValidation = validation;
+	c.validation = a.validation && NrdEnsureValidation( a.w, a.h );
+	cs.enableValidation = c.validation;
 	if ( nrd::SetCommonSettings( *nrdInstance, cs ) != nrd::Result::SUCCESS ) {
 		RTAO_FAIL( 4, "nrd::SetCommonSettings rejected the frame settings" );
 	}
-	if ( relax ) {
-		// R2 (docs/rtx-restir-di.md Plan R2): RELAX_DIFFUSE(_SH). Starting point = RTX Remix's direct-light preset + the RTXDI
-		// sample's edge stopping; the caller's cvars carry the values. Linear radiance + RAW hit distance in (the gather
-		// switches its encoding), output linear (SH0 YCoCg in SH mode - RELAX_BackEnd_UnpackSh). History length comes back in .w.
-		nrd::RelaxSettings xs = {};
-		if ( a.maxAccumFrames > 0 ) { xs.diffuseMaxAccumulatedFrameNum = (uint32_t)Min( a.maxAccumFrames, 63 ); }
-		if ( a.fastFrames > 0 )     { xs.diffuseMaxFastAccumulatedFrameNum = (uint32_t)a.fastFrames; }
-		if ( xs.diffuseMaxFastAccumulatedFrameNum >= xs.diffuseMaxAccumulatedFrameNum && xs.diffuseMaxAccumulatedFrameNum > 1 ) {
-			xs.diffuseMaxFastAccumulatedFrameNum = xs.diffuseMaxAccumulatedFrameNum - 1;
-		}
-		if ( a.fastClampSigma > 0.0f ) { xs.fastHistoryClampingSigmaScale = a.fastClampSigma; }
-		if ( a.historyFixFrameNum > 0 ) {
-			uint32_t hf = (uint32_t)Min( a.historyFixFrameNum, 3 );		// RELAX: [0; 3] and < fast history
-			const uint32_t fastCap = ( xs.diffuseMaxFastAccumulatedFrameNum > 0 ) ? xs.diffuseMaxFastAccumulatedFrameNum - 1 : 0;
-			if ( hf > fastCap ) { hf = fastCap; }
-			xs.historyFixFrameNum = hf;
-		}
-		xs.diffusePrepassBlurRadius = Max( a.relaxPrepass, 0.0f );
-		if ( a.relaxPhiLuminance > 0.0f ) { xs.diffusePhiLuminance = a.relaxPhiLuminance; }
-		if ( a.relaxAtrous >= 2 )        { xs.atrousIterationNum = (uint32_t)Min( a.relaxAtrous, 8 ); }
-		if ( a.relaxVarianceHistory >= 0 ) { xs.spatialVarianceEstimationHistoryThreshold = (uint32_t)a.relaxVarianceHistory; }
-		if ( haveConf && a.relaxConfRelax > 0.0f ) {
-			xs.confidenceDrivenRelaxationMultiplier          = a.relaxConfRelax;	// Remix direct: 0.7 / 1.4 / 0.6
-			xs.confidenceDrivenLuminanceEdgeStoppingRelaxation = 1.4f;
-			xs.confidenceDrivenNormalEdgeStoppingRelaxation    = 0.6f;
-		}
-		xs.enableAntiFirefly = a.relaxAntiFirefly;
-		if ( a.edgeStopScale > 0.0f ) { xs.lobeAngleFraction *= a.edgeStopScale; }
-		if ( a.antilagOff ) {
-			xs.antilagSettings.accelerationAmount = 0.0f;			// no history acceleration, no reset: inert
-			xs.antilagSettings.resetAmount = 0.0f;
-		}
-		if ( a.checkerboard > 0 ) {
-			xs.checkerboardMode = ( a.checkerboard == 1 ) ? nrd::CheckerboardMode::BLACK : nrd::CheckerboardMode::WHITE;
-		}
-		if ( nrd::SetDenoiserSettings( *nrdInstance, denId, &xs ) != nrd::Result::SUCCESS ) {
-			RTAO_FAIL( 5, "nrd::SetDenoiserSettings rejected the ReLAX settings" );
-		}
-	} else {
+	return true;
+}
+
+// the ReLAX settings (ReSTIR DI)
+bool VulkanBackend::RtaoDenoiseRelaxSettings( const rhi::RtaoDenoiseArgs &a, const rtaoDenoiseCtx_t &c ) {
+	const bool haveConf = c.haveConf;
+	const nrd::Identifier denId = c.denId;
+	// R2 (docs/rtx-restir-di.md Plan R2): RELAX_DIFFUSE(_SH). Starting point = RTX Remix's direct-light preset + the RTXDI
+	// sample's edge stopping; the caller's cvars carry the values. Linear radiance + RAW hit distance in (the gather
+	// switches its encoding), output linear (SH0 YCoCg in SH mode - RELAX_BackEnd_UnpackSh). History length comes back in .w.
+	nrd::RelaxSettings xs = {};
+	if ( a.maxAccumFrames > 0 ) { xs.diffuseMaxAccumulatedFrameNum = (uint32_t)Min( a.maxAccumFrames, 63 ); }
+	if ( a.fastFrames > 0 )     { xs.diffuseMaxFastAccumulatedFrameNum = (uint32_t)a.fastFrames; }
+	if ( xs.diffuseMaxFastAccumulatedFrameNum >= xs.diffuseMaxAccumulatedFrameNum && xs.diffuseMaxAccumulatedFrameNum > 1 ) {
+		xs.diffuseMaxFastAccumulatedFrameNum = xs.diffuseMaxAccumulatedFrameNum - 1;
+	}
+	if ( a.fastClampSigma > 0.0f ) { xs.fastHistoryClampingSigmaScale = a.fastClampSigma; }
+	if ( a.historyFixFrameNum > 0 ) {
+		uint32_t hf = (uint32_t)Min( a.historyFixFrameNum, 3 );		// RELAX: [0; 3] and < fast history
+		const uint32_t fastCap = ( xs.diffuseMaxFastAccumulatedFrameNum > 0 ) ? xs.diffuseMaxFastAccumulatedFrameNum - 1 : 0;
+		if ( hf > fastCap ) { hf = fastCap; }
+		xs.historyFixFrameNum = hf;
+	}
+	xs.diffusePrepassBlurRadius = Max( a.relaxPrepass, 0.0f );
+	if ( a.relaxPhiLuminance > 0.0f ) { xs.diffusePhiLuminance = a.relaxPhiLuminance; }
+	if ( a.relaxAtrous >= 2 )        { xs.atrousIterationNum = (uint32_t)Min( a.relaxAtrous, 8 ); }
+	if ( a.relaxVarianceHistory >= 0 ) { xs.spatialVarianceEstimationHistoryThreshold = (uint32_t)a.relaxVarianceHistory; }
+	if ( haveConf && a.relaxConfRelax > 0.0f ) {
+		xs.confidenceDrivenRelaxationMultiplier          = a.relaxConfRelax;	// Remix direct: 0.7 / 1.4 / 0.6
+		xs.confidenceDrivenLuminanceEdgeStoppingRelaxation = 1.4f;
+		xs.confidenceDrivenNormalEdgeStoppingRelaxation    = 0.6f;
+	}
+	xs.enableAntiFirefly = a.relaxAntiFirefly;
+	if ( a.edgeStopScale > 0.0f ) { xs.lobeAngleFraction *= a.edgeStopScale; }
+	if ( a.antilagOff ) {
+		xs.antilagSettings.accelerationAmount = 0.0f;			// no history acceleration, no reset: inert
+		xs.antilagSettings.resetAmount = 0.0f;
+	}
+	if ( a.checkerboard > 0 ) {
+		xs.checkerboardMode = ( a.checkerboard == 1 ) ? nrd::CheckerboardMode::BLACK : nrd::CheckerboardMode::WHITE;
+	}
+	if ( nrd::SetDenoiserSettings( *nrdInstance, denId, &xs ) != nrd::Result::SUCCESS ) {
+		RTAO_FAIL( 5, "nrd::SetDenoiserSettings rejected the ReLAX settings" );
+	}
+	return true;
+}
+
+// the ReBLUR settings (RTAO occlusion / RTGI diffuse)
+bool VulkanBackend::RtaoDenoiseReblurSettings( const rhi::RtaoDenoiseArgs &a, const rtaoDenoiseCtx_t &c ) {
+	const nrd::Identifier denId = c.denId;
 	nrd::ReblurSettings rs = {};
 	rs.hitDistanceParameters.A = a.hitDistA;		// MUST mirror rtao_ray.frag's normalization
 	rs.hitDistanceParameters.B = a.hitDistB;
@@ -8526,14 +8581,28 @@ bool VulkanBackend::RtaoDenoise( const rhi::RtaoDenoiseArgs &a ) {
 	if ( nrd::SetDenoiserSettings( *nrdInstance, denId, &rs ) != nrd::Result::SUCCESS ) {
 		RTAO_FAIL( 5, "nrd::SetDenoiserSettings rejected the ReBLUR settings" );
 	}
-	}	// !relax
+	return true;
+}
 
-	memset( nrdUserViews, 0, sizeof( nrdUserViews ) );
-	// RTGI's REBLUR_DIFFUSE overwrites IN_MV (temporal-stabilization pass), so it needs a
-	// WRITABLE copy — feed a storage scratch (filled from velocity below). RTAO never writes
-	// IN_MV, so it binds the read-only velocity view directly. Fall back to that view too if
-	// the scratch can't be allocated (keeps RTGI working, with the storage-usage validation warning).
-	const bool mvScratch = a.giMode && NrdEnsureMvScratch( vel.width, vel.height );
+// the user (non-pool) resource views NrdRecordDispatches binds
+void VulkanBackend::RtaoDenoiseBindViews( const rhi::RtaoDenoiseArgs &a, const rtaoDenoiseCtx_t &c ) {
+	RenderTarget *ray = c.ray;
+	RenderTarget *vz = c.vz;
+	RenderTarget *norm = c.norm;
+	ImageRec &vel = *c.vel;
+	ImageRec *conf = c.conf;
+	ImageRec *mix = c.mix;
+	const int vzAtt = c.vzAtt;
+	const int nmAtt = c.nmAtt;
+	const bool haveConf = c.haveConf;
+	const bool haveMix = c.haveMix;
+	const bool shMode = c.shMode;
+	const bool validation = c.validation;
+	const bool mvScratch = c.mvScratch;
+	VkImageView outView = c.outView;
+	auto targetView = []( RenderTarget *t, int att ) {
+		return t->colorSampleView[att] != VK_NULL_HANDLE ? t->colorSampleView[att] : t->colorView[att];
+	};
 	nrdUserViews[(uint32_t)nrd::ResourceType::IN_MV]               = mvScratch ? nrdMvScratchView : vel.view;
 	nrdUserViews[(uint32_t)nrd::ResourceType::IN_NORMAL_ROUGHNESS] = targetView( norm, nmAtt );
 	nrdUserViews[(uint32_t)nrd::ResourceType::IN_VIEWZ]            = targetView( vz, vzAtt );
@@ -8558,19 +8627,12 @@ bool VulkanBackend::RtaoDenoise( const rhi::RtaoDenoiseArgs &a ) {
 		nrdUserViews[(uint32_t)nrd::ResourceType::IN_DIFF_HITDIST]  = targetView( ray, 0 );
 		nrdUserViews[(uint32_t)nrd::ResourceType::OUT_DIFF_HITDIST] = outView;
 	}
+}
 
-	VkCommandBuffer cb = frames[frameIndex].cb;
-	if ( insideScenePass ) {
-		vkCmdEndRenderPass( cb );					// dispatches are illegal inside a render pass
-		insideScenePass = false;
-	}
-	if ( insideTargetPass ) {
-		// a target pass mid-recording can't be resumed from here (same rule as Dispatch());
-		// callers sequence RtaoDenoise between EndPass and the next pass, so this is a
-		// defensive bail — GTAO takes over the view
-		RTAO_FAIL( 8, "called inside a target pass — recorded nothing" );
-	}
-
+// RTGI / DI: copy the read-only velocity into NRD's writable scratch
+void VulkanBackend::RtaoDenoiseStageVelocity( VkCommandBuffer cb, const rtaoDenoiseCtx_t &c ) {
+	ImageRec &vel = *c.vel;
+	const bool mvScratch = c.mvScratch;
 	// RTGI: stage the read-only velocity into the writable NRD scratch (NRD reads it, then its
 	// temporal-stabilization pass overwrites it). The copy rewrites every texel, so the scratch's
 	// prior contents are discarded (UNDEFINED); it ends in GENERAL for NRD, velocity back in
@@ -8624,7 +8686,25 @@ bool VulkanBackend::RtaoDenoise( const rhi::RtaoDenoiseArgs &a ) {
 			VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
 			0, 0, NULL, 0, NULL, 2, cpost );
 	}
+}
 
+// inputs to GENERAL, the output's first-use / WAR barrier
+void VulkanBackend::RtaoDenoisePreBarriers( VkCommandBuffer cb, const rhi::RtaoDenoiseArgs &a, const rtaoDenoiseCtx_t &c ) {
+	RenderTarget *ray = c.ray;
+	RenderTarget *vz = c.vz;
+	RenderTarget *norm = c.norm;
+	ImageRec &vel = *c.vel;
+	ImageRec *conf = c.conf;
+	ImageRec *mix = c.mix;
+	const int vzAtt = c.vzAtt;
+	const int nmAtt = c.nmAtt;
+	const bool haveConf = c.haveConf;
+	const bool haveMix = c.haveMix;
+	const bool shMode = c.shMode;
+	const bool validation = c.validation;
+	const bool mvScratch = c.mvScratch;
+	VkImage outImg = c.outImg;
+	bool &outReady = *c.outReady;
 	// inputs: SHADER_READ_ONLY -> GENERAL (NRD's descriptors are written with GENERAL);
 	// output: first use UNDEFINED -> GENERAL, then a WAR barrier vs last frame's sampling
 	VkImageMemoryBarrier pre[10] = {};		// + SH1 input / output in SH mode, + the validation overlay
@@ -8662,20 +8742,24 @@ bool VulkanBackend::RtaoDenoise( const rhi::RtaoDenoiseArgs &a ) {
 		VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
 		0, 0, NULL, 0, NULL, preCount, pre );
 	outReady = true;
+}
 
-	const bool recorded = NrdRecordDispatches( cb, &denId, 1 );
-	if ( recorded ) {
-		nrdPrimed[denId] = true;		// this denoiser's history is now initialised
-	}
-	if ( recorded && !( warned & ( 1 << 7 ) ) ) {
-		warned |= 1 << 7;
-		common->Printf( "%s: NRD %s denoise active (%dx%d)\n", a.giMode ? "RTGI/DI" : "RTAO", relax ? "ReLAX" : "ReBLUR", a.w, a.h );
-	}
-	// on record failure we still fall through to the restore barriers below — the inputs
-	// were already transitioned to GENERAL and MUST go back to SHADER_READ_ONLY, or every
-	// later consumer (FSR2, SSR, the GTAO fallback itself) samples them in the wrong layout
-	#undef RTAO_FAIL
-
+// output to fragment sampling, inputs back to SHADER_READ_ONLY
+void VulkanBackend::RtaoDenoisePostBarriers( VkCommandBuffer cb, const rhi::RtaoDenoiseArgs &a, const rtaoDenoiseCtx_t &c ) {
+	RenderTarget *ray = c.ray;
+	RenderTarget *vz = c.vz;
+	RenderTarget *norm = c.norm;
+	ImageRec &vel = *c.vel;
+	ImageRec *conf = c.conf;
+	ImageRec *mix = c.mix;
+	const int vzAtt = c.vzAtt;
+	const int nmAtt = c.nmAtt;
+	const bool haveConf = c.haveConf;
+	const bool haveMix = c.haveMix;
+	const bool shMode = c.shMode;
+	const bool validation = c.validation;
+	const bool mvScratch = c.mvScratch;
+	VkImage outImg = c.outImg;
 	// output -> fragment sampling; inputs back to SHADER_READ_ONLY for their other consumers
 	VkImageMemoryBarrier post[10] = {};		// + SH1 input / output in SH mode, + the validation overlay
 	uint32_t postCount = 0;
@@ -8711,6 +8795,117 @@ bool VulkanBackend::RtaoDenoise( const rhi::RtaoDenoiseArgs &a ) {
 		VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
 		VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
 		0, 0, NULL, 0, NULL, postCount, post );
+}
+
+bool VulkanBackend::RtaoDenoise( const rhi::RtaoDenoiseArgs &a ) {
+	if ( !frameOpen || skipFrame || device == VK_NULL_HANDLE ) {
+		return false;
+	}
+	if ( !haveComputeDerivatives ) {
+		RTAO_FAIL( 0, "device lacks compute-shader derivatives (quads)" );
+	}
+	if ( !NrdCreate( a.w, a.h ) ) {
+		RTAO_FAIL( 1, "NrdCreate failed (see warnings above)" );
+	}
+	if ( !( a.giMode ? RtgiEnsureOutput( a.w, a.h ) : RtaoEnsureOutput( a.w, a.h ) ) ) {
+		RTAO_FAIL( 2, "output image creation failed" );
+	}
+
+	// resolve the caller's images (color attachment 0 of each single-color target)
+	RenderTarget *ray  = LookupTarget( a.rayRT );
+	RenderTarget *vz   = LookupTarget( a.viewzRT );
+	RenderTarget *norm = LookupTarget( a.normalRT );
+	if ( ray == NULL || vz == NULL || norm == NULL
+			|| a.velImage < 1 || a.velImage > (ImageHandle)imageTable.size()
+			|| !imageTable[a.velImage - 1].live ) {
+		RTAO_FAIL( 3, "input target/velocity lookup failed" );
+	}
+	ImageRec &vel = imageTable[a.velImage - 1];
+	// H6f: optional per-pixel history confidence (GI path only). Present only when the caller ran the
+	// confidence pass this frame (needs a prior denoised frame to reproject) — otherwise NRD antilag only.
+	const bool haveConf = a.giMode && a.confImage >= 1 && a.confImage <= (ImageHandle)imageTable.size()
+		&& imageTable[a.confImage - 1].live;
+	ImageRec *conf = haveConf ? &imageTable[a.confImage - 1] : NULL;
+	// ReSTIR DI R1: optional per-pixel forced history reset (IN_DISOCCLUSION_THRESHOLD_MIX, ReLAX only - its temporal pass
+	// mixes the disocclusion threshold toward a ZERO alternate where the mix is 1, so every reprojection tap fails there)
+	const bool haveMix = a.giMode && a.denoiser == 1 && nrdRelax && a.disoccMixImage >= 1
+		&& a.disoccMixImage <= (ImageHandle)imageTable.size() && imageTable[a.disoccMixImage - 1].live;
+	ImageRec *mix = haveMix ? &imageTable[a.disoccMixImage - 1] : NULL;
+	// the guides may live in attachments 1/2 of the ray target itself (CreateRenderTargetRtaoMrt)
+	const int vzAtt = a.viewzAtt, nmAtt = a.normalAtt;
+	if ( vzAtt < 0 || vzAtt >= vz->colorCount || nmAtt < 0 || nmAtt >= norm->colorCount ) {
+		RTAO_FAIL( 9, "guide attachment index out of range" );
+	}
+
+	// H6b (docs/rtx-rtgi.md): giMode swaps the output image + denoiser id + the DIFF resource enums so the
+	// single NRD instance denoises GI radiance this frame instead of RTAO occlusion. RTAO (giMode false)
+	// is byte-identical below.
+	VkImage      outImg   = a.giMode ? rtgiOutImage : rtaoOutImage;
+	VkImageView  outView  = a.giMode ? rtgiOutView  : rtaoOutView;
+	bool        &outReady = a.giMode ? rtgiOutReady : rtaoOutReady;
+	const bool shMode = a.giMode && a.shMode && rtgiOutSh1View != VK_NULL_HANDLE;
+	// R2: the ReLAX family on request (and only if the instance was created with it - a flip rebuilds via the gfx signature)
+	const bool relax = a.giMode && a.denoiser == 1 && nrdRelax;
+	const nrd::Identifier denId = a.giMode ? ( relax ? ( shMode ? NRD_ID_RELAX_DI_SH : NRD_ID_RELAX_DI )
+	                                                : ( shMode ? NRD_ID_REBLUR_GI_SH : NRD_ID_REBLUR_GI ) ) : NRD_ID_REBLUR_AO;
+
+	rtaoDenoiseCtx_t c;
+	c.ray = ray;	c.vz = vz;	c.norm = norm;	c.vel = &vel;	c.conf = conf;	c.mix = mix;
+	c.vzAtt = vzAtt;	c.nmAtt = nmAtt;	c.haveConf = haveConf;	c.haveMix = haveMix;
+	c.shMode = shMode;	c.relax = relax;	c.validation = false;	c.mvScratch = false;	// the settings / the views below decide
+	c.outImg = outImg;	c.outView = outView;	c.outReady = &outReady;	c.denId = denId;
+	if ( !RtaoDenoiseCommonSettings( a, c ) ) {
+		return false;
+	}
+	if ( relax ) {
+		if ( !RtaoDenoiseRelaxSettings( a, c ) ) {
+			return false;
+		}
+	} else {
+		if ( !RtaoDenoiseReblurSettings( a, c ) ) {
+			return false;
+		}
+	}
+
+	memset( nrdUserViews, 0, sizeof( nrdUserViews ) );
+	// RTGI's REBLUR_DIFFUSE overwrites IN_MV (temporal-stabilization pass), so it needs a
+	// WRITABLE copy — feed a storage scratch (filled from velocity below). RTAO never writes
+	// IN_MV, so it binds the read-only velocity view directly. Fall back to that view too if
+	// the scratch can't be allocated (keeps RTGI working, with the storage-usage validation warning).
+	const bool mvScratch = a.giMode && NrdEnsureMvScratch( vel.width, vel.height );
+	c.mvScratch = mvScratch;
+	RtaoDenoiseBindViews( a, c );
+
+	VkCommandBuffer cb = frames[frameIndex].cb;
+	if ( insideScenePass ) {
+		vkCmdEndRenderPass( cb );					// dispatches are illegal inside a render pass
+		insideScenePass = false;
+	}
+	if ( insideTargetPass ) {
+		// a target pass mid-recording can't be resumed from here (same rule as Dispatch());
+		// callers sequence RtaoDenoise between EndPass and the next pass, so this is a
+		// defensive bail — GTAO takes over the view
+		RTAO_FAIL( 8, "called inside a target pass — recorded nothing" );
+	}
+
+	RtaoDenoiseStageVelocity( cb, c );
+
+	RtaoDenoisePreBarriers( cb, a, c );
+
+	const bool recorded = NrdRecordDispatches( cb, &denId, 1 );
+	if ( recorded ) {
+		nrdPrimed[denId] = true;		// this denoiser's history is now initialised
+	}
+	if ( recorded && !( s_rtaoDenoiseWarned & ( 1 << 7 ) ) ) {
+		s_rtaoDenoiseWarned |= 1 << 7;
+		common->Printf( "%s: NRD %s denoise active (%dx%d)\n", a.giMode ? "RTGI/DI" : "RTAO", relax ? "ReLAX" : "ReBLUR", a.w, a.h );
+	}
+	// on record failure we still fall through to the restore barriers below — the inputs
+	// were already transitioned to GENERAL and MUST go back to SHADER_READ_ONLY, or every
+	// later consumer (FSR2, SSR, the GTAO fallback itself) samples them in the wrong layout
+	#undef RTAO_FAIL
+
+	RtaoDenoisePostBarriers( cb, a, c );
 	return recorded;
 }
 
@@ -9395,19 +9590,8 @@ void VulkanBackend::Fsr2CaptureOpaque( RenderTargetHandle sceneRT ) {
 	fsr2OpaqueValid = true;
 }
 
-bool VulkanBackend::RunFsr2( const Fsr2DispatchArgs &args ) {
-	if ( device == VK_NULL_HANDLE || !frameOpen || skipFrame ) {
-		return false;
-	}
-	if ( !haveSeparateDepthStencilLayouts ) {
-		// the vendored FSR2 VK backend barriers the sampled depth with a depth-only
-		// aspect, which a combined depth-stencil image only allows with this feature
-		if ( !fsr2WarnedNoFeature ) {
-			common->Warning( "FSR2: device lacks separateDepthStencilLayouts - r_fsr unavailable" );
-			fsr2WarnedNoFeature = true;
-		}
-		return false;
-	}
+// the scene, velocity and output targets of this dispatch (+ the FSR2 context at their sizes); false = nothing to do
+bool VulkanBackend::Fsr2ResolveInputs( const Fsr2DispatchArgs &args, fsr2Inputs_t &in ) {
 	RenderTarget *scene = LookupTarget( args.sceneRT );
 	// velocity source: the standalone 3-MRT target's attachment 2, or the merged prepass's
 	// velocity attachment when the merge carried it this view (same RG16F contract; the
@@ -9447,7 +9631,12 @@ bool VulkanBackend::RunFsr2( const Fsr2DispatchArgs &args ) {
 	if ( !Fsr2EnsureContext( scene->w, scene->h, (int)dw, (int)dh ) ) {
 		return false;
 	}
+	in.scene = scene;	in.out = out;	in.velImage = velImage;	in.velView = velView;	in.dw = dw;	in.dh = dh;
+	return true;
+}
 
+// the depth-only-aspect sampled view of the scene target's depth-stencil image
+bool VulkanBackend::Fsr2EnsureDepthView( const RenderTarget *scene ) {
 	// depth-only-aspect sampled view of the scene target's combined depth-stencil image,
 	// rebuilt when the target reallocs (dsImage changes); the old view is retired on the
 	// frame-slot fence like every mid-frame image teardown
@@ -9469,27 +9658,18 @@ bool VulkanBackend::RunFsr2( const Fsr2DispatchArgs &args ) {
 		}
 		fsr2DepthSrc = scene->dsImage;
 	}
+	return true;
+}
 
-	VkCommandBuffer cb = frames[frameIndex].cb;
-	// FSR2 records compute; close any open render pass (the scene pass resumes on the
-	// next Draw through EnsureScenePass, same contract as BeginTargetPass)
-	if ( insideScenePass ) {
-		vkCmdEndRenderPass( cb );
-		insideScenePass = false;
-	}
-	if ( insideTargetPass ) {
-		return false;		// caller error: mid-target-pass dispatch would corrupt the pass
-	}
-
-	const uint32_t w = (uint32_t)scene->w, h = (uint32_t)scene->h;
-
+// the pre-dispatch layouts: depth to sampled, the output to GENERAL (pre[0] is the depth barrier the failure path reuses)
+void VulkanBackend::Fsr2PreBarriers( VkCommandBuffer cb, const RenderTarget *scene, VkImageMemoryBarrier pre[2] ) {
 	// Pre-dispatch layouts. Color + velocity attachments already rest in
 	// SHADER_READ_ONLY between passes (their render passes' finalLayout), which is
 	// exactly FFX_RESOURCE_STATE_COMPUTE_READ's layout — declared as such below, so
 	// FSR2's own barriers on them are same-layout no-ops. Depth sits in
 	// DEPTH_STENCIL_ATTACHMENT_OPTIMAL and must round-trip; the output enters as a
 	// discardable UAV (UNDEFINED on first use / TRANSFER_SRC after a copy-back).
-	VkImageMemoryBarrier pre[2] = {};
+	memset( pre, 0, sizeof( VkImageMemoryBarrier ) * 2 );
 	pre[0].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
 	pre[0].srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
 	pre[0].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
@@ -9511,20 +9691,10 @@ bool VulkanBackend::RunFsr2( const Fsr2DispatchArgs &args ) {
 	vkCmdPipelineBarrier( cb,
 		VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
 		VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, NULL, 0, NULL, 2, pre );
+}
 
-	FfxFsr2DispatchDescription dd = {};
-	dd.commandList = ffxGetCommandListVK( cb );
-	dd.color = ffxGetTextureResourceVK( fsr2Ctx, scene->colorImage[0], scene->colorSampleView[0] != VK_NULL_HANDLE ? scene->colorSampleView[0] : scene->colorView[0],
-		w, h, scene->colorFormat[0], L"FSR2_Color", FFX_RESOURCE_STATE_COMPUTE_READ );
-	dd.depth = ffxGetTextureResourceVK( fsr2Ctx, scene->dsImage, fsr2DepthView,
-		w, h, sceneDepthFormat, L"FSR2_Depth", FFX_RESOURCE_STATE_COMPUTE_READ );
-	dd.motionVectors = ffxGetTextureResourceVK( fsr2Ctx, velImage, velView,
-		w, h, VK_FORMAT_R16G16_SFLOAT, L"FSR2_MotionVectors", FFX_RESOURCE_STATE_COMPUTE_READ );
-	dd.output = ffxGetTextureResourceVK( fsr2Ctx, fsr2Out, fsr2OutView,
-		dw, dh, VK_FORMAT_R16G16B16A16_SFLOAT, L"FSR2_Output", FFX_RESOURCE_STATE_UNORDERED_ACCESS );
-	// exposure/transparencyAndComposition stay null (AUTO_EXPOSURE; hand-authored T&C mask
-	// is the potential V2 of increment D)
-
+// R1/D auto-reactive: the reactive mask from opaque-vs-final, fed to the dispatch when it generates
+void VulkanBackend::Fsr2GenerateReactive( VkCommandBuffer cb, const Fsr2DispatchArgs &args, FfxFsr2DispatchDescription &dd, uint32_t w, uint32_t h ) {
 	// R1/D auto-reactive: generate the reactive mask from opaque-vs-final before the main
 	// dispatch. Where translucent/additive content diverges from the opaque snapshot
 	// (particles, muzzle flashes, GUI screens), FSR2 trusts history less — killing ghost
@@ -9577,7 +9747,10 @@ bool VulkanBackend::RunFsr2( const Fsr2DispatchArgs &args ) {
 			fsr2ReactiveWritten = false;
 		}
 	}
+}
 
+// the dispatch's scalar parameters: motion-vector scale, jitter, sharpening, timing, camera
+void VulkanBackend::Fsr2DispatchParms( const Fsr2DispatchArgs &args, FfxFsr2DispatchDescription &dd, uint32_t w, uint32_t h ) const {
 	// Motion-vector scale, derived in the plan (docs/fsr-temporal-pipeline.md C2) and
 	// verified against the vendored shaders: A2 stores (currUV - prevUV) in +Y-up UV;
 	// FSR2 wants (prevUV - currUV) in top-left +Y-down UV, in PIXELS. Reversing the
@@ -9606,28 +9779,29 @@ bool VulkanBackend::RunFsr2( const Fsr2DispatchArgs &args ) {
 	dd.cameraFar = 100000.0f;					// unused with FFX_FSR2_ENABLE_DEPTH_INFINITE
 	dd.cameraFovAngleVertical = args.fovYRadians;
 	dd.viewSpaceToMetersFactor = 0.0254f;		// 1 Doom unit ~= 1 inch
+}
 
-	const FfxErrorCode err = ffxFsr2ContextDispatch( fsr2Ctx, &dd );
-	fsr2FirstDispatch = false;
-	if ( err != FFX_OK ) {
-		// restore depth for the rest of the frame even on failure
-		VkImageMemoryBarrier depthBack = pre[0];
-		depthBack.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
-		depthBack.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-		depthBack.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-		depthBack.newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-		vkCmdPipelineBarrier( cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-			VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
-			0, 0, NULL, 0, NULL, 1, &depthBack );
-		common->Warning( "FSR2: dispatch failed (code %d)", (int)err );
-		// fsr2Out is in GENERAL (its pre-barrier ran) and the reactive mask's layout is now
-		// indeterminate; both are fully overwritten each frame, so clear the written-flags and let next
-		// frame's pre-barriers start from UNDEFINED rather than a layout that no longer matches.
-		fsr2OutWritten = false;
-		fsr2ReactiveWritten = false;
-		return false;
-	}
+// a failed dispatch: depth back to attachment layout, the written-flags cleared
+void VulkanBackend::Fsr2DispatchFailed( VkCommandBuffer cb, const VkImageMemoryBarrier &depthPre, FfxErrorCode err ) {
+	// restore depth for the rest of the frame even on failure
+	VkImageMemoryBarrier depthBack = depthPre;
+	depthBack.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+	depthBack.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+	depthBack.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	depthBack.newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+	vkCmdPipelineBarrier( cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+		VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+		0, 0, NULL, 0, NULL, 1, &depthBack );
+	common->Warning( "FSR2: dispatch failed (code %d)", (int)err );
+	// fsr2Out is in GENERAL (its pre-barrier ran) and the reactive mask's layout is now
+	// indeterminate; both are fully overwritten each frame, so clear the written-flags and let next
+	// frame's pre-barriers start from UNDEFINED rather than a layout that no longer matches.
+	fsr2OutWritten = false;
+	fsr2ReactiveWritten = false;
+}
 
+// the resolved image into the composite (sub-native) or back over the scene (Native-AA), depth back to attachment layout
+void VulkanBackend::Fsr2CopyOut( VkCommandBuffer cb, const RenderTarget *scene, const RenderTarget *out, uint32_t dw, uint32_t dh ) {
 	// Copy the resolved image into the display-size composite (sub-native), or back over the
 	// scene color (Native-AA: same size/format), and return depth to attachment layout. FSR2
 	// leaves the output in GENERAL (UNORDERED_ACCESS was its last use) and the sampled inputs
@@ -9704,6 +9878,76 @@ bool VulkanBackend::RunFsr2( const Fsr2DispatchArgs &args ) {
 		VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
 			| VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
 		0, 0, NULL, 0, NULL, numPost, post );
+}
+
+bool VulkanBackend::RunFsr2( const Fsr2DispatchArgs &args ) {
+	if ( device == VK_NULL_HANDLE || !frameOpen || skipFrame ) {
+		return false;
+	}
+	if ( !haveSeparateDepthStencilLayouts ) {
+		// the vendored FSR2 VK backend barriers the sampled depth with a depth-only
+		// aspect, which a combined depth-stencil image only allows with this feature
+		if ( !fsr2WarnedNoFeature ) {
+			common->Warning( "FSR2: device lacks separateDepthStencilLayouts - r_fsr unavailable" );
+			fsr2WarnedNoFeature = true;
+		}
+		return false;
+	}
+	fsr2Inputs_t in;
+	if ( !Fsr2ResolveInputs( args, in ) ) {
+		return false;
+	}
+	RenderTarget *scene = in.scene;
+	RenderTarget *out = in.out;
+	const VkImage velImage = in.velImage;
+	const VkImageView velView = in.velView;
+	const uint32_t dw = in.dw, dh = in.dh;
+
+	if ( !Fsr2EnsureDepthView( scene ) ) {
+		return false;
+	}
+
+	VkCommandBuffer cb = frames[frameIndex].cb;
+	// FSR2 records compute; close any open render pass (the scene pass resumes on the
+	// next Draw through EnsureScenePass, same contract as BeginTargetPass)
+	if ( insideScenePass ) {
+		vkCmdEndRenderPass( cb );
+		insideScenePass = false;
+	}
+	if ( insideTargetPass ) {
+		return false;		// caller error: mid-target-pass dispatch would corrupt the pass
+	}
+
+	const uint32_t w = (uint32_t)scene->w, h = (uint32_t)scene->h;
+
+	VkImageMemoryBarrier pre[2];
+	Fsr2PreBarriers( cb, scene, pre );
+
+	FfxFsr2DispatchDescription dd = {};
+	dd.commandList = ffxGetCommandListVK( cb );
+	dd.color = ffxGetTextureResourceVK( fsr2Ctx, scene->colorImage[0], scene->colorSampleView[0] != VK_NULL_HANDLE ? scene->colorSampleView[0] : scene->colorView[0],
+		w, h, scene->colorFormat[0], L"FSR2_Color", FFX_RESOURCE_STATE_COMPUTE_READ );
+	dd.depth = ffxGetTextureResourceVK( fsr2Ctx, scene->dsImage, fsr2DepthView,
+		w, h, sceneDepthFormat, L"FSR2_Depth", FFX_RESOURCE_STATE_COMPUTE_READ );
+	dd.motionVectors = ffxGetTextureResourceVK( fsr2Ctx, velImage, velView,
+		w, h, VK_FORMAT_R16G16_SFLOAT, L"FSR2_MotionVectors", FFX_RESOURCE_STATE_COMPUTE_READ );
+	dd.output = ffxGetTextureResourceVK( fsr2Ctx, fsr2Out, fsr2OutView,
+		dw, dh, VK_FORMAT_R16G16B16A16_SFLOAT, L"FSR2_Output", FFX_RESOURCE_STATE_UNORDERED_ACCESS );
+	// exposure/transparencyAndComposition stay null (AUTO_EXPOSURE; hand-authored T&C mask
+	// is the potential V2 of increment D)
+
+	Fsr2GenerateReactive( cb, args, dd, w, h );
+
+	Fsr2DispatchParms( args, dd, w, h );
+
+	const FfxErrorCode err = ffxFsr2ContextDispatch( fsr2Ctx, &dd );
+	fsr2FirstDispatch = false;
+	if ( err != FFX_OK ) {
+		Fsr2DispatchFailed( cb, pre[0], err );
+		return false;
+	}
+
+	Fsr2CopyOut( cb, scene, out, dw, dh );
 
 	return true;
 }
@@ -12707,54 +12951,9 @@ rhi::ImageHandle VulkanBackend::GetFrameColorSampleImage() {
 	return GetRenderTargetImage( frameTarget );	// the frame target's sampleable color image
 }
 
-/*
-====================
-VulkanBackend::GetPipeline
-
-(stateBits, shader, vertexLayout, cullType) -> VkPipeline, created on first
-use against the scene render pass. The GLS_* decode mirrors the GL3 backend's
-ApplyState table exactly.
-====================
-*/
-VkPipeline VulkanBackend::GetPipeline( const PipelineDesc &desc ) {
-	const int RELEVANT = GLS_SRCBLEND_BITS | GLS_DSTBLEND_BITS | GLS_DEPTHMASK
-	                   | GLS_REDMASK | GLS_GREENMASK | GLS_BLUEMASK | GLS_ALPHAMASK
-	                   | GLS_POLYMODE_LINE | GLS_DEPTHFUNC_EQUAL | GLS_DEPTHFUNC_LESS | GLS_DEPTHFUNC_ALWAYS;
-	const unsigned int bits = (unsigned int)( desc.stateBits & RELEVANT );
-	// desc.tessellate (bit 18, free between RELEVANT's bit 17 and passClass at 24)
-	// keeps the tessellated (patch-list, tesc+tese) and flat variants of the same
-	// shader on distinct cache entries. Only honoured when the shader actually
-	// carries a tess pair and the device supports tessellation.
-	const bool tessellate = desc.tessellate && haveTessellation
-		&& desc.shader >= 1 && desc.shader <= (ShaderHandle)shaderTable.size()
-		&& shaderTable[desc.shader - 1].tesc != VK_NULL_HANDLE
-		&& shaderTable[desc.shader - 1].tese != VK_NULL_HANDLE;
-	// curPassClass (bits 24-31, free above RELEVANT's bit 17) keeps pipelines for
-	// render-pass-incompatible destinations apart: the same shader+state built for
-	// the RGBA8 swapchain scene (class 0) and the RGBA16F HDR buffer (class 2) are
-	// distinct cache entries built against distinct render passes.
-	const unsigned long long key = (unsigned long long)bits
-		| ( (unsigned long long)( tessellate ? 1 : 0 ) << 18 )
-		| ( (unsigned long long)( curPassClass & 0xff ) << 24 )
-		| ( (unsigned long long)( desc.shader & 0xffff ) << 32 )
-		| ( (unsigned long long)( desc.vertexLayout & 0xf ) << 48 )
-		| ( (unsigned long long)( desc.cullType & 0xf ) << 52 )
-		| ( (unsigned long long)( desc.stencilState & 0xf ) << 56 )
-		| ( (unsigned long long)( desc.topology & 0xf ) << 60 );
-
-	auto it = pipelineCache.find( key );
-	if ( it != pipelineCache.end() ) {
-		return it->second;
-	}
-
-	if ( desc.shader < 1 || desc.shader > (ShaderHandle)shaderTable.size()
-	     || shaderTable[desc.shader - 1].failed ) {
-		pipelineCache[key] = VK_NULL_HANDLE;
-		return VK_NULL_HANDLE;
-	}
-	const ShaderRec &sh = shaderTable[desc.shader - 1];
-
-	VkPipelineShaderStageCreateInfo stages[4] = {};
+// the shader stages: vert + frag, + tesc + tese when tessellating
+uint32_t VulkanBackend::PipelineStages( const ShaderRec &sh, bool tessellate, VkPipelineShaderStageCreateInfo stages[4] ) {
+	memset( stages, 0, sizeof( VkPipelineShaderStageCreateInfo ) * 4 );
 	stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
 	stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
 	stages[0].module = sh.vert;
@@ -12777,10 +12976,14 @@ VkPipeline VulkanBackend::GetPipeline( const PipelineDesc &desc ) {
 		stages[stageCount].pName = "main";
 		stageCount++;
 	}
+	return stageCount;
+}
 
+// the vertex input state for the layout (binding + attrs are the caller's storage vin points into)
+void VulkanBackend::PipelineVertexInput( const PipelineDesc &desc, VkVertexInputBindingDescription &binding, VkVertexInputAttributeDescription attrs[6], VkPipelineVertexInputStateCreateInfo &vin ) {
 	// vertex layouts (must match the GL3 VAO setups / shader locations)
-	VkVertexInputBindingDescription binding = {};
-	VkVertexInputAttributeDescription attrs[6] = {};
+	memset( &binding, 0, sizeof( binding ) );
+	memset( attrs, 0, sizeof( VkVertexInputAttributeDescription ) * 6 );
 	uint32_t attrCount = 0;
 	uint32_t bindingCount = 1;
 	if ( desc.vertexLayout == VL_NONE ) {
@@ -12813,14 +13016,17 @@ VkPipeline VulkanBackend::GetPipeline( const PipelineDesc &desc ) {
 	}
 	binding.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
 
-	VkPipelineVertexInputStateCreateInfo vin = {};
+	memset( &vin, 0, sizeof( vin ) );
 	vin.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
 	vin.vertexBindingDescriptionCount = bindingCount;
 	vin.pVertexBindingDescriptions = bindingCount ? &binding : NULL;
 	vin.vertexAttributeDescriptionCount = attrCount;
 	vin.pVertexAttributeDescriptions = attrs;
+}
 
-	VkPipelineInputAssemblyStateCreateInfo ia = {};
+// the input assembly: patches when tessellating, else the GL primMode of an immediate draw (triangle list for every normal draw)
+void VulkanBackend::PipelineInputAssembly( const PipelineDesc &desc, bool tessellate, VkPipelineInputAssemblyStateCreateInfo &ia ) {
+	memset( &ia, 0, sizeof( ia ) );
 	ia.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
 	ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
 	// a tessellated draw feeds the tessellator triangular patches: the same
@@ -12841,35 +13047,11 @@ VkPipeline VulkanBackend::GetPipeline( const PipelineDesc &desc ) {
 	case GL_TRIANGLE_FAN:   ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN; break;
 	default:                ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST; break;
 	}
+}
 
-	VkPipelineViewportStateCreateInfo vp = {};
-	vp.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
-	vp.viewportCount = 1;
-	vp.scissorCount = 1;
-
-	// Winding (verified empirically with the M2 frame dump, 2026-08-02): with
-	// the negative-height viewport, VK's framebuffer-space winding for a GUI
-	// quad comes out such that COUNTER_CLOCKWISE-as-front + the legacy cull
-	// mapping (front-sided culls FRONT, as GL3Backend::ApplyCull) keeps
-	// idTech4's CW-wound triangles — CLOCKWISE-as-front culled every GUI quad
-	// in the engine (all-black menu).
-	VkPipelineRasterizationStateCreateInfo rs = {};
-	rs.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
-	rs.polygonMode = ( ( bits & GLS_POLYMODE_LINE ) && haveFillModeNonSolid )
-		? VK_POLYGON_MODE_LINE : VK_POLYGON_MODE_FILL;
-	rs.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
-	rs.cullMode = desc.cullType == CT_TWO_SIDED ? VK_CULL_MODE_NONE
-	            : ( desc.cullType == CT_BACK_SIDED ? VK_CULL_MODE_BACK_BIT : VK_CULL_MODE_FRONT_BIT );
-	rs.lineWidth = 1.0f;
-	// depth bias always enabled + dynamic (SetPolygonOffset): (0, 0) — the
-	// BeginFrame default — is exactly "disabled"
-	rs.depthBiasEnable = VK_TRUE;
-
-	VkPipelineMultisampleStateCreateInfo ms = {};
-	ms.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
-	ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
-
-	VkPipelineDepthStencilStateCreateInfo ds = {};
+// the depth test / write / func and the M4 stencil configs
+void VulkanBackend::PipelineDepthStencil( const PipelineDesc &desc, unsigned int bits, VkPipelineDepthStencilStateCreateInfo &ds ) {
+	memset( &ds, 0, sizeof( ds ) );
 	ds.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
 	ds.depthTestEnable = VK_TRUE;
 	ds.depthWriteEnable = ( bits & GLS_DEPTHMASK ) ? VK_FALSE : VK_TRUE;
@@ -12932,7 +13114,10 @@ VkPipeline VulkanBackend::GetPipeline( const PipelineDesc &desc ) {
 		ds.front = front;
 		ds.back = back;
 	}
+}
 
+// the blend factors + colour write mask of the GLS_ state bits
+void VulkanBackend::PipelineBlendAttachment( unsigned int bits, VkPipelineColorBlendAttachmentState &att ) {
 	auto mapBlend = []( unsigned int b, bool isSrc ) -> VkBlendFactor {
 		if ( isSrc ) {
 			switch ( b ) {
@@ -12962,7 +13147,7 @@ VkPipeline VulkanBackend::GetPipeline( const PipelineDesc &desc ) {
 		}
 	};
 
-	VkPipelineColorBlendAttachmentState att = {};
+	memset( &att, 0, sizeof( att ) );
 	const unsigned int srcBits = bits & GLS_SRCBLEND_BITS;
 	const unsigned int dstBits = bits & GLS_DSTBLEND_BITS;
 	att.blendEnable = !( srcBits == GLS_SRCBLEND_ONE && dstBits == GLS_DSTBLEND_ZERO );
@@ -12974,6 +13159,98 @@ VkPipeline VulkanBackend::GetPipeline( const PipelineDesc &desc ) {
 	  | ( ( bits & GLS_GREENMASK ) ? 0 : VK_COLOR_COMPONENT_G_BIT )
 	  | ( ( bits & GLS_BLUEMASK )  ? 0 : VK_COLOR_COMPONENT_B_BIT )
 	  | ( ( bits & GLS_ALPHAMASK ) ? 0 : VK_COLOR_COMPONENT_A_BIT );
+}
+
+/*
+====================
+VulkanBackend::GetPipeline
+
+(stateBits, shader, vertexLayout, cullType) -> VkPipeline, created on first
+use against the scene render pass. The GLS_* decode mirrors the GL3 backend's
+ApplyState table exactly.
+====================
+*/
+VkPipeline VulkanBackend::GetPipeline( const PipelineDesc &desc ) {
+	const int RELEVANT = GLS_SRCBLEND_BITS | GLS_DSTBLEND_BITS | GLS_DEPTHMASK
+	                   | GLS_REDMASK | GLS_GREENMASK | GLS_BLUEMASK | GLS_ALPHAMASK
+	                   | GLS_POLYMODE_LINE | GLS_DEPTHFUNC_EQUAL | GLS_DEPTHFUNC_LESS | GLS_DEPTHFUNC_ALWAYS;
+	const unsigned int bits = (unsigned int)( desc.stateBits & RELEVANT );
+	// desc.tessellate (bit 18, free between RELEVANT's bit 17 and passClass at 24)
+	// keeps the tessellated (patch-list, tesc+tese) and flat variants of the same
+	// shader on distinct cache entries. Only honoured when the shader actually
+	// carries a tess pair and the device supports tessellation.
+	const bool tessellate = desc.tessellate && haveTessellation
+		&& desc.shader >= 1 && desc.shader <= (ShaderHandle)shaderTable.size()
+		&& shaderTable[desc.shader - 1].tesc != VK_NULL_HANDLE
+		&& shaderTable[desc.shader - 1].tese != VK_NULL_HANDLE;
+	// curPassClass (bits 24-31, free above RELEVANT's bit 17) keeps pipelines for
+	// render-pass-incompatible destinations apart: the same shader+state built for
+	// the RGBA8 swapchain scene (class 0) and the RGBA16F HDR buffer (class 2) are
+	// distinct cache entries built against distinct render passes.
+	const unsigned long long key = (unsigned long long)bits
+		| ( (unsigned long long)( tessellate ? 1 : 0 ) << 18 )
+		| ( (unsigned long long)( curPassClass & 0xff ) << 24 )
+		| ( (unsigned long long)( desc.shader & 0xffff ) << 32 )
+		| ( (unsigned long long)( desc.vertexLayout & 0xf ) << 48 )
+		| ( (unsigned long long)( desc.cullType & 0xf ) << 52 )
+		| ( (unsigned long long)( desc.stencilState & 0xf ) << 56 )
+		| ( (unsigned long long)( desc.topology & 0xf ) << 60 );
+
+	auto it = pipelineCache.find( key );
+	if ( it != pipelineCache.end() ) {
+		return it->second;
+	}
+
+	if ( desc.shader < 1 || desc.shader > (ShaderHandle)shaderTable.size()
+	     || shaderTable[desc.shader - 1].failed ) {
+		pipelineCache[key] = VK_NULL_HANDLE;
+		return VK_NULL_HANDLE;
+	}
+	const ShaderRec &sh = shaderTable[desc.shader - 1];
+
+	VkPipelineShaderStageCreateInfo stages[4];
+	const uint32_t stageCount = PipelineStages( sh, tessellate, stages );
+
+	VkVertexInputBindingDescription binding;
+	VkVertexInputAttributeDescription attrs[6];
+	VkPipelineVertexInputStateCreateInfo vin;
+	PipelineVertexInput( desc, binding, attrs, vin );
+
+	VkPipelineInputAssemblyStateCreateInfo ia;
+	PipelineInputAssembly( desc, tessellate, ia );
+
+	VkPipelineViewportStateCreateInfo vp = {};
+	vp.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+	vp.viewportCount = 1;
+	vp.scissorCount = 1;
+
+	// Winding (verified empirically with the M2 frame dump, 2026-08-02): with
+	// the negative-height viewport, VK's framebuffer-space winding for a GUI
+	// quad comes out such that COUNTER_CLOCKWISE-as-front + the legacy cull
+	// mapping (front-sided culls FRONT, as GL3Backend::ApplyCull) keeps
+	// idTech4's CW-wound triangles — CLOCKWISE-as-front culled every GUI quad
+	// in the engine (all-black menu).
+	VkPipelineRasterizationStateCreateInfo rs = {};
+	rs.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+	rs.polygonMode = ( ( bits & GLS_POLYMODE_LINE ) && haveFillModeNonSolid )
+		? VK_POLYGON_MODE_LINE : VK_POLYGON_MODE_FILL;
+	rs.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+	rs.cullMode = desc.cullType == CT_TWO_SIDED ? VK_CULL_MODE_NONE
+	            : ( desc.cullType == CT_BACK_SIDED ? VK_CULL_MODE_BACK_BIT : VK_CULL_MODE_FRONT_BIT );
+	rs.lineWidth = 1.0f;
+	// depth bias always enabled + dynamic (SetPolygonOffset): (0, 0) — the
+	// BeginFrame default — is exactly "disabled"
+	rs.depthBiasEnable = VK_TRUE;
+
+	VkPipelineMultisampleStateCreateInfo ms = {};
+	ms.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+	ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+	VkPipelineDepthStencilStateCreateInfo ds;
+	PipelineDepthStencil( desc, bits, ds );
+
+	VkPipelineColorBlendAttachmentState att;
+	PipelineBlendAttachment( bits, att );
 
 	VkPipelineColorBlendStateCreateInfo cb = {};
 	cb.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
