@@ -1116,6 +1116,25 @@ a 2K RGBA8 pyramid is 21 MB, and a level's thousand of them at once would be the
 Returns the thread count used.
 ===============
 */
+// DUDE: the downsize cvars the level-content generators (the parallax / tessellation height
+// fields) were last produced with. Their texture, an R8 height map, depends on nothing else: not
+// on the compression cvars a quality preset flips. A live reload that finds these unchanged keeps
+// the resident height fields instead of solving every normal map again; on mars_city2 they are
+// 957 of the 3718 images and most of the decode time.
+struct generatorDownSize_t {
+	int		downSize, downSizeLimit, forceDownSize;
+	bool	operator==( const generatorDownSize_t &o ) const { return downSize == o.downSize && downSizeLimit == o.downSizeLimit && forceDownSize == o.forceDownSize; }
+};
+static generatorDownSize_t	r_generatorDownSize = { -1, -1, -1 };
+
+static generatorDownSize_t R_CurrentGeneratorDownSize( void ) {
+	generatorDownSize_t d;
+	d.downSize = globalImages->image_downSize.GetInteger();
+	d.downSizeLimit = globalImages->image_downSizeLimit.GetInteger();
+	d.forceDownSize = globalImages->image_forceDownSize.GetBool() ? 1 : 0;
+	return d;
+}
+
 struct parallelLoadStats_t {
 	int		threads;
 	int		decodeMsec;		// wall time the main thread waited on the worker phases
@@ -1134,7 +1153,10 @@ static int R_ParallelLoadImages( idImage **list, int count, const char *workerWa
 		int t0 = Sys_Milliseconds();
 		{
 			idParallelWindow window;
-			stats.threads = Com_ParallelFor( n, [&]( int idx ) { chunk[idx]->LoadImageCpu(); }, r_parallelImageLoadThreads.GetInteger() );
+			const int threads = Com_ParallelFor( n, [&]( int idx ) { chunk[idx]->LoadImageCpu(); }, r_parallelImageLoadThreads.GetInteger() );
+			if ( threads > stats.threads ) {
+				stats.threads = threads;		// the last chunk is a short one
+			}
 		}
 		stats.decodeMsec += Sys_Milliseconds() - t0;
 
@@ -1195,7 +1217,9 @@ static void R_ReloadImages( const idCmdArgs &args, bool all, bool checkPrecompre
 	if ( all && checkPrecompressed && r_parallelImageLoad.GetBool() && glConfig.isInitialized ) {
 		const int start = Sys_Milliseconds();
 		std::vector<idImage *> par;
-		int regenCount = 0, serialCount = 0, skipCount = 0;
+		int regenCount = 0, serialCount = 0, skipCount = 0, keptCount = 0;
+		// resident height fields stay when the downsize cvars they were produced with are current
+		const bool keepGenerators = residentOnly && ( R_CurrentGeneratorDownSize() == r_generatorDownSize );
 
 		par.reserve( globalImages->images.Num() );
 		for ( i = 0 ; i < globalImages->images.Num() ; i++ ) {
@@ -1207,6 +1231,10 @@ static void R_ReloadImages( const idCmdArgs &args, bool all, bool checkPrecompre
 			}
 			if ( residentOnly && image->texnum == idImage::TEXTURE_NOT_LOADED && image->rhiHandle == 0 ) {
 				skipCount++;
+				continue;
+			}
+			if ( keepGenerators && image->generatorCpu ) {
+				keptCount++;
 				continue;
 			}
 			if ( image->cubeFiles != CF_2D || image->isPartialImage || image->partialImage ) {
@@ -1224,10 +1252,14 @@ static void R_ReloadImages( const idCmdArgs &args, bool all, bool checkPrecompre
 				"reloadImages: a worker hit an error during decode (see above); affected images use the default texture", false, stats );
 		}
 
-		common->Printf( "reloadImages: %i images reloaded in %.2f seconds: %i on %i threads (decode %.2f s, upload %.2f s, %i MB), %i serial, %i regenerated; %i not resident, left to demand load\n",
+		if ( !keepGenerators ) {
+			r_generatorDownSize = R_CurrentGeneratorDownSize();		// the height fields were just produced with these
+		}
+
+		common->Printf( "reloadImages: %i images reloaded in %.2f seconds: %i on %i threads (decode %.2f s, upload %.2f s, %i MB), %i serial, %i regenerated; %i height fields kept, %i not resident, left to demand load\n",
 			(int)par.size() + serialCount + regenCount, ( Sys_Milliseconds() - start ) * 0.001f,
 			(int)par.size(), stats.threads, stats.decodeMsec * 0.001f, stats.uploadMsec * 0.001f, stats.uploadBytes >> 20,
-			serialCount, regenCount, skipCount );
+			serialCount, regenCount, keptCount, skipCount );
 		return;
 	}
 
@@ -1235,6 +1267,7 @@ static void R_ReloadImages( const idCmdArgs &args, bool all, bool checkPrecompre
 		image = globalImages->images[ i ];
 		image->Reload( checkPrecompressed, all );
 	}
+	r_generatorDownSize = R_CurrentGeneratorDownSize();
 }
 
 void R_ReloadImages_f( const idCmdArgs &args ) {
@@ -2370,6 +2403,8 @@ void idImageManager::EndLevelLoad() {
 			}
 		}
 	}
+
+	r_generatorDownSize = R_CurrentGeneratorDownSize();		// the height fields are current (see R_ReloadImages)
 
 	int	end = Sys_Milliseconds();
 	common->Printf( "%5i purged from previous\n", purgeCount );
