@@ -399,6 +399,14 @@ public:
 	                                                 int numLevels, int textureFilter,
 	                                                 int textureRepeat, bool singleChannel = false ) { return 0; }
 
+	// DUDE: parallel image load. Between these two calls the texture creates above record
+	// their copies into one command buffer instead of submitting and waiting per image;
+	// EndTextureUploadBatch submits once, waits, and frees the staging buffers. Nothing may
+	// sample a batched texture before the End. Default: no-op (the GL backend uploads
+	// synchronously through qgl).
+	virtual void			BeginTextureUploadBatch( void ) {}
+	virtual void			EndTextureUploadBatch( void ) {}
+
 	// Phase 4 M4: cube-map upload (normalization/ambient cube maps, env maps).
 	// pics are six size×size RGBA8 faces in GL_TEXTURE_CUBE_MAP_POSITIVE_X..
 	// order; sampler is always clamp-to-edge (the only mode that makes sense

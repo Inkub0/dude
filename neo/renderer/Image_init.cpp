@@ -1163,8 +1163,13 @@ static int R_ParallelLoadImages( idImage **list, int count, const char *workerWa
 		// surface any prints/warnings the workers buffered (order-independent)
 		Com_FlushThreadCaptureWarn( workerWarning );
 
-		// phase 2: upload the decoded pyramids on the main thread (GPU submit is not thread-safe)
+		// phase 2: upload the decoded pyramids on the main thread (GPU submit is not thread-safe);
+		// the RHI backend submits the chunk's uploads in one batch (a no-op on GL)
 		t0 = Sys_Milliseconds();
+		rhi::RHI * const r = glConfig.rhiBackend ? rhi::GetRHI() : NULL;
+		if ( r ) {
+			r->BeginTextureUploadBatch();
+		}
 		for ( int i = 0; i < n; i++ ) {
 			const idImage::parallelLoad_t *pd = chunk[i]->parallelData;
 			if ( pd ) {
@@ -1180,6 +1185,9 @@ static int R_ParallelLoadImages( idImage **list, int count, const char *workerWa
 			if ( pacifier && ( ( base + i ) & 15 ) == 0 ) {
 				session->PacifierUpdate();
 			}
+		}
+		if ( r ) {
+			r->EndTextureUploadBatch();
 		}
 		stats.uploadMsec += Sys_Milliseconds() - t0;
 	}

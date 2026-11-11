@@ -231,6 +231,8 @@ public:
 	ImageHandle				UploadTexture2DLevels( int w, int h, const PrebuiltMip *levels,
 	                                               int numLevels, int textureFilter,
 	                                               int textureRepeat, bool singleChannel );	// shared by the two above
+	virtual void			BeginTextureUploadBatch( void );
+	virtual void			EndTextureUploadBatch( void );
 	virtual ImageHandle		CreateTextureCube( int size, const void * const pics[6],
 	                                           int textureFilter, bool allowMips );
 	virtual ShaderHandle	LoadShader( const char *name );
@@ -1349,6 +1351,21 @@ private:
 	VkCommandPool				uploadPool = VK_NULL_HANDLE;
 	VkCommandBuffer				uploadCb = VK_NULL_HANDLE;
 	VkFence						uploadFence = VK_NULL_HANDLE;
+	// DUDE: batched texture uploads (BeginTextureUploadBatch / EndTextureUploadBatch): the
+	// level load and the live reload hand over a chunk of worker-built pyramids at a time, and
+	// one command buffer + one submit + one fence wait per chunk replaces one of each per image
+	VkCommandBuffer				batchCb = VK_NULL_HANDLE;
+	VkFence						batchFence = VK_NULL_HANDLE;
+	bool						batchOpen = false;
+	int							batchImages = 0;
+	VkDeviceSize				batchStagingBytes = 0;
+	std::vector< std::pair<VkBuffer, VmaAllocation> >	batchStaging;
+	static const VkDeviceSize	BATCH_STAGING_LIMIT = 256u << 20;		// staging in flight before a mid-chunk flush
+	void						SubmitTextureUploadBatch( void );
+	// DUDE: true after a vkDeviceWaitIdle with nothing submitted since, so DestroyImage between
+	// frames waits once for a run of destroys (a reload purges thousands of images in a row)
+	bool						deviceIdle = false;
+	VkResult					QueueSubmit( uint32_t count, const VkSubmitInfo *si, VkFence fence ) { deviceIdle = false; return vkQueueSubmit( gfxQueue, count, si, fence ); }
 
 public:
 	// ================= M6: ImGui on Vulkan (VulkanImGui.h glue) =================
@@ -3645,7 +3662,7 @@ void VulkanBackend::EndFrame() {
 		si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
 		si.commandBufferCount = 1;
 		si.pCommandBuffers = &f.cb;
-		vkCheck( vkQueueSubmit( gfxQueue, 1, &si, f.fence ), "vkQueueSubmit" );
+		vkCheck( QueueSubmit( 1, &si, f.fence ), "vkQueueSubmit" );
 		imguiDrawData = NULL;
 		frameIndex = ( frameIndex + 1 ) % FRAMES_IN_FLIGHT;
 		return;
@@ -3776,7 +3793,7 @@ void VulkanBackend::EndFrame() {
 	si.pCommandBuffers = &f.cb;
 	si.signalSemaphoreCount = 1;
 	si.pSignalSemaphores = &releaseSems[imageIndex];
-	vkCheck( vkQueueSubmit( gfxQueue, 1, &si, f.fence ), "vkQueueSubmit" );
+	vkCheck( QueueSubmit( 1, &si, f.fence ), "vkQueueSubmit" );
 
 	VkPresentInfoKHR pi = {};
 	pi.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
@@ -4149,6 +4166,11 @@ bool VulkanBackend::CreateM2Resources() {
 		VkFenceCreateInfo fci = {};
 		fci.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
 		vkCreateFence( device, &fci, NULL, &uploadFence );
+		// the batched texture upload's own command buffer + fence (the sync uploads above keep
+		// theirs, so a cube map or buffer upload inside an open batch does not reset it)
+		vkAllocateCommandBuffers( device, &cai, &batchCb );
+		vkCreateFence( device, &fci, NULL, &batchFence );
+		batchOpen = false;
 	}
 
 	// 1x1 white dummy for descriptor slots no draw populates
@@ -4275,7 +4297,11 @@ void VulkanBackend::DestroyM2Resources() {
 	if ( setLayoutCompute )  { vkDestroyDescriptorSetLayout( device, setLayoutCompute, NULL ); setLayoutCompute = VK_NULL_HANDLE; }
 
 	if ( uploadFence ) { vkDestroyFence( device, uploadFence, NULL ); uploadFence = VK_NULL_HANDLE; }
-	if ( uploadPool )  { vkDestroyCommandPool( device, uploadPool, NULL ); uploadPool = VK_NULL_HANDLE; uploadCb = VK_NULL_HANDLE; }
+	if ( batchFence )  { vkDestroyFence( device, batchFence, NULL ); batchFence = VK_NULL_HANDLE; }
+	for ( size_t i = 0; i < batchStaging.size(); i++ ) { vmaDestroyBuffer( vma, batchStaging[i].first, batchStaging[i].second ); }
+	batchStaging.clear();
+	batchOpen = false;
+	if ( uploadPool )  { vkDestroyCommandPool( device, uploadPool, NULL ); uploadPool = VK_NULL_HANDLE; uploadCb = VK_NULL_HANDLE; batchCb = VK_NULL_HANDLE; }
 
 	DrainRetiredBuffers( true );			// device idle: destroy every retired block now
 	for ( int slot = 0; slot < FRAMES_IN_FLIGHT; slot++ ) {
@@ -5574,7 +5600,7 @@ void VulkanBackend::DispatchSync( const ComputeArgs &args ) {
 	si.pCommandBuffers = &uploadCb;
 	vkResetFences( device, 1, &uploadFence );
 	// guard the wait: if the submit failed (e.g. OOM) the fence never signals, so an unguarded wait would hang
-	if ( vkCheck( vkQueueSubmit( gfxQueue, 1, &si, uploadFence ), "vkQueueSubmit(sync upload)" ) ) {
+	if ( vkCheck( QueueSubmit( 1, &si, uploadFence ), "vkQueueSubmit(sync upload)" ) ) {
 		vkCheck( vkWaitForFences( device, 1, &uploadFence, VK_TRUE, UINT64_MAX ), "vkWaitForFences(DispatchSync)" );	// a hang here = device lost: name it
 	}
 	if ( set != VK_NULL_HANDLE ) {
@@ -5868,7 +5894,7 @@ bool VulkanBackend::BuildAsSync( VkAccelerationStructureTypeKHR type, const VkAc
 	si.pCommandBuffers = &uploadCb;
 	vkResetFences( device, 1, &uploadFence );
 	// guard the wait: if the submit failed (e.g. OOM) the fence never signals, so an unguarded wait would hang
-	if ( vkCheck( vkQueueSubmit( gfxQueue, 1, &si, uploadFence ), "vkQueueSubmit(sync upload)" ) ) {
+	if ( vkCheck( QueueSubmit( 1, &si, uploadFence ), "vkQueueSubmit(sync upload)" ) ) {
 		vkCheck( vkWaitForFences( device, 1, &uploadFence, VK_TRUE, UINT64_MAX ), "vkWaitForFences(BuildAsSync)" );	// a hang here = device lost: name it
 	}
 	DestroyRtBuffer( scratch );
@@ -6035,7 +6061,7 @@ BlasHandle VulkanBackend::CreateBlasFromBuffers( const BlasGeometry *geoms, int 
 	si.pCommandBuffers = &uploadCb;
 	vkResetFences( device, 1, &uploadFence );
 	// guard the wait: if the submit failed (e.g. OOM) the fence never signals, so an unguarded wait would hang
-	if ( vkCheck( vkQueueSubmit( gfxQueue, 1, &si, uploadFence ), "vkQueueSubmit(sync upload)" ) ) {
+	if ( vkCheck( QueueSubmit( 1, &si, uploadFence ), "vkQueueSubmit(sync upload)" ) ) {
 		vkCheck( vkWaitForFences( device, 1, &uploadFence, VK_TRUE, UINT64_MAX ), "vkWaitForFences(CreateBlasFromBuffers)" );	// a hang here = device lost: name it
 	}
 	DestroyRtBuffer( scratch );
@@ -6114,7 +6140,7 @@ void VulkanBackend::RefitBlas( BlasHandle blas, const BlasGeometry *geoms, int c
 	si.pCommandBuffers = &uploadCb;
 	vkResetFences( device, 1, &uploadFence );
 	// guard the wait: if the submit failed (e.g. OOM) the fence never signals, so an unguarded wait would hang
-	if ( vkCheck( vkQueueSubmit( gfxQueue, 1, &si, uploadFence ), "vkQueueSubmit(sync upload)" ) ) {
+	if ( vkCheck( QueueSubmit( 1, &si, uploadFence ), "vkQueueSubmit(sync upload)" ) ) {
 		vkCheck( vkWaitForFences( device, 1, &uploadFence, VK_TRUE, UINT64_MAX ), "vkWaitForFences(RefitBlas)" );	// a hang here = device lost: name it
 	}
 }
@@ -6737,7 +6763,7 @@ void VulkanBackend::UpdateDynamicGeometry( const float *worldPositions, int numV
 		si.pCommandBuffers = &uploadCb;
 		vkResetFences( device, 1, &uploadFence );
 		// guard the wait: if the submit failed (e.g. OOM) the fence never signals, so an unguarded wait would hang
-		if ( vkCheck( vkQueueSubmit( gfxQueue, 1, &si, uploadFence ), "vkQueueSubmit(sync upload)" ) ) {
+		if ( vkCheck( QueueSubmit( 1, &si, uploadFence ), "vkQueueSubmit(sync upload)" ) ) {
 			vkCheck( vkWaitForFences( device, 1, &uploadFence, VK_TRUE, UINT64_MAX ), "vkWaitForFences(UpdateDynamicGeometry)" );	// a hang here = device lost: name it
 		}
 		rtFrameDynBuilt[slot] = true;
@@ -6972,7 +6998,7 @@ void VulkanBackend::UpdateTlas( const RtInstance *instances, int count ) {
 		si.pCommandBuffers = &uploadCb;
 		vkResetFences( device, 1, &uploadFence );
 		// guard the wait: if the submit failed (e.g. OOM) the fence never signals, so an unguarded wait would hang
-		if ( vkCheck( vkQueueSubmit( gfxQueue, 1, &si, uploadFence ), "vkQueueSubmit(sync upload)" ) ) {
+		if ( vkCheck( QueueSubmit( 1, &si, uploadFence ), "vkQueueSubmit(sync upload)" ) ) {
 			vkCheck( vkWaitForFences( device, 1, &uploadFence, VK_TRUE, UINT64_MAX ), "vkWaitForFences(UpdateTlas)" );	// a hang here = device lost: name it
 		}
 		rtFrameBuilt[slot] = true;
@@ -8786,7 +8812,7 @@ void VulkanBackend::NrdSelfTest() {
 		si.pCommandBuffers = &uploadCb;
 		vkResetFences( device, 1, &uploadFence );
 		// guard the wait: if the submit failed (e.g. OOM) the fence never signals, so an unguarded wait would hang
-		if ( vkCheck( vkQueueSubmit( gfxQueue, 1, &si, uploadFence ), "vkQueueSubmit(sync upload)" ) ) {
+		if ( vkCheck( QueueSubmit( 1, &si, uploadFence ), "vkQueueSubmit(sync upload)" ) ) {
 			vkCheck( vkWaitForFences( device, 1, &uploadFence, VK_TRUE, UINT64_MAX ), "vkWaitForFences(NrdSelfTest)" );	// a hang here = device lost: name it
 		}
 	}
@@ -8882,7 +8908,7 @@ void VulkanBackend::NrdSelfTest() {
 		si.pCommandBuffers = &uploadCb;
 		vkResetFences( device, 1, &uploadFence );
 		// guard the wait: if the submit failed (e.g. OOM) the fence never signals, so an unguarded wait would hang
-		if ( vkCheck( vkQueueSubmit( gfxQueue, 1, &si, uploadFence ), "vkQueueSubmit(sync upload)" ) ) {
+		if ( vkCheck( QueueSubmit( 1, &si, uploadFence ), "vkQueueSubmit(sync upload)" ) ) {
 			vkCheck( vkWaitForFences( device, 1, &uploadFence, VK_TRUE, UINT64_MAX ), "vkWaitForFences(NrdSelfTest)" );	// a hang here = device lost: name it
 		}
 	}
@@ -9837,6 +9863,77 @@ ImageHandle VulkanBackend::CreateTexture2DPrebuilt( int w, int h, const Prebuilt
 
 /*
 ====================
+VulkanBackend::BeginTextureUploadBatch / SubmitTextureUploadBatch / EndTextureUploadBatch
+
+DUDE parallel image load: between Begin and End, UploadTexture2DLevels records each
+texture's barriers and copies into batchCb and parks its staging buffer, instead of a
+submit + fence wait per image. Submit ends the command buffer, submits it once, waits,
+frees the staging buffers and begins a fresh one (UploadTexture2DLevels calls it when
+the staging in flight would pass BATCH_STAGING_LIMIT); End does the same and closes the
+batch. The image objects, views, samplers and bindless slots are created immediately;
+their contents land at the submit, and nothing samples them before the End (load time,
+between frames).
+====================
+*/
+void VulkanBackend::BeginTextureUploadBatch( void ) {
+	if ( device == VK_NULL_HANDLE || batchCb == VK_NULL_HANDLE ) {
+		return;
+	}
+	if ( batchOpen ) {
+		SubmitTextureUploadBatch();		// a batch left open (an error unwound past its End): submit it, then start over
+		vkEndCommandBuffer( batchCb );
+		batchOpen = false;
+	}
+	vkResetCommandBuffer( batchCb, 0 );
+	VkCommandBufferBeginInfo bi = {};
+	bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+	bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+	vkBeginCommandBuffer( batchCb, &bi );
+	CheckpointMarkCb( batchCb, "sync:TextureUploadBatch" );
+	batchImages = 0;
+	batchStagingBytes = 0;
+	batchOpen = true;
+}
+
+void VulkanBackend::SubmitTextureUploadBatch( void ) {
+	vkEndCommandBuffer( batchCb );
+	if ( batchImages ) {
+		VkSubmitInfo si = {};
+		si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+		si.commandBufferCount = 1;
+		si.pCommandBuffers = &batchCb;
+		vkResetFences( device, 1, &batchFence );
+		// guard the wait: if the submit failed (e.g. OOM) the fence never signals, so an unguarded wait would hang
+		if ( vkCheck( QueueSubmit( 1, &si, batchFence ), "vkQueueSubmit(texture upload batch)" ) ) {
+			vkCheck( vkWaitForFences( device, 1, &batchFence, VK_TRUE, UINT64_MAX ), "vkWaitForFences(TextureUploadBatch)" );	// a hang here = device lost: name it
+		}
+	}
+	for ( size_t i = 0; i < batchStaging.size(); i++ ) {
+		vmaDestroyBuffer( vma, batchStaging[i].first, batchStaging[i].second );
+	}
+	batchStaging.clear();
+	batchImages = 0;
+	batchStagingBytes = 0;
+	// a fresh command buffer for whatever the batch records next
+	vkResetCommandBuffer( batchCb, 0 );
+	VkCommandBufferBeginInfo bi = {};
+	bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+	bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+	vkBeginCommandBuffer( batchCb, &bi );
+	CheckpointMarkCb( batchCb, "sync:TextureUploadBatch" );
+}
+
+void VulkanBackend::EndTextureUploadBatch( void ) {
+	if ( !batchOpen ) {
+		return;
+	}
+	SubmitTextureUploadBatch();
+	vkEndCommandBuffer( batchCb );		// the fresh one Submit began: nothing recorded, never submitted
+	batchOpen = false;
+}
+
+/*
+====================
 VulkanBackend::UploadTexture2DLevels
 
 Shared GPU upload for CreateTexture2D / CreateTexture2DPrebuilt: stage the supplied
@@ -9927,14 +10024,24 @@ ImageHandle VulkanBackend::UploadTexture2DLevels( int w, int h, const PrebuiltMi
 		}
 	}
 
-	// record + submit the upload, wait for it (load-time only)
+	// record + submit the upload, wait for it (load-time only) - or, inside a texture upload
+	// batch, record it into the batch's command buffer and let EndTextureUploadBatch submit
+	// the whole chunk at once (DUDE: the level load and the live reload)
 	{
-		vkResetCommandBuffer( uploadCb, 0 );
-		VkCommandBufferBeginInfo bi = {};
-		bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-		bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-		vkBeginCommandBuffer( uploadCb, &bi );
-		CheckpointMarkCb( uploadCb, "sync:UploadTexture2DLevels" );	// VK_NV_device_diagnostic_checkpoints: name this sync submission
+		VkCommandBuffer cb = uploadCb;
+		if ( batchOpen ) {
+			if ( batchImages && batchStagingBytes + total > BATCH_STAGING_LIMIT ) {
+				SubmitTextureUploadBatch();		// bound the staging in flight; the batch stays open
+			}
+			cb = batchCb;
+		} else {
+			vkResetCommandBuffer( uploadCb, 0 );
+			VkCommandBufferBeginInfo bi = {};
+			bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+			bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+			vkBeginCommandBuffer( uploadCb, &bi );
+			CheckpointMarkCb( uploadCb, "sync:UploadTexture2DLevels" );	// VK_NV_device_diagnostic_checkpoints: name this sync submission
+		}
 
 		VkImageMemoryBarrier toDst = {};
 		toDst.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
@@ -9948,7 +10055,7 @@ ImageHandle VulkanBackend::UploadTexture2DLevels( int w, int h, const PrebuiltMi
 		toDst.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
 		toDst.subresourceRange.levelCount = (uint32_t)levels.size();
 		toDst.subresourceRange.layerCount = 1;
-		vkCmdPipelineBarrier( uploadCb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+		vkCmdPipelineBarrier( cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
 			0, 0, NULL, 0, NULL, 1, &toDst );
 
 		VkDeviceSize bufOfs = 0;
@@ -9959,7 +10066,7 @@ ImageHandle VulkanBackend::UploadTexture2DLevels( int w, int h, const PrebuiltMi
 			c.imageSubresource.mipLevel = (uint32_t)i;
 			c.imageSubresource.layerCount = 1;
 			c.imageExtent = { (uint32_t)levels[i].w, (uint32_t)levels[i].h, 1 };
-			vkCmdCopyBufferToImage( uploadCb, staging, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &c );
+			vkCmdCopyBufferToImage( cb, staging, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &c );
 			bufOfs += (VkDeviceSize)levels[i].w * levels[i].h * texelBytes;
 		}
 
@@ -9968,21 +10075,31 @@ ImageHandle VulkanBackend::UploadTexture2DLevels( int w, int h, const PrebuiltMi
 		toRead.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
 		toRead.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
 		toRead.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-		vkCmdPipelineBarrier( uploadCb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+		vkCmdPipelineBarrier( cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
 			0, 0, NULL, 0, NULL, 1, &toRead );
 
-		vkEndCommandBuffer( uploadCb );
-		VkSubmitInfo si = {};
-		si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-		si.commandBufferCount = 1;
-		si.pCommandBuffers = &uploadCb;
-		vkResetFences( device, 1, &uploadFence );
-		// guard the wait: if the submit failed (e.g. OOM) the fence never signals, so an unguarded wait would hang
-		if ( vkCheck( vkQueueSubmit( gfxQueue, 1, &si, uploadFence ), "vkQueueSubmit(sync upload)" ) ) {
-			vkCheck( vkWaitForFences( device, 1, &uploadFence, VK_TRUE, UINT64_MAX ), "vkWaitForFences(UploadTexture2DLevels)" );	// a hang here = device lost: name it
+		if ( batchOpen ) {
+			// the batch owns the staging buffer until its submit has completed
+			batchStaging.push_back( std::make_pair( staging, stagingAlloc ) );
+			batchStagingBytes += total;
+			batchImages++;
+			staging = VK_NULL_HANDLE;
+		} else {
+			vkEndCommandBuffer( uploadCb );
+			VkSubmitInfo si = {};
+			si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+			si.commandBufferCount = 1;
+			si.pCommandBuffers = &uploadCb;
+			vkResetFences( device, 1, &uploadFence );
+			// guard the wait: if the submit failed (e.g. OOM) the fence never signals, so an unguarded wait would hang
+			if ( vkCheck( QueueSubmit( 1, &si, uploadFence ), "vkQueueSubmit(sync upload)" ) ) {
+				vkCheck( vkWaitForFences( device, 1, &uploadFence, VK_TRUE, UINT64_MAX ), "vkWaitForFences(UploadTexture2DLevels)" );	// a hang here = device lost: name it
+			}
 		}
 	}
-	vmaDestroyBuffer( vma, staging, stagingAlloc );
+	if ( staging != VK_NULL_HANDLE ) {
+		vmaDestroyBuffer( vma, staging, stagingAlloc );
+	}
 
 	ImageRec rec;
 	rec.image = image;
@@ -10102,7 +10219,12 @@ void VulkanBackend::DestroyImage( ImageHandle h ) {
 	if ( frameOpen && !skipFrame ) {
 		retiredImages[frameIndex].push_back( { rec.image, rec.alloc, rec.view } );
 	} else {
-		vkDeviceWaitIdle( device );
+		// DUDE: nothing submitted since the last wait = nothing in flight that could read the
+		// image, so a run of destroys (a reload purging the resident textures) waits once
+		if ( !deviceIdle ) {
+			vkDeviceWaitIdle( device );
+			deviceIdle = true;
+		}
 		if ( rec.view )  { vkDestroyImageView( device, rec.view, NULL ); }
 		if ( rec.image ) { vmaDestroyImage( vma, rec.image, rec.alloc ); }
 	}
@@ -10640,7 +10762,7 @@ bool VulkanBackend::ReadPixelsRGB( unsigned char *dest, int x, int y, int w, int
 	si.pCommandBuffers = &uploadCb;
 	vkResetFences( device, 1, &uploadFence );
 	// guard the wait: if the submit failed (e.g. OOM) the fence never signals, so an unguarded wait would hang
-	if ( vkCheck( vkQueueSubmit( gfxQueue, 1, &si, uploadFence ), "vkQueueSubmit(sync upload)" ) ) {
+	if ( vkCheck( QueueSubmit( 1, &si, uploadFence ), "vkQueueSubmit(sync upload)" ) ) {
 		vkCheck( vkWaitForFences( device, 1, &uploadFence, VK_TRUE, UINT64_MAX ), "vkWaitForFences(ReadPixelsRGB)" );	// a hang here = device lost: name it
 	}
 
@@ -10811,7 +10933,7 @@ ImageHandle VulkanBackend::CreateTextureCube( int size, const void * const pics[
 		si.pCommandBuffers = &uploadCb;
 		vkResetFences( device, 1, &uploadFence );
 		// guard the wait: if the submit failed (e.g. OOM) the fence never signals, so an unguarded wait would hang
-		if ( vkCheck( vkQueueSubmit( gfxQueue, 1, &si, uploadFence ), "vkQueueSubmit(sync upload)" ) ) {
+		if ( vkCheck( QueueSubmit( 1, &si, uploadFence ), "vkQueueSubmit(sync upload)" ) ) {
 			vkCheck( vkWaitForFences( device, 1, &uploadFence, VK_TRUE, UINT64_MAX ), "vkWaitForFences(CreateTextureCube)" );	// a hang here = device lost: name it
 		}
 	}
@@ -10904,7 +11026,7 @@ bool VulkanBackend::CreateShadowDummy( ShadowDummy &d, bool cube ) {
 	si.pCommandBuffers = &uploadCb;
 	vkResetFences( device, 1, &uploadFence );
 	// guard the wait: if the submit failed (e.g. OOM) the fence never signals, so an unguarded wait would hang
-	if ( vkCheck( vkQueueSubmit( gfxQueue, 1, &si, uploadFence ), "vkQueueSubmit(sync upload)" ) ) {
+	if ( vkCheck( QueueSubmit( 1, &si, uploadFence ), "vkQueueSubmit(sync upload)" ) ) {
 		vkCheck( vkWaitForFences( device, 1, &uploadFence, VK_TRUE, UINT64_MAX ), "vkWaitForFences(CreateShadowDummy)" );	// a hang here = device lost: name it
 	}
 
