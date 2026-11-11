@@ -290,7 +290,8 @@ static const int BMODEL_MAGIC = ( 'D' ) | ( 'B' << 8 ) | ( 'M' << 16 ) | ( '1' <
 // Bump when the serialized layout OR any load-time derive changes (R_CleanupTriangles and what it
 // calls: sil indexes/edges, mirrored/dup verts, face planes, tangents), else stale caches keep the
 // old derived data. ENGINE_VERSION in the header also re-derives everything on each release.
-static const int BMODEL_VERSION = 1;
+//   2: the SSE4.1 tangent derive no longer writes NaN tangents for triangles with collinear texcoords
+static const int BMODEL_VERSION = 2;
 
 static idStr BinaryModelPath( const char *modelName ) {
 	idStr path = "generated/";
