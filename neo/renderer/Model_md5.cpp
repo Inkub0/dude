@@ -1230,9 +1230,6 @@ void idMD5Mesh::BuildTessTopology( const idJointMat *bindJoints ) {
 	tessBakeMinEdge = r_tessMinEdge.GetFloat();		// recorded only; not used to gate (see header note)
 
 	const int numOut = deformInfo->numOutputVerts;
-	const int numSrc = deformInfo->numSourceVerts;
-	const int numMir = deformInfo->numMirroredVerts;
-	const int mbase  = numOut - numMir;
 	const int numSrcTris = deformInfo->numIndexes / 3;
 	const int vPerTri = ( L + 1 ) * ( L + 2 ) / 2;		// generated verts per source triangle
 	const int tPerTri = L * L;							// generated tris per source triangle
@@ -1272,17 +1269,7 @@ void idMD5Mesh::BuildTessTopology( const idJointMat *bindJoints ) {
 	// and seam are load-time; positions are only used to satisfy the same layout as UpdateSurface).
 	// A heap copy: a level load defers the fill below (R_MD5_FlushTessBakes) past the bind joints' life.
 	idDrawVert *bindVerts = (idDrawVert *)R_StaticAlloc( numOut * sizeof( idDrawVert ) );
-	for ( int i = 0; i < numSrc; i++ ) {
-		bindVerts[i].Clear();
-		bindVerts[i].st = texCoords[i];
-	}
-	StampTessSeamMask( bindVerts );
-	if ( bindJoints != NULL ) {
-		TransformVerts( bindVerts, bindJoints );	// positions: only the layout; the fill reads st + seam (NULL on a live re-bake)
-	}
-	for ( int i = 0; i < numMir; i++ ) {
-		bindVerts[mbase + i] = bindVerts[deformInfo->mirroredVerts[i]];
-	}
+	StageTessBindVerts( bindVerts, bindJoints );	// positions: only the layout; the fill reads st + seam (NULL on a live re-bake)
 
 	// the material's height map for the displacement relief. Absent => relief 0 (no displacement); the
 	// material sampler matrix is treated as identity (character bumps have no texture matrix), so the
@@ -1419,9 +1406,24 @@ bool idMD5Mesh::EnsureTessBuffersUploaded( void ) {
 	if ( !r ) {
 		return false;
 	}
-	tessGpuBarySeam = r->CreateBuffer( rhi::BU_STORAGE, numTessOutVerts * (int)sizeof( idVec4 ), tessBarySeam );
-	tessGpuSrcTri   = r->CreateBuffer( rhi::BU_STORAGE, numTessOutVerts * 3 * (int)sizeof( int ), tessSrcTri );
-	tessGpuHeight   = r->CreateBuffer( rhi::BU_STORAGE, numTessOutVerts * (int)sizeof( float ), tessHeight );
+	return CreateTessGpuBuffers( r, false );
+}
+
+/*
+====================
+idMD5Mesh::CreateTessGpuBuffers
+
+DUDE: the three per-mesh static topology buffers the deform kernel reads (bary+seam, source-corner indices,
+relief), created together and rolled back together. deviceOnly = GPU-only buffers the GPU bake fills
+(BakeTessOnGpu); otherwise uploaded from the CPU bake's arrays. On success the handles are stamped as the
+current backend's (tessGpuGen).
+====================
+*/
+bool idMD5Mesh::CreateTessGpuBuffers( rhi::RHI *r, bool deviceOnly ) {
+	const rhi::BufferUsage usage = deviceOnly ? rhi::BU_STORAGE_DEVICE : rhi::BU_STORAGE;
+	tessGpuBarySeam = r->CreateBuffer( usage, numTessOutVerts * (int)sizeof( idVec4 ), deviceOnly ? NULL : tessBarySeam );
+	tessGpuSrcTri   = r->CreateBuffer( usage, numTessOutVerts * 3 * (int)sizeof( int ), deviceOnly ? NULL : tessSrcTri );
+	tessGpuHeight   = r->CreateBuffer( usage, numTessOutVerts * (int)sizeof( float ), deviceOnly ? NULL : tessHeight );
 	if ( !tessGpuBarySeam || !tessGpuSrcTri || !tessGpuHeight ) {
 		if ( tessGpuBarySeam ) { r->DestroyBuffer( tessGpuBarySeam ); }
 		if ( tessGpuSrcTri )   { r->DestroyBuffer( tessGpuSrcTri ); }
@@ -1431,6 +1433,33 @@ bool idMD5Mesh::EnsureTessBuffersUploaded( void ) {
 	}
 	tessGpuGen = r_md5GpuGen;				// these handles belong to the current backend
 	return true;
+}
+
+/*
+====================
+idMD5Mesh::StageTessBindVerts
+
+DUDE: the bind-pose OUTPUT verts the tess bakes read: st from the mesh texcoords, the UV-seam mask in the
+colour alpha (StampTessSeamMask), the mirror-seam copies appended; positions only when bindJoints is given
+(the CPU bake's layout; nothing reads them). verts holds deformInfo->numOutputVerts.
+====================
+*/
+void idMD5Mesh::StageTessBindVerts( idDrawVert *verts, const idJointMat *bindJoints ) {
+	const int numOut = deformInfo->numOutputVerts;
+	const int numSrc = deformInfo->numSourceVerts;
+	const int numMir = deformInfo->numMirroredVerts;
+	const int mbase  = numOut - numMir;
+	for ( int i = 0; i < numSrc; i++ ) {
+		verts[i].Clear();
+		verts[i].st = texCoords[i];
+	}
+	StampTessSeamMask( verts );
+	if ( bindJoints != NULL ) {
+		TransformVerts( verts, bindJoints );
+	}
+	for ( int i = 0; i < numMir; i++ ) {
+		verts[mbase + i] = verts[deformInfo->mirroredVerts[i]];
+	}
 }
 
 /*
@@ -1455,31 +1484,15 @@ bool idMD5Mesh::BakeTessOnGpu( void ) {
 	if ( heightImage && heightHandle == 0 ) {
 		return false;		// not uploaded yet: bake once it is
 	}
-	tessGpuBarySeam = r->CreateBuffer( rhi::BU_STORAGE_DEVICE, numTessOutVerts * (int)sizeof( idVec4 ), NULL );
-	tessGpuSrcTri   = r->CreateBuffer( rhi::BU_STORAGE_DEVICE, numTessOutVerts * 3 * (int)sizeof( int ), NULL );
-	tessGpuHeight   = r->CreateBuffer( rhi::BU_STORAGE_DEVICE, numTessOutVerts * (int)sizeof( float ), NULL );
-	if ( !tessGpuBarySeam || !tessGpuSrcTri || !tessGpuHeight ) {
-		if ( tessGpuBarySeam ) { r->DestroyBuffer( tessGpuBarySeam ); }
-		if ( tessGpuSrcTri )   { r->DestroyBuffer( tessGpuSrcTri ); }
-		if ( tessGpuHeight )   { r->DestroyBuffer( tessGpuHeight ); }
-		tessGpuBarySeam = tessGpuSrcTri = tessGpuHeight = 0;
+	if ( !CreateTessGpuBuffers( r, true ) ) {
 		return false;
 	}
 
 	// per output vertex (s, t, seam, 0): the bind texcoords and the UV-seam mask, mirror-seam copies included
 	// (the same values the CPU bake reads from its bind-pose verts)
 	const int numOut = deformInfo->numOutputVerts;
-	const int numSrc = deformInfo->numSourceVerts;
-	const int mbase  = numOut - deformInfo->numMirroredVerts;
 	idDrawVert *verts = (idDrawVert *)R_FrameAlloc( numOut * (int)sizeof( idDrawVert ) );
-	for ( int i = 0; i < numSrc; i++ ) {
-		verts[i].Clear();
-		verts[i].st = texCoords[i];
-	}
-	StampTessSeamMask( verts );
-	for ( int i = 0; i < deformInfo->numMirroredVerts; i++ ) {
-		verts[mbase + i] = verts[deformInfo->mirroredVerts[i]];
-	}
+	StageTessBindVerts( verts, NULL );
 	idVec4 *stSeam = (idVec4 *)R_FrameAlloc( numOut * (int)sizeof( idVec4 ) );
 	for ( int i = 0; i < numOut; i++ ) {
 		stSeam[i].Set( verts[i].st.x, verts[i].st.y, verts[i].color[3] / 255.0f, 0.0f );
@@ -1487,7 +1500,6 @@ bool idMD5Mesh::BakeTessOnGpu( void ) {
 
 	RB_RHI_AddTessBakeJob( r_md5TessBakeShader, stSeam, numOut, deformInfo->indexes, deformInfo->numIndexes,
 	                       tessGpuBarySeam, tessGpuSrcTri, tessGpuHeight, heightHandle, numTessOutVerts, tessBakeLevel );
-	tessGpuGen = r_md5GpuGen;				// these handles belong to the current backend
 	return true;
 }
 

@@ -251,6 +251,8 @@ private:
 	void						FreeTessData( void );
 	const idImage *				TessHeightImage( void ) const;	// DUDE: the material's tess height map, NULL = none
 	bool						BakeTessOnGpu( void );			// DUDE: tessGpuBake: create + GPU-fill the tessGpu* buffers
+	bool						CreateTessGpuBuffers( rhi::RHI *r, bool deviceOnly );	// DUDE: the three tessGpu* buffers, together
+	void						StageTessBindVerts( idDrawVert *verts, const idJointMat *bindJoints );	// DUDE: bind-pose output verts for the bakes
 public:
 	// DUDE: BuildTessTopology's fill, worker-safe (see R_MD5_FlushTessBakes); false on a count mismatch
 	bool						FillTessTopology( const idDrawVert *bindVerts, const byte *bumpPic, int bumpW, int bumpH );
