@@ -39,12 +39,21 @@ If you have questions concerning this license or the applicable additional terms
 #if defined(__GNUC__) && defined(D3_HAS_SIMD_SSE41)
 
 #include <smmintrin.h>
+#include <float.h>
 
 // lane selectors: result lane0 gets source lane a, lane1 gets b, etc.
 #define SHUF( a, b, c, d )		_MM_SHUFFLE( (d), (c), (b), (a) )
 
-// rsqrtps followed by one Newton-Raphson iteration, accurate to ~1e-6 relative
+// rsqrtps followed by one Newton-Raphson iteration, accurate to ~1e-6 relative.
+// The input is clamped to the smallest normal float first: rsqrtps( 0 ) is +inf and the
+// Newton step turns that into NaN, so a zero-length vector would come out NaN instead of
+// zero. DeriveTangents meets such vectors on every triangle whose three texcoords are
+// collinear (its first tangent is exactly zero) and accumulates the result into all three
+// vertices, so one such triangle blackened a whole face under the PBR interaction.
+// idMath::RSqrt returns a huge finite number for 0, which the generic code multiplies back
+// into a zero vector; this matches that.
 static ID_INLINE __m128 SSE41_RSqrt( __m128 x ) {
+	x = _mm_max_ps( x, _mm_set1_ps( FLT_MIN ) );
 	__m128 r = _mm_rsqrt_ps( x );
 	// r = r * ( 1.5 - 0.5 * x * r * r )
 	__m128 h = _mm_mul_ps( _mm_set1_ps( 0.5f ), x );
