@@ -934,6 +934,70 @@ static byte DDS_MaskChannel( unsigned int pixel, unsigned int mask, byte missing
 	return (byte)( ( ( ( pixel & mask ) >> shift ) * 255 + max / 2 ) / max );
 }
 
+/*
+===============
+R_DecodeDDSLevelRGBA
+
+DUDE: decodes one DXT1 / DXT3 / DXT5 / RXGB mip level of w x h texels from its blocks to
+RGBA8 (RXGB's red comes back from alpha). false for any other fourCC. out holds w*h*4
+bytes. LoadDDS uses it for a .dds that stands in for a source image; the Vulkan precompressed
+path uses it on a small mip for the emissive-table statistics it would otherwise sample
+from the decoded source.
+===============
+*/
+bool R_DecodeDDSLevelRGBA( const byte *blocks, int w, int h, unsigned int fourCC, byte *out ) {
+	int blockBytes = 0;
+	bool threeColor = false, explicitAlpha = false, interpolatedAlpha = false, rxgb = false;
+	if ( fourCC == DDS_MAKEFOURCC( 'D', 'X', 'T', '1' ) ) {
+		blockBytes = 8;
+		threeColor = true;
+	} else if ( fourCC == DDS_MAKEFOURCC( 'D', 'X', 'T', '3' ) ) {
+		blockBytes = 16;
+		explicitAlpha = true;
+	} else if ( fourCC == DDS_MAKEFOURCC( 'D', 'X', 'T', '5' ) || fourCC == DDS_MAKEFOURCC( 'R', 'X', 'G', 'B' ) ) {
+		blockBytes = 16;
+		interpolatedAlpha = true;
+		rxgb = ( fourCC == DDS_MAKEFOURCC( 'R', 'X', 'G', 'B' ) );
+	} else {
+		return false;
+	}
+	const byte *block = blocks;
+	for ( int by = 0; by < h; by += 4 ) {
+		for ( int bx = 0; bx < w; bx += 4, block += blockBytes ) {
+			byte texels[16][4];
+			const byte *colorBlock = blockBytes == 16 ? block + 8 : block;
+			DDS_DecodeColorBlock( colorBlock, texels, threeColor );
+			if ( explicitAlpha ) {
+				for ( int i = 0; i < 16; i++ ) {
+					const int nibble = ( block[i / 2] >> ( 4 * ( i & 1 ) ) ) & 15;
+					texels[i][3] = (byte)( nibble * 17 );
+				}
+			} else if ( interpolatedAlpha ) {
+				DDS_DecodeAlphaBlock( block, texels );
+			}
+			for ( int i = 0; i < 16; i++ ) {
+				const int x = bx + ( i & 3 ), y = by + ( i >> 2 );
+				if ( x >= w || y >= h ) {
+					continue;	// the padding of a block past the image edge
+				}
+				byte *dst = out + ( y * w + x ) * 4;
+				if ( rxgb ) {
+					dst[0] = texels[i][3];
+					dst[1] = texels[i][1];
+					dst[2] = texels[i][2];
+					dst[3] = 255;
+				} else {
+					dst[0] = texels[i][0];
+					dst[1] = texels[i][1];
+					dst[2] = texels[i][2];
+					dst[3] = texels[i][3];
+				}
+			}
+		}
+	}
+	return true;
+}
+
 static void LoadDDS( const char *name, byte **pic, int *width, int *height, ID_TIME_T *timestamp ) {
 	if ( !pic ) {
 		fileSystem->ReadFile( name, NULL, timestamp );
@@ -961,18 +1025,12 @@ static void LoadDDS( const char *name, byte **pic, int *width, int *height, ID_T
 	const int dataSize = fileSize - headerEnd;
 
 	int blockBytes = 0;		// 0 = uncompressed
-	bool threeColor = false, explicitAlpha = false, interpolatedAlpha = false, rxgb = false;
 	if ( pfFlags & DDSF_FOURCC ) {
 		if ( fourCC == DDS_MAKEFOURCC( 'D', 'X', 'T', '1' ) ) {
 			blockBytes = 8;
-			threeColor = true;
-		} else if ( fourCC == DDS_MAKEFOURCC( 'D', 'X', 'T', '3' ) ) {
+		} else if ( fourCC == DDS_MAKEFOURCC( 'D', 'X', 'T', '3' ) || fourCC == DDS_MAKEFOURCC( 'D', 'X', 'T', '5' )
+		            || fourCC == DDS_MAKEFOURCC( 'R', 'X', 'G', 'B' ) ) {
 			blockBytes = 16;
-			explicitAlpha = true;
-		} else if ( fourCC == DDS_MAKEFOURCC( 'D', 'X', 'T', '5' ) || fourCC == DDS_MAKEFOURCC( 'R', 'X', 'G', 'B' ) ) {
-			blockBytes = 16;
-			interpolatedAlpha = true;
-			rxgb = ( fourCC == DDS_MAKEFOURCC( 'R', 'X', 'G', 'B' ) );
 		} else {
 			common->Warning( "LoadDDS: %s uses a format this loader does not decode", name );
 			fileSystem->FreeFile( buffer );
@@ -994,40 +1052,7 @@ static void LoadDDS( const char *name, byte **pic, int *width, int *height, ID_T
 
 	byte *out = (byte *)R_StaticAlloc( w * h * 4 );
 	if ( blockBytes ) {
-		const byte *block = data;
-		for ( int by = 0; by < h; by += 4 ) {
-			for ( int bx = 0; bx < w; bx += 4, block += blockBytes ) {
-				byte texels[16][4];
-				const byte *colorBlock = blockBytes == 16 ? block + 8 : block;
-				DDS_DecodeColorBlock( colorBlock, texels, threeColor );
-				if ( explicitAlpha ) {
-					for ( int i = 0; i < 16; i++ ) {
-						const int nibble = ( block[i / 2] >> ( 4 * ( i & 1 ) ) ) & 15;
-						texels[i][3] = (byte)( nibble * 17 );
-					}
-				} else if ( interpolatedAlpha ) {
-					DDS_DecodeAlphaBlock( block, texels );
-				}
-				for ( int i = 0; i < 16; i++ ) {
-					const int x = bx + ( i & 3 ), y = by + ( i >> 2 );
-					if ( x >= w || y >= h ) {
-						continue;	// the padding of a block past the image edge
-					}
-					byte *dst = out + ( y * w + x ) * 4;
-					if ( rxgb ) {
-						dst[0] = texels[i][3];
-						dst[1] = texels[i][1];
-						dst[2] = texels[i][2];
-						dst[3] = 255;
-					} else {
-						dst[0] = texels[i][0];
-						dst[1] = texels[i][1];
-						dst[2] = texels[i][2];
-						dst[3] = texels[i][3];
-					}
-				}
-			}
-		}
+		R_DecodeDDSLevelRGBA( data, w, h, fourCC, out );
 	} else {
 		const unsigned int rMask = LittleInt( header->ddspf.dwRBitMask );
 		const unsigned int gMask = LittleInt( header->ddspf.dwGBitMask );

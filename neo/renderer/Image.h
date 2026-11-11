@@ -243,7 +243,8 @@ public:
 	// R_StaticAlloc; caller frees). Split out so the parallel loader can read/inflate the
 	// .dds on a worker and keep the GL upload (UploadPrecompressedImage) on the main thread.
 	bool		ReadPrecompressedImage( byte **dataOut, int *lenOut );
-	void		UploadPrecompressedImage( byte *data, int len );
+	void		UploadPrecompressedImage( byte *data, int len, bool sampleStats = true );
+	void		UploadPrecompressedImageRhi( const byte *data, int len, bool sampleStats );	// DUDE: the Vulkan half (BC blocks through the RHI)
 	void		ActuallyLoadImage( bool checkForPrecompressed, bool fromBackEnd );
 	void		StartBackgroundImageLoad();
 	int			BitsForInternalFormat( int internalFormat ) const;
@@ -261,6 +262,7 @@ public:
 	// submit stays serial. Mirrors the Vulkan branch of ActuallyLoadImage/GenerateImage.
 	bool		LoadImageCpu();
 	bool		LoadImageCpuGL();		// DUDE: the GL3 non-.dds worker half (GenerateImage before its first GL call)
+	int			VulkanBlockFormat( const byte *pic, int width, int height ) const;	// DUDE: the block format a compressing tier encodes this image in on Vulkan, -1 = none
 	void		UploadImageCpu();
 	// DUDE: a classic generator (_white, _fog, ...) is permanent: never purged, never level
 	// loaded. One with a generatorCpu hook is LEVEL content (the parallax / tessellation
@@ -334,6 +336,10 @@ public:
 		int				levelH[PARALLEL_MAX_LEVELS];
 		int				numLevels;
 		int				width, height;					// base level dimensions
+		// Vulkan at a compressing tier: the worker block-encoded the pyramid (VulkanBlockFormat /
+		// R_CompressBcLevel); levelData then holds each level's blocks, levelBytes their sizes
+		int				bcFormat;						// rhi::RHI::CompressedFormat, -1 = RGBA8 levels
+		int				levelBytes[PARALLEL_MAX_LEVELS];
 		// GL3: worker-read raw .dds bytes → UploadPrecompressedImage on main
 		byte *			precompressedData;				// R_StaticAlloc'd, NULL if not a .dds load
 		int				precompressedLen;
@@ -560,6 +566,9 @@ public:
 extern idImageManager	*globalImages;		// pointer to global list for the rest of the system
 
 int MakePowerOfTwo( int num );
+bool R_DecodeDDSLevelRGBA( const byte *blocks, int w, int h, unsigned int fourCC, byte *out );	// DUDE: Image_files.cpp
+int  R_BcLevelBytes( int format, int w, int h );												// DUDE: Image_compress.cpp (format = rhi::RHI::CompressedFormat)
+bool R_CompressBcLevel( int format, const byte *rgba, int w, int h, byte *out );				// DUDE: Image_compress.cpp
 
 /*
 ====================================================================

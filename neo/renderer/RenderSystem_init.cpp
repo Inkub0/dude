@@ -1602,6 +1602,12 @@ void R_InitOpenGL( void ) {
 
 		common->Printf( "Vulkan device: %s\n", glConfig.renderer_string );
 		common->Printf( "Vulkan driver: %s\n", glConfig.version_string );
+		// DUDE precompressed .dds on Vulkan: the backend samples BC1-BC7 natively when the device
+		// has textureCompressionBC, so the compressing presets take the pak's .dds files as GL
+		// does (ReadPrecompressedImage and the presets gate on these flags)
+		glConfig.textureCompressionAvailable = rhi::GetRHI()->TextureCompressionAvailable();
+		glConfig.bptcTextureCompressionAvailable = glConfig.textureCompressionAvailable;
+		common->Printf( "Vulkan block-compressed textures (.dds): %s\n", glConfig.textureCompressionAvailable ? "yes" : "no" );
 
 		// M6: ImGui via imgui_impl_vulkan — needs the live backend (instance,
 		// device, swapchain render pass), so init here rather than at window

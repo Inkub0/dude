@@ -1177,7 +1177,8 @@ static int R_ParallelLoadImages( idImage **list, int count, const char *workerWa
 					stats.uploadBytes += pd->precompressedLen;
 				} else {
 					for ( int l = 0; l < pd->numLevels; l++ ) {
-						stats.uploadBytes += pd->levelW[l] * pd->levelH[l] * 4;
+						// a Vulkan worker-encoded pyramid holds blocks (bcFormat), the rest RGBA8 levels
+						stats.uploadBytes += ( pd->bcFormat >= 0 ) ? pd->levelBytes[l] : pd->levelW[l] * pd->levelH[l] * 4;
 					}
 				}
 			}
