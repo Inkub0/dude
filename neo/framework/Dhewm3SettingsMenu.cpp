@@ -2775,17 +2775,24 @@ static bool GraphicsHasApplyableChanges()
 
 static void ApplyGraphicsSettings()
 {
-	const char* cmd = "vid_restart partial\n";
-	if ( initialUsePrecomprTextures != globalImages->image_usePrecompressedTextures.GetInteger()
+	// a new display or Vulkan device needs a new window: the full restart (which reloads the textures
+	// too). A compression / precompressed-file change only needs the textures re-uploaded with the new
+	// cvars: "reloadImages reload" is the pass the full restart runs for them, without tearing the
+	// window, context and backend down (DUDE; the quality presets do the same). Resolution, fullscreen
+	// and MSAA go through the partial restart, which falls back to a full one on its own when it must.
+	const bool newWindow = ( initialFullscreenDisplay != r_fullscreenDisplay.GetInteger() || initialFullscreenDisplayName != r_fullscreenDisplayName.GetString() )
+	    || initialVkDevice != NamedCvar( "r_vkDevice" ).GetInteger();
+	const bool reloadTextures = initialUsePrecomprTextures != globalImages->image_usePrecompressedTextures.GetInteger()
 	    || initialUseNormalCompr != globalImages->image_useNormalCompression.GetInteger()
-	    || initialUseCompression != globalImages->image_useCompression.GetInteger()
-	    || ( initialFullscreenDisplay != r_fullscreenDisplay.GetInteger() || initialFullscreenDisplayName != r_fullscreenDisplayName.GetString() )
-	    || initialVkDevice != NamedCvar( "r_vkDevice" ).GetInteger() )
-	{
-		// these need a full restart (=> textures must be reloaded; the window / Vulkan device is recreated)
-		cmd = "vid_restart\n";
+	    || initialUseCompression != globalImages->image_useCompression.GetInteger();
+	if ( newWindow ) {
+		cmdSystem->BufferCommandText( CMD_EXEC_APPEND, "vid_restart\n" );
+		return;
 	}
-	cmdSystem->BufferCommandText( CMD_EXEC_APPEND, cmd );
+	if ( reloadTextures ) {
+		cmdSystem->BufferCommandText( CMD_EXEC_APPEND, "reloadImages reload\n" );
+	}
+	cmdSystem->BufferCommandText( CMD_EXEC_APPEND, "vid_restart partial\n" );
 }
 
 static void GraphicsResetChanges()
@@ -3658,8 +3665,10 @@ static void ApplyEnhancementPreset( int idx, int rtMode )
 	// image-quality class (com_machineSpec) is pinned to Ultra, so a Low left behind by Quake 4's own
 	// Video Quality menu or by "execMachineSpec" (load-time downsizing, ignored high-quality flags)
 	// must not survive a preset. Compression is the tier's (see compressTextures). Textures that are
-	// already loaded keep their old size/format, so a change that matters on this backend restarts
-	// the renderer the way the Graphics settings do for these cvars; nothing changed, no restart.
+	// already loaded keep their old size/format, so a change that matters on this backend re-uploads
+	// them in place ("reloadImages reload": every image re-reads its source with the current cvars -
+	// the same pass a vid_restart runs, without tearing the window, context and backend down and
+	// building them again); nothing changed, no reload.
 	{
 		static const char *fullSizeCvars[] = {
 			"image_downSize", "image_downSizeBump", "image_downSizeSpecular", "image_forceDownSize",
@@ -3684,7 +3693,7 @@ static void ApplyEnhancementPreset( int idx, int rtMode )
 			}
 		}
 		if ( reloadTextures && glConfig.isInitialized ) {
-			cmdSystem->BufferCommandText( CMD_EXEC_APPEND, "vid_restart\n" );
+			cmdSystem->BufferCommandText( CMD_EXEC_APPEND, "reloadImages reload\n" );
 		}
 	}
 
