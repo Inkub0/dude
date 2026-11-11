@@ -135,41 +135,55 @@ idCVar r_tessDeform( "r_tessDeform", "0", CVAR_RENDERER | CVAR_BOOL | CVAR_ARCHI
 // live buffer -- and re-uploaded. Starts at 1 so a mesh's default 0 never coincides with a live gen.
 static unsigned int r_md5GpuGen = 1;
 
-static rhi::ShaderHandle r_md5SkinShader = 0;		// compiled once, shared by all meshes
-static bool r_md5SkinShaderTried = false;
-static rhi::ShaderHandle r_md5SkinPrevShader = 0;	// PREVPOS variant (skinned motion vectors): binding 6 must be bound
-static bool r_md5SkinPrevShaderTried = false;
-static rhi::ShaderHandle r_md5DeriveShader = 0;		// re-derive + weld pass (r_gpuSkinDerive)
-static bool r_md5DeriveShaderTried = false;
+// The MD5 compute kernels, compiled lazily once (build-time SPIR-V: no runtime shaderc, so they work on the
+// Windows/mingw build + Proton) and shared by all meshes. A kernel that fails to load stays 0 until
+// R_MD5_ResetGpuShaders; the callers then keep their fallback (the CPU skinner, the bind TBN, fixed-function
+// tessellation, the CPU bake). missing = printed once when the load fails (NULL = silent variant).
+struct md5GpuShader_t {
+	const char *		name;
+	const char *		missing;
+	rhi::ShaderHandle	handle;
+	bool				tried;
+};
+enum {
+	MD5_SHADER_SKIN,		// md5skin.comp
+	MD5_SHADER_SKIN_PREV,	// PREVPOS variant (skinned motion vectors): same source, one #define after the #version line;
+							// a separate program because a storage binding a shader statically uses must be bound at dispatch
+	MD5_SHADER_DERIVE,		// re-derive + weld pass (r_gpuSkinDerive)
+	MD5_SHADER_TESS,		// deform-once kernel (md5tessdeform.comp)
+	MD5_SHADER_TESS_PREV,	// its PREVPOS variant: also saves last frame's deformed positions for the velocity prepass
+	MD5_SHADER_TESS_BAKE,	// the GPU bake of the deform-once subdivision (md5tessbake.comp); 0 = the CPU bake
+	MD5_SHADER_COUNT
+};
+static md5GpuShader_t r_md5GpuShaders[MD5_SHADER_COUNT] = {
+	{ "md5skin",				"gpuSkin: no compute lane (GL3, or the md5skin SPIR-V is missing)\n", 0, false },
+	{ "md5skin_prevpos",		NULL, 0, false },
+	{ "md5derive",				"gpuSkin: tangent-derive kernel unavailable (md5derive SPIR-V missing) -- falling back to baked bind TBN\n", 0, false },
+	{ "md5tessdeform",			"tessDeform: no compute lane (GL3, or the md5tessdeform SPIR-V is missing)\n", 0, false },
+	{ "md5tessdeform_prevpos",	NULL, 0, false },
+	{ "md5tessbake",			NULL, 0, false },
+};
+
+// Lazily compile one kernel (once). Returns 0 if there is no compute lane (GL3) or it failed to load.
+static rhi::ShaderHandle R_MD5_GpuShader( rhi::RHI *r, int which ) {
+	md5GpuShader_t &sh = r_md5GpuShaders[which];
+	if ( !sh.tried ) {
+		sh.tried = true;
+		sh.handle = r->LoadComputeShader( sh.name );
+		if ( sh.handle == 0 && sh.missing ) {
+			common->Printf( "%s", sh.missing );
+		}
+	}
+	return sh.handle;
+}
+static rhi::ShaderHandle R_MD5_SkinShader( rhi::RHI *r )     { return R_MD5_GpuShader( r, MD5_SHADER_SKIN ); }
+static rhi::ShaderHandle R_MD5_SkinPrevShader( rhi::RHI *r ) { return R_MD5_GpuShader( r, MD5_SHADER_SKIN_PREV ); }
+static rhi::ShaderHandle R_MD5_DeriveShader( rhi::RHI *r )   { return R_MD5_GpuShader( r, MD5_SHADER_DERIVE ); }
+static rhi::ShaderHandle R_MD5_TessShader( rhi::RHI *r )     { return R_MD5_GpuShader( r, MD5_SHADER_TESS ); }
+static rhi::ShaderHandle R_MD5_TessPrevShader( rhi::RHI *r ) { return R_MD5_GpuShader( r, MD5_SHADER_TESS_PREV ); }
+static rhi::ShaderHandle R_MD5_TessBakeShader( rhi::RHI *r ) { return R_MD5_GpuShader( r, MD5_SHADER_TESS_BAKE ); }
 
 idCVar r_skinnedMotionVectors( "r_skinnedMotionVectors", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "GPU-skinned characters write per-BONE motion into the velocity buffer: the skin kernel keeps each vertex's previous-frame position and the normal/velocity prepass projects THAT through the previous frame's matrices, instead of assuming the mesh moved rigidly with its entity. Removes the ghosting / smearing of swinging limbs in everything temporal (RTAO denoiser, FSR2, reflection + haze accumulation). Needs r_gpuSkinning (Vulkan) and a velocity consumer (r_fsr / r_motionVectors); ~16 bytes per skinned vertex" );
-
-// Lazily compile the shared skinning compute shader (once). Returns 0 if there is no compute
-// lane (GL3) or it failed to compile — callers then keep the CPU skinner.
-static rhi::ShaderHandle R_MD5_SkinShader( rhi::RHI *r ) {
-	if ( !r_md5SkinShaderTried ) {
-		r_md5SkinShaderTried = true;
-		r_md5SkinShader = r->LoadComputeShader( "md5skin" );	// build-time SPIR-V: no runtime shaderc, so it works on the Windows/mingw build + Proton
-		if ( r_md5SkinShader == 0 ) {
-			common->Printf( "gpuSkin: no compute lane (GL3, or the md5skin SPIR-V is missing)\n" );
-		}
-	}
-	return r_md5SkinShader;
-}
-
-// Lazily compile the re-derive + weld compute shader (once). 0 = unavailable, in which case the
-// skin falls back to the LBS-rotated bind TBN the position kernel already wrote (option B).
-static rhi::ShaderHandle R_MD5_DeriveShader( rhi::RHI *r ) {
-	if ( !r_md5DeriveShaderTried ) {
-		r_md5DeriveShaderTried = true;
-		r_md5DeriveShader = r->LoadComputeShader( "md5derive" );	// build-time SPIR-V (Windows/Proton-safe)
-		if ( r_md5DeriveShader == 0 ) {
-			common->Printf( "gpuSkin: tangent-derive kernel unavailable (md5derive SPIR-V missing) -- falling back to baked bind TBN\n" );
-		}
-	}
-	return r_md5DeriveShader;
-}
-
 
 // R^T * v : transform a bind-pose model-space vector into the joint's local space using the
 // inverse of the (orthonormal) bind rotation. idJointMat is row-major 3x4, so R[r][c]=m[r*4+c]
@@ -178,16 +192,6 @@ static ID_INLINE idVec3 R_MD5_InvRotate( const float *m, const idVec3 &v ) {
 	return idVec3( m[0*4+0]*v[0] + m[1*4+0]*v[1] + m[2*4+0]*v[2],
 	               m[0*4+1]*v[0] + m[1*4+1]*v[1] + m[2*4+1]*v[2],
 	               m[0*4+2]*v[0] + m[1*4+2]*v[1] + m[2*4+2]*v[2] );
-}
-
-// The PREVPOS variant of the skin kernel (same source, one #define after the #version line). Separate
-// program because a storage binding a shader statically uses must be bound at dispatch.
-static rhi::ShaderHandle R_MD5_SkinPrevShader( rhi::RHI *r ) {
-	if ( !r_md5SkinPrevShaderTried ) {
-		r_md5SkinPrevShaderTried = true;
-		r_md5SkinPrevShader = r->LoadComputeShader( "md5skin_prevpos" );	// PREVPOS variant, build-time SPIR-V (Windows/Proton-safe)
-	}
-	return r_md5SkinPrevShader;
 }
 
 static const char *MD5_SnapshotName = "_MD5_Snapshot_";
@@ -924,43 +928,8 @@ void idMD5Mesh::TransformScaledVerts( idDrawVert *verts, const idJointMat *entJo
 // resulting buffer can feed every depth-EQUAL pass (B-2). st/normal/tangents are the linear
 // barycentric interpolation of the source corners (matching interaction.tese's flat interp).
 
-static rhi::ShaderHandle r_md5TessShader = 0;
-static bool r_md5TessShaderTried = false;
-
-// Lazily compile the shared deform compute shader (once). 0 if there's no compute lane (GL3).
-static rhi::ShaderHandle r_md5TessBakeShader = 0;
-static bool r_md5TessBakeShaderTried = false;
-// DUDE: the GPU bake of the deform-once subdivision (md5tessbake.comp); 0 = unavailable -> the CPU bake
-static rhi::ShaderHandle R_MD5_TessBakeShader( rhi::RHI *r ) {
-	if ( !r_md5TessBakeShaderTried ) {
-		r_md5TessBakeShaderTried = true;
-		r_md5TessBakeShader = r->LoadComputeShader( "md5tessbake" );	// build-time SPIR-V
-	}
-	return r_md5TessBakeShader;
-}
-
-static rhi::ShaderHandle r_md5TessPrevShader = 0;
-static bool r_md5TessPrevShaderTried = false;
-// The PREVPOS variant of the deform kernel (md5tessdeform_prevpos.comp): also saves last frame's deformed
-// positions for the velocity prepass, as R_MD5_SkinPrevShader's kernel does for the plain skinned mesh.
-static rhi::ShaderHandle R_MD5_TessPrevShader( rhi::RHI *r ) {
-	if ( !r_md5TessPrevShaderTried ) {
-		r_md5TessPrevShaderTried = true;
-		r_md5TessPrevShader = r->LoadComputeShader( "md5tessdeform_prevpos" );	// build-time SPIR-V
-	}
-	return r_md5TessPrevShader;
-}
-
-static rhi::ShaderHandle R_MD5_TessShader( rhi::RHI *r ) {
-	if ( !r_md5TessShaderTried ) {
-		r_md5TessShaderTried = true;
-		r_md5TessShader = r->LoadComputeShader( "md5tessdeform" );	// build-time SPIR-V (Windows/Proton-safe)
-		if ( r_md5TessShader == 0 ) {
-			common->Printf( "tessDeform: no compute lane (GL3, or the md5tessdeform SPIR-V is missing)\n" );
-		}
-	}
-	return r_md5TessShader;
-}
+// The deform / bake kernels themselves: R_MD5_TessShader, R_MD5_TessPrevShader, R_MD5_TessBakeShader (the
+// kernel table at the top of the file).
 
 /*
 ====================
@@ -978,12 +947,10 @@ recompile lazily on next use against the new backend.
 ====================
 */
 void R_MD5_ResetGpuShaders( void ) {
-	r_md5SkinShader = 0;		r_md5SkinShaderTried = false;
-	r_md5SkinPrevShader = 0;	r_md5SkinPrevShaderTried = false;
-	r_md5DeriveShader = 0;		r_md5DeriveShaderTried = false;
-	r_md5TessShader = 0;		r_md5TessShaderTried = false;
-	r_md5TessPrevShader = 0;	r_md5TessPrevShaderTried = false;
-	r_md5TessBakeShader = 0;	r_md5TessBakeShaderTried = false;
+	for ( int i = 0; i < MD5_SHADER_COUNT; i++ ) {
+		r_md5GpuShaders[i].handle = 0;
+		r_md5GpuShaders[i].tried = false;
+	}
 	// the backend is gone: every per-mesh skin/tess buffer handle cached across all MD5 meshes now
 	// names a reissued table slot. Bump the generation so EnsureSkin/TessBuffersUploaded re-uploads
 	// them lazily and FreeGpuSkinData/FreeTessData skip the (now dangling) DestroyBuffer.
@@ -1498,7 +1465,7 @@ bool idMD5Mesh::BakeTessOnGpu( void ) {
 		stSeam[i].Set( verts[i].st.x, verts[i].st.y, verts[i].color[3] / 255.0f, 0.0f );
 	}
 
-	RB_RHI_AddTessBakeJob( r_md5TessBakeShader, stSeam, numOut, deformInfo->indexes, deformInfo->numIndexes,
+	RB_RHI_AddTessBakeJob( R_MD5_TessBakeShader( r ), stSeam, numOut, deformInfo->indexes, deformInfo->numIndexes,
 	                       tessGpuBarySeam, tessGpuSrcTri, tessGpuHeight, heightHandle, numTessOutVerts, tessBakeLevel );
 	return true;
 }
@@ -1832,7 +1799,7 @@ void idMD5Mesh::QueueGpuSkin( const struct renderEntity_s *ent, const idJointMat
 	if ( r_gpuSkinning.GetBool() && rhi::GetActiveBackendType() == rhi::BT_VULKAN
 	     && skinExpandLocalTBN && R_MD5_SkinShader( rhi::GetRHI() ) != 0 && EnsureSkinBuffersUploaded() ) {
 		rhi::RHI *r = rhi::GetRHI();
-		const rhi::ShaderHandle skinShader = r_md5SkinShader;
+		const rhi::ShaderHandle skinShader = R_MD5_SkinShader( r );
 		const int numOut = numOutputVerts;
 		// (re)allocate the per-surface output buffer if missing or resized
 		if ( tri->gpuSkinVB && tri->gpuSkinVerts != numOut ) {
@@ -1852,7 +1819,7 @@ void idMD5Mesh::QueueGpuSkin( const struct renderEntity_s *ent, const idJointMat
 		rhi::ShaderHandle jobShader = skinShader;
 		if ( R_MD5_SyncPrevBuffer( r, r_skinnedMotionVectors.GetBool() && tri->gpuSkinVB && R_MD5_SkinPrevShader( r ) != 0,
 		                           numOut, tri->gpuSkinPrevVB, tri->gpuSkinPrevAddr, &tri->gpuSkinPrevValid ) ) {
-			jobShader = r_md5SkinPrevShader;
+			jobShader = R_MD5_SkinPrevShader( r );
 		}
 		if ( tri->gpuSkinVB && tri->gpuSkinFrame != tr.frameCount ) {
 			// gpuSkinVB holds the PREVIOUS frame's pose only if it was drawn last frame - skinned then, or
@@ -1980,10 +1947,11 @@ void idMD5Mesh::QueueTessDeform( srfTriangles_t *tri, bool tessDeformActive, boo
 		// PREVPOS kernel copies them out of tessDeformVB before overwriting it); gbuffer.vert reads it by device
 		// address. Same lifetime rules as gpuSkinPrevVB (R_MD5_SyncPrevBuffer); no valid flag: the deform job
 		// decides from tessDeformFrame below.
-		rhi::ShaderHandle tessShader = r_md5TessShader;
+		const rhi::ShaderHandle tessDeformShader = R_MD5_TessShader( r );
+		rhi::ShaderHandle tessShader = tessDeformShader;
 		if ( R_MD5_SyncPrevBuffer( r, r_skinnedMotionVectors.GetBool() && tri->tessDeformVB && R_MD5_TessPrevShader( r ) != 0,
 		                           numTessV, tri->tessDeformPrevVB, tri->tessDeformPrevAddr, NULL ) ) {
-			tessShader = r_md5TessPrevShader;
+			tessShader = R_MD5_TessPrevShader( r );
 		}
 		// one deform dispatch per surface per frame
 		if ( tri->tessDeformVB && tri->tessDeformFrame != tr.frameCount ) {
@@ -1996,7 +1964,7 @@ void idMD5Mesh::QueueTessDeform( srfTriangles_t *tri, bool tessDeformActive, boo
 			tri->tessDeformFrame = tr.frameCount;
 			const int nSrc = deformInfo->numOutputVerts;
 			const float disp = r_tessDisplace.GetFloat();
-			const unsigned int prevBuf = ( tessShader != r_md5TessShader ) ? tri->tessDeformPrevVB : 0;
+			const unsigned int prevBuf = ( tessShader != tessDeformShader ) ? tri->tessDeformPrevVB : 0;
 			if ( tri->gpuSkinVB ) {
 				// GPU source: read the skinned buffer directly (skin flush + its barrier run first)
 				RB_RHI_AddTessJob( tessShader, tri->gpuSkinVB, NULL, nSrc,
