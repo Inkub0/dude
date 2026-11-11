@@ -3880,31 +3880,9 @@ static void RB_RHI_HdrMeterCropView( rhi::RHI *r, const viewDef_t *viewDef ) {
 	rbBloomImg = RB_RHI_Bloom( r, sceneImg, uvRect );
 }
 
-static void RB_RHI_DrawView( rhi::RHI *r, viewDef_t *viewDef ) {
-	backEnd.viewDef = viewDef;	// engine helpers (cinematics, counters) read this
-
-	// Is the main world view a cinematic camera? Read off the VIEW itself, so it works with any
-	// game DLL (mods included) and needs no game-side signal:
-	//   - viewID 0: not a player's first-person eye (cameras, third person, death cam), and
-	//   - near plane below 2: idGameLocal::SetCamera sets r_znear to 1 for as long as a cinematic
-	//     camera is active and restores 3 when it ends (stock behaviour in every SDK-derived DLL;
-	//     taken from the projection that was actually built: P[14] = -2 * zNear).
-	// Latched per main view (world, not a subview); the HDR resolve that consumes it runs after
-	// the HUD's 2D view, whose viewDef would say nothing about the scene.
-	if ( viewDef->viewEntitys && !viewDef->isSubview ) {
-		rhiCinematicView = viewDef->renderView.viewID == 0 && viewDef->projectionMatrix[14] > -4.0f;
-	}
-
-	// window clipping, matching RB_BeginDrawingView
-	r->SetViewport( tr.viewportOffset[0] + viewDef->viewport.x1,
-	                tr.viewportOffset[1] + viewDef->viewport.y1,
-	                viewDef->viewport.x2 + 1 - viewDef->viewport.x1,
-	                viewDef->viewport.y2 + 1 - viewDef->viewport.y1 );
-	r->SetScissor( tr.viewportOffset[0] + viewDef->viewport.x1 + viewDef->scissor.x1,
-	               tr.viewportOffset[1] + viewDef->viewport.y1 + viewDef->scissor.y1,
-	               viewDef->scissor.x2 + 1 - viewDef->scissor.x1,
-	               viewDef->scissor.y2 + 1 - viewDef->scissor.y1 );
-
+// the view's pass: a 3D view clears depth/stencil and draws the world (shadow maps, light loop, interactions),
+// the DI apply and the portal sky; a 2D view draws over the existing contents
+static void RB_RHI_DrawViewBegin( rhi::RHI *r, viewDef_t *viewDef ) {
 	if ( viewDef->viewEntitys ) {
 		// 3D world view: clear depth/stencil like RB_BeginDrawingView (color
 		// is never cleared — the r_clear pass at frame start handles that),
@@ -3938,7 +3916,35 @@ static void RB_RHI_DrawView( rhi::RHI *r, viewDef_t *viewDef ) {
 		// 2D view (menu/console/HUD/loading): draw over existing contents
 		r->BeginPass( NULL );
 	}
+}
 
+// the opaque/translucent split: reflections, the DI and RTGI applies (opaque-surface lighting, inside FSR2's
+// opaque snapshot) and that snapshot. Called once per view: at the first translucent surface, else after the loop.
+static void RB_RHI_DrawViewOpaqueSplit( rhi::RHI *r, viewDef_t *viewDef ) {
+	r->GpuScopeBegin( "reflections" );	// screen-space SSR or RT reflections (whichever ran; see rtrefl.* vs no children)
+	RB_RHI_ScreenSpaceReflections( r, viewDef );
+	r->GpuScopeEnd();
+	// H6c RT GI apply, HERE (before the snapshot) rather than after post: the bounce is additive
+	// opaque-surface lighting, so it must be part of FSR2's opaque snapshot — added afterwards it
+	// looked like flash/particle content to the auto-reactive mask and got de-ghosted into a
+	// blocky "square" over strong-GI regions. No-op unless r_rtgi is on; idempotent per view.
+	// ReSTIR DI Stage D: the direct-lighting apply, same site + same reasons (opaque-surface lighting,
+	// must be inside FSR2's opaque snapshot). No-op unless r_rtReStirDIApply lit this view.
+	r->GpuScopeBegin( "restir.di.apply" );
+	RB_RHI_ReStirDIApply( r, viewDef );
+	r->GpuScopeEnd();
+	r->GpuScopeBegin( "rtgi apply" );
+	RB_RHI_RtgiApply( r, viewDef );
+	r->GpuScopeEnd();
+	// R1/D: snapshot the opaque scene (incl. the SSR composite — reflections live on
+	// opaque surfaces, as does the GI bounce just applied) for FSR2's auto-reactive mask,
+	// before particles/blends draw
+	RB_RHI_FsrCaptureOpaque( r, viewDef );
+}
+
+// the forward stage: ambient/emissive/decal passes, the opaque split, fog + volumetrics, the post-process-sort
+// surfaces. For a 2D view (no world) this is the GUI/HUD/menu draw.
+static void RB_RHI_DrawViewForward( rhi::RHI *r, viewDef_t *viewDef ) {
 	// ambient/emissive shader passes (both view types); for 2D views the GL
 	// scissor was just set to the view rect, keep the tracking in sync
 	if ( !viewDef->viewEntitys ) {
@@ -3977,39 +3983,12 @@ static void RB_RHI_DrawView( rhi::RHI *r, viewDef_t *viewDef ) {
 		}
 		if ( !ssrDone && drawSurfs[i]->material->GetSort() > SS_DECAL ) {
 			ssrDone = true;
-			r->GpuScopeBegin( "reflections" );	// screen-space SSR or RT reflections (whichever ran; see rtrefl.* vs no children)
-			RB_RHI_ScreenSpaceReflections( r, viewDef );
-			r->GpuScopeEnd();
-			// H6c RT GI apply, HERE (before the snapshot) rather than after post: the bounce is additive
-			// opaque-surface lighting, so it must be part of FSR2's opaque snapshot — added afterwards it
-			// looked like flash/particle content to the auto-reactive mask and got de-ghosted into a
-			// blocky "square" over strong-GI regions. No-op unless r_rtgi is on; idempotent per view.
-			// ReSTIR DI Stage D: the direct-lighting apply, same site + same reasons (opaque-surface lighting,
-			// must be inside FSR2's opaque snapshot). No-op unless r_rtReStirDIApply lit this view.
-			r->GpuScopeBegin( "restir.di.apply" );
-			RB_RHI_ReStirDIApply( r, viewDef );
-			r->GpuScopeEnd();
-			r->GpuScopeBegin( "rtgi apply" );
-			RB_RHI_RtgiApply( r, viewDef );
-			r->GpuScopeEnd();
-			// R1/D: snapshot the opaque scene (incl. the SSR composite — reflections live on
-			// opaque surfaces, as does the GI bounce just applied) for FSR2's auto-reactive mask,
-			// before particles/blends draw
-			RB_RHI_FsrCaptureOpaque( r, viewDef );
+			RB_RHI_DrawViewOpaqueSplit( r, viewDef );
 		}
 		RB_RHI_RenderShaderPasses( r, viewDef, drawSurfs[i], currentSpace, mvp );
 	}
 	if ( !ssrDone ) {
-		r->GpuScopeBegin( "reflections" );
-		RB_RHI_ScreenSpaceReflections( r, viewDef );	// view had no translucent surfaces
-		r->GpuScopeEnd();
-		r->GpuScopeBegin( "restir.di.apply" );			// ReSTIR DI direct lighting into the opaque snapshot
-		RB_RHI_ReStirDIApply( r, viewDef );
-		r->GpuScopeEnd();
-		r->GpuScopeBegin( "rtgi apply" );				// GI into the opaque snapshot (see the split above)
-		RB_RHI_RtgiApply( r, viewDef );
-		r->GpuScopeEnd();
-		RB_RHI_FsrCaptureOpaque( r, viewDef );			// fog/post still draw after this point
+		RB_RHI_DrawViewOpaqueSplit( r, viewDef );	// the view had no translucent surfaces; fog/post still draw after this point
 	}
 
 	// fog and blend lights
@@ -4043,7 +4022,78 @@ static void RB_RHI_DrawView( rhi::RHI *r, viewDef_t *viewDef ) {
 		r->GpuScopeEnd();	// end fwd.postsurf
 	}
 	r->GpuScopeEnd();	// end fwdScope
+}
 
+// the FSR2 temporal resolve of the primary view (VK-only; the display-size composite takes the frame from here on)
+static void RB_RHI_DrawViewFsr2( rhi::RHI *r, const viewDef_t *viewDef ) {
+	// R1/C2: FSR2 Native-AA temporal resolve. Reads the pre-tonemap HDR scene, its
+	// depth, and A2's per-object velocity; the backend writes the resolved image back
+	// over rhiHdrRT (copy-back, Native-AA-exact), so the eye-adapt/bloom measurement
+	// below and everything after — HUD composite, tonemap, grain — consume the
+	// stabilised scene. VK-only; inert when the velocity MRT wasn't produced.
+	// Only the TRUE primary view runs FSR2, not a portal-sky background view. A portal-sky map
+	// (D3XP/LM) issues two full-screen, non-subview RenderScene calls per frame -- the sky view,
+	// then the main view -- and BOTH pass isWindowView. The per-frame FSR/composite state (one
+	// FfxFsr2Context, rbFsrRanThisFrame, rbHdrCompositeActive, the SetFrameTarget(composite)
+	// reroute) is built for ONE primary view, so running FSR2 on the sky view too corrupted what
+	// the main view resolves ("only sky, geometry gone" with r_fsr on). RenderScene sets
+	// tr.primaryView before each top-level view, so by backend time it names the LAST one = the
+	// main view; the sky view fails this test and renders plainly for its _currentRender capture.
+	if ( r_fsr.GetBool() && rbHdrActiveThisFrame && rhiHdrRT && viewDef == tr.primaryView
+	     && rhi::GetActiveBackendType() == rhi::BT_VULKAN ) {
+		const rhi::RenderTargetHandle velRT = RB_RHI_VelocityTargetThisView();
+		if ( velRT != 0 ) {
+			// wall-clock delta between dispatches (FSR2 wants ms; menus/paused frames
+			// still advance it, which is correct — history ages in real time)
+			static int fsrPrevMs = 0;
+			const int nowMs = Sys_Milliseconds();
+			float dtMs = ( fsrPrevMs > 0 ) ? (float)( nowMs - fsrPrevMs ) : 16.6f;
+			fsrPrevMs = nowMs;
+			dtMs = idMath::ClampFloat( 0.1f, 200.0f, dtMs );
+
+			rhi::Fsr2DispatchArgs fa;
+			memset( &fa, 0, sizeof( fa ) );
+			fa.sceneRT = rhiHdrRT;
+			fa.velocityRT = velRT;
+			fa.jitterX = viewDef->jitter[0];
+			fa.jitterY = viewDef->jitter[1];
+			fa.frameTimeMs = dtMs;
+			fa.fovYRadians = DEG2RAD( viewDef->renderView.fov_y );
+			fa.zNear = r_znear.GetFloat();
+			fa.reset = RB_RHI_TemporalFsrReset( viewDef );
+			// DUDE: FSR2's history is only last frame's if it ran last frame: after frames that
+			// skipped it (Quake 4's double vision renders into a crop for seconds, a worldless
+			// menu) the history is that old, and only a camera jump reset it
+			static int fsrPrevFrame = -100;
+			if ( fsrPrevFrame != tr.frameCount - 1 ) {
+				fa.reset = true;
+			}
+			fsrPrevFrame = tr.frameCount;
+			fa.sharpness = r_fsrSharpness.GetFloat() > 0.0f ? r_fsrSharpness.GetFloat() : -1.0f;
+			// auto-reactive (R1/D): only meaningful when this frame's opaque snapshot was
+			// captured (the backend also guards on that); < 0 disables
+			fa.reactiveScale = r_fsrReactive.GetBool() ? r_fsrReactiveScale.GetFloat() : -1.0f;
+			// sub-native: the display-size composite receives the output (0 = the Native-AA
+			// copy-back over the scene, kept as the fallback when no composite exists)
+			fa.outputRT = rhiHdrCompositeRT;
+			r->GpuScopeBegin( "fsr2" );
+			rbFsrRanThisFrame = r->RunFsr2( fa );
+			r->GpuScopeEnd();
+			// the scene/HUD reorder: from here on the frame draws into the display-size
+			// composite -- the eye-adapt/bloom measurement, chroma, the HUD / console / menus,
+			// and the resolve all consume the upscaled scene. Film grain stays where it was:
+			// folded into the resolve over THIS display-size image, never inside FSR2's input.
+			if ( rbFsrRanThisFrame && rhiHdrCompositeRT ) {
+				r->SetFrameTarget( rhiHdrCompositeRT );
+				rbHdrCompositeActive = true;
+			}
+		}
+	}
+}
+
+// the primary 3D view's post chain: GL AA/post, the apply fallbacks, debug overlays, DoF, FSR2, eye adaptation +
+// bloom, chromatic aberration; a crop-view frame meters its first world view instead
+static void RB_RHI_DrawViewPost( rhi::RHI *r, viewDef_t *viewDef ) {
 	// DUDE film grain / chromatic aberration over the finished 3D view, before
 	// any 2D/GUI (improvements menu, default off). Fullscreen primary view only:
 	// subviews (mirrors, camera monitors) are composited into it and grained
@@ -4090,69 +4140,7 @@ static void RB_RHI_DrawView( rhi::RHI *r, viewDef_t *viewDef ) {
 		// weapon, on both backends and under HDR. Zero cost unless a reload is easing
 		// r_weaponReloadFocus above 0 (idPlayerView writes it).
 		RB_RHI_DepthOfField( r, viewDef );
-		// R1/C2: FSR2 Native-AA temporal resolve. Reads the pre-tonemap HDR scene, its
-		// depth, and A2's per-object velocity; the backend writes the resolved image back
-		// over rhiHdrRT (copy-back, Native-AA-exact), so the eye-adapt/bloom measurement
-		// below and everything after — HUD composite, tonemap, grain — consume the
-		// stabilised scene. VK-only; inert when the velocity MRT wasn't produced.
-		// Only the TRUE primary view runs FSR2, not a portal-sky background view. A portal-sky map
-		// (D3XP/LM) issues two full-screen, non-subview RenderScene calls per frame -- the sky view,
-		// then the main view -- and BOTH pass isWindowView. The per-frame FSR/composite state (one
-		// FfxFsr2Context, rbFsrRanThisFrame, rbHdrCompositeActive, the SetFrameTarget(composite)
-		// reroute) is built for ONE primary view, so running FSR2 on the sky view too corrupted what
-		// the main view resolves ("only sky, geometry gone" with r_fsr on). RenderScene sets
-		// tr.primaryView before each top-level view, so by backend time it names the LAST one = the
-		// main view; the sky view fails this test and renders plainly for its _currentRender capture.
-		if ( r_fsr.GetBool() && rbHdrActiveThisFrame && rhiHdrRT && viewDef == tr.primaryView
-		     && rhi::GetActiveBackendType() == rhi::BT_VULKAN ) {
-			const rhi::RenderTargetHandle velRT = RB_RHI_VelocityTargetThisView();
-			if ( velRT != 0 ) {
-				// wall-clock delta between dispatches (FSR2 wants ms; menus/paused frames
-				// still advance it, which is correct — history ages in real time)
-				static int fsrPrevMs = 0;
-				const int nowMs = Sys_Milliseconds();
-				float dtMs = ( fsrPrevMs > 0 ) ? (float)( nowMs - fsrPrevMs ) : 16.6f;
-				fsrPrevMs = nowMs;
-				dtMs = idMath::ClampFloat( 0.1f, 200.0f, dtMs );
-
-				rhi::Fsr2DispatchArgs fa;
-				memset( &fa, 0, sizeof( fa ) );
-				fa.sceneRT = rhiHdrRT;
-				fa.velocityRT = velRT;
-				fa.jitterX = viewDef->jitter[0];
-				fa.jitterY = viewDef->jitter[1];
-				fa.frameTimeMs = dtMs;
-				fa.fovYRadians = DEG2RAD( viewDef->renderView.fov_y );
-				fa.zNear = r_znear.GetFloat();
-				fa.reset = RB_RHI_TemporalFsrReset( viewDef );
-				// DUDE: FSR2's history is only last frame's if it ran last frame: after frames that
-				// skipped it (Quake 4's double vision renders into a crop for seconds, a worldless
-				// menu) the history is that old, and only a camera jump reset it
-				static int fsrPrevFrame = -100;
-				if ( fsrPrevFrame != tr.frameCount - 1 ) {
-					fa.reset = true;
-				}
-				fsrPrevFrame = tr.frameCount;
-				fa.sharpness = r_fsrSharpness.GetFloat() > 0.0f ? r_fsrSharpness.GetFloat() : -1.0f;
-				// auto-reactive (R1/D): only meaningful when this frame's opaque snapshot was
-				// captured (the backend also guards on that); < 0 disables
-				fa.reactiveScale = r_fsrReactive.GetBool() ? r_fsrReactiveScale.GetFloat() : -1.0f;
-				// sub-native: the display-size composite receives the output (0 = the Native-AA
-				// copy-back over the scene, kept as the fallback when no composite exists)
-				fa.outputRT = rhiHdrCompositeRT;
-				r->GpuScopeBegin( "fsr2" );
-				rbFsrRanThisFrame = r->RunFsr2( fa );
-				r->GpuScopeEnd();
-				// the scene/HUD reorder: from here on the frame draws into the display-size
-				// composite -- the eye-adapt/bloom measurement, chroma, the HUD / console / menus,
-				// and the resolve all consume the upscaled scene. Film grain stays where it was:
-				// folded into the resolve over THIS display-size image, never inside FSR2's input.
-				if ( rbFsrRanThisFrame && rhiHdrCompositeRT ) {
-					r->SetFrameTarget( rhiHdrCompositeRT );
-					rbHdrCompositeActive = true;
-				}
-			}
-		}
+		RB_RHI_DrawViewFsr2( r, viewDef );
 		// HDR eye adaptation (Phase B1): measure the SCENE luminance HERE — end of the primary
 		// 3D view, before the HUD / console / menus are composited into the HDR buffer — so the
 		// adapted exposure tracks the world, not the UI. The resolve samples rbEyeExposureImg.
@@ -4191,7 +4179,10 @@ static void RB_RHI_DrawView( rhi::RHI *r, viewDef_t *viewDef ) {
 		RB_RHI_HdrMeterCropView( r, viewDef );
 		r->GpuScopeEnd();
 	}
+}
 
+// the debug visualisation (r_showTris, r_showNormals, debug lines/polygons, ...) over a 3D view
+static void RB_RHI_DrawViewDebugTools( rhi::RHI *r, viewDef_t *viewDef ) {
 	// debug visualization (r_showTris, r_showNormals, debug lines/polygons, …)
 	// — Chunk G. Renders through idImmediateMode's core path; each sub-view
 	// early-outs on its own cvar, so this is free when nothing is enabled.
@@ -4221,6 +4212,40 @@ static void RB_RHI_DrawView( rhi::RHI *r, viewDef_t *viewDef ) {
 			RB_RenderDebugTools( (drawSurf_t **)&viewDef->drawSurfs[0], viewDef->numDrawSurfs );
 		}
 	}
+}
+
+static void RB_RHI_DrawView( rhi::RHI *r, viewDef_t *viewDef ) {
+	backEnd.viewDef = viewDef;	// engine helpers (cinematics, counters) read this
+
+	// Is the main world view a cinematic camera? Read off the VIEW itself, so it works with any
+	// game DLL (mods included) and needs no game-side signal:
+	//   - viewID 0: not a player's first-person eye (cameras, third person, death cam), and
+	//   - near plane below 2: idGameLocal::SetCamera sets r_znear to 1 for as long as a cinematic
+	//     camera is active and restores 3 when it ends (stock behaviour in every SDK-derived DLL;
+	//     taken from the projection that was actually built: P[14] = -2 * zNear).
+	// Latched per main view (world, not a subview); the HDR resolve that consumes it runs after
+	// the HUD's 2D view, whose viewDef would say nothing about the scene.
+	if ( viewDef->viewEntitys && !viewDef->isSubview ) {
+		rhiCinematicView = viewDef->renderView.viewID == 0 && viewDef->projectionMatrix[14] > -4.0f;
+	}
+
+	// window clipping, matching RB_BeginDrawingView
+	r->SetViewport( tr.viewportOffset[0] + viewDef->viewport.x1,
+	                tr.viewportOffset[1] + viewDef->viewport.y1,
+	                viewDef->viewport.x2 + 1 - viewDef->viewport.x1,
+	                viewDef->viewport.y2 + 1 - viewDef->viewport.y1 );
+	r->SetScissor( tr.viewportOffset[0] + viewDef->viewport.x1 + viewDef->scissor.x1,
+	               tr.viewportOffset[1] + viewDef->viewport.y1 + viewDef->scissor.y1,
+	               viewDef->scissor.x2 + 1 - viewDef->scissor.x1,
+	               viewDef->scissor.y2 + 1 - viewDef->scissor.y1 );
+
+	RB_RHI_DrawViewBegin( r, viewDef );
+
+	RB_RHI_DrawViewForward( r, viewDef );
+
+	RB_RHI_DrawViewPost( r, viewDef );
+
+	RB_RHI_DrawViewDebugTools( r, viewDef );
 
 	// DUDE: a portal sky subview hands its picture to the view that drew it
 	if ( viewDef->isPortalSkyView ) {
