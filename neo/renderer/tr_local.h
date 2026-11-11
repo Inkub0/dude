@@ -969,6 +969,7 @@ extern idCVar r_pbrFireflyClamp;		// GGX lobe ceiling (spike suppression / highl
 // Per-category defaults (metal/rough/wet/env) live in a table now (Material.cpp,
 // R_PbrCategoryDefaults), persisted as @cat rows in the pbr config — not cvars.
 extern idCVar r_pbrEnvScale;			// Phase C.1 metal env floor GLOBAL base (per-category env rides on top)
+extern idCVar r_pbrDielectricSheen;	// the same floor for non-metals: F0 (4 %) of each light past the spec-map mask (0 = off)
 
 // DUDE skin / flesh subsurface scattering (docs/skin-shading.md) — wrapped diffuse on the
 // classifier's skin/flesh categories; diffuse-only, works on every shading model (all tiers)

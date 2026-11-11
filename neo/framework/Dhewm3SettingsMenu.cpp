@@ -5045,6 +5045,12 @@ static void DrawDbgGroup_Materials()
 		"going black where the highlight misses. Scales with light and shadow (metals stay dark in "
 		"darkness). With this up, the Metalness Cap can rise toward 1." );
 
+	CvarSliderF( "Dark Surface Sheen", r_pbrDielectricSheen, 0.0f, 4.0f, "%.2f", "the same stand-in for non-metals: a dark-painted "
+		"surface with a near-black specular map (the small medkit's lid) has nothing to show a light with under PBR, "
+		"since the GGX highlight is narrow and the map masks the rest, so it renders as a hole where vanilla's broad "
+		"specular spread a faint sheen. Adds the 4% dielectric base reflectance times this, from all directions, past "
+		"the specular-map mask. 1 = a sheen on the order of vanilla's; 0 = physical (holes return)." );
+
 	// per-category presets: the 8x4 grid every tagged material tracks live. A pinned
 	// (none) or per-material override still keeps its own values (edit those in the
 	// in-game material editor). Metalness/roughness = surface response; wetness = a
@@ -7715,6 +7721,8 @@ static void PbrEditor_DrawCategoriesTab()
 	ImGui::Spacing();
 	PbrCvarSlider( "Metal Color Retention", r_pbrMetalDiffuse, 0.0f, 1.0f );
 	ImGui::TextDisabled( "keeps the asset's painted color on metals (0 = physical kill, 1 = full)" );
+	PbrCvarSlider( "Dark Surface Sheen", r_pbrDielectricSheen, 0.0f, 4.0f );
+	ImGui::TextDisabled( "non-metal environment floor: F0 past the spec-map mask, so black paint is not a hole (0 = physical)" );
 }
 
 // called from D3::ImGuiHooks::NewFrame() (if this window is enabled)

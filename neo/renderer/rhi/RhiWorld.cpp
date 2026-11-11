@@ -1718,6 +1718,9 @@ static void RB_RHI_FillPbrAndFilm( rhi::RenderParams &parms, const drawInteracti
 		// (or a per-material override column) scales the global r_pbrEnvScale; resolved
 		// above as envMul, neutral 1 keeps the global value.
 		parms.occlusionParms[3] = r_pbrEnvScale.GetFloat() * envMul;
+		// the dielectric sheen (r_pbrDielectricSheen) rides parallaxParms2.y, spare on every
+		// interaction draw (FillParallaxParms only writes .x; the DI gather's use of yzw is another draw)
+		parms.parallaxParms2[1] = r_pbrDielectricSheen.GetFloat();
 
 		// organic materials authored without a specular stage (most blood decals
 		// — bloodpool01 — and the gibs) would zero the GGX lobe through the
