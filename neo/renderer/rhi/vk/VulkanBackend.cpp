@@ -183,6 +183,33 @@ static const int FRAMES_IN_FLIGHT = 2;
 ===============================================================================
 */
 
+// CreateDeviceAndVma: the optional device extensions the physical device offers (ProbeDeviceExtensions)
+struct devExtProbe_t {
+	bool haveAccelExt, haveRayQueryExt, haveDeferredOpsExt, haveComputeDerivExt, haveMemoryBudgetExt, havePipelineExecPropsExt;
+};
+// CreateDeviceAndVma: the feature structs one vkGetPhysicalDeviceFeatures2 fills (QueryDeviceFeatures); supported13 heads the chain
+struct devFeatureQuery_t {
+	VkPhysicalDeviceFeatures supported;
+	VkPhysicalDeviceVulkan13Features supported13;
+	VkPhysicalDeviceVulkan12Features supported12;
+	VkPhysicalDeviceVulkan11Features supported11;
+	VkPhysicalDeviceAccelerationStructureFeaturesKHR supportedAccel;
+	VkPhysicalDeviceRayQueryFeaturesKHR supportedRq;
+	VkPhysicalDeviceComputeShaderDerivativesFeaturesKHR supportedCsd;
+	VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR supportedPep;
+};
+// CreateDeviceAndVma: the feature structs vkCreateDevice enables (EnableDeviceFeatures); enabled13 heads the pNext chain
+struct devFeatureEnable_t {
+	VkPhysicalDeviceFeatures enabled;
+	VkPhysicalDeviceVulkan13Features enabled13;
+	VkPhysicalDeviceVulkan12Features enabled12;
+	VkPhysicalDeviceVulkan11Features enabled11;
+	VkPhysicalDeviceAccelerationStructureFeaturesKHR enabledAccel;
+	VkPhysicalDeviceRayQueryFeaturesKHR enabledRq;
+	VkPhysicalDeviceComputeShaderDerivativesFeaturesKHR enabledCsd;
+	VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR enabledPep;
+};
+
 class VulkanBackend final : public RHI {
 public:
 	VulkanBackend() = default;		// members carry their own initializers
@@ -1396,6 +1423,28 @@ private:
 	std::vector<VkFramebuffer>	imguiFbs;
 	bool						imguiUp = false;
 	void *						imguiDrawData = NULL;	// ImDrawData* for this frame
+	// ---- structural pass: the stage helpers of the big functions ----
+	// CreateDeviceAndVma
+	void						ProbeDeviceExtensions( devExtProbe_t &p );
+	void						QueryDeviceFeatures( const devExtProbe_t &p, devFeatureQuery_t &q ) const;
+	void						EnableDeviceFeatures( const devExtProbe_t &p, const devFeatureQuery_t &q, devFeatureEnable_t &e, const char **devExts, uint32_t &devExtCount );
+	void						ResolveDeviceEntryPoints();
+	bool						CreateVma();
+	// BeginFrame
+	void						BeginFrameIdleRebuild();
+	void						BeginFrameSelfTests();
+	bool						BeginFrameAcquire( FrameSlot &f );
+	void						BeginFrameGpuTimer( FrameSlot &f );
+	void						BeginFrameRecycleSlot();
+	void						BeginFrameRtBuilds( FrameSlot &f );
+	// CreateM2Resources
+	void						CreateGpuTimerPool();
+	bool						CreateRings();
+	bool						CreateGraphicsLayouts();
+	bool						CreateComputeLayout();
+	bool						CreateDescriptorPools();
+	bool						CreateUploadPlumbing();
+	bool						CreateDummyImages();
 };
 
 static VulkanBackend vkBackend;
@@ -1935,70 +1984,111 @@ bool VulkanBackend::PickPhysicalDevice() {
 	return true;
 }
 
-/*
-====================
-VulkanBackend::CreateDeviceAndVma
-====================
-*/
-bool VulkanBackend::CreateDeviceAndVma() {
-	float prio = 1.0f;
-	VkDeviceQueueCreateInfo queues[2] = {};
-	uint32_t queueCount = 0;
-
-	queues[queueCount].sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
-	queues[queueCount].queueFamilyIndex = gfxFamily;
-	queues[queueCount].queueCount = 1;
-	queues[queueCount].pQueuePriorities = &prio;
-	queueCount++;
-	if ( presentFamily != gfxFamily ) {
-		queues[queueCount] = queues[0];
-		queues[queueCount].queueFamilyIndex = presentFamily;
-		queueCount++;
-	}
-
-	const char *devExts[12] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
-	uint32_t devExtCount = 1;
-
+// which optional device extensions the physical device offers (+ haveCheckpoints)
+void VulkanBackend::ProbeDeviceExtensions( devExtProbe_t &p ) {
 	// R2 ray-query foundation: probe for the RT extension trio. deferred_host_operations is a
 	// hard dependency of acceleration_structure even though we never use host builds. All other
 	// dependencies (BDA, descriptor indexing) are core on our 1.4 floor.
 	// H2b: also probe VK_KHR_compute_shader_derivatives — NRD's vendored SPIR-V is built
 	// with quad intrinsics (libs/nrd/README-DUDE.md) and needs the quads feature bit.
-	bool haveAccelExt = false, haveRayQueryExt = false, haveDeferredOpsExt = false;
-	bool haveComputeDerivExt = false;
-	bool haveMemoryBudgetExt = false;
-	bool havePipelineExecPropsExt = false;
-	{
-		uint32_t extCount = 0;
-		vkEnumerateDeviceExtensionProperties( physical, NULL, &extCount, NULL );
-		std::vector<VkExtensionProperties> extProps( extCount );
-		if ( extCount > 0 ) {
-			vkEnumerateDeviceExtensionProperties( physical, NULL, &extCount, extProps.data() );
-		}
-		for ( uint32_t i = 0; i < extCount; i++ ) {
-			if ( !strcmp( extProps[i].extensionName, VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME ) ) {
-				haveAccelExt = true;
-			} else if ( !strcmp( extProps[i].extensionName, VK_KHR_RAY_QUERY_EXTENSION_NAME ) ) {
-				haveRayQueryExt = true;
-			} else if ( !strcmp( extProps[i].extensionName, VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME ) ) {
-				haveDeferredOpsExt = true;
-			} else if ( !strcmp( extProps[i].extensionName, VK_KHR_COMPUTE_SHADER_DERIVATIVES_EXTENSION_NAME ) ) {
-				haveComputeDerivExt = true;
-			} else if ( !strcmp( extProps[i].extensionName, VK_EXT_MEMORY_BUDGET_EXTENSION_NAME ) ) {
-				haveMemoryBudgetExt = true;
-			} else if ( !strcmp( extProps[i].extensionName, VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME ) ) {
-				haveCheckpoints = true;		// NVIDIA: hang localisation markers (see CheckpointMark)
-			} else if ( !strcmp( extProps[i].extensionName, VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME ) ) {
-				havePipelineExecPropsExt = true;	// r_vkPipelineStats: per-stage register / spill readout (dev tool)
-			}
+	uint32_t extCount = 0;
+	vkEnumerateDeviceExtensionProperties( physical, NULL, &extCount, NULL );
+	std::vector<VkExtensionProperties> extProps( extCount );
+	if ( extCount > 0 ) {
+		vkEnumerateDeviceExtensionProperties( physical, NULL, &extCount, extProps.data() );
+	}
+	for ( uint32_t i = 0; i < extCount; i++ ) {
+		if ( !strcmp( extProps[i].extensionName, VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME ) ) {
+			p.haveAccelExt = true;
+		} else if ( !strcmp( extProps[i].extensionName, VK_KHR_RAY_QUERY_EXTENSION_NAME ) ) {
+			p.haveRayQueryExt = true;
+		} else if ( !strcmp( extProps[i].extensionName, VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME ) ) {
+			p.haveDeferredOpsExt = true;
+		} else if ( !strcmp( extProps[i].extensionName, VK_KHR_COMPUTE_SHADER_DERIVATIVES_EXTENSION_NAME ) ) {
+			p.haveComputeDerivExt = true;
+		} else if ( !strcmp( extProps[i].extensionName, VK_EXT_MEMORY_BUDGET_EXTENSION_NAME ) ) {
+			p.haveMemoryBudgetExt = true;
+		} else if ( !strcmp( extProps[i].extensionName, VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME ) ) {
+			haveCheckpoints = true;		// NVIDIA: hang localisation markers (see CheckpointMark)
+		} else if ( !strcmp( extProps[i].extensionName, VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME ) ) {
+			p.havePipelineExecPropsExt = true;	// r_vkPipelineStats: per-stage register / spill readout (dev tool)
 		}
 	}
+}
 
+// what the device supports: the core features and the 1.1 / 1.2 / 1.3 + extension feature structs (chained for one query)
+void VulkanBackend::QueryDeviceFeatures( const devExtProbe_t &p, devFeatureQuery_t &q ) const {
+	const bool haveAccelExt = p.haveAccelExt;
+	const bool haveRayQueryExt = p.haveRayQueryExt;
+	const bool haveDeferredOpsExt = p.haveDeferredOpsExt;
+	const bool haveComputeDerivExt = p.haveComputeDerivExt;
+	const bool havePipelineExecPropsExt = p.havePipelineExecPropsExt;
+	VkPhysicalDeviceFeatures &supported = q.supported;
+	vkGetPhysicalDeviceFeatures( physical, &supported );
+	// discard in fragment shaders compiles to OpDemoteToHelperInvocation under
+	// the vulkan1.4 SPIR-V target (modern helper-invocation semantics rather
+	// than the old OpKill); the capability needs shaderDemoteToHelperInvocation,
+	// a core + required feature since Vulkan 1.3, so guaranteed on our 1.4 floor.
+	VkPhysicalDeviceVulkan13Features &supported13 = q.supported13;
+	supported13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
+	// Vulkan 1.2 feature struct: drawIndirectCount (the vkCmdDraw*IndirectCount form) lives here.
+	VkPhysicalDeviceVulkan12Features &supported12 = q.supported12;
+	supported12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+	supported13.pNext = &supported12;
+	// Vulkan 1.1 feature struct: 16-bit storage, needed by FSR2's fp16 shader permutations.
+	VkPhysicalDeviceVulkan11Features &supported11 = q.supported11;
+	supported11.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
+	supported12.pNext = &supported11;
+	// R2: acceleration-structure + ray-query feature structs, chained into the query only when
+	// the extensions actually exist (an unrecognized pNext struct is not valid otherwise).
+	VkPhysicalDeviceAccelerationStructureFeaturesKHR &supportedAccel = q.supportedAccel;
+	supportedAccel.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR;
+	VkPhysicalDeviceRayQueryFeaturesKHR &supportedRq = q.supportedRq;
+	supportedRq.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR;
+	if ( haveAccelExt && haveRayQueryExt && haveDeferredOpsExt ) {
+		supported11.pNext = &supportedAccel;
+		supportedAccel.pNext = &supportedRq;
+	}
+	// H2b: compute-shader derivatives feature query (chained only when the ext exists)
+	VkPhysicalDeviceComputeShaderDerivativesFeaturesKHR &supportedCsd = q.supportedCsd;
+	supportedCsd.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COMPUTE_SHADER_DERIVATIVES_FEATURES_KHR;
+	if ( haveComputeDerivExt ) {
+		supportedCsd.pNext = supported11.pNext;
+		supported11.pNext = &supportedCsd;
+	}
+	// r_vkPipelineStats: pipeline-executable-properties feature query (chained only when the ext exists)
+	VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR &supportedPep = q.supportedPep;
+	supportedPep.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_EXECUTABLE_PROPERTIES_FEATURES_KHR;
+	if ( havePipelineExecPropsExt ) {
+		supportedPep.pNext = supported11.pNext;
+		supported11.pNext = &supportedPep;
+	}
+	VkPhysicalDeviceFeatures2 supported2 = {};
+	supported2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+	supported2.pNext = &supported13;
+	vkGetPhysicalDeviceFeatures2( physical, &supported2 );
+}
+
+// what we enable (and the have* flags the rest of the backend keys off): the core features, the chained 1.1 / 1.2 / 1.3 +
+// extension feature structs (e.enabled13 heads the chain) and the extension names they need
+void VulkanBackend::EnableDeviceFeatures( const devExtProbe_t &p, const devFeatureQuery_t &q, devFeatureEnable_t &e, const char **devExts, uint32_t &devExtCount ) {
+	const bool haveAccelExt = p.haveAccelExt;
+	const bool haveRayQueryExt = p.haveRayQueryExt;
+	const bool haveDeferredOpsExt = p.haveDeferredOpsExt;
+	const bool haveComputeDerivExt = p.haveComputeDerivExt;
+	const bool haveMemoryBudgetExt = p.haveMemoryBudgetExt;
+	const bool havePipelineExecPropsExt = p.havePipelineExecPropsExt;
+	const VkPhysicalDeviceFeatures &supported = q.supported;
+	const VkPhysicalDeviceVulkan13Features &supported13 = q.supported13;
+	const VkPhysicalDeviceVulkan12Features &supported12 = q.supported12;
+	const VkPhysicalDeviceVulkan11Features &supported11 = q.supported11;
+	const VkPhysicalDeviceAccelerationStructureFeaturesKHR &supportedAccel = q.supportedAccel;
+	const VkPhysicalDeviceRayQueryFeaturesKHR &supportedRq = q.supportedRq;
+	const VkPhysicalDeviceComputeShaderDerivativesFeaturesKHR &supportedCsd = q.supportedCsd;
+	const VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR &supportedPep = q.supportedPep;
 	// optional features the M2+ paths use when present: sampler anisotropy
 	// (TF_DEFAULT textures) and line-fill mode (GLS_POLYMODE_LINE debug draws)
-	VkPhysicalDeviceFeatures supported = {};
-	vkGetPhysicalDeviceFeatures( physical, &supported );
-	VkPhysicalDeviceFeatures enabled = {};
+	VkPhysicalDeviceFeatures &enabled = e.enabled;
 	haveAnisotropy = supported.samplerAnisotropy == VK_TRUE;
 	haveFillModeNonSolid = supported.fillModeNonSolid == VK_TRUE;
 	enabled.samplerAnisotropy = haveAnisotropy ? VK_TRUE : VK_FALSE;
@@ -2046,50 +2136,7 @@ bool VulkanBackend::CreateDeviceAndVma() {
 	haveDrawIndirectFirstInstance = supported.drawIndirectFirstInstance == VK_TRUE;
 	enabled.drawIndirectFirstInstance = haveDrawIndirectFirstInstance ? VK_TRUE : VK_FALSE;
 
-	// discard in fragment shaders compiles to OpDemoteToHelperInvocation under
-	// the vulkan1.4 SPIR-V target (modern helper-invocation semantics rather
-	// than the old OpKill); the capability needs shaderDemoteToHelperInvocation,
-	// a core + required feature since Vulkan 1.3, so guaranteed on our 1.4 floor.
-	VkPhysicalDeviceVulkan13Features supported13 = {};
-	supported13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
-	// Vulkan 1.2 feature struct: drawIndirectCount (the vkCmdDraw*IndirectCount form) lives here.
-	VkPhysicalDeviceVulkan12Features supported12 = {};
-	supported12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
-	supported13.pNext = &supported12;
-	// Vulkan 1.1 feature struct: 16-bit storage, needed by FSR2's fp16 shader permutations.
-	VkPhysicalDeviceVulkan11Features supported11 = {};
-	supported11.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
-	supported12.pNext = &supported11;
-	// R2: acceleration-structure + ray-query feature structs, chained into the query only when
-	// the extensions actually exist (an unrecognized pNext struct is not valid otherwise).
-	VkPhysicalDeviceAccelerationStructureFeaturesKHR supportedAccel = {};
-	supportedAccel.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR;
-	VkPhysicalDeviceRayQueryFeaturesKHR supportedRq = {};
-	supportedRq.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR;
-	if ( haveAccelExt && haveRayQueryExt && haveDeferredOpsExt ) {
-		supported11.pNext = &supportedAccel;
-		supportedAccel.pNext = &supportedRq;
-	}
-	// H2b: compute-shader derivatives feature query (chained only when the ext exists)
-	VkPhysicalDeviceComputeShaderDerivativesFeaturesKHR supportedCsd = {};
-	supportedCsd.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COMPUTE_SHADER_DERIVATIVES_FEATURES_KHR;
-	if ( haveComputeDerivExt ) {
-		supportedCsd.pNext = supported11.pNext;
-		supported11.pNext = &supportedCsd;
-	}
-	// r_vkPipelineStats: pipeline-executable-properties feature query (chained only when the ext exists)
-	VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR supportedPep = {};
-	supportedPep.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_EXECUTABLE_PROPERTIES_FEATURES_KHR;
-	if ( havePipelineExecPropsExt ) {
-		supportedPep.pNext = supported11.pNext;
-		supported11.pNext = &supportedPep;
-	}
-	VkPhysicalDeviceFeatures2 supported2 = {};
-	supported2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
-	supported2.pNext = &supported13;
-	vkGetPhysicalDeviceFeatures2( physical, &supported2 );
-
-	VkPhysicalDeviceVulkan13Features enabled13 = {};
+	VkPhysicalDeviceVulkan13Features &enabled13 = e.enabled13;
 	enabled13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
 	if ( supported13.shaderDemoteToHelperInvocation ) {
 		enabled13.shaderDemoteToHelperInvocation = VK_TRUE;
@@ -2099,7 +2146,7 @@ bool VulkanBackend::CreateDeviceAndVma() {
 
 	// GPU-driven indirect draw (Phase 3): the count-buffer form needs drawIndirectCount enabled
 	// explicitly (the 1.4 command floor does not imply the feature). Chained after enabled13.
-	VkPhysicalDeviceVulkan12Features enabled12 = {};
+	VkPhysicalDeviceVulkan12Features &enabled12 = e.enabled12;
 	enabled12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
 	haveDrawIndirectCount = supported12.drawIndirectCount == VK_TRUE;
 	enabled12.drawIndirectCount = haveDrawIndirectCount ? VK_TRUE : VK_FALSE;
@@ -2137,7 +2184,7 @@ bool VulkanBackend::CreateDeviceAndVma() {
 	}
 	enabled13.pNext = &enabled12;
 
-	VkPhysicalDeviceVulkan11Features enabled11 = {};
+	VkPhysicalDeviceVulkan11Features &enabled11 = e.enabled11;
 	enabled11.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
 	enabled11.storageBuffer16BitAccess = supported11.storageBuffer16BitAccess;
 	enabled11.uniformAndStorageBuffer16BitAccess = supported11.uniformAndStorageBuffer16BitAccess;
@@ -2150,9 +2197,9 @@ bool VulkanBackend::CreateDeviceAndVma() {
 		&& supportedAccel.accelerationStructure == VK_TRUE
 		&& supportedRq.rayQuery == VK_TRUE
 		&& haveBufferDeviceAddress;
-	VkPhysicalDeviceAccelerationStructureFeaturesKHR enabledAccel = {};
+	VkPhysicalDeviceAccelerationStructureFeaturesKHR &enabledAccel = e.enabledAccel;
 	enabledAccel.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR;
-	VkPhysicalDeviceRayQueryFeaturesKHR enabledRq = {};
+	VkPhysicalDeviceRayQueryFeaturesKHR &enabledRq = e.enabledRq;
 	enabledRq.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR;
 	if ( haveRayQuery ) {
 		enabledAccel.accelerationStructure = VK_TRUE;
@@ -2168,7 +2215,7 @@ bool VulkanBackend::CreateDeviceAndVma() {
 	// (NRD_SUPPORTS_QUAD_INTRINSICS=1 in the vendored SPIR-V). Device creation is
 	// unchanged on hardware without the extension; NrdCreate refuses there.
 	haveComputeDerivatives = haveComputeDerivExt && supportedCsd.computeDerivativeGroupQuads == VK_TRUE;
-	VkPhysicalDeviceComputeShaderDerivativesFeaturesKHR enabledCsd = {};
+	VkPhysicalDeviceComputeShaderDerivativesFeaturesKHR &enabledCsd = e.enabledCsd;
 	enabledCsd.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COMPUTE_SHADER_DERIVATIVES_FEATURES_KHR;
 	if ( haveComputeDerivatives ) {
 		enabledCsd.computeDerivativeGroupQuads = VK_TRUE;
@@ -2192,7 +2239,7 @@ bool VulkanBackend::CreateDeviceAndVma() {
 	// extension. No behaviour change until a pipeline is created with the capture-statistics bit, which only the
 	// pipelines the cvar names get - so enabling it whenever the driver offers it is free.
 	havePipelineExecProps = havePipelineExecPropsExt && supportedPep.pipelineExecutableInfo == VK_TRUE;
-	VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR enabledPep = {};
+	VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR &enabledPep = e.enabledPep;
 	enabledPep.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_EXECUTABLE_PROPERTIES_FEATURES_KHR;
 	if ( havePipelineExecProps ) {
 		enabledPep.pipelineExecutableInfo = VK_TRUE;
@@ -2200,22 +2247,10 @@ bool VulkanBackend::CreateDeviceAndVma() {
 		enabled11.pNext = &enabledPep;
 		devExts[devExtCount++] = VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME;
 	}
+}
 
-	VkDeviceCreateInfo dci = {};
-	dci.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
-	dci.pNext = &enabled13;
-	dci.queueCreateInfoCount = queueCount;
-	dci.pQueueCreateInfos = queues;
-	dci.enabledExtensionCount = devExtCount;
-	dci.ppEnabledExtensionNames = devExts;
-	dci.pEnabledFeatures = &enabled;
-
-	if ( !vkCheck( vkCreateDevice( physical, &dci, NULL, &device ), "vkCreateDevice" ) ) {
-		return false;
-	}
-	vkGetDeviceQueue( device, gfxFamily, 0, &gfxQueue );
-	vkGetDeviceQueue( device, presentFamily, 0, &presentQueue );
-
+// the checkpoint, pipeline-statistics and acceleration-structure entry points (+ the AS scratch alignment); a failure drops the capability whole
+void VulkanBackend::ResolveDeviceEntryPoints() {
 	// R2: resolve the acceleration-structure entry points and the scratch-alignment limit.
 	// If any entry point fails to resolve (broken loader/driver), drop the capability whole -
 	// partial RT support is worse than none.
@@ -2263,7 +2298,10 @@ bool VulkanBackend::CreateDeviceAndVma() {
 	common->Printf( "VK: ray query %s\n", haveRayQuery
 		? "available (KHR_acceleration_structure + KHR_ray_query)"
 		: "not available - RT features disabled" );
+}
 
+// the VMA allocator (BDA + OS memory budget when enabled)
+bool VulkanBackend::CreateVma() {
 	VmaAllocatorCreateInfo aci = {};
 	aci.physicalDevice = physical;
 	aci.device = device;
@@ -2285,6 +2323,60 @@ bool VulkanBackend::CreateDeviceAndVma() {
 	common->Printf( "VK: VRAM budget source: %s\n",
 		haveMemoryBudget ? "VK_EXT_memory_budget (OS-level free VRAM)" : "VMA heuristic (80%% of heap)" );
 	return true;
+}
+
+/*
+====================
+VulkanBackend::CreateDeviceAndVma
+====================
+*/
+bool VulkanBackend::CreateDeviceAndVma() {
+	float prio = 1.0f;
+	VkDeviceQueueCreateInfo queues[2] = {};
+	uint32_t queueCount = 0;
+
+	queues[queueCount].sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+	queues[queueCount].queueFamilyIndex = gfxFamily;
+	queues[queueCount].queueCount = 1;
+	queues[queueCount].pQueuePriorities = &prio;
+	queueCount++;
+	if ( presentFamily != gfxFamily ) {
+		queues[queueCount] = queues[0];
+		queues[queueCount].queueFamilyIndex = presentFamily;
+		queueCount++;
+	}
+
+	const char *devExts[12] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
+	uint32_t devExtCount = 1;
+
+	devExtProbe_t ext;
+	memset( &ext, 0, sizeof( ext ) );
+	ProbeDeviceExtensions( ext );
+	devFeatureQuery_t q;
+	memset( &q, 0, sizeof( q ) );
+	QueryDeviceFeatures( ext, q );
+	devFeatureEnable_t e;
+	memset( &e, 0, sizeof( e ) );
+	EnableDeviceFeatures( ext, q, e, devExts, devExtCount );
+
+	VkDeviceCreateInfo dci = {};
+	dci.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+	dci.pNext = &e.enabled13;
+	dci.queueCreateInfoCount = queueCount;
+	dci.pQueueCreateInfos = queues;
+	dci.enabledExtensionCount = devExtCount;
+	dci.ppEnabledExtensionNames = devExts;
+	dci.pEnabledFeatures = &e.enabled;
+
+	if ( !vkCheck( vkCreateDevice( physical, &dci, NULL, &device ), "vkCreateDevice" ) ) {
+		return false;
+	}
+	vkGetDeviceQueue( device, gfxFamily, 0, &gfxQueue );
+	vkGetDeviceQueue( device, presentFamily, 0, &presentQueue );
+
+	ResolveDeviceEntryPoints();
+
+	return CreateVma();
 }
 
 /*
@@ -3161,33 +3253,8 @@ int VulkanBackend::SceneImageHeight() {
 	return ( ft != NULL && ft->colorTarget ) ? ft->h : (int)sceneExtent.height;
 }
 
-/*
-====================
-VulkanBackend::BeginFrame
-====================
-*/
-void VulkanBackend::BeginFrame( int windowWidth, int windowHeight ) {
-	if ( vkDeviceDead ) {
-		VK_OnDeadDevice( "BeginFrame" );
-		return;
-	}
-	if ( device == VK_NULL_HANDLE || frameOpen ) {
-		return;
-	}
-	// one-shot from SetFramePresent: a swap-less command list (CaptureRenderToFile) records and
-	// submits like any frame but never touches the swapchain — see the acquire below and EndFrame
-	frameWillPresent = framePresent;
-	framePresent = true;
-
-	// Advance the NVML telemetry ring while the device is alive, so a crash dump can show the
-	// clock / P-state / power trajectory leading into a device loss. Cheap and throttled to ~10 Hz;
-	// only runs when the HUD or crash logging is on.
-	if ( r_vkCrashLogging.GetBool() || r_vkDebugHud.GetBool() ) {
-		VkSampleTelemetry();
-	}
-	FrameSlot &f = frames[frameIndex];
-	vkCheck( vkWaitForFences( device, 1, &f.fence, VK_TRUE, UINT64_MAX ), "vkWaitForFences(BeginFrame)" );	// a hang here = device lost: name it
-
+// the frame-boundary GPU drain when a resource-reconfiguring setting or the FSR size changed
+void VulkanBackend::BeginFrameIdleRebuild() {
 	// --- Graphics-reconfiguration idle-rebuild at the frame boundary (belt-and-suspenders) ---
 	// Changing a resource-reconfiguring setting (an FSR render scale, or any feature toggle / resolution
 	// scale / shadow size - a preset flip changes a whole batch at once) makes the NEXT frame resize the
@@ -3199,28 +3266,25 @@ void VulkanBackend::BeginFrame( int windowWidth, int windowHeight ) {
 	// size or the graphics-config signature changed, so none of that reconfiguration races in-flight work.
 	// The signature excludes continuous uniform sliders, so dragging an intensity never triggers this; the
 	// one-time hitch on a toggle / preset apply is invisible during menu interaction.
-	{
-		int fsrW = 0, fsrH = 0;
-		R_FsrWorldSize( fsrW, fsrH );
-		const bool fsrSizeChanged = ( fsrW != fsrAppliedW || fsrH != fsrAppliedH ) && fsrAppliedW != 0;
-		const uint64_t sig = ComputeGfxCfgSignature();
-		const bool cfgChanged = gfxCfgSigValid && ( sig != gfxCfgSig );
-		if ( fsrSizeChanged || cfgChanged ) {
-			vkDeviceWaitIdle( device );		// frame boundary: all submitted work done, nothing in flight
-		}
-		if ( fsrSizeChanged ) {
-			Fsr2DestroyContext( true );		// FSR size changed: clean teardown so the mid-frame rebuild + its internal wait-idle are skipped
-		}
-		fsrAppliedW = fsrW;
-		fsrAppliedH = fsrH;
-		gfxCfgSig = sig;
-		gfxCfgSigValid = true;
+	int fsrW = 0, fsrH = 0;
+	R_FsrWorldSize( fsrW, fsrH );
+	const bool fsrSizeChanged = ( fsrW != fsrAppliedW || fsrH != fsrAppliedH ) && fsrAppliedW != 0;
+	const uint64_t sig = ComputeGfxCfgSignature();
+	const bool cfgChanged = gfxCfgSigValid && ( sig != gfxCfgSig );
+	if ( fsrSizeChanged || cfgChanged ) {
+		vkDeviceWaitIdle( device );		// frame boundary: all submitted work done, nothing in flight
 	}
+	if ( fsrSizeChanged ) {
+		Fsr2DestroyContext( true );		// FSR size changed: clean teardown so the mid-frame rebuild + its internal wait-idle are skipped
+	}
+	fsrAppliedW = fsrW;
+	fsrAppliedH = fsrH;
+	gfxCfgSig = sig;
+	gfxCfgSigValid = true;
+}
 
-	// FSR2 auto-reactive (R1/D): the opaque snapshot is one-frame data — a new frame
-	// invalidates it until Fsr2CaptureOpaque runs again at this frame's translucent split
-	fsr2OpaqueValid = false;
-
+// the one-shot-on-toggle self tests, the BDA zfill variant load and its firing report
+void VulkanBackend::BeginFrameSelfTests() {
 	// compute-lane self-test (Phase 1): one-shot on the cvar toggle. Runs on the synchronous
 	// upload cb (waits idle) — a dev validation path, so gate it to the modified edge.
 	if ( r_vkComputeTest.IsModified() ) {
@@ -3296,7 +3360,10 @@ void VulkanBackend::BeginFrame( int windowWidth, int windowHeight ) {
 			Mrt3SelfTest();
 		}
 	}
+}
 
+// the swapchain checks (vsync / size) and the image acquire of a presenting frame; false = this frame is skipped (frameOpen set)
+bool VulkanBackend::BeginFrameAcquire( FrameSlot &f ) {
 	// vsync toggle → new present mode; window size change → new extent. Compare the live cvar against
 	// the value the swapchain was built for (not the modified-flag, which core already cleared).
 	if ( r_swapInterval.GetInteger() != appliedSwapInterval ) {
@@ -3310,12 +3377,12 @@ void VulkanBackend::BeginFrame( int windowWidth, int windowHeight ) {
 	if ( swapchainDirty && !RecreateSwapchain() ) {
 		skipFrame = true;
 		frameOpen = true;
-		return;
+		return false;
 	}
 	if ( swapExtent.width == 0 || swapExtent.height == 0 || swapchain == VK_NULL_HANDLE ) {
 		skipFrame = true;		// minimized
 		frameOpen = true;
-		return;
+		return false;
 	}
 
 	// Acquire a swapchain image only for a presenting frame. Acquiring for a capture-only
@@ -3328,12 +3395,12 @@ void VulkanBackend::BeginFrame( int windowWidth, int windowHeight ) {
 			if ( !RecreateSwapchain() ) {
 				skipFrame = true;
 				frameOpen = true;
-				return;
+				return false;
 			}
 			if ( swapExtent.width == 0 || swapExtent.height == 0 || swapchain == VK_NULL_HANDLE ) {
 				skipFrame = true;		// minimized during the rebuild: nothing to acquire this frame
 				frameOpen = true;
-				return;
+				return false;
 			}
 			ar = vkAcquireNextImageKHR( device, swapchain, UINT64_MAX, f.acquireSem, VK_NULL_HANDLE, &imageIndex );
 		}
@@ -3343,17 +3410,14 @@ void VulkanBackend::BeginFrame( int windowWidth, int windowHeight ) {
 			vkCheck( ar, "vkAcquireNextImageKHR" );
 			skipFrame = true;
 			frameOpen = true;
-			return;
+			return false;
 		}
 	}
+	return true;
+}
 
-	vkResetFences( device, 1, &f.fence );
-	vkResetCommandPool( device, f.pool, 0 );
-	VkCommandBufferBeginInfo bi = {};
-	bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-	bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-	vkBeginCommandBuffer( f.cb, &bi );
-
+// r_vkGpuTime: last frame's readback for this slot, the query resets and the frame-start stamp
+void VulkanBackend::BeginFrameGpuTimer( FrameSlot &f ) {
 	// GPU timer (r_vkGpuTime): read back this slot's previous pair before the
 	// reset wipes it, then — while active — reset the two queries (must be outside
 	// a render pass; the cb has none open yet) and stamp the frame's start.
@@ -3373,7 +3437,10 @@ void VulkanBackend::BeginFrame( int windowWidth, int windowHeight ) {
 			gpuTimerActive = true;
 		}
 	}
+}
 
+// this slot's fence has passed: drain its retired objects, rebuild the anisotropy samplers on a change, reset its rings + pool
+void VulkanBackend::BeginFrameRecycleSlot() {
 	// M2: this slot's GPU work is fenced off — reset its rings (the
 	// StreamGeneration contract) and its per-draw descriptor pool
 	DrainRetiredRings( frameIndex );	// buffers replaced by GrowRing last time this slot ran
@@ -3432,7 +3499,10 @@ void VulkanBackend::BeginFrame( int windowWidth, int windowHeight ) {
 	if ( framePool[frameIndex] ) {
 		vkResetDescriptorPool( device, framePool[frameIndex], 0 );
 	}
+}
 
+// the per-frame monster BLAS + TLAS builds ahead of every draw, behind the barrier against last frame's ray reads
+void VulkanBackend::BeginFrameRtBuilds( FrameSlot &f ) {
 	// Xid-109 ROOT-CAUSE FIX (workflow rtao-device-lost-hunt, 2026-09-17): a pipeline
 	// barrier's FIRST synchronization scope covers all PREVIOUSLY SUBMITTED commands on the
 	// queue, so this orders the previous frame's fragment/compute ray-query traversal (and
@@ -3485,6 +3555,59 @@ void VulkanBackend::BeginFrame( int windowWidth, int windowHeight ) {
 	}
 	GpuScopeEnd();
 	gpuScopesBeginFrame = false;
+}
+
+/*
+====================
+VulkanBackend::BeginFrame
+====================
+*/
+void VulkanBackend::BeginFrame( int windowWidth, int windowHeight ) {
+	if ( vkDeviceDead ) {
+		VK_OnDeadDevice( "BeginFrame" );
+		return;
+	}
+	if ( device == VK_NULL_HANDLE || frameOpen ) {
+		return;
+	}
+	// one-shot from SetFramePresent: a swap-less command list (CaptureRenderToFile) records and
+	// submits like any frame but never touches the swapchain — see the acquire below and EndFrame
+	frameWillPresent = framePresent;
+	framePresent = true;
+
+	// Advance the NVML telemetry ring while the device is alive, so a crash dump can show the
+	// clock / P-state / power trajectory leading into a device loss. Cheap and throttled to ~10 Hz;
+	// only runs when the HUD or crash logging is on.
+	if ( r_vkCrashLogging.GetBool() || r_vkDebugHud.GetBool() ) {
+		VkSampleTelemetry();
+	}
+	FrameSlot &f = frames[frameIndex];
+	vkCheck( vkWaitForFences( device, 1, &f.fence, VK_TRUE, UINT64_MAX ), "vkWaitForFences(BeginFrame)" );	// a hang here = device lost: name it
+
+	BeginFrameIdleRebuild();
+
+	// FSR2 auto-reactive (R1/D): the opaque snapshot is one-frame data — a new frame
+	// invalidates it until Fsr2CaptureOpaque runs again at this frame's translucent split
+	fsr2OpaqueValid = false;
+
+	BeginFrameSelfTests();
+
+	if ( !BeginFrameAcquire( f ) ) {
+		return;
+	}
+
+	vkResetFences( device, 1, &f.fence );
+	vkResetCommandPool( device, f.pool, 0 );
+	VkCommandBufferBeginInfo bi = {};
+	bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+	bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+	vkBeginCommandBuffer( f.cb, &bi );
+
+	BeginFrameGpuTimer( f );
+
+	BeginFrameRecycleSlot();
+
+	BeginFrameRtBuilds( f );
 
 	boundPipeline = VK_NULL_HANDLE;
 	boundTexKey = TexSetKey{};
@@ -3848,21 +3971,8 @@ void VulkanBackend::EndFrame() {
 ===============================================================================
 */
 
-/*
-====================
-VulkanBackend::CreateM2Resources
-====================
-*/
-bool VulkanBackend::CreateM2Resources() {
-	uboAlign = (int)physProps.limits.minUniformBufferOffsetAlignment;
-	if ( uboAlign < 4 ) {
-		uboAlign = 256;
-	}
-	storageAlign = (int)physProps.limits.minStorageBufferOffsetAlignment;	// a power of two (spec), <= 256
-	if ( storageAlign < 4 ) {
-		storageAlign = 4;
-	}
-
+// the r_vkGpuTime timestamp query pool (inert when the queue has no valid timestamp bits)
+void VulkanBackend::CreateGpuTimerPool() {
 	// GPU timer query pool (r_vkGpuTime). Gated on the graphics queue's
 	// timestampValidBits; timestampPeriod is ns/tick. If unsupported the cvar just
 	// stays inert (like the GL3 timer without the query entry points). Recreated
@@ -3890,7 +4000,10 @@ bool VulkanBackend::CreateM2Resources() {
 	}
 	for ( int i = 0; i < FRAMES_IN_FLIGHT; i++ ) { gpuTimerBusy[i] = false; }
 	gpuTimerActive = false;
+}
 
+// the per-slot host-visible rings (UBO, vertex, index, staging, indirect, storage)
+bool VulkanBackend::CreateRings() {
 	// host-visible persistently-mapped rings, one set per frame slot — the
 	// slot's fence wait in BeginFrame guarantees the GPU is done with them
 	// before offsets reset (the StreamGeneration contract)
@@ -3934,7 +4047,11 @@ bool VulkanBackend::CreateM2Resources() {
 			setups[i].ring->handle = (BufferHandle)bufferTable.size();
 		}
 	}
+	return true;
+}
 
+// the graphics descriptor set layouts (set 0 dynamic UBO, set 1 samplers, set 2 bindless when available) and the pipeline layout
+bool VulkanBackend::CreateGraphicsLayouts() {
 	// tess stages read the same UBO (matrices, tess params, light origin) and,
 	// for displacement, the same texture set; fold the bits in only when the
 	// device supports tessellation (else the flags reference an unusable stage).
@@ -4049,7 +4166,11 @@ bool VulkanBackend::CreateM2Resources() {
 			return false;
 		}
 	}
+	return true;
+}
 
+// the compute lane's set layout, pipeline layout and per-dispatch pool
+bool VulkanBackend::CreateComputeLayout() {
 	// compute lane (docs/gpu-offload-plan.md Phase 1): one set of 8 STORAGE_BUFFER bindings
 	// (ComputeArgs::storage[]) + a 128-byte push-constant range for params, a dedicated
 	// pipeline layout, and a FREE-able pool for per-dispatch sets. All COMPUTE-stage, kept
@@ -4098,7 +4219,11 @@ bool VulkanBackend::CreateM2Resources() {
 			return false;
 		}
 	}
+	return true;
+}
 
+// the per-slot set 0 (+ its pool), the persistent texture-set pool and the per-frame fallback pools
+bool VulkanBackend::CreateDescriptorPools() {
 	// per-slot set 0, pointing at that slot's UBO ring (persistent pool)
 	{
 		VkDescriptorPoolSize ps = { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, FRAMES_IN_FLIGHT };
@@ -4161,7 +4286,11 @@ bool VulkanBackend::CreateM2Resources() {
 			return false;
 		}
 	}
+	return true;
+}
 
+// the synchronous upload command buffer + fence and the batched texture upload's own pair
+bool VulkanBackend::CreateUploadPlumbing() {
 	// synchronous image-upload plumbing (level/menu load time)
 	{
 		VkCommandPoolCreateInfo pci = {};
@@ -4186,7 +4315,11 @@ bool VulkanBackend::CreateM2Resources() {
 		vkCreateFence( device, &fci, NULL, &batchFence );
 		batchOpen = false;
 	}
+	return true;
+}
 
+// the dummy images for descriptor slots no draw populates (white, grey, cube, shadow 2D / cube)
+bool VulkanBackend::CreateDummyImages() {
 	// 1x1 white dummy for descriptor slots no draw populates
 	{
 		const byte white[4] = { 255, 255, 255, 255 };
@@ -4213,6 +4346,49 @@ bool VulkanBackend::CreateM2Resources() {
 			common->Warning( "VK: couldn't create the M4 dummy images" );
 			return false;
 		}
+	}
+	return true;
+}
+
+/*
+====================
+VulkanBackend::CreateM2Resources
+====================
+*/
+bool VulkanBackend::CreateM2Resources() {
+	uboAlign = (int)physProps.limits.minUniformBufferOffsetAlignment;
+	if ( uboAlign < 4 ) {
+		uboAlign = 256;
+	}
+	storageAlign = (int)physProps.limits.minStorageBufferOffsetAlignment;	// a power of two (spec), <= 256
+	if ( storageAlign < 4 ) {
+		storageAlign = 4;
+	}
+
+	CreateGpuTimerPool();
+
+	if ( !CreateRings() ) {
+		return false;
+	}
+
+	if ( !CreateGraphicsLayouts() ) {
+		return false;
+	}
+
+	if ( !CreateComputeLayout() ) {
+		return false;
+	}
+
+	if ( !CreateDescriptorPools() ) {
+		return false;
+	}
+
+	if ( !CreateUploadPlumbing() ) {
+		return false;
+	}
+
+	if ( !CreateDummyImages() ) {
+		return false;
 	}
 
 	// shader handles are per-backend: drop any Material IR built against
