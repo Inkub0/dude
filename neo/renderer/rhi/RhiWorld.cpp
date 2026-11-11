@@ -9075,6 +9075,719 @@ static void RB_RHI_ApplyViewScissor( rhi::RHI *r, const viewDef_t *viewDef ) {
 	               backEnd.currentScissor.y2 + 1 - backEnd.currentScissor.y1 );
 }
 
+// RB_RHI_ReStirDIPass: the view-level constants its stage helpers share (filled once per view, read-only after -
+// RB_RHI_ReStirDIApplyParms fills the three apply fields)
+struct diPassCtx_t {
+	const viewDef_t *viewDef;
+	idImage *diDepthImg;
+	int w, h, rw, rh, uploadW, uploadH;
+	float resScale, cbParity;
+	bool cbActive, shMode, diFullTarget, combineGI, diApply;
+	unsigned long long lightAddr, tlas, geoTable;
+	int numLights;
+	float invView[16];
+	float invP00, invP11;
+	float diHitScale;
+	rhi::ImageHandle diAlbedoImg, diMatImg;
+};
+
+// RB_RHI_ReStirDIPass: the R3a disocclusion boost's per-view state (RB_RHI_ReStirDIBoostBegin / BoostParms / BoostSide fill it)
+struct diBoost_t {
+	int boostK;
+	rhi::ShaderHandle boostProg, youngProg;
+	bool boostWant, boostAll, boostSide, boostRun, diGiSide;
+};
+
+// the gather MRT pair at the gather res (recreated on loss / resize); false = no targets this frame
+static bool RB_RHI_ReStirDIEnsureTargets( rhi::RHI *r, int rw, int rh ) {
+	// the pair lives and dies together (a lost context, a resolution change)
+	const bool pairStale = ( rhiReStirDIPairRT[0] && r->GetRenderTargetImage( rhiReStirDIPairRT[0] ) == 0 )
+		|| ( rhiReStirDIPairRT[1] && r->GetRenderTargetImage( rhiReStirDIPairRT[1] ) == 0 ) || rhiReStirDIW != rw || rhiReStirDIH != rh;
+	if ( ( rhiReStirDIPairRT[0] || rhiReStirDIPairRT[1] ) && pairStale ) {
+		for ( int k = 0; k < 2; k++ ) { if ( rhiReStirDIPairRT[k] ) { r->DestroyRenderTarget( rhiReStirDIPairRT[k] ); rhiReStirDIPairRT[k] = 0; } }
+		rhiReStirDIRT = 0;	rhiReStirDIPrevRT = 0;	rhiReStirDIW = rhiReStirDIH = 0;	rhiReStirDILastWritten = -1;
+		rhiReStirDIGatherPrevValid = false;
+	}
+	if ( !rhiReStirDIPairRT[0] || !rhiReStirDIPairRT[1] ) {
+		for ( int k = 0; k < 2; k++ ) { if ( !rhiReStirDIPairRT[k] ) { rhiReStirDIPairRT[k] = r->CreateRenderTargetReStirDIMrt( rw, rh ); } }
+		if ( !rhiReStirDIPairRT[0] || !rhiReStirDIPairRT[1] ) {
+			for ( int k = 0; k < 2; k++ ) { if ( rhiReStirDIPairRT[k] ) { r->DestroyRenderTarget( rhiReStirDIPairRT[k] ); rhiReStirDIPairRT[k] = 0; } }
+			rhiReStirDIRT = 0;	rhiReStirDIPrevRT = 0;	rhiReStirDILastWritten = -1;	rhiReStirDIGatherPrevValid = false;
+			return false;
+		}
+		rhiReStirDIW = rw;	rhiReStirDIH = rh;
+		rhiReStirDILastWritten = -1;
+		rhiReStirDIGatherPrevValid = false;
+	}
+	return true;
+}
+
+// the gather's uniforms: lights, visibility ray, resolution, cookies, perforated casters, the SH / spec-reshade mode
+static void RB_RHI_ReStirDIGatherParms( const diPassCtx_t &c, rhi::RenderParams &parms ) {
+	const int w = c.w;
+	const int h = c.h;
+	const int rw = c.rw;
+	const int rh = c.rh;
+	const int uploadW = c.uploadW;
+	const int uploadH = c.uploadH;
+	const float cbParity = c.cbParity;
+	const bool shMode = c.shMode;
+	const unsigned long long lightAddr = c.lightAddr;
+	const unsigned long long tlas = c.tlas;
+	const unsigned long long geoTable = c.geoTable;
+	const int numLights = c.numLights;
+	const float *invView = c.invView;
+	const float invP00 = c.invP00;
+	const float invP11 = c.invP11;
+	const float diHitScale = c.diHitScale;
+	memset( &parms, 0, sizeof( parms ) );
+	RB_RHI_IdentityMvp( parms.mvpMatrix );
+	memcpy( parms.modelViewMatrix, invView, sizeof( parms.modelViewMatrix ) );		// u_modelViewMatrix = view->world
+	memcpy( &parms.color[0], &lightAddr, sizeof( lightAddr ) );			// color.xy = light-buffer device address
+	parms.color[2] = (float)numLights;									// color.z = light count
+	// visibility ray: scene TLAS into rtParms.xy (bit-cast, rtao/interaction idiom), .z = normal offset,
+	// .w = max length. 0 (no RT scene this frame) leaves rtParms.xy = 0 -> the shader skips the ray (unshadowed).
+	if ( tlas != 0 ) {
+		RB_RHI_PackAddr( &parms.rtParms[0], tlas );	// bit-cast, NOT a value cast
+		parms.rtParms[2] = r_rtSunShadowOffset.GetFloat();				// ray-origin normal offset (shared with mode 4)
+		parms.rtParms[3] = 100000.0f;									// max shadow-ray length
+	}
+	// NRD ReblurHitDistanceParameters for direct lighting: the "hit distance" is the distance to the chosen
+	// light, so A sets the world-space blur scale (ReBLUR divides by A+|viewZ|*B). Shader and denoise MUST use
+	// the same A/B. A = 0.5*diHitScale, B = 0.1 (as rtgi_ray.frag). diHitScale ~ a room so typical light
+	// distances don't saturate the normalized value.
+	parms.localParam0[0] = invP00;
+	parms.localParam0[1] = invP11;
+	parms.localParam0[2] = (float)idMath::ClampInt( 0, 128, r_rtReStirDICandidates.GetInteger() );	// M candidates (0 = every light, exhaustive RIS)
+	parms.localParam0[3] = diHitScale;									// NRD hit-distance A = 0.5 * this
+	parms.localParam1[0] = (float)( tr.frameCount & 0xFFFF );			// RNG decorrelation per frame
+	parms.texGen0S[0] = (float)idMath::ClampInt( 1, 16, r_rtEmissiveSamples.GetInteger() );	// emitter area samples averaged per shade (far-field, restir_di_shade.glsl)
+	parms.texGen0S[1] = r_rtEmissiveCheapTarget.GetBool() ? 1.0f : 0.0f;	// emitter candidates weighed analytically (diTargetLight)
+	parms.texGen0S[3] = 0.0f;	// restir_di.frag diOpaqueZero: ALWAYS 0 (an exact late re-derivation the shader compiler cannot merge away)
+	parms.localParam1[2] = cbParity;									// checkerboard parity (0 = off)
+	// gather runs at rw x rh: gl_FragCoord -> [0,1] uv is 1/rw, -> the full-res depth tc carries the (w/rw)
+	// stretch (mirrors RB_RHI_RtgiPass). At scale 1 + no checkerboard: 1/w, 1/uploadW (unchanged).
+	parms.screenCorrection[0] = 1.0f / rw;
+	parms.screenCorrection[1] = 1.0f / rh;
+	parms.depthTexRecip[0] = ( (float)w / rw ) / uploadW;
+	parms.depthTexRecip[1] = ( (float)h / rh ) / uploadH;
+	rhi::FillDepthParms( parms, backEnd.viewDef ? backEnd.viewDef->projectionMatrix : NULL );
+	parms.windowCoord[2] = -1.0f;										// VK-only pass: top-down view-Y sign
+	parms.windowCoord[3] = r_rtLightTextures.GetBool() ? 1.0f : 0.0f;	// Stage G: sample each light's cookie + falloff textures
+
+	// Perforated casters (r_rtPerforatedShadows): every visibility ray takes the grate-aware walk (restir_di_shade.glsl
+	// traceVisibility) - no per-view box list, every pixel picks its own light and the hardware BVH is the gate.
+	// windowCoord.x = grates on, .y = strength; particleRadius.xy = geo table (grate candidates -> coverage texture).
+	if ( tlas != 0 && geoTable != 0 && r_rtPerforatedShadows.GetBool() && r_shadowMapPerforated.GetBool() ) {
+		parms.windowCoord[0] = 1.0f;
+		parms.windowCoord[1] = idMath::ClampFloat( 0.0f, 1.0f, r_shadowMapPerforatedStrength.GetFloat() );
+	}
+	// Soft grate shadows (r_rtShadowBlur parity, restir_di_shade.glsl traceVisibility): the visibility ray averages a
+	// grate's coverage over the footprint the hybrid blur would spread its shadow across - same intensity (per light, in
+	// the light buffer's flags bits 16-31) and curve. .x = on, .y = r_rtShadowBlurCurve. Off -> the hard texel test.
+	if ( parms.windowCoord[0] > 0.5f && r_rtShadowBlur.GetBool() && r_rtShadowBlurIntensity.GetFloat() > 0.0f ) {
+		parms.specularModifier[0] = 1.0f;
+		parms.specularModifier[1] = r_rtShadowBlurCurve.GetFloat();
+	}
+	// the geo table rides particleRadius.xy for BOTH the grate candidates and the combined-GI bounce hits
+	if ( geoTable != 0 ) {
+		const unsigned int geoLo = (unsigned int)( geoTable & 0xFFFFFFFFull ), geoHi = (unsigned int)( geoTable >> 32 );
+		memcpy( &parms.particleRadius[0], &geoLo, sizeof( geoLo ) );		// bit-cast, NOT a value cast
+		memcpy( &parms.particleRadius[1], &geoHi, sizeof( geoHi ) );
+	}
+	// the direct term's light scale: the forward path's lightColor = lightScale * stage colour, the buffer carries
+	// the raw stage colour, so the gather scales (the apply then remultiplies material + AO only)
+	parms.shadowFalloffS[0] = backEnd.lightScale;
+	// cookie mip selection (rt_light_tex.glsl): world size of one FULL-RES screen pixel per unit depth, so the
+	// gather lands on the same mip the forward draw's screen-derivative LOD picks (Doom's black-bordered
+	// cookies read dimmer on the blurred mips; mip 0 made DI brighter than forward on big floors)
+	parms.shadowFalloffS[1] = 2.0f * invP00 / (float)w;
+	// SH mode: no cosine in the gather, SH1 on loc 3. 2 = + full-res specular re-shade (r_rtReStirDISpecReshade): the
+	// gather shades DIFFUSE-ONLY and demodulates by the diffuse share, so the buffer is pure incoming irradiance and the
+	// apply can rebuild a sharp GGX highlight at full res. The gradient inherits this (gp = parms), so its re-shade matches.
+	const bool specReshade = shMode && r_rtReStirDISpecReshade.GetBool();
+	parms.shadowFalloffS[2] = specReshade ? 2.0f : ( shMode ? 1.0f : 0.0f );
+	parms.shadowFalloffS[3] = 1.0f;										// R2: linear + raw hitDist out (ReLAX input)
+}
+
+// the folded RTGI one-bounce's uniforms (RB_RHI_RtgiPass's packing), when combineGI
+static void RB_RHI_ReStirDIBounceParms( const diPassCtx_t &c, rhi::RenderParams &parms ) {
+	const viewDef_t *viewDef = c.viewDef;
+	const bool combineGI = c.combineGI;
+	// With r_rtgi on, the RTGI one-bounce is folded into this gather (rtgi_bounce.glsl) so ONE NRD denoise and ONE
+	// apply serve direct + indirect. RB_RHI_RtgiPass stands down while DI is on (the shared NRD slot), so this is the
+	// ONLY place the bounce is produced under DI - r_rtgi alone switches it (the separate r_rtReStirDICombineGI knob is
+	// retired: its 0 meant "no GI" while r_rtgi still stood RTAO down and the ambient reconcile still assumed GI). Uniforms mirror RB_RHI_RtgiPass's packing
+	// (radius / emissive / clamp / light scale / shadow ray / eye pullback / the CPU-hoisted IGN rotation) plus
+	// rtgi_apply's intensity and fog fade, so the bounce comes out as RTGI's own pass + apply would have made it.
+	parms.specularParms[0] = combineGI ? 1.0f : 0.0f;
+	if ( combineGI ) {
+		RB_RHI_RtgiFogCoefs( viewDef, parms.specularParms[1], parms.specularParms[2] );
+		// fast-changing lights stay forward for the DIRECT term (no lag); their one-bounce would still trail in the
+		// shared NRD history, so the bounce skips them too - the forward path never had a bounce for them anyway
+		parms.specularParms[3] = r_rtReStirDIDynamicForward.GetBool() ? 1.0f : 0.0f;
+		parms.pbrParms[0] = r_rtgiRadius.GetFloat();
+		parms.pbrParms[1] = idMath::ClampFloat( 0.0f, 16.0f, r_rtgiEmissive.GetFloat() );
+		// EMISSIVE MODE (docs/rtx-experimental-lighting.md E2 v3): the emitters are rows of the scene-light buffer (gathered
+		// above), nothing more to pack. While they light the scene the bounce's per-pixel "glow at the hit" term is OFF
+		// (pbrParms.y = 0): a bounce ray landing on an emitter is the same direct emitter->P path the DI now estimates
+		// properly, and would count it twice.
+		if ( r_rtEmissiveLighting.GetBool() && R_RtEmissiveTableAddress( NULL, NULL, NULL ) != 0 ) {
+			parms.pbrParms[1] = 0.0f;
+		}
+		parms.pbrParms[2] = idMath::ClampFloat( 0.0f, 16.0f, r_rtgiEmissiveClamp.GetFloat() );
+		parms.pbrParms[3] = idMath::ClampFloat( 0.0f, 8.0f, r_rtgiLightScale.GetFloat() );
+		parms.pbrParms2[0] = RB_RHI_SceneAmbientRowsBits();					// r_rtgiAmbient fold: the ambient rows (as RB_RHI_RtgiPass; bit-cast)
+		parms.pbrParms2[1] = r_rtgiShadow.GetBool() ? 1.0f : 0.0f;			// H6d dominant-light shadow ray at the hit
+		parms.pbrParms2[2] = 0.004f;										// eye pullback per unit depth (crease-leak fix)
+		parms.pbrParms2[3] = idMath::ClampFloat( 0.0f, 8.0f, r_rtgiIntensity.GetFloat() );
+		// the bounce direction uses an R2 low-discrepancy sequence advanced by the frame index (rtgi_bounce.glsl),
+		// which already rides u_localParam1.x (set above) - nothing to hoist. (Replaced the IGN golden-angle
+		// reorientation, whose diagonal streaked.)
+	}
+}
+
+// Stage D: decides whether DI LIGHTS this view (c.diApply + the G-buffer albedo / material it shades with) and packs the material uniforms
+static void RB_RHI_ReStirDIApplyParms( rhi::RHI *r, diPassCtx_t &c, rhi::RenderParams &parms ) {
+	// Stage D apply mode (r_rtReStirDIApply): DI will LIGHT this view, so the gather shades with the G-buffer material
+	// (albedo att3 + rough/metal/spec att1) and writes the demodulated radiance; the apply (RB_RHI_ReStirDIApply)
+	// remultiplies and adds it at the opaque/translucent split, and RB_RHI_DrawWorld skips the forward draws of
+	// every light the scene-light buffer covers. Needs the albedo prepass (wantAlbedo widened for it) and the apply
+	// shader; the debug overlay owns the screen instead when it is on. Decided HERE (before the light loop) so the
+	// suppression and the apply can never disagree within a view.
+	c.diAlbedoImg = rhiNormalAlbedoThisView ? r->GetRenderTargetImage4( rhiNormalResultRT ) : 0;
+	// NOTE: the gather runs BEFORE the decal-mask pass, so it cannot decal-resolve the material here. In the shipping
+	// SH + spec-reshade path the gather's radiance is material-INDEPENDENT (it demodulates the diffuse share and strips
+	// the cosine), so only the APPLY's material has to be decal-resolved -- done after the mask pass (RB_RHI_DrawView).
+	c.diMatImg = rhiNormalAlbedoThisView ? r->GetRenderTargetImage2( rhiNormalResultRT ) : 0;
+	c.diApply = r_rtReStirDIApply.GetBool() && !r_rtReStirDIDebug.GetBool()
+		&& c.diAlbedoImg != 0 && c.diMatImg != 0 && r->LoadShader( "restir_di_apply" ) != 0;
+	parms.localParam1[1] = r_pbr.GetBool() ? 1.0f : 0.0f;				// GGX metalness workflow vs Lambert-only
+	// apply mode + the cheap-RIS-target flag packed in one slot: 0 = no apply, 1 = apply + cheap target, 2 = apply + full target.
+	// Existing applyMode readers key on > 0.5, so 1 and 2 both read as "apply"; only the gather's candidate loop splits 1 vs 2.
+	parms.localParam1[3] = c.diApply ? ( r_rtReStirDICheapTarget.GetBool() ? 1.0f : 2.0f ) : 0.0f;
+	parms.diffuseModifier[0] = 1.0f - r_pbrMetalDiffuse.GetFloat();		// kd (interaction.frag u_pbrParms2.x)
+	parms.diffuseModifier[1] = r_pbrSpecScale.GetFloat();				// dielectric-weighted lobe scale (u_pbrParms.w)
+	parms.diffuseModifier[2] = r_pbrFireflyClamp.GetFloat();			// lobe ceiling (u_localParam1.w there)
+	parms.diffuseModifier[3] = r_pbrEnvScale.GetFloat();				// metal environment floor (u_occlusionParms.w there)
+}
+
+// the velocity at the gather res: the full-res MRT velocity, downsampled to rw x rh when the gather runs reduced
+static rhi::ImageHandle RB_RHI_ReStirDIVelocityAtRes( rhi::RHI *r, rhi::ImageHandle diVelImg, bool nrdFree, int w, int h, int rw, int rh ) {
+	rhi::ImageHandle nrdVel = diVelImg;
+	if ( diVelImg != 0 && nrdFree && ( rw != w || rh != h ) ) {
+		// velocity for NRD IN_MV + the gradient / confidence reproject. At reduced res, downsample the full-res velocity
+		// to rw x rh (smaa_copy = texture(src, uv)); at full res (rw==w) it is used directly.
+		if ( rhiReStirDIVelRT && r->GetRenderTargetImage( rhiReStirDIVelRT ) == 0 ) { rhiReStirDIVelRT = 0; rhiReStirDIVelW = rhiReStirDIVelH = 0; }
+		if ( rhiReStirDIVelRT && ( rhiReStirDIVelW != rw || rhiReStirDIVelH != rh ) ) { r->DestroyRenderTarget( rhiReStirDIVelRT ); rhiReStirDIVelRT = 0; rhiReStirDIVelW = rhiReStirDIVelH = 0; }
+		if ( !rhiReStirDIVelRT ) {
+			rhiReStirDIVelRT = r->CreateRenderTarget( rhi::IF_RG16F, rw, rh );
+			if ( rhiReStirDIVelRT ) { rhiReStirDIVelW = rw; rhiReStirDIVelH = rh; }
+		}
+		rhi::ShaderHandle copyProg = rhiReStirDIVelRT ? r->LoadShader( "smaa_copy" ) : 0;
+		if ( copyProg != 0 ) {
+			rhi::RenderParams cp;
+			memset( &cp, 0, sizeof( cp ) );
+			RB_RHI_IdentityMvp( cp.mvpMatrix );
+			cp.screenCorrection[0] = 1.0f; cp.screenCorrection[1] = 1.0f;
+			r->GpuScopeBegin( "restir.di.vel" );		// r_vkGpuTime 2: velocity downsample to the gather res
+			r->BeginTargetPass( rhiReStirDIVelRT, NULL );
+			RB_RHI_DrawFullscreen( r, copyProg, cp, diVelImg );
+			r->EndPass();
+			r->GpuScopeEnd();
+			nrdVel = r->GetRenderTargetImage( rhiReStirDIVelRT );
+		}
+	}
+	return nrdVel;
+}
+
+// R3a boost: K, its two programs and the young ping-pong targets -> b.boostWant
+static void RB_RHI_ReStirDIBoostBegin( rhi::RHI *r, int rw, int rh, bool diFullTarget, rhi::ImageHandle nrdVel, bool nrdFree, diBoost_t &b ) {
+	// ---- R3a disocclusion boost (docs/rtx-restir-di.md Plan R3, r_rtReStirDIBoost): K picks + rays on YOUNG pixels. Needs
+	// last frame's denoised output (still in the shared slot until this frame's denoise), the velocity at the gather res and,
+	// for the same-surface test + the hysteresis bit, last frame's side copies (made below, as for the gradient) ----
+	b.boostK = ( r_rtReStirDIBoost.GetInteger() > 1 ) ? idMath::ClampInt( 2, 4, r_rtReStirDIBoost.GetInteger() ) : 0;
+	// the boost is a compiled VARIANT of the gather (restir_di_boost.frag): its K-pick arrays cost the plain gather ~0.7 ms
+	// of occupancy even with nothing boosted, so the plain program carries none of it
+	b.boostProg = ( b.boostK > 0 ) ? r->LoadShader( diFullTarget ? "restir_di_boost_full" : "restir_di_boost" ) : 0;
+	b.youngProg = ( b.boostK > 0 ) ? r->LoadShader( "restir_di_young" ) : 0;
+	// the per-pixel young reason (R8, gather layout) the boost pass reads back clustered (3x3 majority)
+	if ( b.boostK > 0 && b.youngProg != 0 ) {
+		for ( int k = 0; k < 2; k++ ) {
+			if ( rhiReStirDIYoungRT[k] && r->GetRenderTargetImage( rhiReStirDIYoungRT[k] ) == 0 ) { rhiReStirDIYoungRT[k] = 0; rhiReStirDIYoungValid = false; }
+		}
+		if ( rhiReStirDIYoungW != rw || rhiReStirDIYoungH != rh ) {
+			for ( int k = 0; k < 2; k++ ) { if ( rhiReStirDIYoungRT[k] ) { r->DestroyRenderTarget( rhiReStirDIYoungRT[k] ); rhiReStirDIYoungRT[k] = 0; } }
+			rhiReStirDIYoungW = rhiReStirDIYoungH = 0;	rhiReStirDIYoungValid = false;
+		}
+		for ( int k = 0; k < 2; k++ ) { if ( !rhiReStirDIYoungRT[k] ) { rhiReStirDIYoungRT[k] = r->CreateRenderTarget( rhi::IF_RGBA8, rw, rh ); } }
+		if ( rhiReStirDIYoungRT[0] && rhiReStirDIYoungRT[1] ) { rhiReStirDIYoungW = rw;	rhiReStirDIYoungH = rh; }
+	}
+	b.boostWant = b.boostK > 0 && b.boostProg != 0 && b.youngProg != 0 && rhiReStirDIYoungRT[0] != 0 && rhiReStirDIYoungRT[1] != 0 && nrdVel != 0 && nrdFree;
+	if ( !b.boostWant ) { rhiReStirDIYoungValid = false; }		// a gap breaks the age chain: next run starts with no holds
+}
+
+// R3a boost: the all / side verdicts and the hysteresis uniforms (u_tessParms) + last frame's view
+static void RB_RHI_ReStirDIBoostParms( rhi::RHI *r, const viewDef_t *viewDef, bool diCut, bool diPrevSideValid, float diPrevCb, int diMainF, diBoost_t &b, rhi::RenderParams &parms ) {
+	// R3a boost uniforms: everything is young on a cut / first DI frame / when the slot holds someone else's output (the
+	// thresholds go to 1e6 and the side data is declared absent); otherwise ON below BoostHistory, OFF once past twice
+	// that (capped at the history length, never below ON) - the hysteresis band that keeps a pixel's ray count steady.
+	b.boostAll = b.boostWant && ( !rhiReStirDIPrevValid || diCut || r->GetRtgiOutputImage() == 0 );
+	b.boostSide = b.boostWant && !b.boostAll && diPrevSideValid;
+	{
+		// r_rtReStirDIBoostHistory <= 0: the NRD-history trigger is OFF (only true disocclusion + screen entry count; the history
+		// still ends the hysteresis) - a short NRD history over whole areas is what flickering / animated lights leave every
+		// frame on purpose (the gradient resets them), and boosting those footprints cost ~1.4 ms standing still in a cave
+		const bool  hTrig = r_rtReStirDIBoostHistory.GetFloat() > 0.0f;
+		const float hOn   = hTrig ? idMath::ClampFloat( 1.0f, 63.0f, r_rtReStirDIBoostHistory.GetFloat() ) : 0.0f;	// 0: trigger off
+		const float hBase = hTrig ? 2.0f * hOn : 4.0f;		// HOLD: frames a young pixel stays boosted (its own age, young ping-pong)
+		const float hold  = idMath::ClampFloat( 1.0f, 63.0f, ( hBase < (float)diMainF ) ? hBase : (float)diMainF );
+		parms.tessParms[0] = b.boostWant ? (float)b.boostK : 0.0f;
+		parms.tessParms[1] = b.boostAll ? 1.0e6f : hOn;
+		parms.tessParms[2] = hold;
+		parms.tessParms[3] = b.boostSide ? diPrevCb : -1.0f;
+		memcpy( parms.prevMvpMatrix, rhiReStirDIPrevValid ? rhiReStirDIPrevView : viewDef->worldSpace.modelViewMatrix, sizeof( parms.prevMvpMatrix ) );
+	}
+}
+
+// R3a boost: the per-texel side record buffer -> b.boostRun, its address in u_texGen0T
+static void RB_RHI_ReStirDIBoostSide( rhi::RHI *r, int rw, int rh, diBoost_t &b, rhi::RenderParams &parms ) {
+	// The R3a boost's SIDE RECORD per texel (rhiReStirDIGiBuf, restir_di.frag DI_BOOST_SIDE_FLOATS): the plain gather writes it
+	// for the clustered-young texels - the GI term it added (2026-11-02: the boost re-traced the whole bounce to rebuild it,
+	// 2.4 ms of a 3.8 ms boost) and, since 2026-11-03, its candidate loop's result: the RIS numerator, its pick and the boost's
+	// K - 1 extra picks, drawn in that same loop (the boost's own candidate loop was ~1.5 ms of its ~1.6 ms). The boost shades
+	// the K picks from it: no candidate loop, no bounce. u_texGen0T = ( address lo, hi, row stride, cells ) bit-cast, all 0 =
+	// off; the boost needs the record, so no buffer = no boost this frame.
+	// FragmentStorageBarrier on both sides: this gather's writes after last frame's boost reads, the boost's reads after them.
+	b.diGiSide = false;
+	if ( b.boostWant ) {
+		const int cells = rw * rh;
+		if ( rhiReStirDIGiBuf != 0 && rhiReStirDIGiCells != cells ) {
+			r->DestroyBuffer( rhiReStirDIGiBuf );
+			rhiReStirDIGiBuf = 0;	rhiReStirDIGiAddr = 0;	rhiReStirDIGiCells = 0;
+		}
+		if ( rhiReStirDIGiBuf == 0 && cells > 0 ) {
+			rhiReStirDIGiBuf   = RB_RHI_CreateDeviceBuffer( r, cells * 40, rhiReStirDIGiAddr );	// restir_di.frag DI_BOOST_SIDE_FLOATS 10
+			rhiReStirDIGiCells = ( rhiReStirDIGiBuf != 0 ) ? cells : 0;
+		}
+		b.diGiSide = rhiReStirDIGiAddr != 0 && rhiReStirDIGiCells == cells;
+	}
+	b.boostRun = b.boostWant && b.diGiSide;
+	if ( !b.boostRun ) { rhiReStirDIYoungValid = false; }		// no young pass this frame: the age chain restarts
+	{
+		unsigned int gs[4] = { 0u, 0u, 0u, 0u };
+		if ( b.diGiSide ) {
+			gs[0] = (unsigned int)( rhiReStirDIGiAddr & 0xFFFFFFFFull );	gs[1] = (unsigned int)( rhiReStirDIGiAddr >> 32 );
+			gs[2] = (unsigned int)rw;										gs[3] = (unsigned int)rhiReStirDIGiCells;
+			r->FragmentStorageBarrier();
+		}
+		memcpy( parms.texGen0T, gs, sizeof( gs ) );
+	}
+}
+
+// the gather's inputs (units 0-10), bound once for the young pass and the gather alike
+static void RB_RHI_ReStirDIBindGatherInputs( rhi::RHI *r, const diPassCtx_t &c, const diBoost_t &b, const rhi::ImageHandle diPrevSide[3], rhi::ImageHandle nrdVel ) {
+	idImage *diDepthImg = c.diDepthImg;
+	const bool diApply = c.diApply;
+	const rhi::ImageHandle diAlbedoImg = c.diAlbedoImg;
+	const rhi::ImageHandle diMatImg = c.diMatImg;
+	const bool boostWant = b.boostWant;
+	const bool boostAll = b.boostAll;
+	const bool boostSide = b.boostSide;
+	// the gather's inputs (units 0-10), bound once for the young pass and the gather alike (Vulkan binds are draw-time state)
+	RB_RHI_BindUnit( 0, diDepthImg );
+	RB_RHI_BindRTUnit( r, 1, rhiNormalResultRT );
+	// units 2/3 = the G-buffer albedo + material for apply mode; white placeholders otherwise so the descriptor
+	// set is always complete (the shader only samples them when u_localParam1.w > 0.5)
+	if ( diApply ) {
+		RB_RHI_BindRTImage( r, 2, diAlbedoImg );
+		RB_RHI_BindRTImage( r, 3, diMatImg );
+	} else {
+		RB_RHI_BindUnit( 2, globalImages->whiteImage );
+		RB_RHI_BindUnit( 3, globalImages->whiteImage );
+	}
+	// R3a inputs on units 4 / 5 / 6 / 9 / 10 / 11 - never 7 / 8 / 12, the interaction draws' depth-compare shadow samplers that
+	// an unshadowed light inherits (the weapon-dark bug). White placeholders keep the descriptor set complete when the boost is
+	// off or has no side data; the shaders sample them only when u_tessParms says so.
+	{
+		const rhi::ImageHandle prevDen = ( boostWant && !boostAll ) ? r->GetRtgiOutputImage() : 0;
+		if ( prevDen ) { RB_RHI_BindRTImage( r, 4, prevDen ); } else { RB_RHI_BindUnit( 4, globalImages->whiteImage ); }
+		if ( boostSide ) {
+			RB_RHI_BindRTImage( r, 5, diPrevSide[0] );	// last frame's ( viewZ, lum )
+			RB_RHI_BindRTImage( r, 6, diPrevSide[1] );	// last frame's packed normal
+			RB_RHI_BindRTImage( r, 9, diPrevSide[2] );	// last frame's ( SH1, row + 1 [+ boost bit] )
+		} else {
+			RB_RHI_BindUnit( 5, globalImages->whiteImage );	RB_RHI_BindUnit( 6, globalImages->whiteImage );	RB_RHI_BindUnit( 9, globalImages->whiteImage );
+		}
+		// the velocity rides unit 10 whenever the view has one (the R3a boost AND the irradiance cache's mover test read it)
+		if ( nrdVel != 0 ) { RB_RHI_BindRTImage( r, 10, nrdVel ); } else { RB_RHI_BindUnit( 10, globalImages->whiteImage ); }
+	}
+}
+
+// the young pass, the 1-spp gather and the boost pass (R3a), in that order
+static void RB_RHI_ReStirDIGatherDraw( rhi::RHI *r, const diPassCtx_t &c, const diBoost_t &b, rhi::ShaderHandle prog, const rhi::RenderParams &parms ) {
+	const int rw = c.rw;
+	const int rh = c.rh;
+	const bool cbActive = c.cbActive;
+	const rhi::ShaderHandle boostProg = b.boostProg;
+	const rhi::ShaderHandle youngProg = b.youngProg;
+	const bool boostAll = b.boostAll;
+	const bool boostRun = b.boostRun;
+	// fresh 1-spp gather -> NRD guide MRT (weapon masked inside the shader). NRD does the temporal below.
+	// Checkerboard packs every traced sample into the LEFT HALF, so restrict the draw there - the right half is
+	// written nothing and reconstructed by NRD, so ~half the gather fragments (and their visibility rays) run.
+	// The shader keeps its own right-half early-out as the correctness guarantee.
+	// R3a: the YOUNG pass writes every pixel's reason (cheap, uniform, no rays) into a target of the gather's layout, BEFORE
+	// the gather (its inputs are last frame's side data + this frame's G-buffer / velocity, nothing the gather writes): the
+	// plain gather reads the verdict back CLUSTERED (young + >= 5 of 9 neighbours young) to draw the boost's extra picks, and
+	// the boost pass after it shades them on exactly those pixels (isolated specks never trigger it, which matters twice: they
+	// are not worth rays, and one surviving lane keeps a whole warp running).
+	const int yi = rhiReStirDIYoungIdx;
+	if ( boostRun ) {
+		r->GpuScopeBegin( "restir.di.young" );		// r_vkGpuTime 2: the per-pixel young test (+ its age from last frame's)
+		if ( cbActive ) { r->SetNextTargetPassArea( 0, 0, rw / 2, rh ); }
+		r->BeginTargetPass( rhiReStirDIYoungRT[ yi ], NULL );
+		if ( rhiReStirDIYoungValid && !boostAll ) { RB_RHI_BindRTImage( r, 11, r->GetRenderTargetImage( rhiReStirDIYoungRT[ yi ^ 1 ] ) ); }	// last frame's young
+		else { RB_RHI_BindUnit( 11, globalImages->blackImage ); }					// no history of holds: black = reason 0
+		RB_RHI_DrawFullscreen( r, youngProg, parms, 0 );
+		r->EndPass();
+		r->GpuScopeEnd();
+		rhiReStirDIYoungValid = true;
+		rhiReStirDIYoungIdx = yi ^ 1;
+	}
+	r->GpuScopeBegin( "restir.di.gather" );			// r_vkGpuTime 2: the 1-spp DI resample + visibility ray (+ R3a's K rays on young pixels)
+	if ( cbActive ) { r->SetNextTargetPassArea( 0, 0, rw / 2, rh ); }
+	r->BeginTargetPass( rhiReStirDIRT, NULL );
+	// unit 11: THIS frame's young verdict (the plain gather draws the boost's picks where it is clustered); black = none
+	if ( boostRun ) { RB_RHI_BindRTImage( r, 11, r->GetRenderTargetImage( rhiReStirDIYoungRT[ yi ] ) ); }
+	else { RB_RHI_BindUnit( 11, globalImages->blackImage ); }
+	RB_RHI_DrawFullscreen( r, prog, parms, 0 );
+	r->EndPass();
+	r->GpuScopeEnd();
+	if ( boostRun ) {
+		// R3a, the BOOST pass after the plain gather: only the clustered-young pixels survive (the same verdict the gather
+		// drew their extra picks by); they shade the K picks of their side record and overwrite their attachments (identical
+		// guides). The plain gather carries none of the K picks' shading or rays, so its cost stays the same boost on or off.
+		r->FragmentStorageBarrier();					// the plain gather's side records, visible to the boost
+		r->GpuScopeBegin( "restir.di.boost" );		// r_vkGpuTime 2: K picks + rays on the clustered young pixels only
+		if ( cbActive ) { r->SetNextTargetPassArea( 0, 0, rw / 2, rh ); }
+		r->SetNextTargetPassLoad();
+		r->BeginTargetPass( rhiReStirDIRT, NULL );
+		RB_RHI_BindRTImage( r, 11, r->GetRenderTargetImage( rhiReStirDIYoungRT[ yi ] ) );	// THIS frame's young
+		RB_RHI_DrawFullscreen( r, boostProg, parms, 0 );
+		r->EndPass();
+		r->GpuScopeEnd();
+	}
+}
+
+// R1 gradient: the 2 x gradient (gw x gh, A-trous ping-pong) + 2 x confidence (rw x rh, temporal ping-pong) targets
+static void RB_RHI_ReStirDIGradientTargets( rhi::RHI *r, int rw, int rh, int gw, int gh ) {
+	// targets: 2 x RGBA16F gradient (gw x gh, A-trous ping-pong), 2 x RG16F confidence (rw x rh, temporal ping-pong)
+	for ( int k = 0; k < 2; k++ ) {
+		if ( rhiReStirDIGradRT[k] && r->GetRenderTargetImage( rhiReStirDIGradRT[k] ) == 0 ) { rhiReStirDIGradRT[k] = 0; }
+		if ( rhiReStirDIGradConfRT[k] && r->GetRenderTargetImage( rhiReStirDIGradConfRT[k] ) == 0 ) { rhiReStirDIGradConfRT[k] = 0; rhiReStirDIGradConfValid = false; }
+	}
+	if ( rhiReStirDIGradW != gw || rhiReStirDIGradH != gh ) {
+		for ( int k = 0; k < 2; k++ ) { if ( rhiReStirDIGradRT[k] ) { r->DestroyRenderTarget( rhiReStirDIGradRT[k] ); rhiReStirDIGradRT[k] = 0; } }
+		rhiReStirDIGradW = rhiReStirDIGradH = 0;
+	}
+	if ( rhiReStirDIDisoccMixRT && r->GetRenderTargetImage( rhiReStirDIDisoccMixRT ) == 0 ) { rhiReStirDIDisoccMixRT = 0; }
+	if ( rhiReStirDIGradConfW != rw || rhiReStirDIGradConfH != rh ) {
+		if ( rhiReStirDIDisoccMixRT ) { r->DestroyRenderTarget( rhiReStirDIDisoccMixRT ); rhiReStirDIDisoccMixRT = 0; }
+		for ( int k = 0; k < 2; k++ ) { if ( rhiReStirDIGradConfRT[k] ) { r->DestroyRenderTarget( rhiReStirDIGradConfRT[k] ); rhiReStirDIGradConfRT[k] = 0; } }
+		rhiReStirDIGradConfW = rhiReStirDIGradConfH = 0;	rhiReStirDIGradConfValid = false;
+	}
+	for ( int k = 0; k < 2; k++ ) {
+		if ( !rhiReStirDIGradRT[k] )     { rhiReStirDIGradRT[k]     = r->CreateRenderTarget( rhi::IF_RGBA16F, gw, gh ); }	// .z = exact relative change
+		if ( !rhiReStirDIGradConfRT[k] ) { rhiReStirDIGradConfRT[k] = r->CreateRenderTarget( rhi::IF_RG16F, rw, rh ); }	// .x NRD, .y hold state
+	}
+}
+
+// R1 gradient 1: re-shade last frame's chosen light per stratum under this frame's lights (restir_di_gradient.frag)
+static void RB_RHI_ReStirDIGradientShade( rhi::RHI *r, const diPassCtx_t &c, const rhi::RenderParams &parms, rhi::ShaderHandle gradProg, int prevSlot, unsigned long long mapAddr, int stratum, float diPrevCb, const rhi::ImageHandle diPrevSide[3], rhi::ImageHandle nrdVel ) {
+	idImage *diDepthImg = c.diDepthImg;
+	const int rw = c.rw;
+	const int rh = c.rh;
+	const float cbParity = c.cbParity;
+	const bool diApply = c.diApply;
+	const float *invView = c.invView;
+	const rhi::ImageHandle diAlbedoImg = c.diAlbedoImg;
+	const rhi::ImageHandle diMatImg = c.diMatImg;
+	// 1. the gradient: the gather's uniform packing + the R1 extras (restir_di_gradient.frag header)
+	rhi::RenderParams gp = parms;
+	const unsigned long long prevAddr = s_sceneLightSlotAddr[ prevSlot ];
+	const unsigned int mapLo = (unsigned int)( mapAddr & 0xFFFFFFFFull ),  mapHi = (unsigned int)( mapAddr >> 32 );
+	const unsigned int prvLo = (unsigned int)( prevAddr & 0xFFFFFFFFull ), prvHi = (unsigned int)( prevAddr >> 32 );
+	memcpy( &gp.shadowParms[0], &mapLo, sizeof( mapLo ) );	memcpy( &gp.shadowParms[1], &mapHi, sizeof( mapHi ) );
+	memcpy( &gp.shadowParms[2], &prvLo, sizeof( prvLo ) );	memcpy( &gp.shadowParms[3], &prvHi, sizeof( prvHi ) );
+	gp.tessParms[0] = diPrevCb;
+	gp.tessParms[3] = cbParity;				// this frame's parity (where this frame's picks sit)
+	gp.tessParms[1] = (float)DI_LIGHTMAP_MAX;	// table capacity: bounds for stored lightDef indices
+	gp.parallaxParms2[3] = (float)s_sceneLightSlotCount[ prevSlot ];	// last frame's light count: bounds for stored rows
+	{	// last frame's lightDef -> row table (the second gradient direction looks the current light up in it)
+		const unsigned long long prevMap = s_diLightMapSlotAddr[ prevSlot ];
+		const unsigned int pmLo = (unsigned int)( prevMap & 0xFFFFFFFFull ), pmHi = (unsigned int)( prevMap >> 32 );
+		memcpy( &gp.parallaxParms2[0], &pmLo, sizeof( pmLo ) );	memcpy( &gp.parallaxParms2[1], &pmHi, sizeof( pmHi ) );
+	}
+	gp.parallaxParms[0] = (float)stratum;	gp.parallaxParms[1] = (float)rw;	gp.parallaxParms[2] = (float)rh;
+	gp.parallaxParms[3] = r_rtReStirDIGradientStatic.GetFloat();		// static threshold, full-res pixels
+	gp.tessParms[2] = r_rtReStirDIGradientBias.GetFloat();			// weighs the two judgements as the confidence pass will
+	memcpy( gp.prevMvpMatrix, rhiReStirDIPrevView, sizeof( gp.prevMvpMatrix ) );	// last frame's world -> view
+	float prevInvView[16];
+	if ( !RB_RHI_InvertMatrix( rhiReStirDIPrevView, prevInvView ) ) { memcpy( prevInvView, invView, sizeof( prevInvView ) ); }
+	memcpy( gp.projectionMatrix, prevInvView, sizeof( gp.projectionMatrix ) );	// last frame's view -> world (exact static re-shade)
+	r->GpuScopeBegin( "restir.di.grad" );		// r_vkGpuTime 2: 1/9-res re-shade of last frame's light + 1 ray
+	r->BeginTargetPass( rhiReStirDIGradRT[0], NULL );
+	RB_RHI_BindUnit( 0, diDepthImg );
+	RB_RHI_BindRTUnit( r, 1, rhiNormalResultRT );
+	if ( diApply ) { RB_RHI_BindRTImage( r, 2, diAlbedoImg ); RB_RHI_BindRTImage( r, 3, diMatImg ); }
+	else { RB_RHI_BindUnit( 2, globalImages->whiteImage ); RB_RHI_BindUnit( 3, globalImages->whiteImage ); }
+	RB_RHI_BindRTImage( r, 4, r->GetRenderTargetImage2( rhiReStirDIRT ) );		// THIS frame's ( viewZ, lum )
+	RB_RHI_BindRTImage( r, 5, diPrevSide[0] );	// last frame's ( viewZ, lum )
+	RB_RHI_BindRTImage( r, 6, diPrevSide[1] );	// last frame's packed normal
+	// units 10 / 11, not 7 / 8: 7 / 8 are the interaction draws' shadow map / cube (depth-compare samplers) and an
+	// unshadowed (DI-covered) light inherits them unchanged - a colour image there blanked the weapon's lit draws
+	RB_RHI_BindRTImage( r, 10, nrdVel );
+	RB_RHI_BindRTImage( r, 11, diPrevSide[2] );	// last frame's ( SH1, row + 1 )
+	RB_RHI_BindRTImage( r, 9, r->GetRenderTargetImage4( rhiReStirDIRT ) );		// THIS frame's ( SH1, row + 1 )
+	RB_RHI_DrawFullscreen( r, gradProg, gp, 0 );
+	r->EndPass();
+	r->GpuScopeEnd();
+}
+
+// R1 gradient 2: the A-trous passes, ending in rhiReStirDIGradThisView
+static void RB_RHI_ReStirDIGradientFilter( rhi::RHI *r, rhi::ShaderHandle filtProg, int gw, int gh ) {
+	// 2. four A-trous passes, strides 1 / 2 / 4 / 8, ping-pong ending back in [0]
+	r->GpuScopeBegin( "restir.di.gradfilter" );
+	int src = 0;
+	const int filterPasses = idMath::ClampInt( 0, 4, r_rtReStirDIGradientFilterPasses.GetInteger() );
+	for ( int pass = 0; pass < filterPasses; pass++ ) {
+		rhi::RenderParams fp;
+		memset( &fp, 0, sizeof( fp ) );
+		RB_RHI_IdentityMvp( fp.mvpMatrix );
+		fp.localParam0[0] = (float)( 1 << pass );
+		fp.localParam0[1] = (float)gw;	fp.localParam0[2] = (float)gh;
+		fp.localParam0[3] = ( pass == 0 ) ? 1.0f : 0.0f;	// max-dilate the exact relative change by one stratum, first pass only
+		r->BeginTargetPass( rhiReStirDIGradRT[ src ^ 1 ], NULL );
+		RB_RHI_DrawFullscreen( r, filtProg, fp, r->GetRenderTargetImage( rhiReStirDIGradRT[ src ] ) );
+		r->EndPass();
+		src ^= 1;
+	}
+	r->GpuScopeEnd();
+	rhiReStirDIGradThisView = r->GetRenderTargetImage( rhiReStirDIGradRT[ src ] );
+}
+
+// R1 gradient 3 + 4: the NRD confidence at the gather res and the ReLAX history-reset mix (r_rtReStirDIGradientReset)
+static rhi::ImageHandle RB_RHI_ReStirDIGradientConf( rhi::RHI *r, rhi::ShaderHandle confProg, int rw, int rh, rhi::ImageHandle nrdVel, int diMainF ) {
+	// 3. the confidence at the gather res, fed to NRD. ReLAX applies confidence directly and expects small
+	// values (the shader squares it), so the floor is the raw cvar (ReBLUR would need >= historyFix / history).
+	const float mainF  = (float)Max( 1, ( diMainF > 0 ) ? diMainF : 30 );
+	const float floorC = r_rtReStirDIGradientFloor.GetFloat();
+	const float h      = r_rtReStirDIGradientHistory.GetFloat();
+	rhi::RenderParams cp;
+	memset( &cp, 0, sizeof( cp ) );
+	RB_RHI_IdentityMvp( cp.mvpMatrix );
+	cp.localParam0[0] = r_rtReStirDIGradientPower.GetFloat();
+	cp.localParam0[1] = ( h > 0.0f ) ? 1.0f / ( 1.0f + h ) : 1.0f;
+	cp.localParam0[2] = idMath::ClampFloat( 0.0f, 1.0f, floorC );
+	cp.localParam0[3] = r_rtReStirDIGradientBias.GetFloat();
+	cp.localParam1[0] = 0.5f / mainF;									// NRD: dither by 0.5 / maxAccumulatedFrameNum
+	cp.localParam1[1] = rhiReStirDIGradConfValid ? 1.0f : 0.0f;
+	cp.localParam1[2] = idMath::ClampFloat( 0.0f, 0.9f, r_rtReStirDIGradientDeadzone.GetFloat() );
+	cp.localParam1[3] = 1.0f;											// R2: square the confidence for ReLAX (NRD sample)
+	cp.windowCoord[2] = -1.0f;
+	const int ci = rhiReStirDIGradConfIdx;
+	r->GpuScopeBegin( "restir.di.gradconf" );
+	r->BeginTargetPass( rhiReStirDIGradConfRT[ ci ], NULL );
+	// last frame's confidence - only once it exists: the first frame after the targets are (re)created the partner was
+	// never written (UNDEFINED layout at submit, validation 09600); the shader skips it then anyway (localParam1.y = 0)
+	if ( rhiReStirDIGradConfValid ) { RB_RHI_BindRTImage( r, 1, r->GetRenderTargetImage( rhiReStirDIGradConfRT[ ci ^ 1 ] ) ); }
+	else { RB_RHI_BindUnit( 1, globalImages->whiteImage ); }
+	RB_RHI_BindRTImage( r, 2, nrdVel );
+	RB_RHI_DrawFullscreen( r, confProg, cp, rhiReStirDIGradThisView );
+	r->EndPass();
+	r->GpuScopeEnd();
+	const rhi::ImageHandle diGradConfImg = r->GetRenderTargetImage( rhiReStirDIGradConfRT[ ci ] );
+	rhiReStirDIGradConfThisView = diGradConfImg;
+	// 4. ReLAX history RESETS where an exact change is big (r_rtReStirDIGradientReset): the same shader in MIX mode
+	// writes IN_DISOCCLUSION_THRESHOLD_MIX (1 = treat as disoccluded). Confidence alone only shortens ReLAX's window
+	// for the frame, so the stale shadow behind a walking NPC kept fading out for ~100 ms (and a confidence of 0
+	// without a history reset skips ReLAX's history fix, so it came out noisy).
+	const float resetThr = r_rtReStirDIGradientReset.GetFloat();
+	if ( resetThr > 0.0f ) {
+		if ( !rhiReStirDIDisoccMixRT ) { rhiReStirDIDisoccMixRT = r->CreateRenderTarget( rhi::IF_R16F, rw, rh ); }
+		if ( rhiReStirDIDisoccMixRT ) {
+			rhi::RenderParams mp = cp;
+			mp.windowCoord[0] = 1.0f;				// MIX mode
+			mp.windowCoord[1] = resetThr;
+			r->GpuScopeBegin( "restir.di.disoccmix" );
+			r->BeginTargetPass( rhiReStirDIDisoccMixRT, NULL );
+			RB_RHI_DrawFullscreen( r, confProg, mp, rhiReStirDIGradThisView );
+			r->EndPass();
+			r->GpuScopeEnd();
+			rhiReStirDIDisoccMixThisView = r->GetRenderTargetImage( rhiReStirDIDisoccMixRT );
+		}
+	}
+	rhiReStirDIGradConfIdx = ci ^ 1;
+	rhiReStirDIGradConfValid = true;
+	return diGradConfImg;
+}
+
+// R1 gradient confidence: the chain above, after the gather; 0 = none this frame
+static rhi::ImageHandle RB_RHI_ReStirDIGradient( rhi::RHI *r, const diPassCtx_t &c, const rhi::RenderParams &parms, bool diPrevSideValid, const rhi::ImageHandle diPrevSide[3], float diPrevCb, rhi::ImageHandle nrdVel, int diMainF ) {
+	const int rw = c.rw;
+	const int rh = c.rh;
+	// ---- R1 gradient confidence (docs/rtx-restir-di.md Plan R1) ----
+	// Rev.2: AFTER the gather, with last frame's side data in the copies above (both frames' picks at hand): re-shade last frame's chosen light per 3x3 stratum at the reprojected
+	// surface under this frame's lights (restir_di_gradient.frag), A-trous the change 4x (restir_di_gradient_filter),
+	// and turn it into NRD IN_DIFF_CONFIDENCE at the gather res (restir_di_gradient_conf). Needs last frame's gather
+	// side data at this rw x rh, last frame's light buffer + this frame's lightDef -> row table, the velocity, and the
+	// NRD slot (no point computing a confidence nobody consumes). A camera cut resets NRD anyway: skip.
+	rhi::ImageHandle diGradConfImg = 0;
+	rhiReStirDIGradConfThisView = 0;
+	rhiReStirDIGradThisView = 0;
+	rhiReStirDIDisoccMixThisView = 0;
+	{
+		const int prevSlot = ( (int)( ( tr.frameCount + RT_REFL_LIGHT_SLOTS - 1 ) % RT_REFL_LIGHT_SLOTS ) );
+		const bool prevLightsValid = s_sceneLightSlotFrame[ prevSlot ] == tr.frameCount - 1 && s_sceneLightSlotAddr[ prevSlot ] != 0;
+		const int curSlot = (int)( tr.frameCount % RT_REFL_LIGHT_SLOTS );
+		const unsigned long long mapAddr = ( s_sceneLightSlotFrame[ curSlot ] == tr.frameCount ) ? s_diLightMapSlotAddr[ curSlot ] : 0;
+		const bool gradOn = diPrevSideValid && rhiReStirDIPrevValid && prevLightsValid && mapAddr != 0;
+		const int stratum = idMath::ClampInt( 2, 6, r_rtReStirDIGradientStratum.GetInteger() );
+		const int gw = ( rw + stratum - 1 ) / stratum, gh = ( rh + stratum - 1 ) / stratum;
+		if ( gradOn ) {
+			RB_RHI_ReStirDIGradientTargets( r, rw, rh, gw, gh );
+			rhi::ShaderHandle gradProg = r->LoadShader( "restir_di_gradient" );
+			rhi::ShaderHandle filtProg = r->LoadShader( "restir_di_gradient_filter" );
+			rhi::ShaderHandle confProg = r->LoadShader( "restir_di_gradient_conf" );
+			if ( rhiReStirDIGradRT[0] && rhiReStirDIGradRT[1] && rhiReStirDIGradConfRT[0] && rhiReStirDIGradConfRT[1]
+					&& gradProg && filtProg && confProg ) {
+				rhiReStirDIGradW = gw;	rhiReStirDIGradH = gh;
+				rhiReStirDIGradConfW = rw;	rhiReStirDIGradConfH = rh;
+				RB_RHI_ReStirDIGradientShade( r, c, parms, gradProg, prevSlot, mapAddr, stratum, diPrevCb, diPrevSide, nrdVel );
+				RB_RHI_ReStirDIGradientFilter( r, filtProg, gw, gh );
+				diGradConfImg = RB_RHI_ReStirDIGradientConf( r, confProg, rw, rh, nrdVel, diMainF );
+				RB_RHI_ForgetTexBinds();
+			}
+		}
+		if ( diGradConfImg == 0 ) { rhiReStirDIGradConfValid = false; }		// no continuous confidence history to smooth from
+	}
+	return diGradConfImg;
+}
+
+// checkerboard only: the full internal-res NRD guide MRT (rtgi_guides.frag); 0 = the gather's own att1/att2 guides
+static rhi::RenderTargetHandle RB_RHI_ReStirDIGuides( rhi::RHI *r, const diPassCtx_t &c ) {
+	idImage *diDepthImg = c.diDepthImg;
+	const int w = c.w;
+	const int h = c.h;
+	const int rw = c.rw;
+	const int rh = c.rh;
+	const int uploadW = c.uploadW;
+	const int uploadH = c.uploadH;
+	const bool cbActive = c.cbActive;
+	const float *invView = c.invView;
+	// Checkerboard NRD guides: the half-packed gather can't carry per-reconstructed-cell guides, so a ray-free
+	// pass (reuse rtgi_guides.frag; signal-agnostic - depth+normal -> att1 viewZ / att2 normal) fills a full
+	// internal-res (rw x rh) MRT that NRD points its guides at. Non-cb keeps the gather's own att1/att2 guides.
+	rhi::RenderTargetHandle diGuideRT = 0;
+	if ( cbActive ) {
+		if ( rhiReStirDIGuideRT && r->GetRenderTargetImage( rhiReStirDIGuideRT ) == 0 ) { rhiReStirDIGuideRT = 0; rhiReStirDIGuideW = rhiReStirDIGuideH = 0; }
+		if ( rhiReStirDIGuideRT && ( rhiReStirDIGuideW != rw || rhiReStirDIGuideH != rh ) ) { r->DestroyRenderTarget( rhiReStirDIGuideRT ); rhiReStirDIGuideRT = 0; rhiReStirDIGuideW = rhiReStirDIGuideH = 0; }
+		if ( !rhiReStirDIGuideRT ) {
+			rhiReStirDIGuideRT = r->CreateRenderTargetRtgiMrt( rw, rh );
+			if ( rhiReStirDIGuideRT ) { rhiReStirDIGuideW = rw; rhiReStirDIGuideH = rh; }
+		}
+		rhi::ShaderHandle guideProg = rhiReStirDIGuideRT ? r->LoadShader( "rtgi_guides" ) : 0;
+		if ( guideProg != 0 ) {
+			rhi::RenderParams gp;
+			memset( &gp, 0, sizeof( gp ) );
+			RB_RHI_IdentityMvp( gp.mvpMatrix );
+			memcpy( gp.modelViewMatrix, invView, sizeof( gp.modelViewMatrix ) );	// u_modelViewMatrix = view->world (normal encode)
+			gp.screenCorrection[0] = 1.0f / rw;	gp.screenCorrection[1] = 1.0f / rh;
+			gp.depthTexRecip[0] = ( (float)w / rw ) / uploadW;	gp.depthTexRecip[1] = ( (float)h / rh ) / uploadH;
+			r->GpuScopeBegin( "restir.di.guides" );	// r_vkGpuTime 2: internal-res NRD guide fill (checkerboard only)
+			r->BeginTargetPass( rhiReStirDIGuideRT, NULL );
+			RB_RHI_BindUnit( 0, diDepthImg );
+			RB_RHI_BindRTUnit( r, 1, rhiNormalResultRT );
+			RB_RHI_DrawFullscreen( r, guideProg, gp, 0 );
+			r->EndPass();
+			r->GpuScopeEnd();
+			diGuideRT = rhiReStirDIGuideRT;
+		}
+	}
+	return diGuideRT;
+}
+
+// the NRD ReLAX denoise of the gather (the shared GI slot) -> rhiReStirDIDenoisedThisView
+static void RB_RHI_ReStirDIDenoise( rhi::RHI *r, const diPassCtx_t &c, rhi::ImageHandle diConfImg, rhi::RenderTargetHandle diGuideRT, rhi::ImageHandle nrdVel, int diMainF, bool diCut ) {
+	const viewDef_t *viewDef = c.viewDef;
+	const int rw = c.rw;
+	const int rh = c.rh;
+	const float resScale = c.resScale;
+	const bool cbActive = c.cbActive;
+	const bool shMode = c.shMode;
+	const float diHitScale = c.diHitScale;
+	rhi::RtaoDenoiseArgs da;
+	memset( &da, 0, sizeof( da ) );
+	da.giMode = true;									// REBLUR_DIFFUSE into GetRtgiOutputImage (shared GI slot)
+	da.shMode = shMode;									// REBLUR_DIFFUSE_SH: + att3 SH1 in, GetRtgiOutputSh1Image out
+	da.shAtt  = 3;
+	da.rayRT = rhiReStirDIRT;							// att0 = YCoCg radiance+hitdist (half-packed when cb); guides in att1/att2
+	const bool cbDenoise = cbActive && diGuideRT != 0;	// guides ready -> NRD reconstructs the half-packed radiance
+	da.viewzRT  = cbDenoise ? diGuideRT : rhiReStirDIRT;	da.viewzAtt  = 1;
+	da.normalRT = cbDenoise ? diGuideRT : rhiReStirDIRT;	da.normalAtt = 2;
+	da.checkerboard = cbDenoise ? 1 : 0;				// 1 = BLACK (constant); NRD flips per frameIndex to read the packed parity
+	da.velImage = nrdVel;								// velocity at the gather res (downsampled when rw < w)
+	da.w = rw;	da.h = rh;
+	memcpy( da.viewToClip,  viewDef->unjitteredProjectionMatrix, sizeof( da.viewToClip ) );
+	memcpy( da.worldToView, viewDef->worldSpace.modelViewMatrix, sizeof( da.worldToView ) );
+	memcpy( da.viewToClipPrev,  rhiReStirDIPrevValid ? rhiReStirDIPrevProj : da.viewToClip,  sizeof( da.viewToClipPrev ) );
+	memcpy( da.worldToViewPrev, rhiReStirDIPrevValid ? rhiReStirDIPrevView : da.worldToView, sizeof( da.worldToViewPrev ) );
+	da.jitterX = -viewDef->jitter[0] * resScale;
+	da.jitterY =  viewDef->jitter[1] * resScale;
+	da.jitterPrevX = rhiReStirDIPrevValid ? -rhiReStirDIPrevJitter[0] * resScale : da.jitterX;
+	da.jitterPrevY = rhiReStirDIPrevValid ?  rhiReStirDIPrevJitter[1] * resScale : da.jitterY;
+	da.mvScaleX = -1.0f;	da.mvScaleY = 1.0f;			// engine (currUV-prevUV)*0.5 +Y-up -> NRD 2D screen-space
+	da.hitDistA = 0.5f * diHitScale;	da.hitDistB = 0.1f;	// MUST match restir_di.frag's nhd normalization
+	da.maxAccumFrames = diMainF;							// history cap (hoisted above: R0 seconds-based) - ReLAX diffuseMaxAccumulatedFrameNum
+	rhiReStirDIHistFrames = diMainF;						// the debug overlay's history-length ramp divides by this
+	// lag knobs still read by ReLAX (default to today's effective values); the ReBLUR-only ones were trimmed at R6
+	da.fastClampSigma   = r_rtReStirDIFastClamp.GetFloat();	// ReLAX fastHistoryClampingSigmaScale
+	// Interlock: the R1 gradient confidence is NRD's recommended replacement for the built-in antilag, not a
+	// supplement - running both double-rejects history on every lighting change (the flat-area dimming the
+	// gradient exists to avoid). So when the gradient is on it forces antilag off; antilag is the fallback only
+	// when the gradient is off.
+	da.antilagOff       = !r_rtReStirDIAntilag.GetBool() || r_rtReStirDIGradient.GetBool();
+	da.disocclusionThreshold = r_rtReStirDIDisocclusion.GetFloat();	// 0.01 = NRD default
+	da.returnHistoryLength = true;							// .w = accumulated frames (debug view 4; R3's disocclusion boost)
+	da.validation       = ( r_rtReStirDIDebug.GetInteger() == 3 );	// NRD's validation overlay for debug view 3
+	// R2 (Plan R2): ReLAX family + its settings (Remix direct-light preset / RTXDI sample as the starting values)
+	da.denoiser            = 1;								// R6: DI is ReLAX-only
+	da.fastFrames          = r_rtReStirDIRelaxFast.GetInteger();	// ReLAX diffuseMaxFastAccumulatedFrameNum (Remix direct: 1, "to reduce trail")
+	if ( r_rtReStirDIRelaxFastMs.GetFloat() > 0.0f ) {
+		// in TIME, like the main history: 8 frames were 200 ms of trail at 40 fps but 55 ms at 144
+		const float fps = 1000.0f / RB_RHI_SmoothedFrameMs();
+		da.fastFrames = Max( 1, (int)( r_rtReStirDIRelaxFastMs.GetFloat() * 0.001f * fps + 0.5f ) );
+	}
+	da.relaxPrepass        = r_rtReStirDIRelaxPrepass.GetFloat();
+	da.relaxPhiLuminance   = r_rtReStirDIRelaxPhi.GetFloat();
+	da.relaxAtrous         = r_rtReStirDIRelaxAtrous.GetInteger();
+	da.relaxVarianceHistory = r_rtReStirDIRelaxVarianceHist.GetInteger();
+	da.relaxConfRelax      = r_rtReStirDIRelaxConfRelax.GetFloat();
+	da.relaxAntiFirefly    = r_rtReStirDIRelaxFirefly.GetBool();
+	// DI spatial-cleanup overrides still read by ReLAX (the ReBLUR-only prepass/blur-radius were trimmed at R6). 0 = NRD default.
+	da.historyFixFrameNum = r_rtReStirDIHistoryFix.GetInteger();	// spatial reconstruction on thin/disoccluded (moving) history
+	da.edgeStopScale      = r_rtReStirDIEdgeStop.GetFloat();		// >1 blurs across detail edges (grate-noise lever; costs detail)
+	da.confImage = diConfImg;							// IN_DIFF_CONFIDENCE (0 = not provided this frame)
+	da.disoccMixImage = ( diConfImg != 0 ) ? rhiReStirDIDisoccMixThisView : 0;	// R1: forced ReLAX history resets (r_rtReStirDIGradientReset)
+	da.denoisingRange = 20000.0f;
+	da.frameIndex = (unsigned int)tr.frameCount;
+	da.reset = !rhiReStirDIPrevValid || diCut;			// first DI frame / interruption / R0: camera cut
+	r->GpuScopeBegin( "restir.di.denoise" );			// r_vkGpuTime 2: NRD REBLUR_DIFFUSE dispatches
+	rhiReStirDIDenoisedThisView = r->RtaoDenoise( da );	// -> GetRtgiOutputImage holds the denoised DI
+	r->GpuScopeEnd();
+}
+
 static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	// the world-only depth when the prepass deferred the weapon this view (same POT capture size), else _currentDepth
 	idImage *diDepthImg = ( rhiWorldDepthThisView && globalImages->worldDepthImage->rhiHandle != 0 )
@@ -9136,24 +9849,8 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	// R1: the gather target is always the 4-attachment DI MRT (att1 RG16F = viewZ + gradient luminance, att3.w = the
 	// chosen light's row) whether or not SH mode is on - the side data is what next frame's gradient pass re-shades.
 	const bool shMode = r_rtReStirDISH.GetBool();
-	// the pair lives and dies together (a lost context, a resolution change)
-	const bool pairStale = ( rhiReStirDIPairRT[0] && r->GetRenderTargetImage( rhiReStirDIPairRT[0] ) == 0 )
-		|| ( rhiReStirDIPairRT[1] && r->GetRenderTargetImage( rhiReStirDIPairRT[1] ) == 0 ) || rhiReStirDIW != rw || rhiReStirDIH != rh;
-	if ( ( rhiReStirDIPairRT[0] || rhiReStirDIPairRT[1] ) && pairStale ) {
-		for ( int k = 0; k < 2; k++ ) { if ( rhiReStirDIPairRT[k] ) { r->DestroyRenderTarget( rhiReStirDIPairRT[k] ); rhiReStirDIPairRT[k] = 0; } }
-		rhiReStirDIRT = 0;	rhiReStirDIPrevRT = 0;	rhiReStirDIW = rhiReStirDIH = 0;	rhiReStirDILastWritten = -1;
-		rhiReStirDIGatherPrevValid = false;
-	}
-	if ( !rhiReStirDIPairRT[0] || !rhiReStirDIPairRT[1] ) {
-		for ( int k = 0; k < 2; k++ ) { if ( !rhiReStirDIPairRT[k] ) { rhiReStirDIPairRT[k] = r->CreateRenderTargetReStirDIMrt( rw, rh ); } }
-		if ( !rhiReStirDIPairRT[0] || !rhiReStirDIPairRT[1] ) {
-			for ( int k = 0; k < 2; k++ ) { if ( rhiReStirDIPairRT[k] ) { r->DestroyRenderTarget( rhiReStirDIPairRT[k] ); rhiReStirDIPairRT[k] = 0; } }
-			rhiReStirDIRT = 0;	rhiReStirDIPrevRT = 0;	rhiReStirDILastWritten = -1;	rhiReStirDIGatherPrevValid = false;
-			return;
-		}
-		rhiReStirDIW = rw;	rhiReStirDIH = rh;
-		rhiReStirDILastWritten = -1;
-		rhiReStirDIGatherPrevValid = false;
+	if ( !RB_RHI_ReStirDIEnsureTargets( r, rw, rh ) ) {
+		return;
 	}
 	// this gather writes the one it did not write last; the other is last frame's (a gather that never ran since leaves
 	// rhiReStirDILastWritten unchanged, so a skipped frame never makes the side data two frames old or unwritten)
@@ -9173,226 +9870,51 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	const int uploadW = diDepthImg->uploadWidth;
 	const int uploadH = diDepthImg->uploadHeight;
 
-	rhi::RenderParams parms;
-	memset( &parms, 0, sizeof( parms ) );
-	RB_RHI_IdentityMvp( parms.mvpMatrix );
-	memcpy( parms.modelViewMatrix, invView, sizeof( invView ) );		// u_modelViewMatrix = view->world
-	memcpy( &parms.color[0], &lightAddr, sizeof( lightAddr ) );			// color.xy = light-buffer device address
-	parms.color[2] = (float)numLights;									// color.z = light count
-	// visibility ray: scene TLAS into rtParms.xy (bit-cast, rtao/interaction idiom), .z = normal offset,
-	// .w = max length. 0 (no RT scene this frame) leaves rtParms.xy = 0 -> the shader skips the ray (unshadowed).
-	const unsigned long long tlas = r->GetTlasAddress();
-	if ( tlas != 0 ) {
-		RB_RHI_PackAddr( &parms.rtParms[0], tlas );	// bit-cast, NOT a value cast
-		parms.rtParms[2] = r_rtSunShadowOffset.GetFloat();				// ray-origin normal offset (shared with mode 4)
-		parms.rtParms[3] = 100000.0f;									// max shadow-ray length
-	}
-	// NRD ReblurHitDistanceParameters for direct lighting: the "hit distance" is the distance to the chosen
-	// light, so A sets the world-space blur scale (ReBLUR divides by A+|viewZ|*B). Shader and denoise MUST use
-	// the same A/B. A = 0.5*diHitScale, B = 0.1 (as rtgi_ray.frag). diHitScale ~ a room so typical light
-	// distances don't saturate the normalized value.
-	const float diHitScale = 1024.0f;
-	parms.localParam0[0] = invP00;
-	parms.localParam0[1] = invP11;
-	parms.localParam0[2] = (float)idMath::ClampInt( 0, 128, r_rtReStirDICandidates.GetInteger() );	// M candidates (0 = every light, exhaustive RIS)
-	parms.localParam0[3] = diHitScale;									// NRD hit-distance A = 0.5 * this
-	parms.localParam1[0] = (float)( tr.frameCount & 0xFFFF );			// RNG decorrelation per frame
-	parms.texGen0S[0] = (float)idMath::ClampInt( 1, 16, r_rtEmissiveSamples.GetInteger() );	// emitter area samples averaged per shade (far-field, restir_di_shade.glsl)
-	parms.texGen0S[1] = r_rtEmissiveCheapTarget.GetBool() ? 1.0f : 0.0f;	// emitter candidates weighed analytically (diTargetLight)
-	parms.texGen0S[3] = 0.0f;	// restir_di.frag diOpaqueZero: ALWAYS 0 (an exact late re-derivation the shader compiler cannot merge away)
-	parms.localParam1[2] = cbParity;									// checkerboard parity (0 = off)
-	// gather runs at rw x rh: gl_FragCoord -> [0,1] uv is 1/rw, -> the full-res depth tc carries the (w/rw)
-	// stretch (mirrors RB_RHI_RtgiPass). At scale 1 + no checkerboard: 1/w, 1/uploadW (unchanged).
-	parms.screenCorrection[0] = 1.0f / rw;
-	parms.screenCorrection[1] = 1.0f / rh;
-	parms.depthTexRecip[0] = ( (float)w / rw ) / uploadW;
-	parms.depthTexRecip[1] = ( (float)h / rh ) / uploadH;
-	rhi::FillDepthParms( parms, backEnd.viewDef ? backEnd.viewDef->projectionMatrix : NULL );
-	parms.windowCoord[2] = -1.0f;										// VK-only pass: top-down view-Y sign
-	parms.windowCoord[3] = r_rtLightTextures.GetBool() ? 1.0f : 0.0f;	// Stage G: sample each light's cookie + falloff textures
-
-	// Perforated casters (r_rtPerforatedShadows): every visibility ray takes the grate-aware walk (restir_di_shade.glsl
-	// traceVisibility) - no per-view box list, every pixel picks its own light and the hardware BVH is the gate.
-	// windowCoord.x = grates on, .y = strength; particleRadius.xy = geo table (grate candidates -> coverage texture).
+	const unsigned long long tlas = r->GetTlasAddress();			// 0 = no RT scene this frame: the gather skips its visibility ray
 	const unsigned long long geoTable = r->GetRtGeoTableAddress();
-	if ( tlas != 0 && geoTable != 0 && r_rtPerforatedShadows.GetBool() && r_shadowMapPerforated.GetBool() ) {
-		parms.windowCoord[0] = 1.0f;
-		parms.windowCoord[1] = idMath::ClampFloat( 0.0f, 1.0f, r_shadowMapPerforatedStrength.GetFloat() );
-	}
-	// Soft grate shadows (r_rtShadowBlur parity, restir_di_shade.glsl traceVisibility): the visibility ray averages a
-	// grate's coverage over the footprint the hybrid blur would spread its shadow across - same intensity (per light, in
-	// the light buffer's flags bits 16-31) and curve. .x = on, .y = r_rtShadowBlurCurve. Off -> the hard texel test.
-	if ( parms.windowCoord[0] > 0.5f && r_rtShadowBlur.GetBool() && r_rtShadowBlurIntensity.GetFloat() > 0.0f ) {
-		parms.specularModifier[0] = 1.0f;
-		parms.specularModifier[1] = r_rtShadowBlurCurve.GetFloat();
-	}
-	// the geo table rides particleRadius.xy for BOTH the grate candidates and the combined-GI bounce hits
-	if ( geoTable != 0 ) {
-		const unsigned int geoLo = (unsigned int)( geoTable & 0xFFFFFFFFull ), geoHi = (unsigned int)( geoTable >> 32 );
-		memcpy( &parms.particleRadius[0], &geoLo, sizeof( geoLo ) );		// bit-cast, NOT a value cast
-		memcpy( &parms.particleRadius[1], &geoHi, sizeof( geoHi ) );
-	}
-	// the direct term's light scale: the forward path's lightColor = lightScale * stage colour, the buffer carries
-	// the raw stage colour, so the gather scales (the apply then remultiplies material + AO only)
-	parms.shadowFalloffS[0] = backEnd.lightScale;
-	// cookie mip selection (rt_light_tex.glsl): world size of one FULL-RES screen pixel per unit depth, so the
-	// gather lands on the same mip the forward draw's screen-derivative LOD picks (Doom's black-bordered
-	// cookies read dimmer on the blurred mips; mip 0 made DI brighter than forward on big floors)
-	parms.shadowFalloffS[1] = 2.0f * invP00 / (float)w;
-	// SH mode: no cosine in the gather, SH1 on loc 3. 2 = + full-res specular re-shade (r_rtReStirDISpecReshade): the
-	// gather shades DIFFUSE-ONLY and demodulates by the diffuse share, so the buffer is pure incoming irradiance and the
-	// apply can rebuild a sharp GGX highlight at full res. The gradient inherits this (gp = parms), so its re-shade matches.
-	const bool specReshade = shMode && r_rtReStirDISpecReshade.GetBool();
-	parms.shadowFalloffS[2] = specReshade ? 2.0f : ( shMode ? 1.0f : 0.0f );
-	parms.shadowFalloffS[3] = 1.0f;										// R2: linear + raw hitDist out (ReLAX input)
+	const bool combineGI = r_rtgi.GetBool() && tlas != 0 && geoTable != 0;	// the RTGI one-bounce folds into this gather (RB_RHI_ReStirDIBounceParms)
+	diPassCtx_t c;
+	c.viewDef = viewDef;	c.diDepthImg = diDepthImg;
+	c.w = w;	c.h = h;	c.rw = rw;	c.rh = rh;	c.uploadW = uploadW;	c.uploadH = uploadH;
+	c.resScale = resScale;	c.cbParity = cbParity;	c.cbActive = cbActive;	c.shMode = shMode;	c.diFullTarget = diFullTarget;
+	c.combineGI = combineGI;	c.diApply = false;	c.diAlbedoImg = 0;	c.diMatImg = 0;		// RB_RHI_ReStirDIApplyParms decides
+	c.lightAddr = lightAddr;	c.numLights = numLights;	c.tlas = tlas;	c.geoTable = geoTable;
+	memcpy( c.invView, invView, sizeof( c.invView ) );	c.invP00 = invP00;	c.invP11 = invP11;
+	c.diHitScale = 1024.0f;	// NRD hit-distance A = 0.5 * this: the gather parms and the denoise MUST agree
 
-	// With r_rtgi on, the RTGI one-bounce is folded into this gather (rtgi_bounce.glsl) so ONE NRD denoise and ONE
-	// apply serve direct + indirect. RB_RHI_RtgiPass stands down while DI is on (the shared NRD slot), so this is the
-	// ONLY place the bounce is produced under DI - r_rtgi alone switches it (the separate r_rtReStirDICombineGI knob is
-	// retired: its 0 meant "no GI" while r_rtgi still stood RTAO down and the ambient reconcile still assumed GI). Uniforms mirror RB_RHI_RtgiPass's packing
-	// (radius / emissive / clamp / light scale / shadow ray / eye pullback / the CPU-hoisted IGN rotation) plus
-	// rtgi_apply's intensity and fog fade, so the bounce comes out as RTGI's own pass + apply would have made it.
-	const bool combineGI = r_rtgi.GetBool() && tlas != 0 && geoTable != 0;
-	parms.specularParms[0] = combineGI ? 1.0f : 0.0f;
-	if ( combineGI ) {
-		RB_RHI_RtgiFogCoefs( viewDef, parms.specularParms[1], parms.specularParms[2] );
-		// fast-changing lights stay forward for the DIRECT term (no lag); their one-bounce would still trail in the
-		// shared NRD history, so the bounce skips them too - the forward path never had a bounce for them anyway
-		parms.specularParms[3] = r_rtReStirDIDynamicForward.GetBool() ? 1.0f : 0.0f;
-		parms.pbrParms[0] = r_rtgiRadius.GetFloat();
-		parms.pbrParms[1] = idMath::ClampFloat( 0.0f, 16.0f, r_rtgiEmissive.GetFloat() );
-		// EMISSIVE MODE (docs/rtx-experimental-lighting.md E2 v3): the emitters are rows of the scene-light buffer (gathered
-		// above), nothing more to pack. While they light the scene the bounce's per-pixel "glow at the hit" term is OFF
-		// (pbrParms.y = 0): a bounce ray landing on an emitter is the same direct emitter->P path the DI now estimates
-		// properly, and would count it twice.
-		if ( r_rtEmissiveLighting.GetBool() && R_RtEmissiveTableAddress( NULL, NULL, NULL ) != 0 ) {
-			parms.pbrParms[1] = 0.0f;
-		}
-		parms.pbrParms[2] = idMath::ClampFloat( 0.0f, 16.0f, r_rtgiEmissiveClamp.GetFloat() );
-		parms.pbrParms[3] = idMath::ClampFloat( 0.0f, 8.0f, r_rtgiLightScale.GetFloat() );
-		parms.pbrParms2[0] = RB_RHI_SceneAmbientRowsBits();					// r_rtgiAmbient fold: the ambient rows (as RB_RHI_RtgiPass; bit-cast)
-		parms.pbrParms2[1] = r_rtgiShadow.GetBool() ? 1.0f : 0.0f;			// H6d dominant-light shadow ray at the hit
-		parms.pbrParms2[2] = 0.004f;										// eye pullback per unit depth (crease-leak fix)
-		parms.pbrParms2[3] = idMath::ClampFloat( 0.0f, 8.0f, r_rtgiIntensity.GetFloat() );
-		// the bounce direction uses an R2 low-discrepancy sequence advanced by the frame index (rtgi_bounce.glsl),
-		// which already rides u_localParam1.x (set above) - nothing to hoist. (Replaced the IGN golden-angle
-		// reorientation, whose diagonal streaked.)
-	}
+	rhi::RenderParams parms;
+	RB_RHI_ReStirDIGatherParms( c, parms );
+	RB_RHI_ReStirDIBounceParms( c, parms );
 	// (the RT irradiance cache is packed just before the gather draw, once the velocity at the gather res is known)
 
-	// Stage D apply mode (r_rtReStirDIApply): DI will LIGHT this view, so the gather shades with the G-buffer material
-	// (albedo att3 + rough/metal/spec att1) and writes the demodulated radiance; the apply (RB_RHI_ReStirDIApply)
-	// remultiplies and adds it at the opaque/translucent split, and RB_RHI_DrawWorld skips the forward draws of
-	// every light the scene-light buffer covers. Needs the albedo prepass (wantAlbedo widened for it) and the apply
-	// shader; the debug overlay owns the screen instead when it is on. Decided HERE (before the light loop) so the
-	// suppression and the apply can never disagree within a view.
-	const rhi::ImageHandle diAlbedoImg = rhiNormalAlbedoThisView ? r->GetRenderTargetImage4( rhiNormalResultRT ) : 0;
-	// NOTE: the gather runs BEFORE the decal-mask pass, so it cannot decal-resolve the material here. In the shipping
-	// SH + spec-reshade path the gather's radiance is material-INDEPENDENT (it demodulates the diffuse share and strips
-	// the cosine), so only the APPLY's material has to be decal-resolved -- done after the mask pass (RB_RHI_DrawView).
-	const rhi::ImageHandle diMatImg    = rhiNormalAlbedoThisView ? r->GetRenderTargetImage2( rhiNormalResultRT ) : 0;
-	const bool diApply = r_rtReStirDIApply.GetBool() && !r_rtReStirDIDebug.GetBool()
-		&& diAlbedoImg != 0 && diMatImg != 0 && r->LoadShader( "restir_di_apply" ) != 0;
-	parms.localParam1[1] = r_pbr.GetBool() ? 1.0f : 0.0f;				// GGX metalness workflow vs Lambert-only
-	// apply mode + the cheap-RIS-target flag packed in one slot: 0 = no apply, 1 = apply + cheap target, 2 = apply + full target.
-	// Existing applyMode readers key on > 0.5, so 1 and 2 both read as "apply"; only the gather's candidate loop splits 1 vs 2.
-	parms.localParam1[3] = diApply ? ( r_rtReStirDICheapTarget.GetBool() ? 1.0f : 2.0f ) : 0.0f;
-	parms.diffuseModifier[0] = 1.0f - r_pbrMetalDiffuse.GetFloat();		// kd (interaction.frag u_pbrParms2.x)
-	parms.diffuseModifier[1] = r_pbrSpecScale.GetFloat();				// dielectric-weighted lobe scale (u_pbrParms.w)
-	parms.diffuseModifier[2] = r_pbrFireflyClamp.GetFloat();			// lobe ceiling (u_localParam1.w there)
-	parms.diffuseModifier[3] = r_pbrEnvScale.GetFloat();				// metal environment floor (u_occlusionParms.w there)
-
+	RB_RHI_ReStirDIApplyParms( r, c, parms );
+	const bool diApply = c.diApply;
 	// ---- the velocity at the gather res + the NRD history window, hoisted (R1): the gradient chain below needs both
 	// BEFORE the gather, the denoise after it ----
 	rhi::ImageHandle diVelImg = ( rhiNormalVelThisView && rhiNormalReadyThisView )
 		? r->GetRenderTargetImage3( rhiNormalResultRT ) : 0;
 	const bool nrdFree = !rhiRtgiDenoisedThisView && !rhiRtaoDenoisedThisView;	// the shared NRD slot is ours this frame
-	rhi::ImageHandle nrdVel = diVelImg;
-	if ( diVelImg != 0 && nrdFree && ( rw != w || rh != h ) ) {
-		// velocity for NRD IN_MV + the gradient / confidence reproject. At reduced res, downsample the full-res velocity
-		// to rw x rh (smaa_copy = texture(src, uv)); at full res (rw==w) it is used directly.
-		if ( rhiReStirDIVelRT && r->GetRenderTargetImage( rhiReStirDIVelRT ) == 0 ) { rhiReStirDIVelRT = 0; rhiReStirDIVelW = rhiReStirDIVelH = 0; }
-		if ( rhiReStirDIVelRT && ( rhiReStirDIVelW != rw || rhiReStirDIVelH != rh ) ) { r->DestroyRenderTarget( rhiReStirDIVelRT ); rhiReStirDIVelRT = 0; rhiReStirDIVelW = rhiReStirDIVelH = 0; }
-		if ( !rhiReStirDIVelRT ) {
-			rhiReStirDIVelRT = r->CreateRenderTarget( rhi::IF_RG16F, rw, rh );
-			if ( rhiReStirDIVelRT ) { rhiReStirDIVelW = rw; rhiReStirDIVelH = rh; }
-		}
-		rhi::ShaderHandle copyProg = rhiReStirDIVelRT ? r->LoadShader( "smaa_copy" ) : 0;
-		if ( copyProg != 0 ) {
-			rhi::RenderParams cp;
-			memset( &cp, 0, sizeof( cp ) );
-			RB_RHI_IdentityMvp( cp.mvpMatrix );
-			cp.screenCorrection[0] = 1.0f; cp.screenCorrection[1] = 1.0f;
-			r->GpuScopeBegin( "restir.di.vel" );		// r_vkGpuTime 2: velocity downsample to the gather res
-			r->BeginTargetPass( rhiReStirDIVelRT, NULL );
-			RB_RHI_DrawFullscreen( r, copyProg, cp, diVelImg );
-			r->EndPass();
-			r->GpuScopeEnd();
-			nrdVel = r->GetRenderTargetImage( rhiReStirDIVelRT );
-		}
-	}
+	const rhi::ImageHandle nrdVel = RB_RHI_ReStirDIVelocityAtRes( r, diVelImg, nrdFree, w, h, rw, rh );
 	int diMainF = 0, diFastUnused = 0;	// NRD history cap (DI's own; mirrors RTGI's History Length); R0: r_rtReStirDIHistoryMs
 	RB_RHI_NrdHistoryFrames( r_rtReStirDIHistory.GetInteger(), r_rtReStirDIHistoryMs.GetFloat(),
 		0, diMainF, diFastUnused );	// R6: DI is ReLAX-only; the fast history comes from r_rtReStirDIRelaxFast below
 	const bool diCut = RB_RHI_NrdHistoryReset( viewDef );
 
-	// ---- R3a disocclusion boost (docs/rtx-restir-di.md Plan R3, r_rtReStirDIBoost): K picks + rays on YOUNG pixels. Needs
-	// last frame's denoised output (still in the shared slot until this frame's denoise), the velocity at the gather res and,
-	// for the same-surface test + the hysteresis bit, last frame's side copies (made below, as for the gradient) ----
-	const int  boostK    = ( r_rtReStirDIBoost.GetInteger() > 1 ) ? idMath::ClampInt( 2, 4, r_rtReStirDIBoost.GetInteger() ) : 0;
-	// the boost is a compiled VARIANT of the gather (restir_di_boost.frag): its K-pick arrays cost the plain gather ~0.7 ms
-	// of occupancy even with nothing boosted, so the plain program carries none of it
-	const rhi::ShaderHandle boostProg = ( boostK > 0 ) ? r->LoadShader( diFullTarget ? "restir_di_boost_full" : "restir_di_boost" ) : 0;
-	const rhi::ShaderHandle youngProg = ( boostK > 0 ) ? r->LoadShader( "restir_di_young" ) : 0;
-	// the per-pixel young reason (R8, gather layout) the boost pass reads back clustered (3x3 majority)
-	if ( boostK > 0 && youngProg != 0 ) {
-		for ( int k = 0; k < 2; k++ ) {
-			if ( rhiReStirDIYoungRT[k] && r->GetRenderTargetImage( rhiReStirDIYoungRT[k] ) == 0 ) { rhiReStirDIYoungRT[k] = 0; rhiReStirDIYoungValid = false; }
-		}
-		if ( rhiReStirDIYoungW != rw || rhiReStirDIYoungH != rh ) {
-			for ( int k = 0; k < 2; k++ ) { if ( rhiReStirDIYoungRT[k] ) { r->DestroyRenderTarget( rhiReStirDIYoungRT[k] ); rhiReStirDIYoungRT[k] = 0; } }
-			rhiReStirDIYoungW = rhiReStirDIYoungH = 0;	rhiReStirDIYoungValid = false;
-		}
-		for ( int k = 0; k < 2; k++ ) { if ( !rhiReStirDIYoungRT[k] ) { rhiReStirDIYoungRT[k] = r->CreateRenderTarget( rhi::IF_RGBA8, rw, rh ); } }
-		if ( rhiReStirDIYoungRT[0] && rhiReStirDIYoungRT[1] ) { rhiReStirDIYoungW = rw;	rhiReStirDIYoungH = rh; }
-	}
-	const bool boostWant = boostK > 0 && boostProg != 0 && youngProg != 0 && rhiReStirDIYoungRT[0] != 0 && rhiReStirDIYoungRT[1] != 0 && nrdVel != 0 && nrdFree;
-	if ( !boostWant ) { rhiReStirDIYoungValid = false; }		// a gap breaks the age chain: next run starts with no holds
-
+	diBoost_t boost;
+	memset( &boost, 0, sizeof( boost ) );
+	RB_RHI_ReStirDIBoostBegin( r, rw, rh, diFullTarget, nrdVel, nrdFree, boost );
 	// ---- R1 rev.2: last frame's side data (att1 viewZ+lum / att2 normal / att3 SH1+row) survives the gather, so the
 	// gradient pass can run AFTER it and see BOTH frames' picks (RTXDI: the brightest sample of either frame). It is the
 	// other gather MRT of the pair (rhiReStirDIPrevRT): no copies. ----
 	const float diPrevCb = rhiReStirDIPrevCb;
-	const bool diPrevSideValid = ( r_rtReStirDIGradient.GetBool() || boostWant ) && rhiReStirDIGatherPrevValid
+	const bool diPrevSideValid = ( r_rtReStirDIGradient.GetBool() || boost.boostWant ) && rhiReStirDIGatherPrevValid
 		&& rhiReStirDIPrevRT != 0 && rhiReStirDIPrevRT != rhiReStirDIRT && nrdVel != 0 && nrdFree && !diCut;
 	const rhi::ImageHandle diPrevSide[3] = {
 		diPrevSideValid ? r->GetRenderTargetImage2( rhiReStirDIPrevRT ) : 0,	// last frame's ( viewZ, lum )
 		diPrevSideValid ? r->GetRenderTargetImage3( rhiReStirDIPrevRT ) : 0,	// last frame's packed normal
 		diPrevSideValid ? r->GetRenderTargetImage4( rhiReStirDIPrevRT ) : 0 };	// last frame's ( SH1, row + 1 [+ boost bit] )
 
-	// fresh 1-spp gather -> NRD guide MRT (weapon masked inside the shader). NRD does the temporal below.
-	// Checkerboard packs every traced sample into the LEFT HALF, so restrict the draw there - the right half is
-	// written nothing and reconstructed by NRD, so ~half the gather fragments (and their visibility rays) run.
-	// The shader keeps its own right-half early-out as the correctness guarantee.
-	// R3a boost uniforms: everything is young on a cut / first DI frame / when the slot holds someone else's output (the
-	// thresholds go to 1e6 and the side data is declared absent); otherwise ON below BoostHistory, OFF once past twice
-	// that (capped at the history length, never below ON) - the hysteresis band that keeps a pixel's ray count steady.
-	const bool boostAll = boostWant && ( !rhiReStirDIPrevValid || diCut || r->GetRtgiOutputImage() == 0 );
-	const bool boostSide = boostWant && !boostAll && diPrevSideValid;
-	{
-		// r_rtReStirDIBoostHistory <= 0: the NRD-history trigger is OFF (only true disocclusion + screen entry count; the history
-		// still ends the hysteresis) - a short NRD history over whole areas is what flickering / animated lights leave every
-		// frame on purpose (the gradient resets them), and boosting those footprints cost ~1.4 ms standing still in a cave
-		const bool  hTrig = r_rtReStirDIBoostHistory.GetFloat() > 0.0f;
-		const float hOn   = hTrig ? idMath::ClampFloat( 1.0f, 63.0f, r_rtReStirDIBoostHistory.GetFloat() ) : 0.0f;	// 0: trigger off
-		const float hBase = hTrig ? 2.0f * hOn : 4.0f;		// HOLD: frames a young pixel stays boosted (its own age, young ping-pong)
-		const float hold  = idMath::ClampFloat( 1.0f, 63.0f, ( hBase < (float)diMainF ) ? hBase : (float)diMainF );
-		parms.tessParms[0] = boostWant ? (float)boostK : 0.0f;
-		parms.tessParms[1] = boostAll ? 1.0e6f : hOn;
-		parms.tessParms[2] = hold;
-		parms.tessParms[3] = boostSide ? diPrevCb : -1.0f;
-		memcpy( parms.prevMvpMatrix, rhiReStirDIPrevValid ? rhiReStirDIPrevView : viewDef->worldSpace.modelViewMatrix, sizeof( parms.prevMvpMatrix ) );
-	}
+	RB_RHI_ReStirDIBoostParms( r, viewDef, diCut, diPrevSideValid, diPrevCb, diMainF, boost, parms );
 	// RT irradiance cache (docs/rtx-irradiance-cache.md): the combined bounce learns the cache at every traced STATIC pixel
 	// and reads it at its hit (multi-bounce). Only with the bounce; slot address in u_particleRadius.zw (.xy = the geo
 	// table). Flag 8 = the velocity at the gather res rides unit 10 (bound below), so the gather tells movers from the
@@ -9408,272 +9930,16 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	if ( rhiRtLightGrid.readyThisView && rhiRtLightGrid.filledThisFrame ) {	// never hand a consumer an UNFILLED grid (garbage indices)
 		RB_RHI_LightGridPack( parms, rhiRtLightGrid.parms );
 	}
-	// The R3a boost's SIDE RECORD per texel (rhiReStirDIGiBuf, restir_di.frag DI_BOOST_SIDE_FLOATS): the plain gather writes it
-	// for the clustered-young texels - the GI term it added (2026-11-02: the boost re-traced the whole bounce to rebuild it,
-	// 2.4 ms of a 3.8 ms boost) and, since 2026-11-03, its candidate loop's result: the RIS numerator, its pick and the boost's
-	// K - 1 extra picks, drawn in that same loop (the boost's own candidate loop was ~1.5 ms of its ~1.6 ms). The boost shades
-	// the K picks from it: no candidate loop, no bounce. u_texGen0T = ( address lo, hi, row stride, cells ) bit-cast, all 0 =
-	// off; the boost needs the record, so no buffer = no boost this frame.
-	// FragmentStorageBarrier on both sides: this gather's writes after last frame's boost reads, the boost's reads after them.
-	bool diGiSide = false;
-	if ( boostWant ) {
-		const int cells = rw * rh;
-		if ( rhiReStirDIGiBuf != 0 && rhiReStirDIGiCells != cells ) {
-			r->DestroyBuffer( rhiReStirDIGiBuf );
-			rhiReStirDIGiBuf = 0;	rhiReStirDIGiAddr = 0;	rhiReStirDIGiCells = 0;
-		}
-		if ( rhiReStirDIGiBuf == 0 && cells > 0 ) {
-			rhiReStirDIGiBuf   = RB_RHI_CreateDeviceBuffer( r, cells * 40, rhiReStirDIGiAddr );	// restir_di.frag DI_BOOST_SIDE_FLOATS 10
-			rhiReStirDIGiCells = ( rhiReStirDIGiBuf != 0 ) ? cells : 0;
-		}
-		diGiSide = rhiReStirDIGiAddr != 0 && rhiReStirDIGiCells == cells;
-	}
-	const bool boostRun = boostWant && diGiSide;
-	if ( !boostRun ) { rhiReStirDIYoungValid = false; }		// no young pass this frame: the age chain restarts
-	{
-		unsigned int gs[4] = { 0u, 0u, 0u, 0u };
-		if ( diGiSide ) {
-			gs[0] = (unsigned int)( rhiReStirDIGiAddr & 0xFFFFFFFFull );	gs[1] = (unsigned int)( rhiReStirDIGiAddr >> 32 );
-			gs[2] = (unsigned int)rw;										gs[3] = (unsigned int)rhiReStirDIGiCells;
-			r->FragmentStorageBarrier();
-		}
-		memcpy( parms.texGen0T, gs, sizeof( gs ) );
-	}
-	// the gather's inputs (units 0-10), bound once for the young pass and the gather alike (Vulkan binds are draw-time state)
-	RB_RHI_BindUnit( 0, diDepthImg );
-	RB_RHI_BindRTUnit( r, 1, rhiNormalResultRT );
-	// units 2/3 = the G-buffer albedo + material for apply mode; white placeholders otherwise so the descriptor
-	// set is always complete (the shader only samples them when u_localParam1.w > 0.5)
-	if ( diApply ) {
-		RB_RHI_BindRTImage( r, 2, diAlbedoImg );
-		RB_RHI_BindRTImage( r, 3, diMatImg );
-	} else {
-		RB_RHI_BindUnit( 2, globalImages->whiteImage );
-		RB_RHI_BindUnit( 3, globalImages->whiteImage );
-	}
-	// R3a inputs on units 4 / 5 / 6 / 9 / 10 / 11 - never 7 / 8 / 12, the interaction draws' depth-compare shadow samplers that
-	// an unshadowed light inherits (the weapon-dark bug). White placeholders keep the descriptor set complete when the boost is
-	// off or has no side data; the shaders sample them only when u_tessParms says so.
-	{
-		const rhi::ImageHandle prevDen = ( boostWant && !boostAll ) ? r->GetRtgiOutputImage() : 0;
-		if ( prevDen ) { RB_RHI_BindRTImage( r, 4, prevDen ); } else { RB_RHI_BindUnit( 4, globalImages->whiteImage ); }
-		if ( boostSide ) {
-			RB_RHI_BindRTImage( r, 5, diPrevSide[0] );	// last frame's ( viewZ, lum )
-			RB_RHI_BindRTImage( r, 6, diPrevSide[1] );	// last frame's packed normal
-			RB_RHI_BindRTImage( r, 9, diPrevSide[2] );	// last frame's ( SH1, row + 1 [+ boost bit] )
-		} else {
-			RB_RHI_BindUnit( 5, globalImages->whiteImage );	RB_RHI_BindUnit( 6, globalImages->whiteImage );	RB_RHI_BindUnit( 9, globalImages->whiteImage );
-		}
-		// the velocity rides unit 10 whenever the view has one (the R3a boost AND the irradiance cache's mover test read it)
-		if ( nrdVel != 0 ) { RB_RHI_BindRTImage( r, 10, nrdVel ); } else { RB_RHI_BindUnit( 10, globalImages->whiteImage ); }
-	}
-	// R3a: the YOUNG pass writes every pixel's reason (cheap, uniform, no rays) into a target of the gather's layout, BEFORE
-	// the gather (its inputs are last frame's side data + this frame's G-buffer / velocity, nothing the gather writes): the
-	// plain gather reads the verdict back CLUSTERED (young + >= 5 of 9 neighbours young) to draw the boost's extra picks, and
-	// the boost pass after it shades them on exactly those pixels (isolated specks never trigger it, which matters twice: they
-	// are not worth rays, and one surviving lane keeps a whole warp running).
-	const int yi = rhiReStirDIYoungIdx;
-	if ( boostRun ) {
-		r->GpuScopeBegin( "restir.di.young" );		// r_vkGpuTime 2: the per-pixel young test (+ its age from last frame's)
-		if ( cbActive ) { r->SetNextTargetPassArea( 0, 0, rw / 2, rh ); }
-		r->BeginTargetPass( rhiReStirDIYoungRT[ yi ], NULL );
-		if ( rhiReStirDIYoungValid && !boostAll ) { RB_RHI_BindRTImage( r, 11, r->GetRenderTargetImage( rhiReStirDIYoungRT[ yi ^ 1 ] ) ); }	// last frame's young
-		else { RB_RHI_BindUnit( 11, globalImages->blackImage ); }					// no history of holds: black = reason 0
-		RB_RHI_DrawFullscreen( r, youngProg, parms, 0 );
-		r->EndPass();
-		r->GpuScopeEnd();
-		rhiReStirDIYoungValid = true;
-		rhiReStirDIYoungIdx = yi ^ 1;
-	}
-	r->GpuScopeBegin( "restir.di.gather" );			// r_vkGpuTime 2: the 1-spp DI resample + visibility ray (+ R3a's K rays on young pixels)
-	if ( cbActive ) { r->SetNextTargetPassArea( 0, 0, rw / 2, rh ); }
-	r->BeginTargetPass( rhiReStirDIRT, NULL );
-	// unit 11: THIS frame's young verdict (the plain gather draws the boost's picks where it is clustered); black = none
-	if ( boostRun ) { RB_RHI_BindRTImage( r, 11, r->GetRenderTargetImage( rhiReStirDIYoungRT[ yi ] ) ); }
-	else { RB_RHI_BindUnit( 11, globalImages->blackImage ); }
-	RB_RHI_DrawFullscreen( r, prog, parms, 0 );
-	r->EndPass();
-	r->GpuScopeEnd();
-	if ( boostRun ) {
-		// R3a, the BOOST pass after the plain gather: only the clustered-young pixels survive (the same verdict the gather
-		// drew their extra picks by); they shade the K picks of their side record and overwrite their attachments (identical
-		// guides). The plain gather carries none of the K picks' shading or rays, so its cost stays the same boost on or off.
-		r->FragmentStorageBarrier();					// the plain gather's side records, visible to the boost
-		r->GpuScopeBegin( "restir.di.boost" );		// r_vkGpuTime 2: K picks + rays on the clustered young pixels only
-		if ( cbActive ) { r->SetNextTargetPassArea( 0, 0, rw / 2, rh ); }
-		r->SetNextTargetPassLoad();
-		r->BeginTargetPass( rhiReStirDIRT, NULL );
-		RB_RHI_BindRTImage( r, 11, r->GetRenderTargetImage( rhiReStirDIYoungRT[ yi ] ) );	// THIS frame's young
-		RB_RHI_DrawFullscreen( r, boostProg, parms, 0 );
-		r->EndPass();
-		r->GpuScopeEnd();
-	}
+	RB_RHI_ReStirDIBoostSide( r, rw, rh, boost, parms );
+	RB_RHI_ReStirDIBindGatherInputs( r, c, boost, diPrevSide, nrdVel );
+	RB_RHI_ReStirDIGatherDraw( r, c, boost, prog, parms );
 	rhiReStirDIRanThisView = true;
 	rhiReStirDIApplyThisView = diApply;				// Stage D: from here on this view is DI-lit (forward loop + apply)
 	rhiReStirDIGatherPrevValid = true;				// R1: the MRT now holds this frame's side data for next frame's gradient
 	rhiReStirDILastWritten = ( rhiReStirDIRT == rhiReStirDIPairRT[1] ) ? 1 : 0;	// next gather writes the other of the pair
 	rhiReStirDIPrevCb = cbParity;
 
-	// ---- R1 gradient confidence (docs/rtx-restir-di.md Plan R1) ----
-	// Rev.2: AFTER the gather, with last frame's side data in the copies above (both frames' picks at hand): re-shade last frame's chosen light per 3x3 stratum at the reprojected
-	// surface under this frame's lights (restir_di_gradient.frag), A-trous the change 4x (restir_di_gradient_filter),
-	// and turn it into NRD IN_DIFF_CONFIDENCE at the gather res (restir_di_gradient_conf). Needs last frame's gather
-	// side data at this rw x rh, last frame's light buffer + this frame's lightDef -> row table, the velocity, and the
-	// NRD slot (no point computing a confidence nobody consumes). A camera cut resets NRD anyway: skip.
-	rhi::ImageHandle diGradConfImg = 0;
-	rhiReStirDIGradConfThisView = 0;
-	rhiReStirDIGradThisView = 0;
-	rhiReStirDIDisoccMixThisView = 0;
-	{
-		const int prevSlot = ( (int)( ( tr.frameCount + RT_REFL_LIGHT_SLOTS - 1 ) % RT_REFL_LIGHT_SLOTS ) );
-		const bool prevLightsValid = s_sceneLightSlotFrame[ prevSlot ] == tr.frameCount - 1 && s_sceneLightSlotAddr[ prevSlot ] != 0;
-		const int curSlot = (int)( tr.frameCount % RT_REFL_LIGHT_SLOTS );
-		const unsigned long long mapAddr = ( s_sceneLightSlotFrame[ curSlot ] == tr.frameCount ) ? s_diLightMapSlotAddr[ curSlot ] : 0;
-		const bool gradOn = diPrevSideValid && rhiReStirDIPrevValid && prevLightsValid && mapAddr != 0;
-		const int stratum = idMath::ClampInt( 2, 6, r_rtReStirDIGradientStratum.GetInteger() );
-		const int gw = ( rw + stratum - 1 ) / stratum, gh = ( rh + stratum - 1 ) / stratum;
-		if ( gradOn ) {
-			// targets: 2 x RGBA16F gradient (gw x gh, A-trous ping-pong), 2 x RG16F confidence (rw x rh, temporal ping-pong)
-			for ( int k = 0; k < 2; k++ ) {
-				if ( rhiReStirDIGradRT[k] && r->GetRenderTargetImage( rhiReStirDIGradRT[k] ) == 0 ) { rhiReStirDIGradRT[k] = 0; }
-				if ( rhiReStirDIGradConfRT[k] && r->GetRenderTargetImage( rhiReStirDIGradConfRT[k] ) == 0 ) { rhiReStirDIGradConfRT[k] = 0; rhiReStirDIGradConfValid = false; }
-			}
-			if ( rhiReStirDIGradW != gw || rhiReStirDIGradH != gh ) {
-				for ( int k = 0; k < 2; k++ ) { if ( rhiReStirDIGradRT[k] ) { r->DestroyRenderTarget( rhiReStirDIGradRT[k] ); rhiReStirDIGradRT[k] = 0; } }
-				rhiReStirDIGradW = rhiReStirDIGradH = 0;
-			}
-			if ( rhiReStirDIDisoccMixRT && r->GetRenderTargetImage( rhiReStirDIDisoccMixRT ) == 0 ) { rhiReStirDIDisoccMixRT = 0; }
-			if ( rhiReStirDIGradConfW != rw || rhiReStirDIGradConfH != rh ) {
-				if ( rhiReStirDIDisoccMixRT ) { r->DestroyRenderTarget( rhiReStirDIDisoccMixRT ); rhiReStirDIDisoccMixRT = 0; }
-				for ( int k = 0; k < 2; k++ ) { if ( rhiReStirDIGradConfRT[k] ) { r->DestroyRenderTarget( rhiReStirDIGradConfRT[k] ); rhiReStirDIGradConfRT[k] = 0; } }
-				rhiReStirDIGradConfW = rhiReStirDIGradConfH = 0;	rhiReStirDIGradConfValid = false;
-			}
-			for ( int k = 0; k < 2; k++ ) {
-				if ( !rhiReStirDIGradRT[k] )     { rhiReStirDIGradRT[k]     = r->CreateRenderTarget( rhi::IF_RGBA16F, gw, gh ); }	// .z = exact relative change
-				if ( !rhiReStirDIGradConfRT[k] ) { rhiReStirDIGradConfRT[k] = r->CreateRenderTarget( rhi::IF_RG16F, rw, rh ); }	// .x NRD, .y hold state
-			}
-			rhi::ShaderHandle gradProg = r->LoadShader( "restir_di_gradient" );
-			rhi::ShaderHandle filtProg = r->LoadShader( "restir_di_gradient_filter" );
-			rhi::ShaderHandle confProg = r->LoadShader( "restir_di_gradient_conf" );
-			if ( rhiReStirDIGradRT[0] && rhiReStirDIGradRT[1] && rhiReStirDIGradConfRT[0] && rhiReStirDIGradConfRT[1]
-					&& gradProg && filtProg && confProg ) {
-				rhiReStirDIGradW = gw;	rhiReStirDIGradH = gh;
-				rhiReStirDIGradConfW = rw;	rhiReStirDIGradConfH = rh;
-				// 1. the gradient: the gather's uniform packing + the R1 extras (restir_di_gradient.frag header)
-				rhi::RenderParams gp = parms;
-				const unsigned long long prevAddr = s_sceneLightSlotAddr[ prevSlot ];
-				const unsigned int mapLo = (unsigned int)( mapAddr & 0xFFFFFFFFull ),  mapHi = (unsigned int)( mapAddr >> 32 );
-				const unsigned int prvLo = (unsigned int)( prevAddr & 0xFFFFFFFFull ), prvHi = (unsigned int)( prevAddr >> 32 );
-				memcpy( &gp.shadowParms[0], &mapLo, sizeof( mapLo ) );	memcpy( &gp.shadowParms[1], &mapHi, sizeof( mapHi ) );
-				memcpy( &gp.shadowParms[2], &prvLo, sizeof( prvLo ) );	memcpy( &gp.shadowParms[3], &prvHi, sizeof( prvHi ) );
-				gp.tessParms[0] = diPrevCb;
-				gp.tessParms[3] = cbParity;				// this frame's parity (where this frame's picks sit)
-				gp.tessParms[1] = (float)DI_LIGHTMAP_MAX;	// table capacity: bounds for stored lightDef indices
-				gp.parallaxParms2[3] = (float)s_sceneLightSlotCount[ prevSlot ];	// last frame's light count: bounds for stored rows
-				{	// last frame's lightDef -> row table (the second gradient direction looks the current light up in it)
-					const unsigned long long prevMap = s_diLightMapSlotAddr[ prevSlot ];
-					const unsigned int pmLo = (unsigned int)( prevMap & 0xFFFFFFFFull ), pmHi = (unsigned int)( prevMap >> 32 );
-					memcpy( &gp.parallaxParms2[0], &pmLo, sizeof( pmLo ) );	memcpy( &gp.parallaxParms2[1], &pmHi, sizeof( pmHi ) );
-				}
-				gp.parallaxParms[0] = (float)stratum;	gp.parallaxParms[1] = (float)rw;	gp.parallaxParms[2] = (float)rh;
-				gp.parallaxParms[3] = r_rtReStirDIGradientStatic.GetFloat();		// static threshold, full-res pixels
-				gp.tessParms[2] = r_rtReStirDIGradientBias.GetFloat();			// weighs the two judgements as the confidence pass will
-				memcpy( gp.prevMvpMatrix, rhiReStirDIPrevView, sizeof( gp.prevMvpMatrix ) );	// last frame's world -> view
-				float prevInvView[16];
-				if ( !RB_RHI_InvertMatrix( rhiReStirDIPrevView, prevInvView ) ) { memcpy( prevInvView, invView, sizeof( prevInvView ) ); }
-				memcpy( gp.projectionMatrix, prevInvView, sizeof( gp.projectionMatrix ) );	// last frame's view -> world (exact static re-shade)
-				r->GpuScopeBegin( "restir.di.grad" );		// r_vkGpuTime 2: 1/9-res re-shade of last frame's light + 1 ray
-				r->BeginTargetPass( rhiReStirDIGradRT[0], NULL );
-				RB_RHI_BindUnit( 0, diDepthImg );
-				RB_RHI_BindRTUnit( r, 1, rhiNormalResultRT );
-				if ( diApply ) { RB_RHI_BindRTImage( r, 2, diAlbedoImg ); RB_RHI_BindRTImage( r, 3, diMatImg ); }
-				else { RB_RHI_BindUnit( 2, globalImages->whiteImage ); RB_RHI_BindUnit( 3, globalImages->whiteImage ); }
-				RB_RHI_BindRTImage( r, 4, r->GetRenderTargetImage2( rhiReStirDIRT ) );		// THIS frame's ( viewZ, lum )
-				RB_RHI_BindRTImage( r, 5, diPrevSide[0] );	// last frame's ( viewZ, lum )
-				RB_RHI_BindRTImage( r, 6, diPrevSide[1] );	// last frame's packed normal
-				// units 10 / 11, not 7 / 8: 7 / 8 are the interaction draws' shadow map / cube (depth-compare samplers) and an
-				// unshadowed (DI-covered) light inherits them unchanged - a colour image there blanked the weapon's lit draws
-				RB_RHI_BindRTImage( r, 10, nrdVel );
-				RB_RHI_BindRTImage( r, 11, diPrevSide[2] );	// last frame's ( SH1, row + 1 )
-				RB_RHI_BindRTImage( r, 9, r->GetRenderTargetImage4( rhiReStirDIRT ) );		// THIS frame's ( SH1, row + 1 )
-				RB_RHI_DrawFullscreen( r, gradProg, gp, 0 );
-				r->EndPass();
-				r->GpuScopeEnd();
-				// 2. four A-trous passes, strides 1 / 2 / 4 / 8, ping-pong ending back in [0]
-				r->GpuScopeBegin( "restir.di.gradfilter" );
-				int src = 0;
-				const int filterPasses = idMath::ClampInt( 0, 4, r_rtReStirDIGradientFilterPasses.GetInteger() );
-				for ( int pass = 0; pass < filterPasses; pass++ ) {
-					rhi::RenderParams fp;
-					memset( &fp, 0, sizeof( fp ) );
-					RB_RHI_IdentityMvp( fp.mvpMatrix );
-					fp.localParam0[0] = (float)( 1 << pass );
-					fp.localParam0[1] = (float)gw;	fp.localParam0[2] = (float)gh;
-					fp.localParam0[3] = ( pass == 0 ) ? 1.0f : 0.0f;	// max-dilate the exact relative change by one stratum, first pass only
-					r->BeginTargetPass( rhiReStirDIGradRT[ src ^ 1 ], NULL );
-					RB_RHI_DrawFullscreen( r, filtProg, fp, r->GetRenderTargetImage( rhiReStirDIGradRT[ src ] ) );
-					r->EndPass();
-					src ^= 1;
-				}
-				r->GpuScopeEnd();
-				rhiReStirDIGradThisView = r->GetRenderTargetImage( rhiReStirDIGradRT[ src ] );
-				// 3. the confidence at the gather res, fed to NRD. ReLAX applies confidence directly and expects small
-				// values (the shader squares it), so the floor is the raw cvar (ReBLUR would need >= historyFix / history).
-				const float mainF  = (float)Max( 1, ( diMainF > 0 ) ? diMainF : 30 );
-				const float floorC = r_rtReStirDIGradientFloor.GetFloat();
-				const float h      = r_rtReStirDIGradientHistory.GetFloat();
-				rhi::RenderParams cp;
-				memset( &cp, 0, sizeof( cp ) );
-				RB_RHI_IdentityMvp( cp.mvpMatrix );
-				cp.localParam0[0] = r_rtReStirDIGradientPower.GetFloat();
-				cp.localParam0[1] = ( h > 0.0f ) ? 1.0f / ( 1.0f + h ) : 1.0f;
-				cp.localParam0[2] = idMath::ClampFloat( 0.0f, 1.0f, floorC );
-				cp.localParam0[3] = r_rtReStirDIGradientBias.GetFloat();
-				cp.localParam1[0] = 0.5f / mainF;									// NRD: dither by 0.5 / maxAccumulatedFrameNum
-				cp.localParam1[1] = rhiReStirDIGradConfValid ? 1.0f : 0.0f;
-				cp.localParam1[2] = idMath::ClampFloat( 0.0f, 0.9f, r_rtReStirDIGradientDeadzone.GetFloat() );
-				cp.localParam1[3] = 1.0f;											// R2: square the confidence for ReLAX (NRD sample)
-				cp.windowCoord[2] = -1.0f;
-				const int ci = rhiReStirDIGradConfIdx;
-				r->GpuScopeBegin( "restir.di.gradconf" );
-				r->BeginTargetPass( rhiReStirDIGradConfRT[ ci ], NULL );
-				// last frame's confidence - only once it exists: the first frame after the targets are (re)created the partner was
-				// never written (UNDEFINED layout at submit, validation 09600); the shader skips it then anyway (localParam1.y = 0)
-				if ( rhiReStirDIGradConfValid ) { RB_RHI_BindRTImage( r, 1, r->GetRenderTargetImage( rhiReStirDIGradConfRT[ ci ^ 1 ] ) ); }
-				else { RB_RHI_BindUnit( 1, globalImages->whiteImage ); }
-				RB_RHI_BindRTImage( r, 2, nrdVel );
-				RB_RHI_DrawFullscreen( r, confProg, cp, rhiReStirDIGradThisView );
-				r->EndPass();
-				r->GpuScopeEnd();
-				diGradConfImg = r->GetRenderTargetImage( rhiReStirDIGradConfRT[ ci ] );
-				rhiReStirDIGradConfThisView = diGradConfImg;
-				// 4. ReLAX history RESETS where an exact change is big (r_rtReStirDIGradientReset): the same shader in MIX mode
-				// writes IN_DISOCCLUSION_THRESHOLD_MIX (1 = treat as disoccluded). Confidence alone only shortens ReLAX's window
-				// for the frame, so the stale shadow behind a walking NPC kept fading out for ~100 ms (and a confidence of 0
-				// without a history reset skips ReLAX's history fix, so it came out noisy).
-				const float resetThr = r_rtReStirDIGradientReset.GetFloat();
-				if ( resetThr > 0.0f ) {
-					if ( !rhiReStirDIDisoccMixRT ) { rhiReStirDIDisoccMixRT = r->CreateRenderTarget( rhi::IF_R16F, rw, rh ); }
-					if ( rhiReStirDIDisoccMixRT ) {
-						rhi::RenderParams mp = cp;
-						mp.windowCoord[0] = 1.0f;				// MIX mode
-						mp.windowCoord[1] = resetThr;
-						r->GpuScopeBegin( "restir.di.disoccmix" );
-						r->BeginTargetPass( rhiReStirDIDisoccMixRT, NULL );
-						RB_RHI_DrawFullscreen( r, confProg, mp, rhiReStirDIGradThisView );
-						r->EndPass();
-						r->GpuScopeEnd();
-						rhiReStirDIDisoccMixThisView = r->GetRenderTargetImage( rhiReStirDIDisoccMixRT );
-					}
-				}
-				rhiReStirDIGradConfIdx = ci ^ 1;
-				rhiReStirDIGradConfValid = true;
-				RB_RHI_ForgetTexBinds();
-			}
-		}
-		if ( diGradConfImg == 0 ) { rhiReStirDIGradConfValid = false; }		// no continuous confidence history to smooth from
-	}
-
+	const rhi::ImageHandle diGradConfImg = RB_RHI_ReStirDIGradient( r, c, parms, diPrevSideValid, diPrevSide, diPrevCb, nrdVel, diMainF );
 	// RT irradiance cache: resolve AFTER the gather (its accumulation atomics) and the gradient (its C3 cell resets),
 	// before the denoise - one compute dispatch mid-scene (docs/rtx-irradiance-cache.md)
 	if ( diCache ) {
@@ -9692,95 +9958,8 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		// trimmed at R6 - it measured noise on the raw 1-spp signal; the gradient measures the actual lighting change.
 		rhi::ImageHandle diConfImg = diGradConfImg;					// R1: the gradient confidence (0 = none this frame)
 
-		// Checkerboard NRD guides: the half-packed gather can't carry per-reconstructed-cell guides, so a ray-free
-		// pass (reuse rtgi_guides.frag; signal-agnostic - depth+normal -> att1 viewZ / att2 normal) fills a full
-		// internal-res (rw x rh) MRT that NRD points its guides at. Non-cb keeps the gather's own att1/att2 guides.
-		rhi::RenderTargetHandle diGuideRT = 0;
-		if ( cbActive ) {
-			if ( rhiReStirDIGuideRT && r->GetRenderTargetImage( rhiReStirDIGuideRT ) == 0 ) { rhiReStirDIGuideRT = 0; rhiReStirDIGuideW = rhiReStirDIGuideH = 0; }
-			if ( rhiReStirDIGuideRT && ( rhiReStirDIGuideW != rw || rhiReStirDIGuideH != rh ) ) { r->DestroyRenderTarget( rhiReStirDIGuideRT ); rhiReStirDIGuideRT = 0; rhiReStirDIGuideW = rhiReStirDIGuideH = 0; }
-			if ( !rhiReStirDIGuideRT ) {
-				rhiReStirDIGuideRT = r->CreateRenderTargetRtgiMrt( rw, rh );
-				if ( rhiReStirDIGuideRT ) { rhiReStirDIGuideW = rw; rhiReStirDIGuideH = rh; }
-			}
-			rhi::ShaderHandle guideProg = rhiReStirDIGuideRT ? r->LoadShader( "rtgi_guides" ) : 0;
-			if ( guideProg != 0 ) {
-				rhi::RenderParams gp;
-				memset( &gp, 0, sizeof( gp ) );
-				RB_RHI_IdentityMvp( gp.mvpMatrix );
-				memcpy( gp.modelViewMatrix, invView, sizeof( invView ) );	// u_modelViewMatrix = view->world (normal encode)
-				gp.screenCorrection[0] = 1.0f / rw;	gp.screenCorrection[1] = 1.0f / rh;
-				gp.depthTexRecip[0] = ( (float)w / rw ) / uploadW;	gp.depthTexRecip[1] = ( (float)h / rh ) / uploadH;
-				r->GpuScopeBegin( "restir.di.guides" );	// r_vkGpuTime 2: internal-res NRD guide fill (checkerboard only)
-				r->BeginTargetPass( rhiReStirDIGuideRT, NULL );
-				RB_RHI_BindUnit( 0, diDepthImg );
-				RB_RHI_BindRTUnit( r, 1, rhiNormalResultRT );
-				RB_RHI_DrawFullscreen( r, guideProg, gp, 0 );
-				r->EndPass();
-				r->GpuScopeEnd();
-				diGuideRT = rhiReStirDIGuideRT;
-			}
-		}
-
-		rhi::RtaoDenoiseArgs da;
-		memset( &da, 0, sizeof( da ) );
-		da.giMode = true;									// REBLUR_DIFFUSE into GetRtgiOutputImage (shared GI slot)
-		da.shMode = shMode;									// REBLUR_DIFFUSE_SH: + att3 SH1 in, GetRtgiOutputSh1Image out
-		da.shAtt  = 3;
-		da.rayRT = rhiReStirDIRT;							// att0 = YCoCg radiance+hitdist (half-packed when cb); guides in att1/att2
-		const bool cbDenoise = cbActive && diGuideRT != 0;	// guides ready -> NRD reconstructs the half-packed radiance
-		da.viewzRT  = cbDenoise ? diGuideRT : rhiReStirDIRT;	da.viewzAtt  = 1;
-		da.normalRT = cbDenoise ? diGuideRT : rhiReStirDIRT;	da.normalAtt = 2;
-		da.checkerboard = cbDenoise ? 1 : 0;				// 1 = BLACK (constant); NRD flips per frameIndex to read the packed parity
-		da.velImage = nrdVel;								// velocity at the gather res (downsampled when rw < w)
-		da.w = rw;	da.h = rh;
-		memcpy( da.viewToClip,  viewDef->unjitteredProjectionMatrix, sizeof( da.viewToClip ) );
-		memcpy( da.worldToView, viewDef->worldSpace.modelViewMatrix, sizeof( da.worldToView ) );
-		memcpy( da.viewToClipPrev,  rhiReStirDIPrevValid ? rhiReStirDIPrevProj : da.viewToClip,  sizeof( da.viewToClipPrev ) );
-		memcpy( da.worldToViewPrev, rhiReStirDIPrevValid ? rhiReStirDIPrevView : da.worldToView, sizeof( da.worldToViewPrev ) );
-		da.jitterX = -viewDef->jitter[0] * resScale;
-		da.jitterY =  viewDef->jitter[1] * resScale;
-		da.jitterPrevX = rhiReStirDIPrevValid ? -rhiReStirDIPrevJitter[0] * resScale : da.jitterX;
-		da.jitterPrevY = rhiReStirDIPrevValid ?  rhiReStirDIPrevJitter[1] * resScale : da.jitterY;
-		da.mvScaleX = -1.0f;	da.mvScaleY = 1.0f;			// engine (currUV-prevUV)*0.5 +Y-up -> NRD 2D screen-space
-		da.hitDistA = 0.5f * diHitScale;	da.hitDistB = 0.1f;	// MUST match restir_di.frag's nhd normalization
-		da.maxAccumFrames = diMainF;							// history cap (hoisted above: R0 seconds-based) - ReLAX diffuseMaxAccumulatedFrameNum
-		rhiReStirDIHistFrames = diMainF;						// the debug overlay's history-length ramp divides by this
-		// lag knobs still read by ReLAX (default to today's effective values); the ReBLUR-only ones were trimmed at R6
-		da.fastClampSigma   = r_rtReStirDIFastClamp.GetFloat();	// ReLAX fastHistoryClampingSigmaScale
-		// Interlock: the R1 gradient confidence is NRD's recommended replacement for the built-in antilag, not a
-		// supplement - running both double-rejects history on every lighting change (the flat-area dimming the
-		// gradient exists to avoid). So when the gradient is on it forces antilag off; antilag is the fallback only
-		// when the gradient is off.
-		da.antilagOff       = !r_rtReStirDIAntilag.GetBool() || r_rtReStirDIGradient.GetBool();
-		da.disocclusionThreshold = r_rtReStirDIDisocclusion.GetFloat();	// 0.01 = NRD default
-		da.returnHistoryLength = true;							// .w = accumulated frames (debug view 4; R3's disocclusion boost)
-		da.validation       = ( r_rtReStirDIDebug.GetInteger() == 3 );	// NRD's validation overlay for debug view 3
-		// R2 (Plan R2): ReLAX family + its settings (Remix direct-light preset / RTXDI sample as the starting values)
-		da.denoiser            = 1;								// R6: DI is ReLAX-only
-		da.fastFrames          = r_rtReStirDIRelaxFast.GetInteger();	// ReLAX diffuseMaxFastAccumulatedFrameNum (Remix direct: 1, "to reduce trail")
-		if ( r_rtReStirDIRelaxFastMs.GetFloat() > 0.0f ) {
-			// in TIME, like the main history: 8 frames were 200 ms of trail at 40 fps but 55 ms at 144
-			const float fps = 1000.0f / RB_RHI_SmoothedFrameMs();
-			da.fastFrames = Max( 1, (int)( r_rtReStirDIRelaxFastMs.GetFloat() * 0.001f * fps + 0.5f ) );
-		}
-		da.relaxPrepass        = r_rtReStirDIRelaxPrepass.GetFloat();
-		da.relaxPhiLuminance   = r_rtReStirDIRelaxPhi.GetFloat();
-		da.relaxAtrous         = r_rtReStirDIRelaxAtrous.GetInteger();
-		da.relaxVarianceHistory = r_rtReStirDIRelaxVarianceHist.GetInteger();
-		da.relaxConfRelax      = r_rtReStirDIRelaxConfRelax.GetFloat();
-		da.relaxAntiFirefly    = r_rtReStirDIRelaxFirefly.GetBool();
-		// DI spatial-cleanup overrides still read by ReLAX (the ReBLUR-only prepass/blur-radius were trimmed at R6). 0 = NRD default.
-		da.historyFixFrameNum = r_rtReStirDIHistoryFix.GetInteger();	// spatial reconstruction on thin/disoccluded (moving) history
-		da.edgeStopScale      = r_rtReStirDIEdgeStop.GetFloat();		// >1 blurs across detail edges (grate-noise lever; costs detail)
-		da.confImage = diConfImg;							// IN_DIFF_CONFIDENCE (0 = not provided this frame)
-		da.disoccMixImage = ( diConfImg != 0 ) ? rhiReStirDIDisoccMixThisView : 0;	// R1: forced ReLAX history resets (r_rtReStirDIGradientReset)
-		da.denoisingRange = 20000.0f;
-		da.frameIndex = (unsigned int)tr.frameCount;
-		da.reset = !rhiReStirDIPrevValid || diCut;			// first DI frame / interruption / R0: camera cut
-		r->GpuScopeBegin( "restir.di.denoise" );			// r_vkGpuTime 2: NRD REBLUR_DIFFUSE dispatches
-		rhiReStirDIDenoisedThisView = r->RtaoDenoise( da );	// -> GetRtgiOutputImage holds the denoised DI
-		r->GpuScopeEnd();
+		const rhi::RenderTargetHandle diGuideRT = RB_RHI_ReStirDIGuides( r, c );
+		RB_RHI_ReStirDIDenoise( r, c, diConfImg, diGuideRT, nrdVel, diMainF, diCut );
 	}
 
 	// stage this frame's camera for next frame's DI reprojection (un-jittered, as passed). PrevValid tracks
