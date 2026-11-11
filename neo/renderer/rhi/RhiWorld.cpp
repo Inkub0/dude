@@ -47,6 +47,14 @@ RB_CreateSingleDrawInteractions takes a plain function pointer, so the
 per-surface stream handles and per-light state travel through this.
 ===================
 */
+// DUDE (structural pass): a fullscreen pass over the view's rectangle - viewport and scissor at the view's
+// window origin, w x h, and the backend's scissor record set to the view's (eleven passes wrote the triple)
+static void RB_RHI_SetViewViewportScissor( rhi::RHI *r, const viewDef_t *viewDef, int w, int h ) {
+	r->SetViewport( tr.viewportOffset[0] + viewDef->viewport.x1, tr.viewportOffset[1] + viewDef->viewport.y1, w, h );
+	r->SetScissor( tr.viewportOffset[0] + viewDef->viewport.x1, tr.viewportOffset[1] + viewDef->viewport.y1, w, h );
+	backEnd.currentScissor = viewDef->scissor;
+}
+
 // DUDE (structural pass): a GPU-only storage buffer with its device address, or 0 - the buffer
 // destroyed again - when either step fails, so a caller never holds a buffer it cannot address.
 static rhi::BufferHandle RB_RHI_CreateDeviceBuffer( rhi::RHI *r, int bytes, unsigned long long &addr ) {
@@ -10012,11 +10020,7 @@ void RB_RHI_RtaoDebugOverlay( rhi::RHI *r, const viewDef_t *viewDef ) {
 	RB_RHI_IdentityMvp( parms.mvpMatrix );
 	parms.localParam0[0] = 1.0f;					// ssao_debug mode 1: show the AO scalar (.r)
 
-	r->SetViewport( tr.viewportOffset[0] + viewDef->viewport.x1,
-	                tr.viewportOffset[1] + viewDef->viewport.y1, w, h );
-	r->SetScissor( tr.viewportOffset[0] + viewDef->viewport.x1,
-	               tr.viewportOffset[1] + viewDef->viewport.y1, w, h );
-	backEnd.currentScissor = viewDef->scissor;
+	RB_RHI_SetViewViewportScissor( r, viewDef, w, h );
 
 	RB_RHI_DrawFullscreen( r, prog, parms, srcImg );
 	RB_RHI_ForgetTexBinds();
@@ -10126,11 +10130,7 @@ void RB_RHI_RtgiApply( rhi::RHI *r, const viewDef_t *viewDef ) {
 
 	// full-view scissor + viewport (same latent issue as RB_RHI_ReStirDIApply: the last surface draw's scissorRect
 	// is still set here whenever the SSR pass before this site early-outs, clipping the fullscreen apply to it)
-	r->SetViewport( tr.viewportOffset[0] + viewDef->viewport.x1,
-	                tr.viewportOffset[1] + viewDef->viewport.y1, w, h );
-	r->SetScissor( tr.viewportOffset[0] + viewDef->viewport.x1,
-	               tr.viewportOffset[1] + viewDef->viewport.y1, w, h );
-	backEnd.currentScissor = viewDef->scissor;
+	RB_RHI_SetViewViewportScissor( r, viewDef, w, h );
 
 	RB_RHI_BindRTImage( r, 1, albedoImg );					// unit 1 = receiver albedo (prepass att3)
 	RB_RHI_BindUnit( 2, globalImages->currentDepthImage );	// unit 2 = depth (sky skip + bilateral)
@@ -10361,11 +10361,7 @@ void RB_RHI_RtgiCacheDebugOverlay( rhi::RHI *r, const viewDef_t *viewDef ) {
 	parms.windowCoord[2] = -1.0f;										// VK-only: top-down view-Y sign
 	RB_RHI_RtgiCachePack( parms, c.parms, false );						// slot address in u_alphaTest.xy
 
-	r->SetViewport( tr.viewportOffset[0] + viewDef->viewport.x1,
-	                tr.viewportOffset[1] + viewDef->viewport.y1, w, h );
-	r->SetScissor( tr.viewportOffset[0] + viewDef->viewport.x1,
-	               tr.viewportOffset[1] + viewDef->viewport.y1, w, h );
-	backEnd.currentScissor = viewDef->scissor;
+	RB_RHI_SetViewViewportScissor( r, viewDef, w, h );
 
 	RB_RHI_BindUnit( 0, globalImages->currentDepthImage );
 	RB_RHI_BindRTUnit( r, 1, rhiNormalResultRT );
@@ -10528,11 +10524,7 @@ void RB_RHI_LightGridDebugOverlay( rhi::RHI *r, const viewDef_t *viewDef ) {
 	parms.windowCoord[2] = -1.0f;										// VK-only: top-down view-Y sign
 	RB_RHI_LightGridPack( parms, g.parms );								// grid vec4 in u_occlusionParms
 
-	r->SetViewport( tr.viewportOffset[0] + viewDef->viewport.x1,
-	                tr.viewportOffset[1] + viewDef->viewport.y1, w, h );
-	r->SetScissor( tr.viewportOffset[0] + viewDef->viewport.x1,
-	               tr.viewportOffset[1] + viewDef->viewport.y1, w, h );
-	backEnd.currentScissor = viewDef->scissor;
+	RB_RHI_SetViewViewportScissor( r, viewDef, w, h );
 
 	RB_RHI_BindUnit( 0, globalImages->currentDepthImage );
 	RB_RHI_BindRTUnit( r, 1, rhiNormalResultRT );
@@ -10588,11 +10580,7 @@ static void RB_RHI_RtEmissiveTableDebugDraw( rhi::RHI *r, const viewDef_t *viewD
 	parms.screenCorrection[1] = 1.0f / h;
 	rhi::FillDepthParms( parms, viewDef->projectionMatrix );
 
-	r->SetViewport( tr.viewportOffset[0] + viewDef->viewport.x1,
-	                tr.viewportOffset[1] + viewDef->viewport.y1, w, h );
-	r->SetScissor( tr.viewportOffset[0] + viewDef->viewport.x1,
-	               tr.viewportOffset[1] + viewDef->viewport.y1, w, h );
-	backEnd.currentScissor = viewDef->scissor;
+	RB_RHI_SetViewViewportScissor( r, viewDef, w, h );
 
 	rhi::BufferHandle ub;
 	const int uniOfs = r->AllocUniforms( &parms, sizeof( parms ), &ub );
@@ -10760,11 +10748,7 @@ void RB_RHI_RtgiDebugOverlay( rhi::RHI *r, const viewDef_t *viewDef ) {
 	parms.screenCorrection[0] = 1.0f;				// rtgi_debug samples at var_TexCoord (0..1); screenCorrection unused
 	parms.screenCorrection[1] = 1.0f;
 
-	r->SetViewport( tr.viewportOffset[0] + viewDef->viewport.x1,
-	                tr.viewportOffset[1] + viewDef->viewport.y1, w, h );
-	r->SetScissor( tr.viewportOffset[0] + viewDef->viewport.x1,
-	               tr.viewportOffset[1] + viewDef->viewport.y1, w, h );
-	backEnd.currentScissor = viewDef->scissor;
+	RB_RHI_SetViewViewportScissor( r, viewDef, w, h );
 
 	RB_RHI_DrawFullscreen( r, prog, parms, srcImg );
 	RB_RHI_ForgetTexBinds();
@@ -10877,11 +10861,7 @@ void RB_RHI_ReStirDIApply( rhi::RHI *r, const viewDef_t *viewDef ) {
 	// outside it shows nothing but its self-lit stages ("the map is scissored away"). The SSR pass used to reset
 	// it before this site, but it early-outs with r_ssr / r_rtReflections off. Restoring currentScissor to the
 	// view's rect makes the next surface draw re-apply its own.
-	r->SetViewport( tr.viewportOffset[0] + viewDef->viewport.x1,
-	                tr.viewportOffset[1] + viewDef->viewport.y1, w, h );
-	r->SetScissor( tr.viewportOffset[0] + viewDef->viewport.x1,
-	               tr.viewportOffset[1] + viewDef->viewport.y1, w, h );
-	backEnd.currentScissor = viewDef->scissor;
+	RB_RHI_SetViewViewportScissor( r, viewDef, w, h );
 
 	RB_RHI_BindUnit( 1, globalImages->currentDepthImage );
 	RB_RHI_BindRTUnit( r, 2, rhiNormalResultRT );					// full-res normal (a = weapon mask)
@@ -10982,11 +10962,7 @@ void RB_RHI_ReStirDIDebugOverlay( rhi::RHI *r, const viewDef_t *viewDef ) {
 	}
 	rhi::FillDepthParms( parms, backEnd.viewDef ? backEnd.viewDef->projectionMatrix : NULL );
 
-	r->SetViewport( tr.viewportOffset[0] + viewDef->viewport.x1,
-	                tr.viewportOffset[1] + viewDef->viewport.y1, w, h );
-	r->SetScissor( tr.viewportOffset[0] + viewDef->viewport.x1,
-	               tr.viewportOffset[1] + viewDef->viewport.y1, w, h );
-	backEnd.currentScissor = viewDef->scissor;
+	RB_RHI_SetViewViewportScissor( r, viewDef, w, h );
 
 	// depth (unit 1) + normal (unit 2) are needed on EVERY path (the shader's sky + weapon-mask early-outs),
 	// not only for the bilateral weights. The DI pass gated on the depth + normal prepass, so both are valid here.
@@ -11037,11 +11013,7 @@ void RB_RHI_SSAODebugOverlay( rhi::RHI *r, const viewDef_t *viewDef ) {
 	RB_RHI_IdentityMvp( parms.mvpMatrix );
 	parms.localParam0[0] = (float)mode;		// 1 = AO, 2 = bent normal, 3 = normal G-buffer
 
-	r->SetViewport( tr.viewportOffset[0] + viewDef->viewport.x1,
-	                tr.viewportOffset[1] + viewDef->viewport.y1, w, h );
-	r->SetScissor( tr.viewportOffset[0] + viewDef->viewport.x1,
-	               tr.viewportOffset[1] + viewDef->viewport.y1, w, h );
-	backEnd.currentScissor = viewDef->scissor;
+	RB_RHI_SetViewViewportScissor( r, viewDef, w, h );
 
 	RB_RHI_DrawFullscreen( r, prog, parms, r->GetRenderTargetImage( srcRT ) );
 
@@ -11114,11 +11086,7 @@ void RB_RHI_DepthOfField( rhi::RHI *r, const viewDef_t *viewDef ) {
 	// 0 there. (The colour capture stays unflipped — it already displays upright.)
 	parms.windowCoord[0] = ( rhi::GetActiveBackendType() == rhi::BT_VULKAN ) ? 1.0f : 0.0f;
 
-	r->SetViewport( tr.viewportOffset[0] + viewDef->viewport.x1,
-	                tr.viewportOffset[1] + viewDef->viewport.y1, w, h );
-	r->SetScissor( tr.viewportOffset[0] + viewDef->viewport.x1,
-	               tr.viewportOffset[1] + viewDef->viewport.y1, w, h );
-	backEnd.currentScissor = viewDef->scissor;
+	RB_RHI_SetViewViewportScissor( r, viewDef, w, h );
 
 	RB_RHI_BindUnit( 0, globalImages->currentRenderImage );
 	RB_RHI_BindUnit( 1, globalImages->currentDepthImage );
@@ -11598,11 +11566,7 @@ void RB_RHI_MotionVectorDebugOverlay( rhi::RHI *r, const viewDef_t *viewDef ) {
 	// both so slow motion can be cranked up live (magnitude stays black where there is NO motion).
 	parms.localParam0[1] = ( ( mode >= 2 ) ? 40.0f : 12.0f ) * r_mvDebugScale.GetFloat();
 
-	r->SetViewport( tr.viewportOffset[0] + viewDef->viewport.x1,
-	                tr.viewportOffset[1] + viewDef->viewport.y1, w, h );
-	r->SetScissor( tr.viewportOffset[0] + viewDef->viewport.x1,
-	               tr.viewportOffset[1] + viewDef->viewport.y1, w, h );
-	backEnd.currentScissor = viewDef->scissor;
+	RB_RHI_SetViewViewportScissor( r, viewDef, w, h );
 
 	RB_RHI_DrawFullscreen( r, prog, parms, velImg );
 
