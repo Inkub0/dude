@@ -1788,7 +1788,7 @@ other format on this backend. Mirrors the GL upload's decisions: the downsize sk
 top levels, a single level turns mipmapping off, a truncated chain uploads what is there.
 ===============
 */
-void idImage::UploadPrecompressedImageRhi( const byte *data, int len ) {
+void idImage::UploadPrecompressedImageRhi( const byte *data, int len, bool sampleStats ) {
 	const ddsFileHeader_t *header = (const ddsFileHeader_t *)( data + 4 );
 	const unsigned int pfFlags = LittleInt( header->ddspf.dwFlags );
 	const unsigned int fourCC = LittleInt( header->ddspf.dwFourCC );
@@ -1878,16 +1878,17 @@ void idImage::UploadPrecompressedImageRhi( const byte *data, int len ) {
 	uploadHeight = levels[0].h;
 	precompressedFile = true;
 
-	// the stats the decoded source would have given (see R_DdsEmissiveStats); a normal map has no use for them
-	if ( depth != TD_BUMP ) {
+	// the stats the decoded source would have given (see R_DdsEmissiveStats); a normal map has
+	// no use for them, and the parallel load sampled them on the worker already (sampleStats false)
+	if ( sampleStats && depth != TD_BUMP ) {
 		R_DdsEmissiveStats( data, len, averageColor, &glowExtents );
 	}
 }
 
-void idImage::UploadPrecompressedImage( byte *data, int len ) {
+void idImage::UploadPrecompressedImage( byte *data, int len, bool sampleStats ) {
 	// DUDE: the Vulkan backend has no qgl; its RHI takes the blocks as they are
 	if ( qglGenTextures == NULL && glConfig.rhiBackend ) {
-		UploadPrecompressedImageRhi( data, len );
+		UploadPrecompressedImageRhi( data, len, sampleStats );
 		return;
 	}
 
@@ -2425,8 +2426,9 @@ void idImage::UploadImageCpu() {
 		ActuallyLoadImage( true, false );
 	} else if ( parallelData->precompressedData ) {
 		// upload the worker-read .dds, exactly as CheckPrecompressedImage would (GL: the
-		// compressed blocks through qgl; Vulkan: through the RHI, see UploadPrecompressedImageRhi)
-		UploadPrecompressedImage( parallelData->precompressedData, parallelData->precompressedLen );
+		// compressed blocks through qgl; Vulkan: through the RHI, see UploadPrecompressedImageRhi;
+		// the worker sampled the emissive stats, so the upload must not decode them again)
+		UploadPrecompressedImage( parallelData->precompressedData, parallelData->precompressedLen, false );
 	} else if ( parallelData->glPyramid ) {
 		// GL3: the worker-built pyramid (LoadImageCpuGL) goes up as GenerateImage's GL upload does
 		PurgeImage();

@@ -243,8 +243,8 @@ public:
 	// R_StaticAlloc; caller frees). Split out so the parallel loader can read/inflate the
 	// .dds on a worker and keep the GL upload (UploadPrecompressedImage) on the main thread.
 	bool		ReadPrecompressedImage( byte **dataOut, int *lenOut );
-	void		UploadPrecompressedImage( byte *data, int len );
-	void		UploadPrecompressedImageRhi( const byte *data, int len );	// DUDE: the Vulkan half (BC blocks through the RHI)
+	void		UploadPrecompressedImage( byte *data, int len, bool sampleStats = true );
+	void		UploadPrecompressedImageRhi( const byte *data, int len, bool sampleStats );	// DUDE: the Vulkan half (BC blocks through the RHI)
 	void		ActuallyLoadImage( bool checkForPrecompressed, bool fromBackEnd );
 	void		StartBackgroundImageLoad();
 	int			BitsForInternalFormat( int internalFormat ) const;
