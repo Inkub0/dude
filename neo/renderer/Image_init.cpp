@@ -1106,11 +1106,112 @@ New r_texturesize/r_texturedepth variables will take effect on reload
 reloadImages <all>
 ===============
 */
-void R_ReloadImages_f( const idCmdArgs &args ) {
+/*
+===============
+R_ParallelLoadImages
+
+DUDE: the worker decode + main-thread upload over a list of 2D images (the level load's split,
+LoadImageCpu / UploadImageCpu), in chunks so the worker-built pyramids in flight stay bounded:
+a 2K RGBA8 pyramid is 21 MB, and a level's thousand of them at once would be the whole RAM.
+Returns the thread count used.
+===============
+*/
+// DUDE: the downsize cvars the level-content generators (the parallax / tessellation height
+// fields) were last produced with. Their texture, an R8 height map, depends on nothing else: not
+// on the compression cvars a quality preset flips. A live reload that finds these unchanged keeps
+// the resident height fields instead of solving every normal map again; on mars_city2 they are
+// 957 of the 3718 images and most of the decode time.
+struct generatorDownSize_t {
+	int		downSize, downSizeLimit, forceDownSize;
+	bool	operator==( const generatorDownSize_t &o ) const { return downSize == o.downSize && downSizeLimit == o.downSizeLimit && forceDownSize == o.forceDownSize; }
+};
+static generatorDownSize_t	r_generatorDownSize = { -1, -1, -1 };
+
+static generatorDownSize_t R_CurrentGeneratorDownSize( void ) {
+	generatorDownSize_t d;
+	d.downSize = globalImages->image_downSize.GetInteger();
+	d.downSizeLimit = globalImages->image_downSizeLimit.GetInteger();
+	d.forceDownSize = globalImages->image_forceDownSize.GetBool() ? 1 : 0;
+	return d;
+}
+
+struct parallelLoadStats_t {
+	int		threads;
+	int		decodeMsec;		// wall time the main thread waited on the worker phases
+	int		uploadMsec;		// wall time of the main-thread upload phases
+	int		uploadBytes;	// pixel / block bytes handed to the GPU
+};
+
+static int R_ParallelLoadImages( idImage **list, int count, const char *workerWarning, bool pacifier, parallelLoadStats_t &stats ) {
+	static const int CHUNK = 64;
+
+	for ( int base = 0; base < count; base += CHUNK ) {
+		const int n = ( count - base < CHUNK ) ? count - base : CHUNK;
+		idImage ** const chunk = list + base;
+
+		// phase 1: worker threads decode + build mip pyramids (heap / filesystem thread-safe for the window)
+		int t0 = Sys_Milliseconds();
+		{
+			idParallelWindow window;
+			const int threads = Com_ParallelFor( n, [&]( int idx ) { chunk[idx]->LoadImageCpu(); }, r_parallelImageLoadThreads.GetInteger() );
+			if ( threads > stats.threads ) {
+				stats.threads = threads;		// the last chunk is a short one
+			}
+		}
+		stats.decodeMsec += Sys_Milliseconds() - t0;
+
+		// surface any prints/warnings the workers buffered (order-independent)
+		Com_FlushThreadCaptureWarn( workerWarning );
+
+		// phase 2: upload the decoded pyramids on the main thread (GPU submit is not thread-safe);
+		// the RHI backend submits the chunk's uploads in one batch (a no-op on GL)
+		t0 = Sys_Milliseconds();
+		rhi::RHI * const r = glConfig.rhiBackend ? rhi::GetRHI() : NULL;
+		if ( r ) {
+			r->BeginTextureUploadBatch();
+		}
+		for ( int i = 0; i < n; i++ ) {
+			const idImage::parallelLoad_t *pd = chunk[i]->parallelData;
+			if ( pd ) {
+				if ( pd->precompressedData ) {
+					stats.uploadBytes += pd->precompressedLen;
+				} else {
+					for ( int l = 0; l < pd->numLevels; l++ ) {
+						stats.uploadBytes += pd->levelW[l] * pd->levelH[l] * 4;
+					}
+				}
+			}
+			chunk[i]->UploadImageCpu();
+			if ( pacifier && ( ( base + i ) & 15 ) == 0 ) {
+				session->PacifierUpdate();
+			}
+		}
+		if ( r ) {
+			r->EndTextureUploadBatch();
+		}
+		stats.uploadMsec += Sys_Milliseconds() - t0;
+	}
+	return stats.threads;
+}
+
+/*
+===============
+R_ReloadImages
+
+DUDE: the body of "reloadImages". The "reload" form (every image re-read with the current cvars,
+.dds files honoured) is what a quality preset or a compression change runs at a live level, so
+it must not stall the frame for seconds: it takes the level load's parallel path, the worker
+threads decoding and the main thread only uploading. residentOnly leaves an image that is not
+loaded now (purged, never bound this level) alone - it loads on demand with the new cvars when
+it is next bound, as it would have anyway; a full vid_restart purged everything first and passes
+false. Generators, cube maps and partial images reload serially as always. The plain "reloadImages"
+and "reloadImages all" keep the stock serial loop ("all" ignores the .dds files, which the worker
+path does not replicate).
+===============
+*/
+static void R_ReloadImages( const idCmdArgs &args, bool all, bool checkPrecompressed, bool residentOnly ) {
 	int		i;
 	idImage	*image;
-	bool	all;
-	bool	checkPrecompressed;
 
 	// DG: notify the game DLL about the reloadImages command
 	if(gameCallbacks.reloadImagesCB != NULL)
@@ -1120,6 +1221,66 @@ void R_ReloadImages_f( const idCmdArgs &args ) {
 
 	// this probably isn't necessary...
 	globalImages->ChangeTextureFilter();
+
+	if ( all && checkPrecompressed && r_parallelImageLoad.GetBool() && glConfig.isInitialized ) {
+		const int start = Sys_Milliseconds();
+		std::vector<idImage *> par;
+		int regenCount = 0, serialCount = 0, skipCount = 0, keptCount = 0;
+		// resident height fields stay when the downsize cvars they were produced with are current
+		const bool keepGenerators = residentOnly && ( R_CurrentGeneratorDownSize() == r_generatorDownSize );
+
+		par.reserve( globalImages->images.Num() );
+		for ( i = 0 ; i < globalImages->images.Num() ; i++ ) {
+			image = globalImages->images[ i ];
+			if ( image->IsPermanentGenerator() ) {
+				image->Reload( checkPrecompressed, all );		// regenerated, as always
+				regenCount++;
+				continue;
+			}
+			if ( residentOnly && image->texnum == idImage::TEXTURE_NOT_LOADED && image->rhiHandle == 0 ) {
+				skipCount++;
+				continue;
+			}
+			if ( keepGenerators && image->generatorCpu ) {
+				keptCount++;
+				continue;
+			}
+			if ( image->cubeFiles != CF_2D || image->isPartialImage || image->partialImage ) {
+				image->Reload( checkPrecompressed, all );
+				serialCount++;
+				continue;
+			}
+			image->PurgeImage();
+			par.push_back( image );		// file images and level-content generators alike
+		}
+
+		parallelLoadStats_t stats = {};
+		if ( !par.empty() ) {
+			R_ParallelLoadImages( par.data(), (int)par.size(),
+				"reloadImages: a worker hit an error during decode (see above); affected images use the default texture", false, stats );
+		}
+
+		if ( !keepGenerators ) {
+			r_generatorDownSize = R_CurrentGeneratorDownSize();		// the height fields were just produced with these
+		}
+
+		common->Printf( "reloadImages: %i images reloaded in %.2f seconds: %i on %i threads (decode %.2f s, upload %.2f s, %i MB), %i serial, %i regenerated; %i height fields kept, %i not resident, left to demand load\n",
+			(int)par.size() + serialCount + regenCount, ( Sys_Milliseconds() - start ) * 0.001f,
+			(int)par.size(), stats.threads, stats.decodeMsec * 0.001f, stats.uploadMsec * 0.001f, stats.uploadBytes >> 20,
+			serialCount, regenCount, keptCount, skipCount );
+		return;
+	}
+
+	for ( i = 0 ; i < globalImages->images.Num() ; i++ ) {
+		image = globalImages->images[ i ];
+		image->Reload( checkPrecompressed, all );
+	}
+	r_generatorDownSize = R_CurrentGeneratorDownSize();
+}
+
+void R_ReloadImages_f( const idCmdArgs &args ) {
+	bool	all;
+	bool	checkPrecompressed;
 
 	all = false;
 	checkPrecompressed = false;		// if we are doing this as a vid_restart, look for precompressed like normal
@@ -1136,10 +1297,7 @@ void R_ReloadImages_f( const idCmdArgs &args ) {
 		}
 	}
 
-	for ( i = 0 ; i < globalImages->images.Num() ; i++ ) {
-		image = globalImages->images[ i ];
-		image->Reload( checkPrecompressed, all );
-	}
+	R_ReloadImages( args, all, checkPrecompressed, true );
 }
 
 typedef struct {
@@ -1794,8 +1952,10 @@ void idImageManager::ReloadAllImages() {
 	// build the compressed normal map palette
 	SetNormalPalette();
 
+	// DUDE: a full vid_restart purged every image, so this loads them all (the stock scope), on
+	// the worker threads; "reloadImages reload" at a live level reloads only the resident ones
 	args.TokenizeString( "reloadImages reload", false );
-	R_ReloadImages_f( args );
+	R_ReloadImages( args, true, true, false );
 }
 
 /*
@@ -2195,6 +2355,7 @@ void idImageManager::EndLevelLoad() {
 	// images stay serial. Selection matches the serial condition exactly, so behaviour
 	// is identical when the cvar is off.
 	const bool useParallel = r_parallelImageLoad.GetBool();
+	parallelLoadStats_t parStats = {};
 
 	if ( useParallel ) {
 		std::vector<idImage *> par;
@@ -2224,27 +2385,10 @@ void idImageManager::EndLevelLoad() {
 		}
 
 		if ( !par.empty() ) {
-			idImage ** const	list = par.data();
-			const int			count = (int)par.size();
-
-			// phase 1: worker threads decode + build mip pyramids (heap / filesystem thread-safe for the window)
-			{
-				idParallelWindow window;
-				Com_ParallelFor( count, [&]( int idx ) { list[idx]->LoadImageCpu(); }, r_parallelImageLoadThreads.GetInteger() );
-			}
-
-			// surface any prints/warnings the workers buffered (order-independent)
-			Com_FlushThreadCaptureWarn( "r_parallelImageLoad: a worker hit an error during decode (see above); affected images use the default texture" );
-
-			// phase 2: upload the decoded pyramids on the main thread (GPU submit is
-			// not thread-safe)
-			for ( int i = 0 ; i < count ; i++ ) {
-				loadCount++;
-				list[i]->UploadImageCpu();
-				if ( ( loadCount & 15 ) == 0 ) {
-					session->PacifierUpdate();
-				}
-			}
+			// worker decode, main-thread upload, in bounded chunks (R_ParallelLoadImages)
+			R_ParallelLoadImages( par.data(), (int)par.size(),
+				"r_parallelImageLoad: a worker hit an error during decode (see above); affected images use the default texture", true, parStats );
+			loadCount += (int)par.size();
 		}
 	} else {
 		for ( int i = 0 ; i < images.Num() ; i++ ) {
@@ -2268,6 +2412,8 @@ void idImageManager::EndLevelLoad() {
 		}
 	}
 
+	r_generatorDownSize = R_CurrentGeneratorDownSize();		// the height fields are current (see R_ReloadImages)
+
 	int	end = Sys_Milliseconds();
 	common->Printf( "%5i purged from previous\n", purgeCount );
 	common->Printf( "%5i kept from previous\n", keepCount );
@@ -2276,6 +2422,10 @@ void idImageManager::EndLevelLoad() {
 		common->Printf( "%5i of them height fields generated here, not in the material parse (r_deferLevelGenerators)\n", genCount );
 	}
 	common->Printf( "all images loaded in %5.1f seconds\n", (end-start) * 0.001 );
+	if ( parStats.threads ) {
+		common->Printf( "  parallel image load: %i threads, decode %.2f s, upload %.2f s, %i MB uploaded\n",
+			parStats.threads, parStats.decodeMsec * 0.001f, parStats.uploadMsec * 0.001f, parStats.uploadBytes >> 20 );
+	}
 }
 
 /*

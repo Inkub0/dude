@@ -260,6 +260,7 @@ public:
 	// the CPU-heavy decode+mipmap work parallelizes while the (non-thread-safe) GPU
 	// submit stays serial. Mirrors the Vulkan branch of ActuallyLoadImage/GenerateImage.
 	bool		LoadImageCpu();
+	bool		LoadImageCpuGL();		// DUDE: the GL3 non-.dds worker half (GenerateImage before its first GL call)
 	void		UploadImageCpu();
 	// DUDE: a classic generator (_white, _fog, ...) is permanent: never purged, never level
 	// loaded. One with a generatorCpu hook is LEVEL content (the parallax / tessellation
@@ -336,6 +337,10 @@ public:
 		// GL3: worker-read raw .dds bytes → UploadPrecompressedImage on main
 		byte *			precompressedData;				// R_StaticAlloc'd, NULL if not a .dds load
 		int				precompressedLen;
+		// GL3 without a .dds: the worker ran GenerateImage's CPU half (LoadImageCpuGL) into the
+		// pyramid above; main creates the texture and uploads the levels with this format
+		bool			glPyramid;
+		int				glInternalFormat;
 		// GL3 non-.dds: worker can't replicate the GL decode path → main runs the serial load
 		bool			needsSerial;
 		bool			failed;							// decode failed → MakeDefault on main
