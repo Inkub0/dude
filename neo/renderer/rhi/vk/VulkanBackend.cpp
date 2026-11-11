@@ -1369,6 +1369,10 @@ private:
 	std::vector< std::pair<VkBuffer, VmaAllocation> >	batchStaging;
 	static const VkDeviceSize	BATCH_STAGING_LIMIT = 256u << 20;		// staging in flight before a mid-chunk flush
 	void						SubmitTextureUploadBatch( void );
+	// DUDE: the synchronous upload-cb bracket every load-time / validation path shares (structural
+	// pass): reset + begin + checkpoint, then end + submit on uploadFence + guarded wait
+	void						BeginSyncUpload( const char *checkpoint );
+	bool						EndSyncUpload( const char *waitName );
 	// DUDE: true after a vkDeviceWaitIdle with nothing submitted since, so DestroyImage between
 	// frames waits once for a run of destroys (a reload purges thousands of images in a row)
 	bool						deviceIdle = false;
@@ -5588,12 +5592,7 @@ void VulkanBackend::DispatchSync( const ComputeArgs &args ) {
 		return;
 	}
 	vkQueueWaitIdle( gfxQueue );
-	vkResetCommandBuffer( uploadCb, 0 );
-	VkCommandBufferBeginInfo bbi = {};
-	bbi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-	bbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-	vkBeginCommandBuffer( uploadCb, &bbi );
-	CheckpointMarkCb( uploadCb, "sync:DispatchSync" );	// VK_NV_device_diagnostic_checkpoints: name this sync submission
+	BeginSyncUpload( "sync:DispatchSync" );
 	VkDescriptorSet set = RecordDispatch( uploadCb, args );
 	if ( set != VK_NULL_HANDLE ) {
 		VkMemoryBarrier mb = {};
@@ -5603,16 +5602,7 @@ void VulkanBackend::DispatchSync( const ComputeArgs &args ) {
 		vkCmdPipelineBarrier( uploadCb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT,
 			0, 1, &mb, 0, NULL, 0, NULL );
 	}
-	vkEndCommandBuffer( uploadCb );
-	VkSubmitInfo si = {};
-	si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-	si.commandBufferCount = 1;
-	si.pCommandBuffers = &uploadCb;
-	vkResetFences( device, 1, &uploadFence );
-	// guard the wait: if the submit failed (e.g. OOM) the fence never signals, so an unguarded wait would hang
-	if ( vkCheck( QueueSubmit( 1, &si, uploadFence ), "vkQueueSubmit(sync upload)" ) ) {
-		vkCheck( vkWaitForFences( device, 1, &uploadFence, VK_TRUE, UINT64_MAX ), "vkWaitForFences(DispatchSync)" );	// a hang here = device lost: name it
-	}
+	EndSyncUpload( "vkWaitForFences(DispatchSync)" );
 	if ( set != VK_NULL_HANDLE ) {
 		vkFreeDescriptorSets( device, computePool, 1, &set );		// cb done -> safe
 	}
@@ -5890,23 +5880,9 @@ bool VulkanBackend::BuildAsSync( VkAccelerationStructureTypeKHR type, const VkAc
 	range.primitiveCount = primCount;
 	const VkAccelerationStructureBuildRangeInfoKHR *pRange = &range;
 	vkQueueWaitIdle( gfxQueue );
-	vkResetCommandBuffer( uploadCb, 0 );
-	VkCommandBufferBeginInfo bbi = {};
-	bbi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-	bbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-	vkBeginCommandBuffer( uploadCb, &bbi );
-	CheckpointMarkCb( uploadCb, "sync:BuildAsSync" );	// VK_NV_device_diagnostic_checkpoints: name this sync submission
+	BeginSyncUpload( "sync:BuildAsSync" );
 	pfnCmdBuildAs( uploadCb, 1, &bgi, &pRange );
-	vkEndCommandBuffer( uploadCb );
-	VkSubmitInfo si = {};
-	si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-	si.commandBufferCount = 1;
-	si.pCommandBuffers = &uploadCb;
-	vkResetFences( device, 1, &uploadFence );
-	// guard the wait: if the submit failed (e.g. OOM) the fence never signals, so an unguarded wait would hang
-	if ( vkCheck( QueueSubmit( 1, &si, uploadFence ), "vkQueueSubmit(sync upload)" ) ) {
-		vkCheck( vkWaitForFences( device, 1, &uploadFence, VK_TRUE, UINT64_MAX ), "vkWaitForFences(BuildAsSync)" );	// a hang here = device lost: name it
-	}
+	EndSyncUpload( "vkWaitForFences(BuildAsSync)" );
 	DestroyRtBuffer( scratch );
 	return true;
 }
@@ -6057,23 +6033,9 @@ BlasHandle VulkanBackend::CreateBlasFromBuffers( const BlasGeometry *geoms, int 
 	bgi.scratchData.deviceAddress = ( scratch.addr + asScratchAlignment - 1 ) & ~(VkDeviceAddress)( asScratchAlignment - 1 );
 	const VkAccelerationStructureBuildRangeInfoKHR *pRange = ranges;
 	vkQueueWaitIdle( gfxQueue );
-	vkResetCommandBuffer( uploadCb, 0 );
-	VkCommandBufferBeginInfo bbi = {};
-	bbi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-	bbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-	vkBeginCommandBuffer( uploadCb, &bbi );
-	CheckpointMarkCb( uploadCb, "sync:CreateBlasFromBuffers" );	// VK_NV_device_diagnostic_checkpoints: name this sync submission
+	BeginSyncUpload( "sync:CreateBlasFromBuffers" );
 	pfnCmdBuildAs( uploadCb, 1, &bgi, &pRange );
-	vkEndCommandBuffer( uploadCb );
-	VkSubmitInfo si = {};
-	si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-	si.commandBufferCount = 1;
-	si.pCommandBuffers = &uploadCb;
-	vkResetFences( device, 1, &uploadFence );
-	// guard the wait: if the submit failed (e.g. OOM) the fence never signals, so an unguarded wait would hang
-	if ( vkCheck( QueueSubmit( 1, &si, uploadFence ), "vkQueueSubmit(sync upload)" ) ) {
-		vkCheck( vkWaitForFences( device, 1, &uploadFence, VK_TRUE, UINT64_MAX ), "vkWaitForFences(CreateBlasFromBuffers)" );	// a hang here = device lost: name it
-	}
+	EndSyncUpload( "vkWaitForFences(CreateBlasFromBuffers)" );
 	DestroyRtBuffer( scratch );
 
 	VkAccelerationStructureDeviceAddressInfoKHR dai = {};
@@ -6136,23 +6098,9 @@ void VulkanBackend::RefitBlas( BlasHandle blas, const BlasGeometry *geoms, int c
 	}
 	// out of frame (validation): synchronous refit on the upload cb. Stalls; never per-frame.
 	vkQueueWaitIdle( gfxQueue );
-	vkResetCommandBuffer( uploadCb, 0 );
-	VkCommandBufferBeginInfo bbi = {};
-	bbi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-	bbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-	vkBeginCommandBuffer( uploadCb, &bbi );
-	CheckpointMarkCb( uploadCb, "sync:RefitBlas" );	// VK_NV_device_diagnostic_checkpoints: name this sync submission
+	BeginSyncUpload( "sync:RefitBlas" );
 	pfnCmdBuildAs( uploadCb, 1, &bgi, &pRange );
-	vkEndCommandBuffer( uploadCb );
-	VkSubmitInfo si = {};
-	si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-	si.commandBufferCount = 1;
-	si.pCommandBuffers = &uploadCb;
-	vkResetFences( device, 1, &uploadFence );
-	// guard the wait: if the submit failed (e.g. OOM) the fence never signals, so an unguarded wait would hang
-	if ( vkCheck( QueueSubmit( 1, &si, uploadFence ), "vkQueueSubmit(sync upload)" ) ) {
-		vkCheck( vkWaitForFences( device, 1, &uploadFence, VK_TRUE, UINT64_MAX ), "vkWaitForFences(RefitBlas)" );	// a hang here = device lost: name it
-	}
+	EndSyncUpload( "vkWaitForFences(RefitBlas)" );
 }
 
 void VulkanBackend::DestroyBlas( BlasHandle blas ) {
@@ -6759,23 +6707,9 @@ void VulkanBackend::UpdateDynamicGeometry( const float *worldPositions, int numV
 	if ( !rtFrameDynBuilt[slot] ) {
 		// fresh slot: prime synchronously so a fresh TLAS prime that references this BLAS
 		// finds it built (steady-state frames rebuild it on the frame cb instead)
-		vkResetCommandBuffer( uploadCb, 0 );
-		VkCommandBufferBeginInfo bbi = {};
-		bbi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-		bbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-		vkBeginCommandBuffer( uploadCb, &bbi );
-		CheckpointMarkCb( uploadCb, "sync:UpdateDynamicGeometry" );	// VK_NV_device_diagnostic_checkpoints: name this sync submission
+		BeginSyncUpload( "sync:UpdateDynamicGeometry" );
 		RecordFrameDynBlasBuild( uploadCb, slot );
-		vkEndCommandBuffer( uploadCb );
-		VkSubmitInfo si = {};
-		si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-		si.commandBufferCount = 1;
-		si.pCommandBuffers = &uploadCb;
-		vkResetFences( device, 1, &uploadFence );
-		// guard the wait: if the submit failed (e.g. OOM) the fence never signals, so an unguarded wait would hang
-		if ( vkCheck( QueueSubmit( 1, &si, uploadFence ), "vkQueueSubmit(sync upload)" ) ) {
-			vkCheck( vkWaitForFences( device, 1, &uploadFence, VK_TRUE, UINT64_MAX ), "vkWaitForFences(UpdateDynamicGeometry)" );	// a hang here = device lost: name it
-		}
+		EndSyncUpload( "vkWaitForFences(UpdateDynamicGeometry)" );
 		rtFrameDynBuilt[slot] = true;
 		rtDynPendingSlot = -1;			// fresh slot already holds this frame's geometry
 	} else {
@@ -6994,23 +6928,9 @@ void VulkanBackend::UpdateTlas( const RtInstance *instances, int count ) {
 		// prime a freshly created slot SYNCHRONOUSLY: out-of-band readers (the validator's
 		// DispatchSync executes before this frame's cb) must never traverse a never-built
 		// TLAS. Once per slot per (re)creation; steady-state frames take the async path.
-		vkResetCommandBuffer( uploadCb, 0 );
-		VkCommandBufferBeginInfo bbi = {};
-		bbi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-		bbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-		vkBeginCommandBuffer( uploadCb, &bbi );
-		CheckpointMarkCb( uploadCb, "sync:UpdateTlas" );	// VK_NV_device_diagnostic_checkpoints: name this sync submission
+		BeginSyncUpload( "sync:UpdateTlas" );
 		RecordFrameTlasBuild( uploadCb, slot );
-		vkEndCommandBuffer( uploadCb );
-		VkSubmitInfo si = {};
-		si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-		si.commandBufferCount = 1;
-		si.pCommandBuffers = &uploadCb;
-		vkResetFences( device, 1, &uploadFence );
-		// guard the wait: if the submit failed (e.g. OOM) the fence never signals, so an unguarded wait would hang
-		if ( vkCheck( QueueSubmit( 1, &si, uploadFence ), "vkQueueSubmit(sync upload)" ) ) {
-			vkCheck( vkWaitForFences( device, 1, &uploadFence, VK_TRUE, UINT64_MAX ), "vkWaitForFences(UpdateTlas)" );	// a hang here = device lost: name it
-		}
+		EndSyncUpload( "vkWaitForFences(UpdateTlas)" );
 		rtFrameBuilt[slot] = true;
 		rtPendingSlot = -1;					// the slot already holds this frame's poses
 	} else {
@@ -8774,12 +8694,7 @@ void VulkanBackend::NrdSelfTest() {
 	// one-shot init: user images -> GENERAL, then constant clears for the static planes
 	{
 		vkQueueWaitIdle( gfxQueue );
-		vkResetCommandBuffer( uploadCb, 0 );
-		VkCommandBufferBeginInfo bbi = {};
-		bbi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-		bbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-		vkBeginCommandBuffer( uploadCb, &bbi );
-		CheckpointMarkCb( uploadCb, "sync:NrdSelfTest" );	// VK_NV_device_diagnostic_checkpoints: name this sync submission
+		BeginSyncUpload( "sync:NrdSelfTest" );
 		VkImageMemoryBarrier barriers[5] = {};
 		VkImage images[5] = { imgMv.image, imgNormal.image, imgViewZ.image, imgNoise.image, imgOut.image };
 		for ( int i = 0; i < 5; i++ ) {
@@ -8815,16 +8730,7 @@ void VulkanBackend::NrdSelfTest() {
 		mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
 		vkCmdPipelineBarrier( uploadCb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
 			0, 1, &mb, 0, NULL, 0, NULL );
-		vkEndCommandBuffer( uploadCb );
-		VkSubmitInfo si = {};
-		si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-		si.commandBufferCount = 1;
-		si.pCommandBuffers = &uploadCb;
-		vkResetFences( device, 1, &uploadFence );
-		// guard the wait: if the submit failed (e.g. OOM) the fence never signals, so an unguarded wait would hang
-		if ( vkCheck( QueueSubmit( 1, &si, uploadFence ), "vkQueueSubmit(sync upload)" ) ) {
-			vkCheck( vkWaitForFences( device, 1, &uploadFence, VK_TRUE, UINT64_MAX ), "vkWaitForFences(NrdSelfTest)" );	// a hang here = device lost: name it
-		}
+		EndSyncUpload( "vkWaitForFences(NrdSelfTest)" );
 	}
 
 	// camera for a plausible frame: RH infinite-far perspective (fov 90, near 0.1),
@@ -8868,12 +8774,7 @@ void VulkanBackend::NrdSelfTest() {
 		}
 
 		vkQueueWaitIdle( gfxQueue );
-		vkResetCommandBuffer( uploadCb, 0 );
-		VkCommandBufferBeginInfo bbi = {};
-		bbi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-		bbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-		vkBeginCommandBuffer( uploadCb, &bbi );
-		CheckpointMarkCb( uploadCb, "sync:NrdSelfTest" );	// VK_NV_device_diagnostic_checkpoints: name this sync submission
+		BeginSyncUpload( "sync:NrdSelfTest" );
 
 		// upload this frame's noise into IN_DIFF_HITDIST
 		VkBufferImageCopy copy = {};
@@ -8911,16 +8812,7 @@ void VulkanBackend::NrdSelfTest() {
 				0, 1, &mb, 0, NULL, 0, NULL );
 		}
 
-		vkEndCommandBuffer( uploadCb );
-		VkSubmitInfo si = {};
-		si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-		si.commandBufferCount = 1;
-		si.pCommandBuffers = &uploadCb;
-		vkResetFences( device, 1, &uploadFence );
-		// guard the wait: if the submit failed (e.g. OOM) the fence never signals, so an unguarded wait would hang
-		if ( vkCheck( QueueSubmit( 1, &si, uploadFence ), "vkQueueSubmit(sync upload)" ) ) {
-			vkCheck( vkWaitForFences( device, 1, &uploadFence, VK_TRUE, UINT64_MAX ), "vkWaitForFences(NrdSelfTest)" );	// a hang here = device lost: name it
-		}
+		EndSyncUpload( "vkWaitForFences(NrdSelfTest)" );
 	}
 
 	if ( !ok ) {
@@ -9873,6 +9765,40 @@ ImageHandle VulkanBackend::CreateTexture2DPrebuilt( int w, int h, const Prebuilt
 
 /*
 ====================
+VulkanBackend::BeginSyncUpload / EndSyncUpload
+
+The synchronous upload-cb bracket (DUDE, structural pass): the twelve load-time and validation
+paths that record on uploadCb, submit it and wait shared these two blocks line for line. Begin
+resets and begins the cb and names the submission for VK_NV_device_diagnostic_checkpoints; End
+ends it, submits on uploadFence and waits - guarded, since a failed submit (OOM) never signals
+the fence and an unguarded wait would hang. Returns whether the submission completed. Stalls
+the GPU: never per-frame.
+====================
+*/
+void VulkanBackend::BeginSyncUpload( const char *checkpoint ) {
+	vkResetCommandBuffer( uploadCb, 0 );
+	VkCommandBufferBeginInfo bi = {};
+	bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+	bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+	vkBeginCommandBuffer( uploadCb, &bi );
+	CheckpointMarkCb( uploadCb, checkpoint );
+}
+
+bool VulkanBackend::EndSyncUpload( const char *waitName ) {
+	vkEndCommandBuffer( uploadCb );
+	VkSubmitInfo si = {};
+	si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+	si.commandBufferCount = 1;
+	si.pCommandBuffers = &uploadCb;
+	vkResetFences( device, 1, &uploadFence );
+	if ( !vkCheck( QueueSubmit( 1, &si, uploadFence ), "vkQueueSubmit(sync upload)" ) ) {
+		return false;
+	}
+	return vkCheck( vkWaitForFences( device, 1, &uploadFence, VK_TRUE, UINT64_MAX ), waitName );	// a hang here = device lost: the name says where
+}
+
+/*
+====================
 VulkanBackend::BeginTextureUploadBatch / SubmitTextureUploadBatch / EndTextureUploadBatch
 
 DUDE parallel image load: between Begin and End, UploadTexture2DLevels records each
@@ -10087,12 +10013,7 @@ ImageHandle VulkanBackend::UploadTexture2DImpl( int w, int h, VkFormat format, c
 			}
 			cb = batchCb;
 		} else {
-			vkResetCommandBuffer( uploadCb, 0 );
-			VkCommandBufferBeginInfo bi = {};
-			bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-			bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-			vkBeginCommandBuffer( uploadCb, &bi );
-			CheckpointMarkCb( uploadCb, "sync:UploadTexture2DLevels" );	// VK_NV_device_diagnostic_checkpoints: name this sync submission
+			BeginSyncUpload( "sync:UploadTexture2DLevels" );
 		}
 
 		VkImageMemoryBarrier toDst = {};
@@ -10137,16 +10058,7 @@ ImageHandle VulkanBackend::UploadTexture2DImpl( int w, int h, VkFormat format, c
 			batchImages++;
 			staging = VK_NULL_HANDLE;
 		} else {
-			vkEndCommandBuffer( uploadCb );
-			VkSubmitInfo si = {};
-			si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-			si.commandBufferCount = 1;
-			si.pCommandBuffers = &uploadCb;
-			vkResetFences( device, 1, &uploadFence );
-			// guard the wait: if the submit failed (e.g. OOM) the fence never signals, so an unguarded wait would hang
-			if ( vkCheck( QueueSubmit( 1, &si, uploadFence ), "vkQueueSubmit(sync upload)" ) ) {
-				vkCheck( vkWaitForFences( device, 1, &uploadFence, VK_TRUE, UINT64_MAX ), "vkWaitForFences(UploadTexture2DLevels)" );	// a hang here = device lost: name it
-			}
+			EndSyncUpload( "vkWaitForFences(UploadTexture2DLevels)" );
 		}
 	}
 	if ( staging != VK_NULL_HANDLE ) {
@@ -10782,12 +10694,7 @@ bool VulkanBackend::ReadPixelsRGB( unsigned char *dest, int x, int y, int w, int
 		mapped = (byte *)info.pMappedData;
 	}
 
-	vkResetCommandBuffer( uploadCb, 0 );
-	VkCommandBufferBeginInfo bi = {};
-	bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-	bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-	vkBeginCommandBuffer( uploadCb, &bi );
-	CheckpointMarkCb( uploadCb, "sync:ReadPixelsRGB" );	// VK_NV_device_diagnostic_checkpoints: name this sync submission
+	BeginSyncUpload( "sync:ReadPixelsRGB" );
 
 	// make the color writes available to transfer reads (queue is idle, so
 	// this is a memory barrier, not an execution race)
@@ -10807,16 +10714,7 @@ bool VulkanBackend::ReadPixelsRGB( unsigned char *dest, int x, int y, int w, int
 	c.imageExtent = { (uint32_t)w, (uint32_t)h, 1 };
 	vkCmdCopyImageToBuffer( uploadCb, sceneColor, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, buf, 1, &c );
 
-	vkEndCommandBuffer( uploadCb );
-	VkSubmitInfo si = {};
-	si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-	si.commandBufferCount = 1;
-	si.pCommandBuffers = &uploadCb;
-	vkResetFences( device, 1, &uploadFence );
-	// guard the wait: if the submit failed (e.g. OOM) the fence never signals, so an unguarded wait would hang
-	if ( vkCheck( QueueSubmit( 1, &si, uploadFence ), "vkQueueSubmit(sync upload)" ) ) {
-		vkCheck( vkWaitForFences( device, 1, &uploadFence, VK_TRUE, UINT64_MAX ), "vkWaitForFences(ReadPixelsRGB)" );	// a hang here = device lost: name it
-	}
+	EndSyncUpload( "vkWaitForFences(ReadPixelsRGB)" );
 
 	// RGBA top-down -> RGB bottom-up with 4-byte row padding (the GL contract)
 	const int dstRow = ( w * 3 + 3 ) & ~3;
@@ -10933,12 +10831,7 @@ ImageHandle VulkanBackend::CreateTextureCube( int size, const void * const pics[
 	}
 
 	{
-		vkResetCommandBuffer( uploadCb, 0 );
-		VkCommandBufferBeginInfo bi = {};
-		bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-		bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-		vkBeginCommandBuffer( uploadCb, &bi );
-		CheckpointMarkCb( uploadCb, "sync:CreateTextureCube" );	// VK_NV_device_diagnostic_checkpoints: name this sync submission
+		BeginSyncUpload( "sync:CreateTextureCube" );
 
 		VkImageMemoryBarrier toDst = {};
 		toDst.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
@@ -10978,16 +10871,7 @@ ImageHandle VulkanBackend::CreateTextureCube( int size, const void * const pics[
 		vkCmdPipelineBarrier( uploadCb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
 			0, 0, NULL, 0, NULL, 1, &toRead );
 
-		vkEndCommandBuffer( uploadCb );
-		VkSubmitInfo si = {};
-		si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-		si.commandBufferCount = 1;
-		si.pCommandBuffers = &uploadCb;
-		vkResetFences( device, 1, &uploadFence );
-		// guard the wait: if the submit failed (e.g. OOM) the fence never signals, so an unguarded wait would hang
-		if ( vkCheck( QueueSubmit( 1, &si, uploadFence ), "vkQueueSubmit(sync upload)" ) ) {
-			vkCheck( vkWaitForFences( device, 1, &uploadFence, VK_TRUE, UINT64_MAX ), "vkWaitForFences(CreateTextureCube)" );	// a hang here = device lost: name it
-		}
+		EndSyncUpload( "vkWaitForFences(CreateTextureCube)" );
 	}
 	vmaDestroyBuffer( vma, staging, stagingAlloc );
 
@@ -11051,12 +10935,7 @@ bool VulkanBackend::CreateShadowDummy( ShadowDummy &d, bool cube ) {
 	}
 
 	// transition to SHADER_READ_ONLY (content undefined, never read)
-	vkResetCommandBuffer( uploadCb, 0 );
-	VkCommandBufferBeginInfo bi = {};
-	bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-	bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-	vkBeginCommandBuffer( uploadCb, &bi );
-	CheckpointMarkCb( uploadCb, "sync:CreateShadowDummy" );	// VK_NV_device_diagnostic_checkpoints: name this sync submission
+	BeginSyncUpload( "sync:CreateShadowDummy" );
 	VkImageMemoryBarrier b = {};
 	b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
 	b.srcAccessMask = 0;
@@ -11071,16 +10950,7 @@ bool VulkanBackend::CreateShadowDummy( ShadowDummy &d, bool cube ) {
 	b.subresourceRange.layerCount = cube ? 6 : 1;
 	vkCmdPipelineBarrier( uploadCb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
 		0, 0, NULL, 0, NULL, 1, &b );
-	vkEndCommandBuffer( uploadCb );
-	VkSubmitInfo si = {};
-	si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-	si.commandBufferCount = 1;
-	si.pCommandBuffers = &uploadCb;
-	vkResetFences( device, 1, &uploadFence );
-	// guard the wait: if the submit failed (e.g. OOM) the fence never signals, so an unguarded wait would hang
-	if ( vkCheck( QueueSubmit( 1, &si, uploadFence ), "vkQueueSubmit(sync upload)" ) ) {
-		vkCheck( vkWaitForFences( device, 1, &uploadFence, VK_TRUE, UINT64_MAX ), "vkWaitForFences(CreateShadowDummy)" );	// a hang here = device lost: name it
-	}
+	EndSyncUpload( "vkWaitForFences(CreateShadowDummy)" );
 
 	VkImageViewCreateInfo vi = {};
 	vi.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
