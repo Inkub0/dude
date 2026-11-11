@@ -2330,7 +2330,12 @@ void idMaterial::ParseStage( idLexer &src, const textureRepeat_t trpDefault ) {
 	// on a character UV atlas), so they do not share an image even when both are on.
 	// Gated at parse time like parallax, so off = no extra resident textures and
 	// bit-for-bit vanilla; toggling r_tessellation takes effect on the next map load.
-	if ( r_tessellation.GetBool() && ss->lighting == SL_BUMP ) {
+	// Only where a backend can tessellate: the GL3 backend's 3.3 core context has no
+	// tessellation stages (RB_RHI_TessellateSurf is Vulkan-only), and the presets set the
+	// cvar from High up on both backends, so GL3 was solving hundreds of height fields at
+	// every level load for a feature it never draws.
+	const bool backendTessellates = glConfig.rhiBackend && !glConfig.coreProfile;		// Vulkan
+	if ( r_tessellation.GetBool() && backendTessellates && ss->lighting == SL_BUMP ) {
 		float tessBake = 0.0f;
 		idStr tessAuthored;
 		if ( imageName[0] ) {

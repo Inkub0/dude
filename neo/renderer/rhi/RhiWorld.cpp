@@ -12035,6 +12035,7 @@ static void RB_RHI_PrepareViewLighting( rhi::RHI *r, const viewDef_t *viewDef, b
 		qglBindTexture( GL_TEXTURE_2D, (GLuint)rhiDecalMaskImage );
 		rhi::gl3ActiveTexture( GL_TEXTURE0 );
 		backEnd.glState.currenttmu = 0;
+		backEnd.glState.tmu[14].current2DMap = -1;		// the direct bind bypassed the tmu cache
 	}
 
 	// Bind the AO buffer on unit 9 for the whole per-light loop: both the ambient and
