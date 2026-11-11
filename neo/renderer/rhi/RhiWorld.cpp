@@ -8716,6 +8716,158 @@ normal play and the shipped RTAO path are untouched. VK + RT hardware only; shar
 (r_rtgi joined the RT-world implication gate + the per-frame-rebuild exception in tr_main).
 ===================
 */
+// H6g (RB_RHI_RtgiPass): the full-res NRD guides for the checkerboard gather, a ray-free pass over depth + normal.
+// Returns the guide target, 0 when it could not be made.
+static rhi::RenderTargetHandle RB_RHI_RtgiGuides( rhi::RHI *r, const float invView[16], int w, int h, int rw, int rh, int uploadW, int uploadH ) {
+	// H6g: full-res NRD guides for checkerboard (the half-packed gather can't carry them). Ray-free pass over
+	// depth + normal into a full-res MRT (att1 viewZ, att2 normal), which the denoise points NRD's guides at.
+	rhi::RenderTargetHandle giGuideRT = 0;
+	{
+		// the guides are NRD's "full resolution" for checkerboard = the rw x rh gather resolution (the radiance
+		// is the half-packed part). Same coordinate mapping as the gather so guide and radiance line up.
+		if ( rhiRtgiGuideRT && r->GetRenderTargetImage( rhiRtgiGuideRT ) == 0 ) { rhiRtgiGuideRT = 0; rhiRtgiGuideW = rhiRtgiGuideH = 0; }
+		if ( rhiRtgiGuideRT && ( rhiRtgiGuideW != rw || rhiRtgiGuideH != rh ) ) { r->DestroyRenderTarget( rhiRtgiGuideRT ); rhiRtgiGuideRT = 0; rhiRtgiGuideW = rhiRtgiGuideH = 0; }
+		if ( !rhiRtgiGuideRT ) {
+			rhiRtgiGuideRT = r->CreateRenderTargetRtgiMrt( rw, rh );
+			if ( rhiRtgiGuideRT ) { rhiRtgiGuideW = rw; rhiRtgiGuideH = rh; }
+		}
+		rhi::ShaderHandle guideProg = rhiRtgiGuideRT ? r->LoadShader( "rtgi_guides" ) : 0;
+		if ( guideProg != 0 ) {
+			rhi::RenderParams gp;
+			memset( &gp, 0, sizeof( gp ) );
+			RB_RHI_IdentityMvp( gp.mvpMatrix );
+			memcpy( gp.modelViewMatrix, invView, sizeof( gp.modelViewMatrix ) );	// u_modelViewMatrix = view->world (normal encode)
+			gp.screenCorrection[0] = 1.0f / rw;	gp.screenCorrection[1] = 1.0f / rh;
+			gp.depthTexRecip[0] = ( (float)w / rw ) / uploadW;	gp.depthTexRecip[1] = ( (float)h / rh ) / uploadH;
+			r->GpuScopeBegin( "rtgi.guides" );		// r_vkGpuTime 2: full-res NRD guide fill (checkerboard only)
+			r->BeginTargetPass( rhiRtgiGuideRT, NULL );
+			RB_RHI_BindUnit( 0, globalImages->currentDepthImage );
+			RB_RHI_BindRTUnit( r, 1, rhiNormalResultRT );
+			RB_RHI_DrawFullscreen( r, guideProg, gp, 0 );
+			r->EndPass();
+			r->GpuScopeEnd();
+			giGuideRT = rhiRtgiGuideRT;
+		}
+	}
+	return giGuideRT;
+}
+
+// RB_RHI_RtgiPass: the full-res velocity MRT at the GI resolution for NRD's IN_MV (the full-res image itself at scale 1).
+static rhi::ImageHandle RB_RHI_RtgiVelocityAtRes( rhi::RHI *r, rhi::ImageHandle giVelImg, int w, int h, int rw, int rh ) {
+	rhi::ImageHandle nrdVel = giVelImg;
+	if ( rw != w || rh != h ) {
+		// downsample the full-res velocity to the GI ray/NRD resolution (smaa_copy = texture(src, uv))
+		if ( rhiRtgiVelRT && r->GetRenderTargetImage( rhiRtgiVelRT ) == 0 ) { rhiRtgiVelRT = 0; rhiRtgiVelW = rhiRtgiVelH = 0; }
+		if ( rhiRtgiVelRT && ( rhiRtgiVelW != rw || rhiRtgiVelH != rh ) ) { r->DestroyRenderTarget( rhiRtgiVelRT ); rhiRtgiVelRT = 0; rhiRtgiVelW = rhiRtgiVelH = 0; }
+		if ( !rhiRtgiVelRT ) {
+			rhiRtgiVelRT = r->CreateRenderTarget( rhi::IF_RG16F, rw, rh );
+			if ( rhiRtgiVelRT ) { rhiRtgiVelW = rw; rhiRtgiVelH = rh; }
+		}
+		rhi::ShaderHandle copyProg = rhiRtgiVelRT ? r->LoadShader( "smaa_copy" ) : 0;
+		if ( copyProg != 0 ) {
+			rhi::RenderParams cp;
+			memset( &cp, 0, sizeof( cp ) );
+			RB_RHI_IdentityMvp( cp.mvpMatrix );
+			cp.screenCorrection[0] = 1.0f; cp.screenCorrection[1] = 1.0f;
+			r->GpuScopeBegin( "rtgi.vel" );		// r_vkGpuTime 2: velocity downsample to GI res (resScale only)
+			r->BeginTargetPass( rhiRtgiVelRT, NULL );
+			RB_RHI_DrawFullscreen( r, copyProg, cp, giVelImg );
+			r->EndPass();
+			r->GpuScopeEnd();
+			nrdVel = r->GetRenderTargetImage( rhiRtgiVelRT );
+		}
+	}
+	return nrdVel;
+}
+
+// H6f (RB_RHI_RtgiPass): the history-confidence pass, or 0 when it does not run this frame.
+static rhi::ImageHandle RB_RHI_RtgiConfidence( rhi::RHI *r, int rw, int rh, bool cbActive, rhi::ImageHandle nrdVel ) {
+	// H6f: history-confidence pass (docs/rtx-rtgi.md). Compare this frame's raw bounce luminance against
+	// last frame's DENOISED GI reprojected by the motion vectors, and write a per-pixel confidence that
+	// tells NRD to drop history where the lighting moved (a lit silhouette under the camera) but keep it
+	// on stable surfaces — killing the edge smear without the flat dimming a global antilag would cause.
+	// Needs a prior denoised frame (GetRtgiOutputImage != 0, still last frame's until RtaoDenoise below
+	// overwrites it) and the velocity we just resolved. r_rtgiConfidence 0 disables it (NRD antilag only).
+	rhi::ImageHandle giConfImg = 0;
+	const rhi::ImageHandle giPrevDenoised = r->GetRtgiOutputImage();
+	// Runs for both paths. In checkerboard the raw is half-packed, so the shader (u_localParam0.w = parity)
+	// only computes confidence at this frame's TRACED cells (reading the packed sample) and trusts history
+	// on the reconstructed cells.
+	if ( r_rtgiConfidence.GetFloat() > 0.0f && rhiRtgiPrevValid && giPrevDenoised != 0 ) {
+		if ( rhiRtgiConfRT && r->GetRenderTargetImage( rhiRtgiConfRT ) == 0 ) { rhiRtgiConfRT = 0; rhiRtgiConfW = rhiRtgiConfH = 0; }
+		if ( rhiRtgiConfRT && ( rhiRtgiConfW != rw || rhiRtgiConfH != rh ) ) { r->DestroyRenderTarget( rhiRtgiConfRT ); rhiRtgiConfRT = 0; rhiRtgiConfW = rhiRtgiConfH = 0; }
+		if ( !rhiRtgiConfRT ) {
+			rhiRtgiConfRT = r->CreateRenderTarget( rhi::IF_R16F, rw, rh );	// R8+ per NRD; R16F is the single-channel target we have
+			if ( rhiRtgiConfRT ) { rhiRtgiConfW = rw; rhiRtgiConfH = rh; }
+		}
+		rhi::ShaderHandle confProg = rhiRtgiConfRT ? r->LoadShader( "rtgi_confidence" ) : 0;
+		if ( confProg != 0 ) {
+			rhi::RenderParams confParms;
+			memset( &confParms, 0, sizeof( confParms ) );
+			RB_RHI_IdentityMvp( confParms.mvpMatrix );
+			confParms.screenCorrection[0] = 1.0f / rw;			// texel size for the 3x3 tap of the noisy current signal
+			confParms.screenCorrection[1] = 1.0f / rh;
+			confParms.localParam0[0] = idMath::ClampFloat( 0.0f, 16.0f, r_rtgiConfidence.GetFloat() );	// sensitivity
+			confParms.localParam0[1] = 0.1f;					// confidence floor: never fully reject history (avoids edge frying)
+			confParms.localParam0[2] = 0.35f;					// noise deadzone: ignore sub-noise relative diffs so stable surfaces keep full history
+			confParms.localParam0[3] = cbActive ? (float)( 1 + ( (int)tr.frameCount & 1 ) ) : 0.0f;	// H6g: checkerboard parity (0 = off, packed-read for traced cells)
+			confParms.windowCoord[2] = -1.0f;					// VK top-down: flip the velocity row (ssr_temporal convention)
+			r->GpuScopeBegin( "rtgi.conf" );		// r_vkGpuTime 2: H6f history-confidence pass
+			r->BeginTargetPass( rhiRtgiConfRT, NULL );
+			RB_RHI_BindRTImage( r, 1, giPrevDenoised );			// unit 1 = last frame's denoised GI (YCoCg)
+			RB_RHI_BindRTImage( r, 2, nrdVel );					// unit 2 = motion vectors at GI res
+			RB_RHI_DrawFullscreen( r, confProg, confParms, r->GetRenderTargetImage( rhiRtgiRayRT ) );	// unit 0 = this frame's raw gather
+			r->EndPass();
+			r->GpuScopeEnd();
+			giConfImg = r->GetRenderTargetImage( rhiRtgiConfRT );
+		}
+	}
+	return giConfImg;
+}
+
+// H6b (RB_RHI_RtgiPass): the NRD REBLUR_DIFFUSE denoise of the gather, mirroring RB_RHI_RtaoPass's; sets
+// rhiRtgiDenoisedThisView.
+static void RB_RHI_RtgiDenoise( rhi::RHI *r, const viewDef_t *viewDef, int rw, int rh, float resScale, float radius, bool cbActive,
+                                rhi::RenderTargetHandle giGuideRT, rhi::ImageHandle nrdVel, rhi::ImageHandle giConfImg ) {
+	rhi::RtaoDenoiseArgs da;
+	memset( &da, 0, sizeof( da ) );
+	da.giMode = true;								// denoise GI radiance (REBLUR_DIFFUSE), not RTAO occlusion
+	da.rayRT = rhiRtgiRayRT;						// att0 = RGBA16F radiance+hitdist; guides in att1/att2
+	// resScale path: guides ride in the gather MRT (att1/att2). Checkerboard: radiance is half-packed, so
+	// the guides come from the full-res rtgi_guides pass instead (same att1/att2 layout). da.checkerboard =
+	// constant BLACK (1); the gather already packed the left half to match NRD's frameIndex parity.
+	const bool cbDenoise = cbActive && giGuideRT != 0;
+	da.viewzRT  = cbDenoise ? giGuideRT : rhiRtgiRayRT;	da.viewzAtt  = 1;
+	da.normalRT = cbDenoise ? giGuideRT : rhiRtgiRayRT;	da.normalAtt = 2;
+	da.checkerboard = cbDenoise ? 1 : 0;			// 1 = BLACK (constant); NRD flips per frameIndex
+	da.velImage = nrdVel;
+	da.w = rw;	da.h = rh;
+	memcpy( da.viewToClip,  viewDef->unjitteredProjectionMatrix, sizeof( da.viewToClip ) );
+	memcpy( da.worldToView, viewDef->worldSpace.modelViewMatrix, sizeof( da.worldToView ) );
+	memcpy( da.viewToClipPrev,  rhiRtgiPrevValid ? rhiRtgiPrevProj : da.viewToClip,  sizeof( da.viewToClipPrev ) );
+	memcpy( da.worldToViewPrev, rhiRtgiPrevValid ? rhiRtgiPrevView : da.worldToView, sizeof( da.worldToViewPrev ) );
+	da.jitterX = -viewDef->jitter[0] * resScale;
+	da.jitterY =  viewDef->jitter[1] * resScale;
+	da.jitterPrevX = rhiRtgiPrevValid ? -rhiRtgiPrevJitter[0] * resScale : da.jitterX;
+	da.jitterPrevY = rhiRtgiPrevValid ?  rhiRtgiPrevJitter[1] * resScale : da.jitterY;
+	da.mvScaleX = -1.0f;	da.mvScaleY = 1.0f;
+	da.hitDistA = 0.5f * radius;	da.hitDistB = 0.1f;		// MUST match rtgi_ray.frag's normHitDist
+	{	// GI ReBLUR history cap (ghosting vs noise lever); R0: r_rtgiHistoryMs = the same window in time
+		int mainF = 0, fastF = 0;
+		RB_RHI_NrdHistoryFrames( r_rtgiHistory.GetInteger(), r_rtgiHistoryMs.GetFloat(), 6, mainF, fastF );
+		da.maxAccumFrames = mainF;
+		da.fastFrames = ( r_rtgiHistoryMs.GetFloat() > 0.0f ) ? fastF : 0;
+	}
+	da.fastClampSigma = r_rtgiFastClamp.GetFloat();			// R0: 2.0 = NRD default (today)
+	da.confImage = giConfImg;								// H6f: IN_DIFF_CONFIDENCE (0 = not provided this frame)
+	da.denoisingRange = 20000.0f;
+	da.frameIndex = (unsigned int)tr.frameCount;
+	da.reset = !rhiRtgiPrevValid || RB_RHI_NrdHistoryReset( viewDef );	// R0: + camera cut / teleport
+	r->GpuScopeBegin( "rtgi.denoise" );						// r_vkGpuTime 2: NRD REBLUR_DIFFUSE denoise dispatches
+	rhiRtgiDenoisedThisView = r->RtaoDenoise( da );			// giMode -> GI diffuse denoise into GetRtgiOutputImage
+	r->GpuScopeEnd();
+}
+
 static void RB_RHI_RtgiPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	rhiRtgiRanThisView = false;
 	rhiRtgiDenoisedThisView = false;	// reset on every early-out (the apply gates on it)
@@ -8868,144 +9020,19 @@ static void RB_RHI_RtgiPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		RB_RHI_RtgiCacheResolve( r );				// fold this frame's accumulated bounce estimates into the cells
 	}
 
-	// H6g: full-res NRD guides for checkerboard (the half-packed gather can't carry them). Ray-free pass over
-	// depth + normal into a full-res MRT (att1 viewZ, att2 normal), which the denoise points NRD's guides at.
-	rhi::RenderTargetHandle giGuideRT = 0;
-	if ( cbActive ) {
-		// the guides are NRD's "full resolution" for checkerboard = the rw x rh gather resolution (the radiance
-		// is the half-packed part). Same coordinate mapping as the gather so guide and radiance line up.
-		if ( rhiRtgiGuideRT && r->GetRenderTargetImage( rhiRtgiGuideRT ) == 0 ) { rhiRtgiGuideRT = 0; rhiRtgiGuideW = rhiRtgiGuideH = 0; }
-		if ( rhiRtgiGuideRT && ( rhiRtgiGuideW != rw || rhiRtgiGuideH != rh ) ) { r->DestroyRenderTarget( rhiRtgiGuideRT ); rhiRtgiGuideRT = 0; rhiRtgiGuideW = rhiRtgiGuideH = 0; }
-		if ( !rhiRtgiGuideRT ) {
-			rhiRtgiGuideRT = r->CreateRenderTargetRtgiMrt( rw, rh );
-			if ( rhiRtgiGuideRT ) { rhiRtgiGuideW = rw; rhiRtgiGuideH = rh; }
-		}
-		rhi::ShaderHandle guideProg = rhiRtgiGuideRT ? r->LoadShader( "rtgi_guides" ) : 0;
-		if ( guideProg != 0 ) {
-			rhi::RenderParams gp;
-			memset( &gp, 0, sizeof( gp ) );
-			RB_RHI_IdentityMvp( gp.mvpMatrix );
-			memcpy( gp.modelViewMatrix, invView, sizeof( invView ) );	// u_modelViewMatrix = view->world (normal encode)
-			gp.screenCorrection[0] = 1.0f / rw;	gp.screenCorrection[1] = 1.0f / rh;
-			gp.depthTexRecip[0] = ( (float)w / rw ) / uploadW;	gp.depthTexRecip[1] = ( (float)h / rh ) / uploadH;
-			r->GpuScopeBegin( "rtgi.guides" );		// r_vkGpuTime 2: full-res NRD guide fill (checkerboard only)
-			r->BeginTargetPass( rhiRtgiGuideRT, NULL );
-			RB_RHI_BindUnit( 0, globalImages->currentDepthImage );
-			RB_RHI_BindRTUnit( r, 1, rhiNormalResultRT );
-			RB_RHI_DrawFullscreen( r, guideProg, gp, 0 );
-			r->EndPass();
-			r->GpuScopeEnd();
-			giGuideRT = rhiRtgiGuideRT;
-		}
-	}
+	// H6g: full-res NRD guides for checkerboard (the half-packed gather can't carry them)
+	const rhi::RenderTargetHandle giGuideRT = cbActive ? RB_RHI_RtgiGuides( r, invView, w, h, rw, rh, uploadW, uploadH ) : 0;
 
 	// ---- H6b: NRD REBLUR_DIFFUSE denoise (docs/rtx-rtgi.md), mirroring RB_RHI_RtaoPass's denoise ----
 	// Needs the velocity MRT (r_fsr / r_motionVectors) for IN_MV; without it the raw gather is used (grainy).
 	rhi::ImageHandle giVelImg = ( rhiNormalVelThisView && rhiNormalReadyThisView )
 		? r->GetRenderTargetImage3( rhiNormalResultRT ) : 0;
 	if ( giVelImg != 0 ) {
-		rhi::ImageHandle nrdVel = giVelImg;
-		if ( rw != w || rh != h ) {
-			// downsample the full-res velocity to the GI ray/NRD resolution (smaa_copy = texture(src, uv))
-			if ( rhiRtgiVelRT && r->GetRenderTargetImage( rhiRtgiVelRT ) == 0 ) { rhiRtgiVelRT = 0; rhiRtgiVelW = rhiRtgiVelH = 0; }
-			if ( rhiRtgiVelRT && ( rhiRtgiVelW != rw || rhiRtgiVelH != rh ) ) { r->DestroyRenderTarget( rhiRtgiVelRT ); rhiRtgiVelRT = 0; rhiRtgiVelW = rhiRtgiVelH = 0; }
-			if ( !rhiRtgiVelRT ) {
-				rhiRtgiVelRT = r->CreateRenderTarget( rhi::IF_RG16F, rw, rh );
-				if ( rhiRtgiVelRT ) { rhiRtgiVelW = rw; rhiRtgiVelH = rh; }
-			}
-			rhi::ShaderHandle copyProg = rhiRtgiVelRT ? r->LoadShader( "smaa_copy" ) : 0;
-			if ( copyProg != 0 ) {
-				rhi::RenderParams cp;
-				memset( &cp, 0, sizeof( cp ) );
-				RB_RHI_IdentityMvp( cp.mvpMatrix );
-				cp.screenCorrection[0] = 1.0f; cp.screenCorrection[1] = 1.0f;
-				r->GpuScopeBegin( "rtgi.vel" );		// r_vkGpuTime 2: velocity downsample to GI res (resScale only)
-				r->BeginTargetPass( rhiRtgiVelRT, NULL );
-				RB_RHI_DrawFullscreen( r, copyProg, cp, giVelImg );
-				r->EndPass();
-				r->GpuScopeEnd();
-				nrdVel = r->GetRenderTargetImage( rhiRtgiVelRT );
-			}
-		}
+		const rhi::ImageHandle nrdVel = RB_RHI_RtgiVelocityAtRes( r, giVelImg, w, h, rw, rh );
 
-		// H6f: history-confidence pass (docs/rtx-rtgi.md). Compare this frame's raw bounce luminance against
-		// last frame's DENOISED GI reprojected by the motion vectors, and write a per-pixel confidence that
-		// tells NRD to drop history where the lighting moved (a lit silhouette under the camera) but keep it
-		// on stable surfaces — killing the edge smear without the flat dimming a global antilag would cause.
-		// Needs a prior denoised frame (GetRtgiOutputImage != 0, still last frame's until RtaoDenoise below
-		// overwrites it) and the velocity we just resolved. r_rtgiConfidence 0 disables it (NRD antilag only).
-		rhi::ImageHandle giConfImg = 0;
-		const rhi::ImageHandle giPrevDenoised = r->GetRtgiOutputImage();
-		// Runs for both paths. In checkerboard the raw is half-packed, so the shader (u_localParam0.w = parity)
-		// only computes confidence at this frame's TRACED cells (reading the packed sample) and trusts history
-		// on the reconstructed cells.
-		if ( r_rtgiConfidence.GetFloat() > 0.0f && rhiRtgiPrevValid && giPrevDenoised != 0 ) {
-			if ( rhiRtgiConfRT && r->GetRenderTargetImage( rhiRtgiConfRT ) == 0 ) { rhiRtgiConfRT = 0; rhiRtgiConfW = rhiRtgiConfH = 0; }
-			if ( rhiRtgiConfRT && ( rhiRtgiConfW != rw || rhiRtgiConfH != rh ) ) { r->DestroyRenderTarget( rhiRtgiConfRT ); rhiRtgiConfRT = 0; rhiRtgiConfW = rhiRtgiConfH = 0; }
-			if ( !rhiRtgiConfRT ) {
-				rhiRtgiConfRT = r->CreateRenderTarget( rhi::IF_R16F, rw, rh );	// R8+ per NRD; R16F is the single-channel target we have
-				if ( rhiRtgiConfRT ) { rhiRtgiConfW = rw; rhiRtgiConfH = rh; }
-			}
-			rhi::ShaderHandle confProg = rhiRtgiConfRT ? r->LoadShader( "rtgi_confidence" ) : 0;
-			if ( confProg != 0 ) {
-				rhi::RenderParams confParms;
-				memset( &confParms, 0, sizeof( confParms ) );
-				RB_RHI_IdentityMvp( confParms.mvpMatrix );
-				confParms.screenCorrection[0] = 1.0f / rw;			// texel size for the 3x3 tap of the noisy current signal
-				confParms.screenCorrection[1] = 1.0f / rh;
-				confParms.localParam0[0] = idMath::ClampFloat( 0.0f, 16.0f, r_rtgiConfidence.GetFloat() );	// sensitivity
-				confParms.localParam0[1] = 0.1f;					// confidence floor: never fully reject history (avoids edge frying)
-				confParms.localParam0[2] = 0.35f;					// noise deadzone: ignore sub-noise relative diffs so stable surfaces keep full history
-				confParms.localParam0[3] = cbActive ? (float)( 1 + ( (int)tr.frameCount & 1 ) ) : 0.0f;	// H6g: checkerboard parity (0 = off, packed-read for traced cells)
-				confParms.windowCoord[2] = -1.0f;					// VK top-down: flip the velocity row (ssr_temporal convention)
-				r->GpuScopeBegin( "rtgi.conf" );		// r_vkGpuTime 2: H6f history-confidence pass
-				r->BeginTargetPass( rhiRtgiConfRT, NULL );
-				RB_RHI_BindRTImage( r, 1, giPrevDenoised );			// unit 1 = last frame's denoised GI (YCoCg)
-				RB_RHI_BindRTImage( r, 2, nrdVel );					// unit 2 = motion vectors at GI res
-				RB_RHI_DrawFullscreen( r, confProg, confParms, r->GetRenderTargetImage( rhiRtgiRayRT ) );	// unit 0 = this frame's raw gather
-				r->EndPass();
-				r->GpuScopeEnd();
-				giConfImg = r->GetRenderTargetImage( rhiRtgiConfRT );
-			}
-		}
+		const rhi::ImageHandle giConfImg = RB_RHI_RtgiConfidence( r, rw, rh, cbActive, nrdVel );
 
-		rhi::RtaoDenoiseArgs da;
-		memset( &da, 0, sizeof( da ) );
-		da.giMode = true;								// denoise GI radiance (REBLUR_DIFFUSE), not RTAO occlusion
-		da.rayRT = rhiRtgiRayRT;						// att0 = RGBA16F radiance+hitdist; guides in att1/att2
-		// resScale path: guides ride in the gather MRT (att1/att2). Checkerboard: radiance is half-packed, so
-		// the guides come from the full-res rtgi_guides pass instead (same att1/att2 layout). da.checkerboard =
-		// constant BLACK (1); the gather already packed the left half to match NRD's frameIndex parity.
-		const bool cbDenoise = cbActive && giGuideRT != 0;
-		da.viewzRT  = cbDenoise ? giGuideRT : rhiRtgiRayRT;	da.viewzAtt  = 1;
-		da.normalRT = cbDenoise ? giGuideRT : rhiRtgiRayRT;	da.normalAtt = 2;
-		da.checkerboard = cbDenoise ? 1 : 0;			// 1 = BLACK (constant); NRD flips per frameIndex
-		da.velImage = nrdVel;
-		da.w = rw;	da.h = rh;
-		memcpy( da.viewToClip,  viewDef->unjitteredProjectionMatrix, sizeof( da.viewToClip ) );
-		memcpy( da.worldToView, viewDef->worldSpace.modelViewMatrix, sizeof( da.worldToView ) );
-		memcpy( da.viewToClipPrev,  rhiRtgiPrevValid ? rhiRtgiPrevProj : da.viewToClip,  sizeof( da.viewToClipPrev ) );
-		memcpy( da.worldToViewPrev, rhiRtgiPrevValid ? rhiRtgiPrevView : da.worldToView, sizeof( da.worldToViewPrev ) );
-		da.jitterX = -viewDef->jitter[0] * resScale;
-		da.jitterY =  viewDef->jitter[1] * resScale;
-		da.jitterPrevX = rhiRtgiPrevValid ? -rhiRtgiPrevJitter[0] * resScale : da.jitterX;
-		da.jitterPrevY = rhiRtgiPrevValid ?  rhiRtgiPrevJitter[1] * resScale : da.jitterY;
-		da.mvScaleX = -1.0f;	da.mvScaleY = 1.0f;
-		da.hitDistA = 0.5f * radius;	da.hitDistB = 0.1f;		// MUST match rtgi_ray.frag's normHitDist
-		{	// GI ReBLUR history cap (ghosting vs noise lever); R0: r_rtgiHistoryMs = the same window in time
-			int mainF = 0, fastF = 0;
-			RB_RHI_NrdHistoryFrames( r_rtgiHistory.GetInteger(), r_rtgiHistoryMs.GetFloat(), 6, mainF, fastF );
-			da.maxAccumFrames = mainF;
-			da.fastFrames = ( r_rtgiHistoryMs.GetFloat() > 0.0f ) ? fastF : 0;
-		}
-		da.fastClampSigma = r_rtgiFastClamp.GetFloat();			// R0: 2.0 = NRD default (today)
-		da.confImage = giConfImg;								// H6f: IN_DIFF_CONFIDENCE (0 = not provided this frame)
-		da.denoisingRange = 20000.0f;
-		da.frameIndex = (unsigned int)tr.frameCount;
-		da.reset = !rhiRtgiPrevValid || RB_RHI_NrdHistoryReset( viewDef );	// R0: + camera cut / teleport
-		r->GpuScopeBegin( "rtgi.denoise" );						// r_vkGpuTime 2: NRD REBLUR_DIFFUSE denoise dispatches
-		rhiRtgiDenoisedThisView = r->RtaoDenoise( da );			// giMode -> GI diffuse denoise into GetRtgiOutputImage
-		r->GpuScopeEnd();
+		RB_RHI_RtgiDenoise( r, viewDef, rw, rh, resScale, radius, cbActive, giGuideRT, nrdVel, giConfImg );
 	}
 	// stage this frame's camera for next frame's GI reprojection (un-jittered, as passed)
 	memcpy( rhiRtgiPrevProj, viewDef->unjitteredProjectionMatrix, sizeof( rhiRtgiPrevProj ) );
@@ -9921,54 +9948,9 @@ static idScreenRect RB_RHI_RtShadowBlurRect( const viewDef_t *viewDef, const vie
 	return u;
 }
 
-static rhi::ImageHandle RB_RHI_RtShadowBlurLight( rhi::RHI *r, const viewDef_t *viewDef, const viewLight_t *vLight ) {
-	const unsigned long long tlas = r->GetTlasAddress();
-	if ( tlas == 0 || !vLight->lightDef ) {
-		return 0;
-	}
-	const int w = rhiRtBlurW, h = rhiRtBlurH;
-	const idScreenRect lr = RB_RHI_RtShadowBlurRect( viewDef, vLight, w, h );
-	if ( lr.x2 < lr.x1 || lr.y2 < lr.y1 ) {
-		return 0;		// no opaque surface of this light on screen: nothing would sample a mask
-	}
-
-	// How wide the blur gets. The width follows the geometry - 0 where the caster touches the
-	// receiver, growing with the gap: halfWidth = blurScale * dOccluder / ( dLight - dOccluder ) -
-	// and r_rtShadowBlurIntensity scales it. blurScale is a length in world units (it is the radius
-	// a physical light would need to cast that penumbra, but it is only a blur amount here): 3 at
-	// intensity 1 for ordinary fixtures, growing with the light's own volume so a 5000-unit "sun
-	// replacement" omni doesn't get a bulb-sized blur. Parallel suns sit 100000 units out along
-	// their direction: 1 degree of angular radius at intensity 1.
-	const renderLight_t &lp = vLight->lightDef->parms;
-	const idVec3 &lorg = vLight->globalLightOrigin;
-	const float lightRadius = RB_RHI_RtShadowBlurLightRadius( lp, lorg, viewDef->renderView.vieworg );	// shared with the light gather (DI soft grates)
-
-	// r_rtShadowBlurMinPenumbra: skip the blur entirely for a light whose penumbra is sub-pixel. A
-	// distant and/or small light casts a shadow edge finer than one screen pixel, so softening it is
-	// invisible yet still pays the full per-light ray + tiles + separable blur. Leave such a light on
-	// its crisp inline hard ray instead (the caller falls back to it when this returns 0, and any
-	// stagger slot it held ages out and frees itself in RB_RHI_RtShadowBlurBegin). The estimate
-	// mirrors the shader's own width - penumbra(px) ~= 2 * lightRadius(world) * (proj[0]*0.5*w) /
-	// receiverDepth - with a unit occluder/receiver gap ratio as the representative case, and takes the
-	// nearest the lit geometry can sit (origin minus the light's own radius) as the receiver depth so a
-	// large nearby light is never wrongly skipped. Parallel suns keep a fixed ~1deg angular penumbra
-	// everywhere, so they are never skipped.
-	const float minPenumbra = r_rtShadowBlurMinPenumbra.GetFloat();
-	if ( minPenumbra > 0.0f && !lp.parallel ) {
-		float depth = ( lorg - viewDef->renderView.vieworg ).Length();
-		if ( lp.pointLight ) {
-			depth -= Max( lp.lightRadius.x, Max( lp.lightRadius.y, lp.lightRadius.z ) );
-		}
-		if ( depth < 1.0f ) { depth = 1.0f; }
-		const float pxPerUnit = viewDef->projectionMatrix[0] * 0.5f * (float)w;	// at view depth 1
-		const float penumbraPx = 2.0f * lightRadius * pxPerUnit / depth;			// full width, gap ratio ~1
-		if ( penumbraPx < minPenumbra ) {
-			return 0;		// sub-pixel penumbra: the hard inline shadow is visually identical
-		}
-	}
-
-	rhiRtBlurLastStale = false;
-
+// r_rtShadowBlurStagger (RB_RHI_RtShadowBlurLight): this light's mask slot, when staggering applies - returns the slot's
+// REUSED mask when this frame may skip the refresh, else 0 with slot set (or NULL when the light refreshes every frame).
+static rhi::ImageHandle RB_RHI_RtShadowBlurStagger( rhi::RHI *r, const viewDef_t *viewDef, const viewLight_t *vLight, int w, int h, rtBlurSlot_t *&slot ) {
 	// ---- r_rtShadowBlurStagger: how often does this light's mask refresh? By the distance from the
 	// viewer to the light's ORIGIN: nearer than StaggerNear every frame, up to StaggerFar every 2nd,
 	// beyond every 3rd. (The first cut measured to the light's VOLUME, which is 0 for every light
@@ -9995,7 +9977,7 @@ static rhi::ImageHandle RB_RHI_RtShadowBlurLight( rhi::RHI *r, const viewDef_t *
 	//     Best-effort bonus - its per-frame classify may trail this pass by a frame - so it only
 	//     ever sharpens the teleport case, never the (reliably timed) cutscene one.
 	const bool camDiscontinuity = RB_RHI_CinematicView() || rhiTemporalCam.historyReset;
-	rtBlurSlot_t *slot = NULL;
+	slot = NULL;
 	if ( r_rtShadowBlurStagger.GetBool() && ictx.interactionRtProg != 0 && !camDiscontinuity ) {
 		const float dist = vLight->lightDef->parms.parallel ? 0.0f
 			: ( vLight->globalLightOrigin - viewDef->renderView.vieworg ).Length();
@@ -10046,14 +10028,16 @@ static rhi::ImageHandle RB_RHI_RtShadowBlurLight( rhi::RHI *r, const viewDef_t *
 			}
 		}
 	}
-	const int blurTaps = 24;		// = K in rtshadow_blur.frag = HW_MAX in rtshadow_tiles.frag: the widest half-width, pixels
+	return 0;
+}
 
-	// lp / lorg / lightRadius (the world-space blur scale) were computed above, before the stagger
-	// and sub-pixel-penumbra early-outs.
+// The ray pass's uniforms (RB_RHI_RtShadowBlurLight): the TLAS, the light's origin / projection / falloff, the blur
+// scale and the per-pixel width factors, the perforated casters, the depth mapping.
+static void RB_RHI_RtShadowBlurRayParms( rhi::RHI *r, const viewDef_t *viewDef, const viewLight_t *vLight, unsigned long long tlas,
+                                         const idVec3 &lorg, float lightRadius, int w, int h, int blurTaps, rhi::RenderParams &parms ) {
 	const float *proj = viewDef->projectionMatrix;
 	const unsigned int tlasLo = (unsigned int)( tlas & 0xFFFFFFFFull );
 	const unsigned int tlasHi = (unsigned int)( tlas >> 32 );
-	rhi::RenderParams parms;
 	memset( &parms, 0, sizeof( parms ) );
 	RB_RHI_IdentityMvp( parms.mvpMatrix );
 	memcpy( parms.modelViewMatrix, rhiRtBlur.invView, sizeof( rhiRtBlur.invView ) );	// view -> world
@@ -10082,27 +10066,14 @@ static rhi::ImageHandle RB_RHI_RtShadowBlurLight( rhi::RHI *r, const viewDef_t *
 	parms.depthTexRecip[0] = 1.0f / globalImages->currentDepthImage->uploadWidth;
 	rhi::FillDepthParms( parms, backEnd.viewDef ? backEnd.viewDef->projectionMatrix : NULL );	// this view's depth -> view z pair (cinematics cram the near plane)
 	parms.depthTexRecip[1] = 1.0f / globalImages->currentDepthImage->uploadHeight;
-	// "lit, nothing to spread, never traced": what the big targets clear to (color targets
-	// always clear on begin) and what the tile + blur passes skip
-	rhi::ClearArgs clearLit;
-	memset( &clearLit, 0, sizeof( clearLit ) );
-	clearLit.color = true;
-	clearLit.rgba[0] = 1.0f;
-	rhi::ClearArgs clearZero;
-	memset( &clearZero, 0, sizeof( clearZero ) );
-	clearZero.color = true;
+}
 
-	// The rects, all GL convention (bottom-up; the backend converts). Each stage reads blurTaps
-	// pixels beyond what the next one writes:
-	//   vRect  = the light's rect + 3            what the interactions sample; vertical blur writes it
-	//   hRect  = vRect grown by blurTaps in y    horizontal blur writes it (the vertical pass reads that far)
-	//   rayRect = the light's rect + blurTaps + 3, grown to whole 8x8 TILES (tiles count from the
-	//            TOP row, so the alignment is done in top-down rows) - rays write it, and the tile
-	//            classification reads exactly these tiles, never a pixel outside
-	// Every pass on a view-sized target is restricted to its rect (SetNextTargetPassArea): with
-	// every light ray-traced (r_rtAllLights) a view holds many of these per frame, and three
-	// full-target clears per light were the bulk of a small light's cost. Outside a pass's area
-	// the target is undefined - which is why no stage may read beyond the previous one's rect.
+// The rects of RB_RHI_RtShadowBlurLight's passes, all GL convention (bottom-up; the backend converts). Each stage reads
+// blurTaps pixels beyond what the next one writes: v = the light's rect + 3 (what the interactions sample; the vertical
+// blur writes it), h = v grown by blurTaps in y (the horizontal blur writes it), ray = the light's rect + blurTaps + 3
+// grown to whole 8x8 tiles (rTop/rBot in top-down rows, ry in GL rows).
+struct rtBlurRects_t { int vx1, vx2, vy1, vy2, hy1, hy2, rx1, rx2, rTop, rBot, ry1, ry2; };
+static rtBlurRects_t RB_RHI_RtShadowBlurRects( const idScreenRect &lr, int w, int h, int blurTaps ) {
 	const int wide = blurTaps + 3, tight = 3;
 	const int vx1 = Max( 0, lr.x1 - tight ), vx2 = Min( w - 1, lr.x2 + tight );
 	const int vy1 = Max( 0, lr.y1 - tight ), vy2 = Min( h - 1, lr.y2 + tight );
@@ -10112,14 +10083,15 @@ static rhi::ImageHandle RB_RHI_RtShadowBlurLight( rhi::RHI *r, const viewDef_t *
 	const int rTop = ( ( h - 1 - Min( h - 1, lr.y2 + wide ) ) / 8 ) * 8;				// top-down rows
 	const int rBot = Min( h - 1, ( ( h - 1 - Max( 0, lr.y1 - wide ) ) / 8 ) * 8 + 7 );
 	const int ry1 = h - 1 - rBot, ry2 = h - 1 - rTop;								// back to GL rows
+	rtBlurRects_t rc = { vx1, vx2, vy1, vy2, hy1, hy2, rx1, rx2, rTop, rBot, ry1, ry2 };
+	return rc;
+}
 
-	// No ray where the light is black: a light's volume is a box, its projection * falloff usually
-	// round, so the box's corners receive exactly nothing - shadowed or not. The ray pass can test
-	// that itself when the light has ONE active stage with a plain 2D projection image (no texture
-	// matrix: a rotating gobo's lookup isn't the raw lightProject planes; no cinematic). Anything
-	// else keeps tracing the whole volume, as before.
-	idImage *atProjImg = globalImages->whiteImage;
-	idImage *atFalloffImg = vLight->falloffImage ? vLight->falloffImage : globalImages->whiteImage;
+// RB_RHI_RtShadowBlurLight: no ray where the light is black - the projection + falloff images the ray pass may test
+// itself when the light has ONE active stage with a plain 2D projection image (parms.rtParms[3] = 1), white otherwise.
+static void RB_RHI_RtShadowBlurLightImages( const viewLight_t *vLight, rhi::RenderParams &parms, idImage *&atProjImg, idImage *&atFalloffImg ) {
+	atProjImg = globalImages->whiteImage;
+	atFalloffImg = vLight->falloffImage ? vLight->falloffImage : globalImages->whiteImage;
 	{
 		const idMaterial *ls = vLight->lightShader;
 		const float *lregs = vLight->shaderRegisters;
@@ -10138,28 +10110,14 @@ static rhi::ImageHandle RB_RHI_RtShadowBlurLight( rhi::RHI *r, const viewDef_t *
 			parms.rtParms[3] = 1.0f;
 		}
 	}
+}
 
-	// r_rtShadowBlurCheckerboard: trace a static screen checkerboard (half the rays, u_color.x). The skipped
-	// pixels (ray target b < 0) are reconstructed INSIDE the horizontal blur pass from their two traced
-	// horizontal neighbours (always the opposite parity in a (x^y) checkerboard), so there is no separate
-	// fill pass; the tile classification already ignores holes (they read as "never traced").
-	const bool cbActive = r_rtShadowBlurCheckerboard.GetBool();
-	parms.color[0] = cbActive ? 1.0f : 0.0f;					// u_color.x = checkerboard enable (rtshadow_ray.frag)
-
-	r->GpuScopeBegin( "rtblur.ray" );
-	r->SetNextTargetPassArea( rx1, ry1, rx2 - rx1 + 1, ry2 - ry1 + 1 );
-	r->BeginTargetPass( rhiRtBlurRayRT, &clearLit );
-	r->SetScissor( rx1, ry1, rx2 - rx1 + 1, ry2 - ry1 + 1 );
-	RB_RHI_BindUnit( 0, globalImages->currentDepthImage );
-	RB_RHI_BindRTUnit( r, 1, rhiNormalResultRT );
-	RB_RHI_BindUnit( 2, atFalloffImg );
-	RB_RHI_BindUnit( 3, atProjImg );
-	RB_RHI_DrawFullscreen( r, rhiRtBlur.rayProg, parms, 0 );
-	r->EndPass();
-	r->GpuScopeEnd();
-
-	const rhi::RenderTargetHandle srcRT = rhiRtBlurRayRT;		// tiles + the horizontal blur read the (checkerboard) ray target directly
-
+// RB_RHI_RtShadowBlurLight: the two tile classification passes over the ray rect's 8x8 tiles.
+static void RB_RHI_RtShadowBlurTiles( rhi::RHI *r, rhi::RenderTargetHandle srcRT, int h, const rtBlurRects_t &rc ) {
+	const int rx1 = rc.rx1, rx2 = rc.rx2, rTop = rc.rTop, rBot = rc.rBot;
+	rhi::ClearArgs clearZero;			// "never traced" for the tile targets (they clear whole)
+	memset( &clearZero, 0, sizeof( clearZero ) );
+	clearZero.color = true;
 	rhi::RenderParams tp;
 	memset( &tp, 0, sizeof( tp ) );
 	RB_RHI_IdentityMvp( tp.mvpMatrix );
@@ -10185,7 +10143,16 @@ static rhi::ImageHandle RB_RHI_RtShadowBlurLight( rhi::RHI *r, const viewDef_t *
 		r->EndPass();
 		r->GpuScopeEnd();
 	}
+}
 
+// RB_RHI_RtShadowBlurLight: the separable blur, horizontal into the ping target then vertical into the mask (a staggered
+// light's own slot mask, cleared whole).
+static void RB_RHI_RtShadowBlurSeparable( rhi::RHI *r, rhi::RenderTargetHandle srcRT, const rtBlurRects_t &rc, bool cbActive, rtBlurSlot_t *slot ) {
+	const int vx1 = rc.vx1, vx2 = rc.vx2, vy1 = rc.vy1, vy2 = rc.vy2, hy1 = rc.hy1, hy2 = rc.hy2;
+	rhi::ClearArgs clearLit;			// "lit, nothing to spread, never traced": what the big targets clear to
+	memset( &clearLit, 0, sizeof( clearLit ) );
+	clearLit.color = true;
+	clearLit.rgba[0] = 1.0f;
 	rhi::RenderParams bp;
 	memset( &bp, 0, sizeof( bp ) );
 	RB_RHI_IdentityMvp( bp.mvpMatrix );
@@ -10211,6 +10178,125 @@ static rhi::ImageHandle RB_RHI_RtShadowBlurLight( rhi::RHI *r, const viewDef_t *
 		r->EndPass();
 		r->GpuScopeEnd();
 	}
+}
+
+static rhi::ImageHandle RB_RHI_RtShadowBlurLight( rhi::RHI *r, const viewDef_t *viewDef, const viewLight_t *vLight ) {
+	const unsigned long long tlas = r->GetTlasAddress();
+	if ( tlas == 0 || !vLight->lightDef ) {
+		return 0;
+	}
+	const int w = rhiRtBlurW, h = rhiRtBlurH;
+	const idScreenRect lr = RB_RHI_RtShadowBlurRect( viewDef, vLight, w, h );
+	if ( lr.x2 < lr.x1 || lr.y2 < lr.y1 ) {
+		return 0;		// no opaque surface of this light on screen: nothing would sample a mask
+	}
+
+	// How wide the blur gets. The width follows the geometry - 0 where the caster touches the
+	// receiver, growing with the gap: halfWidth = blurScale * dOccluder / ( dLight - dOccluder ) -
+	// and r_rtShadowBlurIntensity scales it. blurScale is a length in world units (it is the radius
+	// a physical light would need to cast that penumbra, but it is only a blur amount here): 3 at
+	// intensity 1 for ordinary fixtures, growing with the light's own volume so a 5000-unit "sun
+	// replacement" omni doesn't get a bulb-sized blur. Parallel suns sit 100000 units out along
+	// their direction: 1 degree of angular radius at intensity 1.
+	const renderLight_t &lp = vLight->lightDef->parms;
+	const idVec3 &lorg = vLight->globalLightOrigin;
+	const float lightRadius = RB_RHI_RtShadowBlurLightRadius( lp, lorg, viewDef->renderView.vieworg );	// shared with the light gather (DI soft grates)
+
+	// r_rtShadowBlurMinPenumbra: skip the blur entirely for a light whose penumbra is sub-pixel. A
+	// distant and/or small light casts a shadow edge finer than one screen pixel, so softening it is
+	// invisible yet still pays the full per-light ray + tiles + separable blur. Leave such a light on
+	// its crisp inline hard ray instead (the caller falls back to it when this returns 0, and any
+	// stagger slot it held ages out and frees itself in RB_RHI_RtShadowBlurBegin). The estimate
+	// mirrors the shader's own width - penumbra(px) ~= 2 * lightRadius(world) * (proj[0]*0.5*w) /
+	// receiverDepth - with a unit occluder/receiver gap ratio as the representative case, and takes the
+	// nearest the lit geometry can sit (origin minus the light's own radius) as the receiver depth so a
+	// large nearby light is never wrongly skipped. Parallel suns keep a fixed ~1deg angular penumbra
+	// everywhere, so they are never skipped.
+	const float minPenumbra = r_rtShadowBlurMinPenumbra.GetFloat();
+	if ( minPenumbra > 0.0f && !lp.parallel ) {
+		float depth = ( lorg - viewDef->renderView.vieworg ).Length();
+		if ( lp.pointLight ) {
+			depth -= Max( lp.lightRadius.x, Max( lp.lightRadius.y, lp.lightRadius.z ) );
+		}
+		if ( depth < 1.0f ) { depth = 1.0f; }
+		const float pxPerUnit = viewDef->projectionMatrix[0] * 0.5f * (float)w;	// at view depth 1
+		const float penumbraPx = 2.0f * lightRadius * pxPerUnit / depth;			// full width, gap ratio ~1
+		if ( penumbraPx < minPenumbra ) {
+			return 0;		// sub-pixel penumbra: the hard inline shadow is visually identical
+		}
+	}
+
+	rhiRtBlurLastStale = false;
+
+	rtBlurSlot_t *slot = NULL;
+	{
+		const rhi::ImageHandle reused = RB_RHI_RtShadowBlurStagger( r, viewDef, vLight, w, h, slot );
+		if ( reused != 0 ) {
+			return reused;
+		}
+	}
+	const int blurTaps = 24;		// = K in rtshadow_blur.frag = HW_MAX in rtshadow_tiles.frag: the widest half-width, pixels
+
+	// lp / lorg / lightRadius (the world-space blur scale) were computed above, before the stagger
+	// and sub-pixel-penumbra early-outs.
+	rhi::RenderParams parms;
+	RB_RHI_RtShadowBlurRayParms( r, viewDef, vLight, tlas, lorg, lightRadius, w, h, blurTaps, parms );
+	// "lit, nothing to spread, never traced": what the big targets clear to (color targets
+	// always clear on begin) and what the tile + blur passes skip
+	rhi::ClearArgs clearLit;
+	memset( &clearLit, 0, sizeof( clearLit ) );
+	clearLit.color = true;
+	clearLit.rgba[0] = 1.0f;
+	rhi::ClearArgs clearZero;
+	memset( &clearZero, 0, sizeof( clearZero ) );
+	clearZero.color = true;
+
+	// The rects, all GL convention (bottom-up; the backend converts). Each stage reads blurTaps
+	// pixels beyond what the next one writes:
+	//   vRect  = the light's rect + 3            what the interactions sample; vertical blur writes it
+	//   hRect  = vRect grown by blurTaps in y    horizontal blur writes it (the vertical pass reads that far)
+	//   rayRect = the light's rect + blurTaps + 3, grown to whole 8x8 TILES (tiles count from the
+	//            TOP row, so the alignment is done in top-down rows) - rays write it, and the tile
+	//            classification reads exactly these tiles, never a pixel outside
+	// Every pass on a view-sized target is restricted to its rect (SetNextTargetPassArea): with
+	// every light ray-traced (r_rtAllLights) a view holds many of these per frame, and three
+	// full-target clears per light were the bulk of a small light's cost. Outside a pass's area
+	// the target is undefined - which is why no stage may read beyond the previous one's rect.
+	const rtBlurRects_t rc = RB_RHI_RtShadowBlurRects( lr, w, h, blurTaps );
+	const int rx1 = rc.rx1, rx2 = rc.rx2, ry1 = rc.ry1, ry2 = rc.ry2;
+
+	// No ray where the light is black: a light's volume is a box, its projection * falloff usually
+	// round, so the box's corners receive exactly nothing - shadowed or not. The ray pass can test
+	// that itself when the light has ONE active stage with a plain 2D projection image (no texture
+	// matrix: a rotating gobo's lookup isn't the raw lightProject planes; no cinematic). Anything
+	// else keeps tracing the whole volume, as before.
+	idImage *atProjImg, *atFalloffImg;
+	RB_RHI_RtShadowBlurLightImages( vLight, parms, atProjImg, atFalloffImg );
+
+	// r_rtShadowBlurCheckerboard: trace a static screen checkerboard (half the rays, u_color.x). The skipped
+	// pixels (ray target b < 0) are reconstructed INSIDE the horizontal blur pass from their two traced
+	// horizontal neighbours (always the opposite parity in a (x^y) checkerboard), so there is no separate
+	// fill pass; the tile classification already ignores holes (they read as "never traced").
+	const bool cbActive = r_rtShadowBlurCheckerboard.GetBool();
+	parms.color[0] = cbActive ? 1.0f : 0.0f;					// u_color.x = checkerboard enable (rtshadow_ray.frag)
+
+	r->GpuScopeBegin( "rtblur.ray" );
+	r->SetNextTargetPassArea( rx1, ry1, rx2 - rx1 + 1, ry2 - ry1 + 1 );
+	r->BeginTargetPass( rhiRtBlurRayRT, &clearLit );
+	r->SetScissor( rx1, ry1, rx2 - rx1 + 1, ry2 - ry1 + 1 );
+	RB_RHI_BindUnit( 0, globalImages->currentDepthImage );
+	RB_RHI_BindRTUnit( r, 1, rhiNormalResultRT );
+	RB_RHI_BindUnit( 2, atFalloffImg );
+	RB_RHI_BindUnit( 3, atProjImg );
+	RB_RHI_DrawFullscreen( r, rhiRtBlur.rayProg, parms, 0 );
+	r->EndPass();
+	r->GpuScopeEnd();
+
+	const rhi::RenderTargetHandle srcRT = rhiRtBlurRayRT;		// tiles + the horizontal blur read the (checkerboard) ray target directly
+
+	RB_RHI_RtShadowBlurTiles( r, srcRT, h, rc );
+
+	RB_RHI_RtShadowBlurSeparable( r, srcRT, rc, cbActive, slot );
 
 	// drop the tile target from the recorded units: the next blurred light renders INTO it, and a
 	// later draw that doesn't rebind unit 1 must not carry an attachment along
