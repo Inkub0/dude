@@ -47,6 +47,18 @@ RB_CreateSingleDrawInteractions takes a plain function pointer, so the
 per-surface stream handles and per-light state travel through this.
 ===================
 */
+// DUDE (structural pass): a GPU-only storage buffer with its device address, or 0 - the buffer
+// destroyed again - when either step fails, so a caller never holds a buffer it cannot address.
+static rhi::BufferHandle RB_RHI_CreateDeviceBuffer( rhi::RHI *r, int bytes, unsigned long long &addr ) {
+	rhi::BufferHandle b = r->CreateBuffer( rhi::BU_STORAGE_DEVICE, bytes, NULL );
+	addr = ( b != 0 ) ? r->GetBufferDeviceAddress( b ) : 0;
+	if ( b != 0 && addr == 0 ) {
+		r->DestroyBuffer( b );
+		b = 0;
+	}
+	return b;
+}
+
 static struct {
 	rhi::RHI *			r;
 	const viewDef_t *	viewDef;
@@ -1632,17 +1644,11 @@ static void RB_RHI_FillPerforatedParms( rhi::RHI *r, rhi::RenderParams &parms, c
 	if ( geoTable == 0 ) {
 		return;
 	}
-	const unsigned int geoLo = (unsigned int)( geoTable & 0xFFFFFFFFull );
-	const unsigned int geoHi = (unsigned int)( geoTable >> 32 );
-	memcpy( &parms.shadowFalloffS[0], &geoLo, sizeof( geoLo ) );	// bit-cast, NOT a value cast
-	memcpy( &parms.shadowFalloffS[1], &geoHi, sizeof( geoHi ) );
+	RB_RHI_PackAddr( &parms.shadowFalloffS[0], geoTable );	// bit-cast, NOT a value cast
 	parms.shadowFalloffS[2] = idMath::ClampFloat( 0.0f, 1.0f, r_shadowMapPerforatedStrength.GetFloat() );
 	parms.shadowFalloffS[3] = (float)cachedCount;					// > 0: test the segment against that many boxes; < 0: no list
-	const unsigned int boxLo = (unsigned int)( cachedAddr & 0xFFFFFFFFull );
-	const unsigned int boxHi = (unsigned int)( cachedAddr >> 32 );
 	memset( parms.shadowProjectionQ, 0, sizeof( parms.shadowProjectionQ ) );
-	memcpy( &parms.shadowProjectionQ[0], &boxLo, sizeof( boxLo ) );
-	memcpy( &parms.shadowProjectionQ[1], &boxHi, sizeof( boxHi ) );
+	RB_RHI_PackAddr( &parms.shadowProjectionQ[0], cachedAddr );	// bit-cast, NOT a value cast
 }
 
 // r_rtShadowBlur: shader parms for an interaction that looks this light's blurred mask up
@@ -1664,10 +1670,7 @@ static void RB_RHI_FillBlurMaskParms( rhi::RenderParams &parms, bool &rtSun ) {
 	}
 	parms.shadowParms[0] = 6.0f;
 	memcpy( parms.prevMvpMatrix, ictx.shadowMaskViewProj, sizeof( parms.prevMvpMatrix ) );
-	const unsigned int tlasLo = (unsigned int)( tlas & 0xFFFFFFFFu );
-	const unsigned int tlasHi = (unsigned int)( tlas >> 32 );
-	memcpy( &parms.rtParms[0], &tlasLo, sizeof( tlasLo ) );	// bit-cast, NOT a value cast
-	memcpy( &parms.rtParms[1], &tlasHi, sizeof( tlasHi ) );
+	RB_RHI_PackAddr( &parms.rtParms[0], tlas );	// bit-cast, NOT a value cast
 	parms.rtParms[2] = r_rtSunShadowOffset.GetFloat();
 	parms.rtParms[3] = 100000.0f;
 	RB_RHI_FillPerforatedParms( ictx.r, parms, backEnd.vLight );
@@ -1860,10 +1863,7 @@ static void RB_RHI_FillShadowParms( rhi::RenderParams &parms, const drawInteract
 				const unsigned long long tlas = ictx.r->GetTlasAddress();
 				if ( tlas != 0 ) {
 					parms.shadowParms[0] = 4.0f;
-					const unsigned int tlasLo = (unsigned int)( tlas & 0xFFFFFFFFu );
-					const unsigned int tlasHi = (unsigned int)( tlas >> 32 );
-					memcpy( &parms.rtParms[0], &tlasLo, sizeof( tlasLo ) );	// bit-cast, NOT a value cast
-					memcpy( &parms.rtParms[1], &tlasHi, sizeof( tlasHi ) );
+					RB_RHI_PackAddr( &parms.rtParms[0], tlas );	// bit-cast, NOT a value cast
 					parms.rtParms[2] = r_rtSunShadowOffset.GetFloat();
 					parms.rtParms[3] = 100000.0f;
 					RB_RHI_FillPerforatedParms( ictx.r, parms, backEnd.vLight );	// after the mode-3 fill above: the ray modes own u_shadowFalloffS
@@ -1886,10 +1886,7 @@ static void RB_RHI_FillShadowParms( rhi::RenderParams &parms, const drawInteract
 				RB_RHI_FillBlurMaskParms( parms, rtSun );
 			} else if ( tlas != 0 && ictx.interactionRtProg != 0 ) {
 				parms.shadowParms[0] = 4.0f;
-				const unsigned int tlasLo = (unsigned int)( tlas & 0xFFFFFFFFu );
-				const unsigned int tlasHi = (unsigned int)( tlas >> 32 );
-				memcpy( &parms.rtParms[0], &tlasLo, sizeof( tlasLo ) );	// bit-cast, NOT a value cast
-				memcpy( &parms.rtParms[1], &tlasHi, sizeof( tlasHi ) );
+				RB_RHI_PackAddr( &parms.rtParms[0], tlas );	// bit-cast, NOT a value cast
 				parms.rtParms[2] = r_rtSunShadowOffset.GetFloat();
 				parms.rtParms[3] = 100000.0f;
 				RB_RHI_FillPerforatedParms( ictx.r, parms, backEnd.vLight );
@@ -1984,10 +1981,7 @@ static bool RB_RHI_FillContactShadowParms( rhi::RenderParams &parms, const drawI
 				if ( !rtSun ) {
 					// a shadow-map / mask / unshadowed draw: hand it the TLAS and the ray-origin normal offset (the
 					// RT shadow modes fill the same lanes), and bind the ray-query variant, whose map paths are unchanged
-					const unsigned int tlasLo = (unsigned int)( tlas & 0xFFFFFFFFu );
-					const unsigned int tlasHi = (unsigned int)( tlas >> 32 );
-					memcpy( &parms.rtParms[0], &tlasLo, sizeof( tlasLo ) );	// bit-cast, NOT a value cast
-					memcpy( &parms.rtParms[1], &tlasHi, sizeof( tlasHi ) );
+					RB_RHI_PackAddr( &parms.rtParms[0], tlas );	// bit-cast, NOT a value cast
 					parms.rtParms[2] = r_rtSunShadowOffset.GetFloat();
 					parms.rtParms[3] = 100000.0f;
 					rtSun = true;
@@ -5891,7 +5885,7 @@ static rhi::ImageHandle RB_RHI_DecalResolveMaterial( rhi::RHI *r, rhi::ImageHand
 	}
 	rhi::RenderParams parms;
 	memset( &parms, 0, sizeof( parms ) );
-	parms.mvpMatrix[0] = parms.mvpMatrix[5] = parms.mvpMatrix[10] = parms.mvpMatrix[15] = 1.0f;
+	RB_RHI_IdentityMvp( parms.mvpMatrix );
 	r->BeginTargetPass( rhiDecalMatRT, NULL );
 	r->SetViewport( 0, 0, w, h );
 	r->SetScissor( 0, 0, w, h );
@@ -6014,7 +6008,7 @@ rhi::ImageHandle RB_RHI_BerserkAccum( rhi::RHI *r, const viewDef_t *viewDef,
 
 	rhi::RenderParams parms;
 	memset( &parms, 0, sizeof( parms ) );
-	parms.mvpMatrix[0] = parms.mvpMatrix[5] = parms.mvpMatrix[10] = parms.mvpMatrix[15] = 1.0f;
+	RB_RHI_IdentityMvp( parms.mvpMatrix );
 	parms.localParam0[0] = scale;
 	parms.localParam0[1] = feedback * fade;					// wind-down fades the feedback out
 	parms.localParam0[2] = rhiBerserkValid ? 1.0f : 0.0f;
@@ -6176,7 +6170,7 @@ rhi::ImageHandle RB_RHI_HelltimeAccum( rhi::RHI *r, const viewDef_t *viewDef, in
 
 	rhi::RenderParams parms;
 	memset( &parms, 0, sizeof( parms ) );
-	parms.mvpMatrix[0] = parms.mvpMatrix[5] = parms.mvpMatrix[10] = parms.mvpMatrix[15] = 1.0f;
+	RB_RHI_IdentityMvp( parms.mvpMatrix );
 	parms.screenCorrection[0] = ( potW > 0 ) ? (float)fullW / potW : 1.0f;
 	parms.screenCorrection[1] = ( potH > 0 ) ? (float)fullH / potH : 1.0f;
 	parms.localParam0[0] = scale;
@@ -7117,7 +7111,7 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 			if ( doSsrHiZ ) {
 				rhi::RenderParams pyr;
 				memset( &pyr, 0, sizeof( pyr ) );
-				pyr.mvpMatrix[0] = pyr.mvpMatrix[5] = pyr.mvpMatrix[10] = pyr.mvpMatrix[15] = 1.0f;
+				RB_RHI_IdentityMvp( pyr.mvpMatrix );
 				pyr.depthTexRecip[0] = ( (float)fullW / ssrW ) / uploadW;	// SSR frag -> depth tc
 				rhi::FillDepthParms( pyr, backEnd.viewDef ? backEnd.viewDef->projectionMatrix : NULL );	// this view's depth -> view z pair (cinematics cram the near plane)
 				pyr.depthTexRecip[1] = ( (float)fullH / ssrH ) / uploadH;
@@ -7164,7 +7158,7 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 	// ---- stage 1: march into the offscreen buffer (cleared to 0 = miss) ----
 	rhi::RenderParams parms;
 	memset( &parms, 0, sizeof( parms ) );
-	parms.mvpMatrix[0] = parms.mvpMatrix[5] = parms.mvpMatrix[10] = parms.mvpMatrix[15] = 1.0f;
+	RB_RHI_IdentityMvp( parms.mvpMatrix );
 	// the real view->clip matrix projects march points back to screen; the inverse
 	// factors reconstruct view-space positions (same recipe as ssao.frag)
 	memcpy( parms.projectionMatrix, viewDef->projectionMatrix, sizeof( parms.projectionMatrix ) );
@@ -7317,7 +7311,7 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 		if ( downProg && rhiSsrColorMipLevels >= 2 ) {
 			rhi::RenderParams cp;
 			memset( &cp, 0, sizeof( cp ) );
-			cp.mvpMatrix[0] = cp.mvpMatrix[5] = cp.mvpMatrix[10] = cp.mvpMatrix[15] = 1.0f;
+			RB_RHI_IdentityMvp( cp.mvpMatrix );
 			// level 0: 1:1 copy of the reflection result into the pyramid base (mode 0).
 			// Level 0 uses BeginTargetPass (its framebuffer is the base colorFb) — NOT
 			// BeginTargetMipPass, which only creates per-level framebuffers for L>=1 and
@@ -7358,7 +7352,7 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 	// ---- stage 3: full-res additive composite over the lit scene (inside the #4a !rtWillRender guard) ----
 	rhi::RenderParams compParms;
 	memset( &compParms, 0, sizeof( compParms ) );
-	compParms.mvpMatrix[0] = compParms.mvpMatrix[5] = compParms.mvpMatrix[10] = compParms.mvpMatrix[15] = 1.0f;
+	RB_RHI_IdentityMvp( compParms.mvpMatrix );
 	compParms.localParam0[0] = invP00;
 	compParms.localParam0[1] = invP11;
 	compParms.localParam0[2] = idMath::ClampFloat( 0.05f, 0.95f, r_ssrRoughnessFade.GetFloat() );	// roughness fade start
@@ -7436,7 +7430,7 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 
 			rhi::RenderParams rp;
 			memset( &rp, 0, sizeof( rp ) );
-			rp.mvpMatrix[0] = rp.mvpMatrix[5] = rp.mvpMatrix[10] = rp.mvpMatrix[15] = 1.0f;
+			RB_RHI_IdentityMvp( rp.mvpMatrix );
 			memcpy( rp.modelViewMatrix, invView, sizeof( invView ) );	// u_modelViewMatrix = view->world
 			rp.localParam0[0] = invP00;
 			rp.localParam0[1] = invP11;
@@ -7585,7 +7579,7 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 			backEnd.currentScissor = viewDef->scissor;
 			rhi::RenderParams cp;
 			memset( &cp, 0, sizeof( cp ) );
-			cp.mvpMatrix[0] = cp.mvpMatrix[5] = cp.mvpMatrix[10] = cp.mvpMatrix[15] = 1.0f;
+			RB_RHI_IdentityMvp( cp.mvpMatrix );
 			// RR6b: box-blur strength + tap spacing; screenCorrection = the RESULT target's texel size so
 			// the blur offsets are in its texels (full-res after the RR6c upscale, ssrRes if temporal off).
 			// At r_rtReflBlur 0 the frag is a 1:1 additive passthrough.
@@ -7728,7 +7722,7 @@ void RB_RHI_VolumetricLighting( rhi::RHI *r, const viewDef_t *viewDef ) {
 
 	rhi::RenderParams mp;
 	memset( &mp, 0, sizeof( mp ) );
-	mp.mvpMatrix[0] = mp.mvpMatrix[5] = mp.mvpMatrix[10] = mp.mvpMatrix[15] = 1.0f;
+	RB_RHI_IdentityMvp( mp.mvpMatrix );
 	memcpy( mp.modelViewMatrix, invView, sizeof( invView ) );			// view -> world
 	memcpy( &mp.rtParms[0], &tlasAddr, sizeof( tlasAddr ) );			// bit-cast device addresses
 	memcpy( &mp.color[0], &lightAddr, sizeof( lightAddr ) );
@@ -7787,7 +7781,7 @@ void RB_RHI_VolumetricLighting( rhi::RHI *r, const viewDef_t *viewDef ) {
 		if ( blurProg && rhiVolBlurRT ) {
 			rhi::RenderParams bp;
 			memset( &bp, 0, sizeof( bp ) );
-			bp.mvpMatrix[0] = bp.mvpMatrix[5] = bp.mvpMatrix[10] = bp.mvpMatrix[15] = 1.0f;
+			RB_RHI_IdentityMvp( bp.mvpMatrix );
 			bp.localParam0[0] = (float)volW;
 			bp.localParam0[1] = (float)volH;
 			bp.localParam0[2] = (float)resDiv;
@@ -7807,7 +7801,7 @@ void RB_RHI_VolumetricLighting( rhi::RHI *r, const viewDef_t *viewDef ) {
 	// both the OLD standalone full-res pass AND the fast path's fused upsample-at-composite below.
 	rhi::RenderParams up;
 	memset( &up, 0, sizeof( up ) );
-	up.mvpMatrix[0] = up.mvpMatrix[5] = up.mvpMatrix[10] = up.mvpMatrix[15] = 1.0f;
+	RB_RHI_IdentityMvp( up.mvpMatrix );
 	up.localParam0[0] = (float)volW;
 	up.localParam0[1] = (float)volH;
 	up.localParam0[2] = (float)resDiv;
@@ -7840,7 +7834,7 @@ void RB_RHI_VolumetricLighting( rhi::RHI *r, const viewDef_t *viewDef ) {
 
 		rhi::RenderParams tp;
 		memset( &tp, 0, sizeof( tp ) );
-		tp.mvpMatrix[0] = tp.mvpMatrix[5] = tp.mvpMatrix[10] = tp.mvpMatrix[15] = 1.0f;
+		RB_RHI_IdentityMvp( tp.mvpMatrix );
 		if ( haveInv ) {
 			memcpy( tp.modelViewMatrix, reproj, sizeof( reproj ) );
 		}
@@ -7890,7 +7884,7 @@ void RB_RHI_VolumetricLighting( rhi::RHI *r, const viewDef_t *viewDef ) {
 	} else {
 		rhi::RenderParams cp;
 		memset( &cp, 0, sizeof( cp ) );
-		cp.mvpMatrix[0] = cp.mvpMatrix[5] = cp.mvpMatrix[10] = cp.mvpMatrix[15] = 1.0f;
+		RB_RHI_IdentityMvp( cp.mvpMatrix );
 		RB_RHI_DrawFullscreen( r, compProg, cp, r->GetRenderTargetImage( volResultRT ),
 		                       GLS_SRCBLEND_ONE | GLS_DSTBLEND_SRC_ALPHA );
 	}
@@ -7987,7 +7981,7 @@ static void RB_RHI_SSAOPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 
 	rhi::RenderParams parms;
 	memset( &parms, 0, sizeof( parms ) );
-	parms.mvpMatrix[0] = parms.mvpMatrix[5] = parms.mvpMatrix[10] = parms.mvpMatrix[15] = 1.0f;
+	RB_RHI_IdentityMvp( parms.mvpMatrix );
 	parms.depthTexRecip[0]    = ( (float)fullW / aoW ) / uploadW;	// gl_FragCoord (AO) -> depth tc
 	rhi::FillDepthParms( parms, backEnd.viewDef ? backEnd.viewDef->projectionMatrix : NULL );	// this view's depth -> view z pair (cinematics cram the near plane)
 	parms.depthTexRecip[1]    = ( (float)fullH / aoH ) / uploadH;
@@ -8302,13 +8296,10 @@ static void RB_RHI_RtaoPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 
 	rhi::RenderParams parms;
 	memset( &parms, 0, sizeof( parms ) );
-	parms.mvpMatrix[0] = parms.mvpMatrix[5] = parms.mvpMatrix[10] = parms.mvpMatrix[15] = 1.0f;
+	RB_RHI_IdentityMvp( parms.mvpMatrix );
 	memcpy( parms.modelViewMatrix, invView, sizeof( invView ) );	// u_modelViewMatrix = view->world
 	// TLAS device address: bit-cast into the rtParms lanes (ssr_rt idiom, NOT a value cast)
-	const unsigned int tlasLo = (unsigned int)( tlas & 0xFFFFFFFFull );
-	const unsigned int tlasHi = (unsigned int)( tlas >> 32 );
-	memcpy( &parms.rtParms[0], &tlasLo, sizeof( tlasLo ) );
-	memcpy( &parms.rtParms[1], &tlasHi, sizeof( tlasHi ) );
+	RB_RHI_PackAddr( &parms.rtParms[0], tlas );	// bit-cast, NOT a value cast
 	parms.localParam0[0] = invP00;
 	parms.localParam0[1] = invP11;
 	parms.localParam0[2] = radius;
@@ -8349,7 +8340,7 @@ static void RB_RHI_RtaoPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 			if ( copyProg != 0 ) {
 				rhi::RenderParams cp;
 				memset( &cp, 0, sizeof( cp ) );
-				cp.mvpMatrix[0] = cp.mvpMatrix[5] = cp.mvpMatrix[10] = cp.mvpMatrix[15] = 1.0f;
+				RB_RHI_IdentityMvp( cp.mvpMatrix );
 				cp.screenCorrection[0] = 1.0f; cp.screenCorrection[1] = 1.0f;
 				r->BeginTargetPass( rhiRtaoVelRT, NULL );
 				RB_RHI_DrawFullscreen( r, copyProg, cp, velImg );
@@ -8419,7 +8410,7 @@ static void RB_RHI_RtaoPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 			if ( rhiRtaoResolveRT != 0 ) {
 				rhi::RenderParams rp;
 				memset( &rp, 0, sizeof( rp ) );
-				rp.mvpMatrix[0] = rp.mvpMatrix[5] = rp.mvpMatrix[10] = rp.mvpMatrix[15] = 1.0f;
+				RB_RHI_IdentityMvp( rp.mvpMatrix );
 				// RTAO's own intensity (default neutral 1.0) — r_ssaoIntensity's 1.2 compensates
 				// for the screen-space march and stays GTAO-only (user decision 2026-09-17)
 				rp.localParam0[0] = RB_RHI_AoIntensityWithVolumetrics( r, r_rtaoIntensity.GetFloat() );
@@ -8553,12 +8544,9 @@ static void RB_RHI_RtgiPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 
 	rhi::RenderParams parms;
 	memset( &parms, 0, sizeof( parms ) );
-	parms.mvpMatrix[0] = parms.mvpMatrix[5] = parms.mvpMatrix[10] = parms.mvpMatrix[15] = 1.0f;
+	RB_RHI_IdentityMvp( parms.mvpMatrix );
 	memcpy( parms.modelViewMatrix, invView, sizeof( invView ) );	// u_modelViewMatrix = view->world
-	const unsigned int tlasLo = (unsigned int)( tlas & 0xFFFFFFFFull );
-	const unsigned int tlasHi = (unsigned int)( tlas >> 32 );
-	memcpy( &parms.rtParms[0], &tlasLo, sizeof( tlasLo ) );			// rtParms.x/y = TLAS (bit-cast)
-	memcpy( &parms.rtParms[1], &tlasHi, sizeof( tlasHi ) );
+	RB_RHI_PackAddr( &parms.rtParms[0], tlas );	// bit-cast, NOT a value cast
 	memcpy( &parms.rtParms[2], &geoTable, sizeof( geoTable ) );		// rtParms.z/w = geo table (bit-cast)
 	parms.localParam0[0] = invP00;
 	parms.localParam0[1] = invP11;
@@ -8649,7 +8637,7 @@ static void RB_RHI_RtgiPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		if ( guideProg != 0 ) {
 			rhi::RenderParams gp;
 			memset( &gp, 0, sizeof( gp ) );
-			gp.mvpMatrix[0] = gp.mvpMatrix[5] = gp.mvpMatrix[10] = gp.mvpMatrix[15] = 1.0f;
+			RB_RHI_IdentityMvp( gp.mvpMatrix );
 			memcpy( gp.modelViewMatrix, invView, sizeof( invView ) );	// u_modelViewMatrix = view->world (normal encode)
 			gp.screenCorrection[0] = 1.0f / rw;	gp.screenCorrection[1] = 1.0f / rh;
 			gp.depthTexRecip[0] = ( (float)w / rw ) / uploadW;	gp.depthTexRecip[1] = ( (float)h / rh ) / uploadH;
@@ -8682,7 +8670,7 @@ static void RB_RHI_RtgiPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 			if ( copyProg != 0 ) {
 				rhi::RenderParams cp;
 				memset( &cp, 0, sizeof( cp ) );
-				cp.mvpMatrix[0] = cp.mvpMatrix[5] = cp.mvpMatrix[10] = cp.mvpMatrix[15] = 1.0f;
+				RB_RHI_IdentityMvp( cp.mvpMatrix );
 				cp.screenCorrection[0] = 1.0f; cp.screenCorrection[1] = 1.0f;
 				r->GpuScopeBegin( "rtgi.vel" );		// r_vkGpuTime 2: velocity downsample to GI res (resScale only)
 				r->BeginTargetPass( rhiRtgiVelRT, NULL );
@@ -8715,7 +8703,7 @@ static void RB_RHI_RtgiPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 			if ( confProg != 0 ) {
 				rhi::RenderParams confParms;
 				memset( &confParms, 0, sizeof( confParms ) );
-				confParms.mvpMatrix[0] = confParms.mvpMatrix[5] = confParms.mvpMatrix[10] = confParms.mvpMatrix[15] = 1.0f;
+				RB_RHI_IdentityMvp( confParms.mvpMatrix );
 				confParms.screenCorrection[0] = 1.0f / rw;			// texel size for the 3x3 tap of the noisy current signal
 				confParms.screenCorrection[1] = 1.0f / rh;
 				confParms.localParam0[0] = idMath::ClampFloat( 0.0f, 16.0f, r_rtgiConfidence.GetFloat() );	// sensitivity
@@ -8913,7 +8901,7 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 
 	rhi::RenderParams parms;
 	memset( &parms, 0, sizeof( parms ) );
-	parms.mvpMatrix[0] = parms.mvpMatrix[5] = parms.mvpMatrix[10] = parms.mvpMatrix[15] = 1.0f;
+	RB_RHI_IdentityMvp( parms.mvpMatrix );
 	memcpy( parms.modelViewMatrix, invView, sizeof( invView ) );		// u_modelViewMatrix = view->world
 	memcpy( &parms.color[0], &lightAddr, sizeof( lightAddr ) );			// color.xy = light-buffer device address
 	parms.color[2] = (float)numLights;									// color.z = light count
@@ -8921,10 +8909,7 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	// .w = max length. 0 (no RT scene this frame) leaves rtParms.xy = 0 -> the shader skips the ray (unshadowed).
 	const unsigned long long tlas = r->GetTlasAddress();
 	if ( tlas != 0 ) {
-		const unsigned int tlasLo = (unsigned int)( tlas & 0xFFFFFFFFull );
-		const unsigned int tlasHi = (unsigned int)( tlas >> 32 );
-		memcpy( &parms.rtParms[0], &tlasLo, sizeof( tlasLo ) );
-		memcpy( &parms.rtParms[1], &tlasHi, sizeof( tlasHi ) );
+		RB_RHI_PackAddr( &parms.rtParms[0], tlas );	// bit-cast, NOT a value cast
 		parms.rtParms[2] = r_rtSunShadowOffset.GetFloat();				// ray-origin normal offset (shared with mode 4)
 		parms.rtParms[3] = 100000.0f;									// max shadow-ray length
 	}
@@ -9062,7 +9047,7 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 		if ( copyProg != 0 ) {
 			rhi::RenderParams cp;
 			memset( &cp, 0, sizeof( cp ) );
-			cp.mvpMatrix[0] = cp.mvpMatrix[5] = cp.mvpMatrix[10] = cp.mvpMatrix[15] = 1.0f;
+			RB_RHI_IdentityMvp( cp.mvpMatrix );
 			cp.screenCorrection[0] = 1.0f; cp.screenCorrection[1] = 1.0f;
 			r->GpuScopeBegin( "restir.di.vel" );		// r_vkGpuTime 2: velocity downsample to the gather res
 			r->BeginTargetPass( rhiReStirDIVelRT, NULL );
@@ -9164,9 +9149,8 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 			rhiReStirDIGiBuf = 0;	rhiReStirDIGiAddr = 0;	rhiReStirDIGiCells = 0;
 		}
 		if ( rhiReStirDIGiBuf == 0 && cells > 0 ) {
-			rhiReStirDIGiBuf   = r->CreateBuffer( rhi::BU_STORAGE_DEVICE, cells * 40, NULL );	// restir_di.frag DI_BOOST_SIDE_FLOATS 10
-			rhiReStirDIGiAddr  = ( rhiReStirDIGiBuf != 0 ) ? r->GetBufferDeviceAddress( rhiReStirDIGiBuf ) : 0;
-			rhiReStirDIGiCells = ( rhiReStirDIGiAddr != 0 ) ? cells : 0;
+			rhiReStirDIGiBuf   = RB_RHI_CreateDeviceBuffer( r, cells * 40, rhiReStirDIGiAddr );	// restir_di.frag DI_BOOST_SIDE_FLOATS 10
+			rhiReStirDIGiCells = ( rhiReStirDIGiBuf != 0 ) ? cells : 0;
 		}
 		diGiSide = rhiReStirDIGiAddr != 0 && rhiReStirDIGiCells == cells;
 	}
@@ -9348,7 +9332,7 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 				for ( int pass = 0; pass < filterPasses; pass++ ) {
 					rhi::RenderParams fp;
 					memset( &fp, 0, sizeof( fp ) );
-					fp.mvpMatrix[0] = fp.mvpMatrix[5] = fp.mvpMatrix[10] = fp.mvpMatrix[15] = 1.0f;
+					RB_RHI_IdentityMvp( fp.mvpMatrix );
 					fp.localParam0[0] = (float)( 1 << pass );
 					fp.localParam0[1] = (float)gw;	fp.localParam0[2] = (float)gh;
 					fp.localParam0[3] = ( pass == 0 ) ? 1.0f : 0.0f;	// max-dilate the exact relative change by one stratum, first pass only
@@ -9366,7 +9350,7 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 				const float h      = r_rtReStirDIGradientHistory.GetFloat();
 				rhi::RenderParams cp;
 				memset( &cp, 0, sizeof( cp ) );
-				cp.mvpMatrix[0] = cp.mvpMatrix[5] = cp.mvpMatrix[10] = cp.mvpMatrix[15] = 1.0f;
+				RB_RHI_IdentityMvp( cp.mvpMatrix );
 				cp.localParam0[0] = r_rtReStirDIGradientPower.GetFloat();
 				cp.localParam0[1] = ( h > 0.0f ) ? 1.0f / ( 1.0f + h ) : 1.0f;
 				cp.localParam0[2] = idMath::ClampFloat( 0.0f, 1.0f, floorC );
@@ -9449,7 +9433,7 @@ static void RB_RHI_ReStirDIPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 			if ( guideProg != 0 ) {
 				rhi::RenderParams gp;
 				memset( &gp, 0, sizeof( gp ) );
-				gp.mvpMatrix[0] = gp.mvpMatrix[5] = gp.mvpMatrix[10] = gp.mvpMatrix[15] = 1.0f;
+				RB_RHI_IdentityMvp( gp.mvpMatrix );
 				memcpy( gp.modelViewMatrix, invView, sizeof( invView ) );	// u_modelViewMatrix = view->world (normal encode)
 				gp.screenCorrection[0] = 1.0f / rw;	gp.screenCorrection[1] = 1.0f / rh;
 				gp.depthTexRecip[0] = ( (float)w / rw ) / uploadW;	gp.depthTexRecip[1] = ( (float)h / rh ) / uploadH;
@@ -9824,7 +9808,7 @@ static rhi::ImageHandle RB_RHI_RtShadowBlurLight( rhi::RHI *r, const viewDef_t *
 	const unsigned int tlasHi = (unsigned int)( tlas >> 32 );
 	rhi::RenderParams parms;
 	memset( &parms, 0, sizeof( parms ) );
-	parms.mvpMatrix[0] = parms.mvpMatrix[5] = parms.mvpMatrix[10] = parms.mvpMatrix[15] = 1.0f;
+	RB_RHI_IdentityMvp( parms.mvpMatrix );
 	memcpy( parms.modelViewMatrix, rhiRtBlur.invView, sizeof( rhiRtBlur.invView ) );	// view -> world
 	memcpy( &parms.rtParms[0], &tlasLo, sizeof( tlasLo ) );		// bit-cast, NOT a value cast
 	memcpy( &parms.rtParms[1], &tlasHi, sizeof( tlasHi ) );
@@ -9931,7 +9915,7 @@ static rhi::ImageHandle RB_RHI_RtShadowBlurLight( rhi::RHI *r, const viewDef_t *
 
 	rhi::RenderParams tp;
 	memset( &tp, 0, sizeof( tp ) );
-	tp.mvpMatrix[0] = tp.mvpMatrix[5] = tp.mvpMatrix[10] = tp.mvpMatrix[15] = 1.0f;
+	RB_RHI_IdentityMvp( tp.mvpMatrix );
 	for ( int pass = 0; pass < 2; pass++ ) {
 		// exactly the ray rect's tiles, both passes (pass 1 reads 64 ray texels per tile; pass 2's
 		// reach search reads tiles beyond them, which the full clear of these small targets left
@@ -9957,7 +9941,7 @@ static rhi::ImageHandle RB_RHI_RtShadowBlurLight( rhi::RHI *r, const viewDef_t *
 
 	rhi::RenderParams bp;
 	memset( &bp, 0, sizeof( bp ) );
-	bp.mvpMatrix[0] = bp.mvpMatrix[5] = bp.mvpMatrix[10] = bp.mvpMatrix[15] = 1.0f;
+	RB_RHI_IdentityMvp( bp.mvpMatrix );
 	for ( int pass = 0; pass < 2; pass++ ) {
 		const int py1 = ( pass == 0 ) ? hy1 : vy1, py2 = ( pass == 0 ) ? hy2 : vy2;
 		bp.localParam0[0] = ( pass == 0 ) ? 1.0f : 0.0f;		// axis
@@ -10025,7 +10009,7 @@ void RB_RHI_RtaoDebugOverlay( rhi::RHI *r, const viewDef_t *viewDef ) {
 
 	rhi::RenderParams parms;
 	memset( &parms, 0, sizeof( parms ) );
-	parms.mvpMatrix[0] = parms.mvpMatrix[5] = parms.mvpMatrix[10] = parms.mvpMatrix[15] = 1.0f;
+	RB_RHI_IdentityMvp( parms.mvpMatrix );
 	parms.localParam0[0] = 1.0f;					// ssao_debug mode 1: show the AO scalar (.r)
 
 	r->SetViewport( tr.viewportOffset[0] + viewDef->viewport.x1,
@@ -10116,7 +10100,7 @@ void RB_RHI_RtgiApply( rhi::RHI *r, const viewDef_t *viewDef ) {
 
 	rhi::RenderParams parms;
 	memset( &parms, 0, sizeof( parms ) );
-	parms.mvpMatrix[0] = parms.mvpMatrix[5] = parms.mvpMatrix[10] = parms.mvpMatrix[15] = 1.0f;
+	RB_RHI_IdentityMvp( parms.mvpMatrix );
 	parms.localParam0[0] = idMath::ClampFloat( 0.0f, 8.0f, r_rtgiIntensity.GetFloat() );
 	// GI (reduced res) + albedo (full res) both sample at gl_FragCoord/(viewW,viewH): the GI buffer
 	// upscales, albedo is 1:1. depth uses the POT _currentDepth tc for the sky skip.
@@ -10194,11 +10178,9 @@ static bool RB_RHI_RtgiCacheBegin( rhi::RHI *r, const viewDef_t *viewDef, bool t
 		// sumL2 in the accum buffer: docs/rtx-irradiance-cache.md C6 variance serve). 20 B total; the slot array stays
 		// contiguous and byte-identical at the buffer start, the sidecar follows at slotCount * 16.
 		const int bytes = ( 1 << log2 ) * 20;
-		c.slotBuf   = r->CreateBuffer( rhi::BU_STORAGE_DEVICE, bytes, NULL );
-		c.accumBuf  = r->CreateBuffer( rhi::BU_STORAGE_DEVICE, bytes, NULL );
-		c.slotAddr  = ( c.slotBuf  != 0 ) ? r->GetBufferDeviceAddress( c.slotBuf )  : 0;
-		c.accumAddr = ( c.accumBuf != 0 ) ? r->GetBufferDeviceAddress( c.accumBuf ) : 0;
-		if ( c.slotAddr == 0 || c.accumAddr == 0 ) {
+		c.slotBuf  = RB_RHI_CreateDeviceBuffer( r, bytes, c.slotAddr );
+		c.accumBuf = RB_RHI_CreateDeviceBuffer( r, bytes, c.accumAddr );
+		if ( c.slotBuf == 0 || c.accumBuf == 0 ) {
 			if ( c.slotBuf  != 0 ) { r->DestroyBuffer( c.slotBuf ); }
 			if ( c.accumBuf != 0 ) { r->DestroyBuffer( c.accumBuf ); }
 			c.slotBuf = c.accumBuf = 0;
@@ -10364,7 +10346,7 @@ void RB_RHI_RtgiCacheDebugOverlay( rhi::RHI *r, const viewDef_t *viewDef ) {
 
 	rhi::RenderParams parms;
 	memset( &parms, 0, sizeof( parms ) );
-	parms.mvpMatrix[0] = parms.mvpMatrix[5] = parms.mvpMatrix[10] = parms.mvpMatrix[15] = 1.0f;
+	RB_RHI_IdentityMvp( parms.mvpMatrix );
 	memcpy( parms.modelViewMatrix, invView, sizeof( invView ) );		// u_modelViewMatrix = view->world
 	parms.localParam0[0] = invP00;
 	parms.localParam0[1] = invP11;
@@ -10422,12 +10404,8 @@ static bool RB_RHI_LightGridBegin( rhi::RHI *r, const viewDef_t *viewDef ) {
 		const long long cells       = (long long)cascades * res * res * res;
 		const long long strideWords = 2 + 2 * (long long)slots;		// header (count, sumImp) + slots * (light, imp)
 		const long long bytes       = cells * strideWords * 4;
-		g.gridBuf  = r->CreateBuffer( rhi::BU_STORAGE_DEVICE, (int)bytes, NULL );
-		g.gridAddr = ( g.gridBuf != 0 ) ? r->GetBufferDeviceAddress( g.gridBuf ) : 0;
-		if ( g.gridBuf == 0 || g.gridAddr == 0 ) {
-			if ( g.gridBuf != 0 ) { r->DestroyBuffer( g.gridBuf ); }
-			g.gridBuf = 0;
-			g.gridAddr = 0;
+		g.gridBuf = RB_RHI_CreateDeviceBuffer( r, (int)bytes, g.gridAddr );
+		if ( g.gridBuf == 0 ) {
 			static bool warned = false;
 			if ( !warned ) { warned = true; common->Warning( "r_rtLightGrid: the grid buffer (%lld MB) could not be created - light grid off", bytes >> 20 ); }
 			return false;
@@ -10537,7 +10515,7 @@ void RB_RHI_LightGridDebugOverlay( rhi::RHI *r, const viewDef_t *viewDef ) {
 
 	rhi::RenderParams parms;
 	memset( &parms, 0, sizeof( parms ) );
-	parms.mvpMatrix[0] = parms.mvpMatrix[5] = parms.mvpMatrix[10] = parms.mvpMatrix[15] = 1.0f;
+	RB_RHI_IdentityMvp( parms.mvpMatrix );
 	memcpy( parms.modelViewMatrix, invView, sizeof( invView ) );		// u_modelViewMatrix = view->world (camPos = [3].xyz)
 	parms.localParam0[0] = invP00;
 	parms.localParam0[1] = invP11;
@@ -10778,7 +10756,7 @@ void RB_RHI_RtgiDebugOverlay( rhi::RHI *r, const viewDef_t *viewDef ) {
 
 	rhi::RenderParams parms;
 	memset( &parms, 0, sizeof( parms ) );
-	parms.mvpMatrix[0] = parms.mvpMatrix[5] = parms.mvpMatrix[10] = parms.mvpMatrix[15] = 1.0f;
+	RB_RHI_IdentityMvp( parms.mvpMatrix );
 	parms.screenCorrection[0] = 1.0f;				// rtgi_debug samples at var_TexCoord (0..1); screenCorrection unused
 	parms.screenCorrection[1] = 1.0f;
 
@@ -10837,7 +10815,7 @@ void RB_RHI_ReStirDIApply( rhi::RHI *r, const viewDef_t *viewDef ) {
 
 	rhi::RenderParams parms;
 	memset( &parms, 0, sizeof( parms ) );
-	parms.mvpMatrix[0] = parms.mvpMatrix[5] = parms.mvpMatrix[10] = parms.mvpMatrix[15] = 1.0f;
+	RB_RHI_IdentityMvp( parms.mvpMatrix );
 	// upscale exactly as the debug overlay: bilateral only when actually reduced-res + enabled
 	const bool diReduced = ( rhiReStirDIW < w || rhiReStirDIH < h );
 	const bool diBilateral = diReduced && r_rtReStirDIBilateralUpscale.GetBool() && uploadW > 0;
@@ -10983,7 +10961,7 @@ void RB_RHI_ReStirDIDebugOverlay( rhi::RHI *r, const viewDef_t *viewDef ) {
 
 	rhi::RenderParams parms;
 	memset( &parms, 0, sizeof( parms ) );
-	parms.mvpMatrix[0] = parms.mvpMatrix[5] = parms.mvpMatrix[10] = parms.mvpMatrix[15] = 1.0f;
+	RB_RHI_IdentityMvp( parms.mvpMatrix );
 	// Upscale the (possibly reduced-res) DI buffer to the full view. Bilateral only when actually upscaling +
 	// enabled + the normal G-buffer is available for the weights; else plain bilinear (the sampler).
 	const bool diReduced = ( rhiReStirDIW < w || rhiReStirDIH < h );
@@ -11056,7 +11034,7 @@ void RB_RHI_SSAODebugOverlay( rhi::RHI *r, const viewDef_t *viewDef ) {
 
 	rhi::RenderParams parms;
 	memset( &parms, 0, sizeof( parms ) );
-	parms.mvpMatrix[0] = parms.mvpMatrix[5] = parms.mvpMatrix[10] = parms.mvpMatrix[15] = 1.0f;
+	RB_RHI_IdentityMvp( parms.mvpMatrix );
 	parms.localParam0[0] = (float)mode;		// 1 = AO, 2 = bent normal, 3 = normal G-buffer
 
 	r->SetViewport( tr.viewportOffset[0] + viewDef->viewport.x1,
@@ -11118,7 +11096,7 @@ void RB_RHI_DepthOfField( rhi::RHI *r, const viewDef_t *viewDef ) {
 
 	rhi::RenderParams parms;
 	memset( &parms, 0, sizeof( parms ) );
-	parms.mvpMatrix[0] = parms.mvpMatrix[5] = parms.mvpMatrix[10] = parms.mvpMatrix[15] = 1.0f;
+	RB_RHI_IdentityMvp( parms.mvpMatrix );
 	parms.screenCorrection[0] = (float)w / colPotW;			// viewport uv -> _currentRender
 	parms.screenCorrection[1] = (float)h / colPotH;
 	parms.localParam0[0] = focus;
@@ -11228,7 +11206,7 @@ void RB_RHI_ChromaticAberration( rhi::RHI *r, const viewDef_t *viewDef, const id
 
 	rhi::RenderParams parms;
 	memset( &parms, 0, sizeof( parms ) );
-	parms.mvpMatrix[0] = parms.mvpMatrix[5] = parms.mvpMatrix[10] = parms.mvpMatrix[15] = 1.0f;
+	RB_RHI_IdentityMvp( parms.mvpMatrix );
 	parms.screenCorrection[0] = (float)w / potW;		// viewport uv -> _currentRender (NPOT)
 	parms.screenCorrection[1] = (float)h / potH;
 	parms.windowCoord[2] = 0.5f;						// aberration center in uv
@@ -11380,7 +11358,7 @@ rhi::ImageHandle RB_RHI_EyeAdaptExposure( rhi::RHI *r, rhi::ImageHandle sceneImg
 	// when driven every frame). C.r ends as the geometric-mean log-luma.
 	rhi::RenderParams p;
 	memset( &p, 0, sizeof( p ) );
-	p.mvpMatrix[0] = p.mvpMatrix[5] = p.mvpMatrix[10] = p.mvpMatrix[15] = 1.0f;
+	RB_RHI_IdentityMvp( p.mvpMatrix );
 	p.localParam0[0] = idMath::ClampFloat( 0.05f, 1.0f, r_hdrAdaptCenter.GetFloat() );	// central metering crop (hdrluma)
 	RB_RHI_SetSceneUvRect( p, uvRect );									// the image part the scene fills (hdrluma)
 
@@ -11413,7 +11391,7 @@ rhi::ImageHandle RB_RHI_EyeAdaptExposure( rhi::RHI *r, rhi::ImageHandle sceneImg
 
 	rhi::RenderParams ep;
 	memset( &ep, 0, sizeof( ep ) );
-	ep.mvpMatrix[0] = ep.mvpMatrix[5] = ep.mvpMatrix[10] = ep.mvpMatrix[15] = 1.0f;
+	RB_RHI_IdentityMvp( ep.mvpMatrix );
 	ep.localParam0[0] = r_hdrExposure.GetFloat();						// neutral "mid" exposure
 	ep.localParam0[1] = r_hdrAdaptBrighten.GetFloat();					// added as the scene darkens
 	ep.localParam0[2] = r_hdrAdaptDarken.GetFloat();					// removed as the scene brightens
@@ -11532,7 +11510,7 @@ rhi::ImageHandle RB_RHI_Bloom( rhi::RHI *r, rhi::ImageHandle sceneImg, const flo
 	// threshold: scene -> D[0] (half res, bright pixels only)
 	rhi::RenderParams p;
 	memset( &p, 0, sizeof( p ) );
-	p.mvpMatrix[0] = p.mvpMatrix[5] = p.mvpMatrix[10] = p.mvpMatrix[15] = 1.0f;
+	RB_RHI_IdentityMvp( p.mvpMatrix );
 	p.localParam0[0] = r_hdrBloomThreshold.GetFloat();
 	RB_RHI_SetSceneUvRect( p, uvRect );						// the image part the scene fills
 	r->BeginTargetPass( rhiBloomD[0], NULL );
@@ -11543,7 +11521,7 @@ rhi::ImageHandle RB_RHI_Bloom( rhi::RHI *r, rhi::ImageHandle sceneImg, const flo
 	for ( int i = 1; i < N; i++ ) {
 		rhi::RenderParams dp;
 		memset( &dp, 0, sizeof( dp ) );
-		dp.mvpMatrix[0] = dp.mvpMatrix[5] = dp.mvpMatrix[10] = dp.mvpMatrix[15] = 1.0f;
+		RB_RHI_IdentityMvp( dp.mvpMatrix );
 		dp.localParam0[0] = 1.0f / (float)rhiBloomW[i-1];		// source texel size
 		dp.localParam0[1] = 1.0f / (float)rhiBloomH[i-1];
 		r->BeginTargetPass( rhiBloomD[i], NULL );
@@ -11555,7 +11533,7 @@ rhi::ImageHandle RB_RHI_Bloom( rhi::RHI *r, rhi::ImageHandle sceneImg, const flo
 	for ( int i = N - 2; i >= 0; i-- ) {
 		rhi::RenderParams up;
 		memset( &up, 0, sizeof( up ) );
-		up.mvpMatrix[0] = up.mvpMatrix[5] = up.mvpMatrix[10] = up.mvpMatrix[15] = 1.0f;
+		RB_RHI_IdentityMvp( up.mvpMatrix );
 		up.localParam0[0] = 1.0f / (float)rhiBloomW[i+1];		// smaller-level texel size (tent offsets)
 		up.localParam0[1] = 1.0f / (float)rhiBloomH[i+1];
 		rhi::RenderTargetHandle srcRT = ( i == N - 2 ) ? rhiBloomD[N-1] : rhiBloomU[i+1];
@@ -11613,7 +11591,7 @@ void RB_RHI_MotionVectorDebugOverlay( rhi::RHI *r, const viewDef_t *viewDef ) {
 
 	rhi::RenderParams parms;
 	memset( &parms, 0, sizeof( parms ) );
-	parms.mvpMatrix[0] = parms.mvpMatrix[5] = parms.mvpMatrix[10] = parms.mvpMatrix[15] = 1.0f;
+	RB_RHI_IdentityMvp( parms.mvpMatrix );
 	parms.localParam0[0] = ( mode >= 2 ) ? 5.0f : 4.0f;		// ssao_debug: 4 = direction, 5 = magnitude
 	// per-frame UV velocity is tiny, so amplify for visibility; the magnitude view reads darker
 	// than the centred direction view, so it gets a larger base gain. r_mvDebugScale multiplies

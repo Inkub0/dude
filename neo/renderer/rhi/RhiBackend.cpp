@@ -356,7 +356,7 @@ static bool RB_RHI_SmaaEdgesWeights( rhi::RHI *r, rhi::ImageHandle sceneImg, int
 
 	rhi::RenderParams parms;
 	memset( &parms, 0, sizeof( parms ) );
-	parms.mvpMatrix[0] = parms.mvpMatrix[5] = parms.mvpMatrix[10] = parms.mvpMatrix[15] = 1.0f;
+	RB_RHI_IdentityMvp( parms.mvpMatrix );
 	// SMAA_RT_METRICS
 	parms.localParam0[0] = 1.0f / w;
 	parms.localParam0[1] = 1.0f / h;
@@ -402,7 +402,7 @@ static bool RB_RHI_SmaaChain( rhi::RHI *r, rhi::ImageHandle sceneImg, rhi::Rende
 
 	rhi::RenderParams parms;
 	memset( &parms, 0, sizeof( parms ) );
-	parms.mvpMatrix[0] = parms.mvpMatrix[5] = parms.mvpMatrix[10] = parms.mvpMatrix[15] = 1.0f;
+	RB_RHI_IdentityMvp( parms.mvpMatrix );
 	// SMAA_RT_METRICS (the blend samples the weights + scene at texel offsets)
 	parms.localParam0[0] = 1.0f / w;
 	parms.localParam0[1] = 1.0f / h;
@@ -451,7 +451,7 @@ static bool RB_RHI_SmaaPassLDR( rhi::RHI *r, const viewDef_t *viewDef ) {
 
 	rhi::RenderParams parms;
 	memset( &parms, 0, sizeof( parms ) );
-	parms.mvpMatrix[0] = parms.mvpMatrix[5] = parms.mvpMatrix[10] = parms.mvpMatrix[15] = 1.0f;
+	RB_RHI_IdentityMvp( parms.mvpMatrix );
 	parms.screenCorrection[0] = potW > 0 ? (float)w / potW : 1.0f;
 	parms.screenCorrection[1] = potH > 0 ? (float)h / potH : 1.0f;
 
@@ -508,7 +508,7 @@ static void RB_RHI_AAPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 
 	rhi::RenderParams parms;
 	memset( &parms, 0, sizeof( parms ) );
-	parms.mvpMatrix[0] = parms.mvpMatrix[5] = parms.mvpMatrix[10] = parms.mvpMatrix[15] = 1.0f;
+	RB_RHI_IdentityMvp( parms.mvpMatrix );
 	// content extent in the oversized POT texture; fxaa.frag samples st * screenCorrection
 	parms.screenCorrection[0] = potW > 0 ? (float)w / potW : 1.0f;
 	parms.screenCorrection[1] = potH > 0 ? (float)h / potH : 1.0f;
@@ -588,7 +588,7 @@ static void RB_RHI_PostProcess( rhi::RHI *r, const viewDef_t *viewDef ) {
 
 	rhi::RenderParams parms;
 	memset( &parms, 0, sizeof( parms ) );
-	parms.mvpMatrix[0] = parms.mvpMatrix[5] = parms.mvpMatrix[10] = parms.mvpMatrix[15] = 1.0f;
+	RB_RHI_IdentityMvp( parms.mvpMatrix );
 	parms.screenCorrection[0] = potW > 0 ? (float)w / potW : 1.0f;
 	parms.screenCorrection[1] = potH > 0 ? (float)h / potH : 1.0f;
 	parms.windowCoord[2] = 0.5f;		// aberration center in uv
@@ -689,7 +689,7 @@ static void RB_RHI_GammaBrightness( rhi::RHI *r ) {
 
 	rhi::RenderParams parms;
 	memset( &parms, 0, sizeof( parms ) );
-	parms.mvpMatrix[0] = parms.mvpMatrix[5] = parms.mvpMatrix[10] = parms.mvpMatrix[15] = 1.0f;
+	RB_RHI_IdentityMvp( parms.mvpMatrix );
 	parms.screenCorrection[0] = potW > 0 ? (float)w / potW : 1.0f;
 	parms.screenCorrection[1] = potH > 0 ? (float)h / potH : 1.0f;
 	// mirror R_SetColorMappings: multiply by brightness (clamped), then pow(1/gamma)
@@ -1019,7 +1019,7 @@ static void RB_RHI_HdrFxaa( rhi::RHI *r ) {
 
 	rhi::RenderParams parms;
 	memset( &parms, 0, sizeof( parms ) );
-	parms.mvpMatrix[0] = parms.mvpMatrix[5] = parms.mvpMatrix[10] = parms.mvpMatrix[15] = 1.0f;
+	RB_RHI_IdentityMvp( parms.mvpMatrix );
 	// exact-size float source: content fills the whole [0,1], one texel = 1/dim
 	parms.screenCorrection[0] = 1.0f;
 	parms.screenCorrection[1] = 1.0f;
@@ -1124,7 +1124,7 @@ static bool RB_RHI_HdrResolveSmaaFused( rhi::RHI *r, int w, int h ) {
 
 	rhi::RenderParams parms;
 	memset( &parms, 0, sizeof( parms ) );
-	parms.mvpMatrix[0] = parms.mvpMatrix[5] = parms.mvpMatrix[10] = parms.mvpMatrix[15] = 1.0f;
+	RB_RHI_IdentityMvp( parms.mvpMatrix );
 	// SMAA_RT_METRICS (localParam0) — shared by the vertex offset and the blend
 	parms.localParam0[0] = 1.0f / w;
 	parms.localParam0[1] = 1.0f / h;
@@ -1251,7 +1251,7 @@ static void RB_RHI_HdrResolve( rhi::RHI *r ) {
 
 	rhi::RenderParams parms;
 	memset( &parms, 0, sizeof( parms ) );
-	parms.mvpMatrix[0] = parms.mvpMatrix[5] = parms.mvpMatrix[10] = parms.mvpMatrix[15] = 1.0f;
+	RB_RHI_IdentityMvp( parms.mvpMatrix );
 	// film grain is folded into the resolve here (RB_RHI_PostProcess is skipped in HDR mode) so
 	// it samples the smooth float buffer instead of the 8-bit _currentRender round-trip that was
 	// re-banding the image. Chromatic aberration is NOT folded here anymore: it runs as a
@@ -3793,7 +3793,7 @@ static void RB_RHI_PortalSkyComposite( rhi::RHI *r, const viewDef_t *viewDef ) {
 	const int potH = img->uploadHeight > 0 ? img->uploadHeight : h;
 	rhi::RenderParams parms;
 	memset( &parms, 0, sizeof( parms ) );
-	parms.mvpMatrix[0] = parms.mvpMatrix[5] = parms.mvpMatrix[10] = parms.mvpMatrix[15] = 1.0f;
+	RB_RHI_IdentityMvp( parms.mvpMatrix );
 	parms.screenCorrection[0] = (float)w / potW;
 	parms.screenCorrection[1] = (float)h / potH;
 	parms.windowCoord[0] = 1.0f / w;

@@ -301,4 +301,19 @@ void RB_RHI_CaptureNextSwap( unsigned char *dest );
 // Part of the strong shutdown orchestrated by RB_RHI_Shutdown (RhiBackend.cpp).
 void RB_RHI_ResetWorldTargets( void );
 
+
+// DUDE (structural pass): two idioms the RHI world/backend passes wrote out by hand dozens of times.
+// A fullscreen pass's model-view-projection is the identity (its quad is already in clip space):
+static ID_INLINE void RB_RHI_IdentityMvp( float m[16] ) {
+	m[0] = m[5] = m[10] = m[15] = 1.0f;
+}
+// A 64-bit device address rides in two floats of a uniform block as a BIT-CAST of its low and
+// high words (the shader rebuilds the uint64 with floatBitsToUint), never a value conversion:
+static ID_INLINE void RB_RHI_PackAddr( float *dst2, unsigned long long addr ) {
+	const unsigned int lo = (unsigned int)( addr & 0xFFFFFFFFull );
+	const unsigned int hi = (unsigned int)( addr >> 32 );
+	memcpy( &dst2[0], &lo, sizeof( lo ) );
+	memcpy( &dst2[1], &hi, sizeof( hi ) );
+}
+
 #endif /* !__GL3LOCAL_H__ */
