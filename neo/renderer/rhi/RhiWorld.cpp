@@ -5117,10 +5117,9 @@ static void RB_RHI_DiVertexColorMode( float mod[4], float add[4], int svc ) {
 	for ( int c = 0; c < 4; c++ ) { mod[c] = m; add[c] = a; }
 }
 
-static bool RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef, int phase = -1 ) {
-	if ( !R_BackendSupportsEnhancements() ) {
-		return false;
-	}
+// Who wants the normal prepass this view (RB_RHI_NormalPrepass): SSAO's normal buffer, SSR's / RT reflections' rough-metal
+// MRT, the motion-vector attachment, the RTGI / ReSTIR DI albedo - and whether this is a view it runs for at all.
+static bool RB_RHI_NormalPrepassWants( rhi::RHI *r, const viewDef_t *viewDef, bool &ssaoWants, bool &ssrWants, bool &velWants, bool &wantAlbedo ) {
 	// SSAO wants the buffer when it feeds the horizon search, or when it's being inspected
 	// (r_ssaoDebug 3) even if SSAO reconstructs normals from depth — so the debug view
 	// always has data. SSR needs it unconditionally (normals to reflect about + the
@@ -5133,15 +5132,15 @@ static bool RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef, int pha
 	// 3-attachment layout untouched). On the RT tier ssr + velocity are already on, so this only adds att3.
 	// ReSTIR DI Stage D (docs/rtx-restir-di.md): lighting the scene with DI needs the same albedo attachment (+ the
 	// rough/metal/spec material attachment it forces) for the deferred shade, so it widens this gate.
-	const bool wantAlbedo = ( r_rtgi.GetBool() || ( r_rtReStirDI.GetBool() && r_rtReStirDIApply.GetBool() ) )
+	wantAlbedo = ( r_rtgi.GetBool() || ( r_rtReStirDI.GetBool() && r_rtReStirDIApply.GetBool() ) )
 		&& rhi::GetActiveBackendType() == rhi::BT_VULKAN;
 	// RT reflections read the normal + rough/metal MRT this pass fills. Since 2026-09-23 they run decoupled from
 	// r_ssr (RT owns the reflective pixels), so gate the prepass on them too — else RT-only mode (r_ssr off) has
 	// no G-buffer to reflect about.
 	const bool rtReflWants = r_rtReflections.GetBool()
 		&& rhi::GetActiveBackendType() == rhi::BT_VULKAN && r->SupportsRayQuery();
-	const bool ssrWants = r_ssr.GetBool() || wantAlbedo || rtReflWants;
-	const bool ssaoWants = r_ssao.GetBool()
+	ssrWants = r_ssr.GetBool() || wantAlbedo || rtReflWants;
+	ssaoWants = r_ssao.GetBool()
 		&& ( r_ssaoNormalBuffer.GetBool() || r_ssaoDebug.GetInteger() == 3 );
 	// R1/A2: per-object motion vectors are VK-only (GL3 has no float-colour RT). When on they
 	// FORCE the normal prepass to run (for the velocity MRT) even if SSAO/SSR want nothing. The
@@ -5149,7 +5148,7 @@ static bool RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef, int pha
 	// so velocity rides the merge by default; the standalone 3-MRT target is only the fallback.
 	// r_fsr (C2) implies them: FSR2 is unusable without a velocity buffer, and MV/jitter are
 	// internal infrastructure, not user-facing toggles (plan section E).
-	const bool velWants = ( ( r_motionVectors.GetBool() || r_fsr.GetBool() )
+	velWants = ( ( r_motionVectors.GetBool() || r_fsr.GetBool() )
 		&& rhi::GetActiveBackendType() == rhi::BT_VULKAN ) || wantAlbedo;
 	if ( !ssaoWants && !ssrWants && !velWants ) {
 		return false;
@@ -5158,15 +5157,13 @@ static bool RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef, int pha
 	if ( !viewDef->viewEntitys || viewDef->isSubview || !fullscreenView ) {
 		return false;
 	}
+	return true;
+}
 
-	rhi::ShaderHandle gbufProg = r->LoadShader( "gbuffer" );
-	if ( !gbufProg ) {
-		return false;
-	}
-
-	const int w = viewDef->viewport.x2 - viewDef->viewport.x1 + 1;
-	const int h = viewDef->viewport.y2 - viewDef->viewport.y1 + 1;
-
+// Begin the normal prepass's target (RB_RHI_NormalPrepass): the merged scene-depth pass where it applies, the standalone
+// MRT target otherwise, or phase 1's re-entry into the standalone target the world phase filled. false = no target.
+static bool RB_RHI_NormalPrepassBegin( rhi::RHI *r, const viewDef_t *viewDef, int w, int h, int phase, bool ssrWants, bool velWants,
+                                       bool wantAlbedo, rhi::RenderTargetHandle &activeNormalRT, bool &didMerge ) {
 	// clear to a flat camera-facing normal (0.5,0.5,1) and the far plane
 	rhi::ClearArgs clear;
 	memset( &clear, 0, sizeof( clear ) );
@@ -5202,8 +5199,8 @@ static bool RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef, int pha
 	const bool wantMerge = r_ssaoMergeNormal.GetBool() && !viewHasSubviewSurf
 		&& rhi::GetActiveBackendType() == rhi::BT_VULKAN && !wantAlbedo	// RTGI albedo needs the standalone 4-attachment target
 		&& phase != 1;
-	rhi::RenderTargetHandle activeNormalRT = 0;
-	bool didMerge = false;
+	activeNormalRT = 0;
+	didMerge = false;
 	if ( phase == 1 ) {
 		// the deferred weapon: into the standalone target phase 0 filled, no clear, same depth-range handling
 		if ( rhiNormalRT == 0 ) {
@@ -5239,6 +5236,237 @@ static bool RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef, int pha
 		rhiNormalVelThisView = velWants;
 		rhiNormalAlbedoThisView = wantAlbedo;
 	}
+	return true;
+}
+
+// R1/B: the per-view jitter cancellation of the motion vectors, computed once per frame (RB_RHI_NormalPrepass).
+static void RB_RHI_NormalPrepassJitterCorr( const viewDef_t *viewDef, int w, int h, float jitterCorr[2] ) {
+	// Computed ONCE per frame. With ReSTIR DI lighting the scene this prepass runs twice per frame (phase 0 world,
+	// phase 1 the deferred weapon); the second call used to see prevJitter == jitter and hand the weapon a ZERO
+	// correction, so its motion vectors carried a per-frame jitter-sized error and FSR2 rejected / blended its
+	// history over the swaying weapon - the "transparent weapon" (clean in screenshots, where DI does not run).
+	static float jitterCorrCache[2] = { 0.0f, 0.0f };
+	static int   jitterCorrFrame = -1;
+	if ( jitterCorrFrame != tr.frameCount ) {
+		jitterCorrCache[0] = ( viewDef->jitter[0] - rhiPrevJitter[0] ) / (float)w;
+		jitterCorrCache[1] = ( viewDef->jitter[1] - rhiPrevJitter[1] ) / (float)h;
+		rhiPrevJitter[0] = viewDef->jitter[0];
+		rhiPrevJitter[1] = viewDef->jitter[1];
+		jitterCorrFrame = tr.frameCount;
+	}
+	jitterCorr[0] = jitterCorrCache[0];
+	jitterCorr[1] = jitterCorrCache[1];
+}
+
+// The surface's bump image + texture matrix for the G-buffer, matching the interaction path (RB_RHI_NormalPrepass).
+static void RB_RHI_NormalPrepassBump( const idMaterial *shader, const float *regs, idImage *&bumpImg, float bumpS[4], float bumpT[4] ) {
+	const shaderStage_t *bumpStage = shader->GetBumpStage();
+	bumpImg = globalImages->flatNormalMap;
+	bumpS[0] = 1.0f; bumpS[1] = 0.0f; bumpS[2] = 0.0f; bumpS[3] = 0.0f;
+	bumpT[0] = 0.0f; bumpT[1] = 1.0f; bumpT[2] = 0.0f; bumpT[3] = 0.0f;
+	if ( bumpStage && bumpStage->texture.image ) {
+		bumpImg = bumpStage->texture.image;
+		if ( bumpStage->texture.hasMatrix ) {
+			bumpS[0] = regs[bumpStage->texture.matrix[0][0]];
+			bumpS[1] = regs[bumpStage->texture.matrix[0][1]];
+			bumpS[3] = regs[bumpStage->texture.matrix[0][2]];
+			bumpT[0] = regs[bumpStage->texture.matrix[1][0]];
+			bumpT[1] = regs[bumpStage->texture.matrix[1][1]];
+			bumpT[3] = regs[bumpStage->texture.matrix[1][2]];
+			// keep scrolls bounded (mirrors R_SetDrawInteraction)
+			if ( bumpS[3] < -40.0f || bumpS[3] > 40.0f ) bumpS[3] -= (int)bumpS[3];
+			if ( bumpT[3] < -40.0f || bumpT[3] > 40.0f ) bumpT[3] -= (int)bumpT[3];
+		}
+	}
+}
+
+// The RTGI / ReSTIR DI albedo capture of a surface (RB_RHI_NormalPrepass, wantAlbedo): the two brightest live diffuse
+// stages with their colours and vertex-colour modes, the specular map, the baked occlusion map and the skin/flesh mark.
+static void RB_RHI_NormalPrepassAlbedo( const drawSurf_t *surf, const idMaterial *shader, const float *regs, rhi::RenderParams &parms,
+                                        idImage *&rtgiDiffuseImg, idImage *&rtgiDiffuseImg2, idImage *&diSpecImg, idImage *&diOcclImg ) {
+	parms.localParam0[1] = 1.0f;
+	diOcclImg = RB_RHI_SurfaceOcclusionImage( surf );
+	parms.occlusionParms[0] = diOcclImg ? 1.0f : 0.0f;
+	// ReSTIR DI skin/flesh SSS (docs/skin-shading.md): mark skin/flesh pixels in the albedo attachment's
+	// alpha (gbuffer.frag out_Albedo.a) so the deferred DI apply warms the terminator on them exactly as
+	// interaction.frag's skinScatterExcess does on the forward path. 0 = none, 0.5 = face skin, 1 = Hell
+	// flesh; the forward path keys SSS off the same PBR categories (RB_RHI_FillSkinSSS).
+	parms.localParam0[3] = 0.0f;
+	if ( r_skinShading.GetFloat() > 0.0f ) {
+		const int skinCat = shader->GetPbrCategory();
+		if ( skinCat == PBR_CAT_SKIN )       { parms.localParam0[3] = 0.5f; }
+		else if ( skinCat == PBR_CAT_FLESH ) { parms.localParam0[3] = 1.0f; }
+	}
+	for ( int s = 0; s < shader->GetNumStages(); s++ ) {
+		const shaderStage_t *sst = shader->GetStage( s );
+		if ( sst->lighting != SL_SPECULAR || sst->texture.image == NULL || regs[sst->conditionRegister] == 0 ) {
+			continue;
+		}
+		diSpecImg = sst->texture.image;
+		break;
+	}
+	// keep the BRIGHTEST live diffuse stage, not the first. A death / transformation CROSSFADE carries two
+	// diffuse stages whose colours sum to the visible face (female_npc/poppy: poppy.tga * (1-death_fade) +
+	// poppyfx1.tga * death_fade); the forward path draws both additively, but the deferred albedo can carry only
+	// ONE, and taking the first captured poppy.tga * (1-death_fade), which fades to BLACK as the second fades in
+	// - so the DI apply remodulated her transforming face to nothing (2026-10-14). The brightest live stage is
+	// the one actually on screen, so the deferred albedo follows the crossfade.
+	// Sum the TWO brightest live diffuse stages - stage A (unit 2 * diffuseModifier) + stage B (unit 4 *
+	// specularParms) in gbuffer.frag - the additive diffuse the forward path draws, so a death/transformation
+	// CROSSFADE (female_npc/poppy: poppy.tga*(1-death_fade) + poppyfx1.tga*death_fade) blends smoothly instead of
+	// one stage fading to black and popping at the midpoint. A single-diffuse surface finds only A (B stays
+	// blackImage * 0), so ordinary materials are byte-identical.
+	float bestDiffLum = -1.0f, lumB = -1.0f;
+	for ( int s = 0; s < shader->GetNumStages(); s++ ) {
+		const shaderStage_t *dst = shader->GetStage( s );
+		if ( dst->lighting != SL_DIFFUSE || dst->texture.image == NULL || regs[dst->conditionRegister] == 0 ) {
+			continue;
+		}
+		const float diffLum = Max( regs[dst->color.registers[0]], 0.0f ) + Max( regs[dst->color.registers[1]], 0.0f )
+		                    + Max( regs[dst->color.registers[2]], 0.0f );
+		if ( diffLum <= bestDiffLum ) {
+			// a dimmer live diffuse is the 2nd crossfade layer (stage B) when it is the brightest of the rest
+			if ( diffLum > lumB ) {
+				lumB = diffLum;
+				rtgiDiffuseImg2 = dst->texture.image;
+				parms.specularParms[0] = Max( regs[dst->color.registers[0]], 0.0f );
+				parms.specularParms[1] = Max( regs[dst->color.registers[1]], 0.0f );
+				parms.specularParms[2] = Max( regs[dst->color.registers[2]], 0.0f );
+				// stage B's OWN vertex-colour mode: a vertex blend (rock*inverseVertexColor) weights its
+				// second stage by the opposite term, captured here so gbuffer.frag matches the forward blend.
+				RB_RHI_DiVertexColorMode( parms.vertexColorModulate2, parms.vertexColorAdd2, dst->vertexColor );
+			}
+			continue;
+		}
+		// a brighter diffuse arrived: demote the previous stage A to stage B (keeps both crossfade layers)
+		if ( bestDiffLum >= 0.0f && bestDiffLum > lumB ) {
+			lumB = bestDiffLum;
+			rtgiDiffuseImg2 = rtgiDiffuseImg;
+			parms.specularParms[0] = parms.diffuseModifier[0];
+			parms.specularParms[1] = parms.diffuseModifier[1];
+			parms.specularParms[2] = parms.diffuseModifier[2];
+			// the demoted stage A carries its vertex-colour mode with it to stage B
+			for ( int c = 0; c < 4; c++ ) { parms.vertexColorModulate2[c] = parms.vertexColorModulate[c]; parms.vertexColorAdd2[c] = parms.vertexColorAdd[c]; }
+		}
+		bestDiffLum = diffLum;
+		rtgiDiffuseImg = dst->texture.image;
+		// the stage colour (R_SetDrawInteraction: the colour registers, floored at 0) and the vertex-colour
+		// mode, exactly as RB_RHI_DrawInteraction hands them to the interaction shaders
+		for ( int c = 0; c < 4; c++ ) {
+			parms.diffuseModifier[c] = Max( regs[dst->color.registers[c]], 0.0f );
+		}
+		switch ( dst->vertexColor ) {
+		case SVC_MODULATE:
+			parms.vertexColorModulate[0] = parms.vertexColorModulate[1] = parms.vertexColorModulate[2] = parms.vertexColorModulate[3] = 1.0f;
+			parms.vertexColorAdd[0] = parms.vertexColorAdd[1] = parms.vertexColorAdd[2] = parms.vertexColorAdd[3] = 0.0f;
+			break;
+		case SVC_INVERSE_MODULATE:
+			parms.vertexColorModulate[0] = parms.vertexColorModulate[1] = parms.vertexColorModulate[2] = parms.vertexColorModulate[3] = -1.0f;
+			parms.vertexColorAdd[0] = parms.vertexColorAdd[1] = parms.vertexColorAdd[2] = parms.vertexColorAdd[3] = 1.0f;
+			break;
+		default:		// SVC_IGNORE: add = 1 (set above)
+			break;
+		}
+		if ( dst->texture.hasMatrix ) {
+			parms.diffuseMatrixS[0] = regs[dst->texture.matrix[0][0]];
+			parms.diffuseMatrixS[1] = regs[dst->texture.matrix[0][1]];
+			parms.diffuseMatrixS[3] = regs[dst->texture.matrix[0][2]];
+			parms.diffuseMatrixT[0] = regs[dst->texture.matrix[1][0]];
+			parms.diffuseMatrixT[1] = regs[dst->texture.matrix[1][1]];
+			parms.diffuseMatrixT[3] = regs[dst->texture.matrix[1][2]];
+		} else {
+			parms.diffuseMatrixS[0] = 1.0f; parms.diffuseMatrixS[1] = 0.0f; parms.diffuseMatrixS[3] = 0.0f;
+			parms.diffuseMatrixT[0] = 0.0f; parms.diffuseMatrixT[1] = 1.0f; parms.diffuseMatrixT[3] = 0.0f;
+		}
+	}
+	// No SL_DIFFUSE stage at all (e.g. the security guard's 'gog' visor, chrome, blend-add /
+	// reflection-only surfaces): the whiteImage default above would make the DI/RTGI apply paint
+	// the whole surface solid WHITE, because a perforated / opaque surface IS captured and DI-lit
+	// (di * B(albedo)). Such a surface has no diffuse reflectance - its look comes from its forward
+	// additive / env-reflection stages, which still draw on top - so black albedo (zero diffuse DI)
+	// is correct and matches the non-RT forward result (white-visor fix, 2026-10-15).
+	if ( bestDiffLum < 0.0f ) {
+		rtgiDiffuseImg = globalImages->blackImage;
+	}
+}
+
+// The G-buffer draws of a surface (RB_RHI_NormalPrepass): one alpha-tested draw per live coverage stage of a perforated
+// material, else one solid draw with the coverage test off. parms / da carry the surface's uniforms and geometry.
+static void RB_RHI_NormalPrepassDraw( rhi::RHI *r, const idMaterial *shader, const float *regs, rhi::RenderParams &parms, rhi::DrawArgs &da ) {
+	bool drewCoverage = false;
+	if ( shader->Coverage() == MC_PERFORATED ) {
+		for ( int s = 0; s < shader->GetNumStages(); s++ ) {
+			const shaderStage_t *pStage = shader->GetStage( s );
+			if ( !pStage->hasAlphaTest || regs[pStage->conditionRegister] == 0 ) {
+				continue;
+			}
+			parms.alphaTest[0] = regs[pStage->alphaTestRegister];
+			parms.alphaTest[1] = 1.0f;
+			if ( pStage->texture.hasMatrix ) {
+				parms.diffuseMatrixS[0] = regs[pStage->texture.matrix[0][0]];
+				parms.diffuseMatrixS[1] = regs[pStage->texture.matrix[0][1]];
+				parms.diffuseMatrixS[3] = regs[pStage->texture.matrix[0][2]];
+				parms.diffuseMatrixT[0] = regs[pStage->texture.matrix[1][0]];
+				parms.diffuseMatrixT[1] = regs[pStage->texture.matrix[1][1]];
+				parms.diffuseMatrixT[3] = regs[pStage->texture.matrix[1][2]];
+			} else {
+				parms.diffuseMatrixS[0] = 1.0f; parms.diffuseMatrixS[1] = 0.0f; parms.diffuseMatrixS[3] = 0.0f;
+				parms.diffuseMatrixT[0] = 0.0f; parms.diffuseMatrixT[1] = 1.0f; parms.diffuseMatrixT[3] = 0.0f;
+			}
+
+			rhi::BufferHandle ub;
+			int uniOfs = r->AllocUniforms( &parms, sizeof( parms ), &ub );
+			RB_RHI_StagePolyOffsetBegin( r, pStage );
+			RB_RHI_BindUnit( 1, pStage->texture.image );
+			da.uniformBuffer = ub;
+			da.uniformOffset = uniOfs;
+			RB_RHI_VkTextures( da );	// VK: units 0 (bump) + 1 (diffuse coverage) from rhiVkUnits
+			r->Draw( da );
+			backEnd.pc.c_drawElements++;
+			RB_RHI_StagePolyOffsetEnd( r, pStage, shader );
+			drewCoverage = true;
+		}
+	}
+
+	// Opaque surfaces (and perforated materials with no live alpha-tested stage): one
+	// solid draw with the coverage test disabled. whiteImage keeps unit 1 valid even
+	// though the disabled test short-circuits the fetch in the shader.
+	if ( !drewCoverage ) {
+		parms.alphaTest[0] = 0.0f;
+		parms.alphaTest[1] = 0.0f;
+		rhi::BufferHandle ub;
+		int uniOfs = r->AllocUniforms( &parms, sizeof( parms ), &ub );
+		RB_RHI_BindUnit( 1, globalImages->whiteImage );
+		da.uniformBuffer = ub;
+		da.uniformOffset = uniOfs;
+		RB_RHI_VkTextures( da );	// VK: units 0 (bump) + 1 (white) from rhiVkUnits
+		r->Draw( da );
+		backEnd.pc.c_drawElements++;
+	}
+}
+
+static bool RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef, int phase = -1 ) {
+	if ( !R_BackendSupportsEnhancements() ) {
+		return false;
+	}
+	bool ssaoWants, ssrWants, velWants, wantAlbedo;
+	if ( !RB_RHI_NormalPrepassWants( r, viewDef, ssaoWants, ssrWants, velWants, wantAlbedo ) ) {
+		return false;
+	}
+
+	rhi::ShaderHandle gbufProg = r->LoadShader( "gbuffer" );
+	if ( !gbufProg ) {
+		return false;
+	}
+
+	const int w = viewDef->viewport.x2 - viewDef->viewport.x1 + 1;
+	const int h = viewDef->viewport.y2 - viewDef->viewport.y1 + 1;
+
+	rhi::RenderTargetHandle activeNormalRT = 0;
+	bool didMerge = false;
+	if ( !RB_RHI_NormalPrepassBegin( r, viewDef, w, h, phase, ssrWants, velWants, wantAlbedo, activeNormalRT, didMerge ) ) {
+		return false;
+	}
 
 	rhi::PipelineDesc pd;
 	pd.stateBits = GLS_DEPTHFUNC_LESS;
@@ -5258,21 +5486,7 @@ static bool RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef, int pha
 	// Advanced once per frame (this prepass runs only for the primary fullscreen view).
 	float jitterCorr[2] = { 0.0f, 0.0f };
 	if ( velWants ) {
-		// Computed ONCE per frame. With ReSTIR DI lighting the scene this prepass runs twice per frame (phase 0 world,
-		// phase 1 the deferred weapon); the second call used to see prevJitter == jitter and hand the weapon a ZERO
-		// correction, so its motion vectors carried a per-frame jitter-sized error and FSR2 rejected / blended its
-		// history over the swaying weapon - the "transparent weapon" (clean in screenshots, where DI does not run).
-		static float jitterCorrCache[2] = { 0.0f, 0.0f };
-		static int   jitterCorrFrame = -1;
-		if ( jitterCorrFrame != tr.frameCount ) {
-			jitterCorrCache[0] = ( viewDef->jitter[0] - rhiPrevJitter[0] ) / (float)w;
-			jitterCorrCache[1] = ( viewDef->jitter[1] - rhiPrevJitter[1] ) / (float)h;
-			rhiPrevJitter[0] = viewDef->jitter[0];
-			rhiPrevJitter[1] = viewDef->jitter[1];
-			jitterCorrFrame = tr.frameCount;
-		}
-		jitterCorr[0] = jitterCorrCache[0];
-		jitterCorr[1] = jitterCorrCache[1];
+		RB_RHI_NormalPrepassJitterCorr( viewDef, w, h, jitterCorr );
 	}
 
 	drawSurf_t **drawSurfs = (drawSurf_t **)&viewDef->drawSurfs[0];
@@ -5323,24 +5537,9 @@ static bool RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef, int pha
 		// path (din->bumpImage / din->bumpMatrix; see R_SetDrawInteraction) so the G-buffer's
 		// bump detail lands at the SAME scale as the lit surface. Using identity here tiled
 		// scaled-bump materials wrong (bumps came out double-size). Flat normal if no bump stage.
-		const shaderStage_t *bumpStage = shader->GetBumpStage();
-		idImage *bumpImg = globalImages->flatNormalMap;
-		float bumpS[4] = { 1.0f, 0.0f, 0.0f, 0.0f };
-		float bumpT[4] = { 0.0f, 1.0f, 0.0f, 0.0f };
-		if ( bumpStage && bumpStage->texture.image ) {
-			bumpImg = bumpStage->texture.image;
-			if ( bumpStage->texture.hasMatrix ) {
-				bumpS[0] = regs[bumpStage->texture.matrix[0][0]];
-				bumpS[1] = regs[bumpStage->texture.matrix[0][1]];
-				bumpS[3] = regs[bumpStage->texture.matrix[0][2]];
-				bumpT[0] = regs[bumpStage->texture.matrix[1][0]];
-				bumpT[1] = regs[bumpStage->texture.matrix[1][1]];
-				bumpT[3] = regs[bumpStage->texture.matrix[1][2]];
-				// keep scrolls bounded (mirrors R_SetDrawInteraction)
-				if ( bumpS[3] < -40.0f || bumpS[3] > 40.0f ) bumpS[3] -= (int)bumpS[3];
-				if ( bumpT[3] < -40.0f || bumpT[3] > 40.0f ) bumpT[3] -= (int)bumpT[3];
-			}
-		}
+		idImage *bumpImg;
+		float bumpS[4], bumpT[4];
+		RB_RHI_NormalPrepassBump( shader, regs, bumpImg, bumpS, bumpT );
 
 		// per-surface uniforms shared by every draw of this surface; the coverage draws
 		// below only override alphaTest + diffuseMatrix on top of these.
@@ -5397,110 +5596,7 @@ static bool RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef, int pha
 		parms.vertexColorAdd2[0] = parms.vertexColorAdd2[1] = parms.vertexColorAdd2[2] = parms.vertexColorAdd2[3] = 1.0f;	// stage B SVC_IGNORE (modulate2 = 0 from memset)
 		idImage *diOcclImg = NULL;
 		if ( wantAlbedo ) {
-			parms.localParam0[1] = 1.0f;
-			diOcclImg = RB_RHI_SurfaceOcclusionImage( surf );
-			parms.occlusionParms[0] = diOcclImg ? 1.0f : 0.0f;
-			// ReSTIR DI skin/flesh SSS (docs/skin-shading.md): mark skin/flesh pixels in the albedo attachment's
-			// alpha (gbuffer.frag out_Albedo.a) so the deferred DI apply warms the terminator on them exactly as
-			// interaction.frag's skinScatterExcess does on the forward path. 0 = none, 0.5 = face skin, 1 = Hell
-			// flesh; the forward path keys SSS off the same PBR categories (RB_RHI_FillSkinSSS).
-			parms.localParam0[3] = 0.0f;
-			if ( r_skinShading.GetFloat() > 0.0f ) {
-				const int skinCat = shader->GetPbrCategory();
-				if ( skinCat == PBR_CAT_SKIN )       { parms.localParam0[3] = 0.5f; }
-				else if ( skinCat == PBR_CAT_FLESH ) { parms.localParam0[3] = 1.0f; }
-			}
-			for ( int s = 0; s < shader->GetNumStages(); s++ ) {
-				const shaderStage_t *sst = shader->GetStage( s );
-				if ( sst->lighting != SL_SPECULAR || sst->texture.image == NULL || regs[sst->conditionRegister] == 0 ) {
-					continue;
-				}
-				diSpecImg = sst->texture.image;
-				break;
-			}
-			// keep the BRIGHTEST live diffuse stage, not the first. A death / transformation CROSSFADE carries two
-			// diffuse stages whose colours sum to the visible face (female_npc/poppy: poppy.tga * (1-death_fade) +
-			// poppyfx1.tga * death_fade); the forward path draws both additively, but the deferred albedo can carry only
-			// ONE, and taking the first captured poppy.tga * (1-death_fade), which fades to BLACK as the second fades in
-			// - so the DI apply remodulated her transforming face to nothing (2026-10-14). The brightest live stage is
-			// the one actually on screen, so the deferred albedo follows the crossfade.
-			// Sum the TWO brightest live diffuse stages - stage A (unit 2 * diffuseModifier) + stage B (unit 4 *
-			// specularParms) in gbuffer.frag - the additive diffuse the forward path draws, so a death/transformation
-			// CROSSFADE (female_npc/poppy: poppy.tga*(1-death_fade) + poppyfx1.tga*death_fade) blends smoothly instead of
-			// one stage fading to black and popping at the midpoint. A single-diffuse surface finds only A (B stays
-			// blackImage * 0), so ordinary materials are byte-identical.
-			float bestDiffLum = -1.0f, lumB = -1.0f;
-			for ( int s = 0; s < shader->GetNumStages(); s++ ) {
-				const shaderStage_t *dst = shader->GetStage( s );
-				if ( dst->lighting != SL_DIFFUSE || dst->texture.image == NULL || regs[dst->conditionRegister] == 0 ) {
-					continue;
-				}
-				const float diffLum = Max( regs[dst->color.registers[0]], 0.0f ) + Max( regs[dst->color.registers[1]], 0.0f )
-				                    + Max( regs[dst->color.registers[2]], 0.0f );
-				if ( diffLum <= bestDiffLum ) {
-					// a dimmer live diffuse is the 2nd crossfade layer (stage B) when it is the brightest of the rest
-					if ( diffLum > lumB ) {
-						lumB = diffLum;
-						rtgiDiffuseImg2 = dst->texture.image;
-						parms.specularParms[0] = Max( regs[dst->color.registers[0]], 0.0f );
-						parms.specularParms[1] = Max( regs[dst->color.registers[1]], 0.0f );
-						parms.specularParms[2] = Max( regs[dst->color.registers[2]], 0.0f );
-						// stage B's OWN vertex-colour mode: a vertex blend (rock*inverseVertexColor) weights its
-						// second stage by the opposite term, captured here so gbuffer.frag matches the forward blend.
-						RB_RHI_DiVertexColorMode( parms.vertexColorModulate2, parms.vertexColorAdd2, dst->vertexColor );
-					}
-					continue;
-				}
-				// a brighter diffuse arrived: demote the previous stage A to stage B (keeps both crossfade layers)
-				if ( bestDiffLum >= 0.0f && bestDiffLum > lumB ) {
-					lumB = bestDiffLum;
-					rtgiDiffuseImg2 = rtgiDiffuseImg;
-					parms.specularParms[0] = parms.diffuseModifier[0];
-					parms.specularParms[1] = parms.diffuseModifier[1];
-					parms.specularParms[2] = parms.diffuseModifier[2];
-					// the demoted stage A carries its vertex-colour mode with it to stage B
-					for ( int c = 0; c < 4; c++ ) { parms.vertexColorModulate2[c] = parms.vertexColorModulate[c]; parms.vertexColorAdd2[c] = parms.vertexColorAdd[c]; }
-				}
-				bestDiffLum = diffLum;
-				rtgiDiffuseImg = dst->texture.image;
-				// the stage colour (R_SetDrawInteraction: the colour registers, floored at 0) and the vertex-colour
-				// mode, exactly as RB_RHI_DrawInteraction hands them to the interaction shaders
-				for ( int c = 0; c < 4; c++ ) {
-					parms.diffuseModifier[c] = Max( regs[dst->color.registers[c]], 0.0f );
-				}
-				switch ( dst->vertexColor ) {
-				case SVC_MODULATE:
-					parms.vertexColorModulate[0] = parms.vertexColorModulate[1] = parms.vertexColorModulate[2] = parms.vertexColorModulate[3] = 1.0f;
-					parms.vertexColorAdd[0] = parms.vertexColorAdd[1] = parms.vertexColorAdd[2] = parms.vertexColorAdd[3] = 0.0f;
-					break;
-				case SVC_INVERSE_MODULATE:
-					parms.vertexColorModulate[0] = parms.vertexColorModulate[1] = parms.vertexColorModulate[2] = parms.vertexColorModulate[3] = -1.0f;
-					parms.vertexColorAdd[0] = parms.vertexColorAdd[1] = parms.vertexColorAdd[2] = parms.vertexColorAdd[3] = 1.0f;
-					break;
-				default:		// SVC_IGNORE: add = 1 (set above)
-					break;
-				}
-				if ( dst->texture.hasMatrix ) {
-					parms.diffuseMatrixS[0] = regs[dst->texture.matrix[0][0]];
-					parms.diffuseMatrixS[1] = regs[dst->texture.matrix[0][1]];
-					parms.diffuseMatrixS[3] = regs[dst->texture.matrix[0][2]];
-					parms.diffuseMatrixT[0] = regs[dst->texture.matrix[1][0]];
-					parms.diffuseMatrixT[1] = regs[dst->texture.matrix[1][1]];
-					parms.diffuseMatrixT[3] = regs[dst->texture.matrix[1][2]];
-				} else {
-					parms.diffuseMatrixS[0] = 1.0f; parms.diffuseMatrixS[1] = 0.0f; parms.diffuseMatrixS[3] = 0.0f;
-					parms.diffuseMatrixT[0] = 0.0f; parms.diffuseMatrixT[1] = 1.0f; parms.diffuseMatrixT[3] = 0.0f;
-				}
-			}
-			// No SL_DIFFUSE stage at all (e.g. the security guard's 'gog' visor, chrome, blend-add /
-			// reflection-only surfaces): the whiteImage default above would make the DI/RTGI apply paint
-			// the whole surface solid WHITE, because a perforated / opaque surface IS captured and DI-lit
-			// (di * B(albedo)). Such a surface has no diffuse reflectance - its look comes from its forward
-			// additive / env-reflection stages, which still draw on top - so black albedo (zero diffuse DI)
-			// is correct and matches the non-RT forward result (white-visor fix, 2026-10-15).
-			if ( bestDiffLum < 0.0f ) {
-				rtgiDiffuseImg = globalImages->blackImage;
-			}
+			RB_RHI_NormalPrepassAlbedo( surf, shader, regs, parms, rtgiDiffuseImg, rtgiDiffuseImg2, diSpecImg, diOcclImg );
 		}
 
 		// DUDE tessellation: subdivide character/monster surfaces here identically to the
@@ -5591,56 +5687,7 @@ static bool RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef, int pha
 		// Also mirrors its per-stage privatePolygonOffset: when this pass IS the sealed scene
 		// depth, the burning-corpse fire threshold must land at D+bias here too, or the
 		// EQUAL-drawn ember floods the whole body (docs/burn-away-ember.md).
-		bool drewCoverage = false;
-		if ( shader->Coverage() == MC_PERFORATED ) {
-			for ( int s = 0; s < shader->GetNumStages(); s++ ) {
-				const shaderStage_t *pStage = shader->GetStage( s );
-				if ( !pStage->hasAlphaTest || regs[pStage->conditionRegister] == 0 ) {
-					continue;
-				}
-				parms.alphaTest[0] = regs[pStage->alphaTestRegister];
-				parms.alphaTest[1] = 1.0f;
-				if ( pStage->texture.hasMatrix ) {
-					parms.diffuseMatrixS[0] = regs[pStage->texture.matrix[0][0]];
-					parms.diffuseMatrixS[1] = regs[pStage->texture.matrix[0][1]];
-					parms.diffuseMatrixS[3] = regs[pStage->texture.matrix[0][2]];
-					parms.diffuseMatrixT[0] = regs[pStage->texture.matrix[1][0]];
-					parms.diffuseMatrixT[1] = regs[pStage->texture.matrix[1][1]];
-					parms.diffuseMatrixT[3] = regs[pStage->texture.matrix[1][2]];
-				} else {
-					parms.diffuseMatrixS[0] = 1.0f; parms.diffuseMatrixS[1] = 0.0f; parms.diffuseMatrixS[3] = 0.0f;
-					parms.diffuseMatrixT[0] = 0.0f; parms.diffuseMatrixT[1] = 1.0f; parms.diffuseMatrixT[3] = 0.0f;
-				}
-
-				rhi::BufferHandle ub;
-				int uniOfs = r->AllocUniforms( &parms, sizeof( parms ), &ub );
-				RB_RHI_StagePolyOffsetBegin( r, pStage );
-				RB_RHI_BindUnit( 1, pStage->texture.image );
-				da.uniformBuffer = ub;
-				da.uniformOffset = uniOfs;
-				RB_RHI_VkTextures( da );	// VK: units 0 (bump) + 1 (diffuse coverage) from rhiVkUnits
-				r->Draw( da );
-				backEnd.pc.c_drawElements++;
-				RB_RHI_StagePolyOffsetEnd( r, pStage, shader );
-				drewCoverage = true;
-			}
-		}
-
-		// Opaque surfaces (and perforated materials with no live alpha-tested stage): one
-		// solid draw with the coverage test disabled. whiteImage keeps unit 1 valid even
-		// though the disabled test short-circuits the fetch in the shader.
-		if ( !drewCoverage ) {
-			parms.alphaTest[0] = 0.0f;
-			parms.alphaTest[1] = 0.0f;
-			rhi::BufferHandle ub;
-			int uniOfs = r->AllocUniforms( &parms, sizeof( parms ), &ub );
-			RB_RHI_BindUnit( 1, globalImages->whiteImage );
-			da.uniformBuffer = ub;
-			da.uniformOffset = uniOfs;
-			RB_RHI_VkTextures( da );	// VK: units 0 (bump) + 1 (white) from rhiVkUnits
-			r->Draw( da );
-			backEnd.pc.c_drawElements++;
-		}
+		RB_RHI_NormalPrepassDraw( r, shader, regs, parms, da );
 
 		if ( depthHack ) {
 			RB_LeaveDepthHack();
