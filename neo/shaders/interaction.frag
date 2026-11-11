@@ -685,6 +685,7 @@ void main() {
 		diffuse = vec4( 0.0 );
 	}
 	vec4 spec;
+	vec3 specFloor = vec3( 0.0 );	// DUDE PBR: the dielectric environment floor, added past the spec-map mask (see the PBR branch)
 
 	if ( u_pbrParms.z > 0.5 ) {
 		// DUDE PBR path (docs/pbr-materials.md Phase A): Cook-Torrance GGX with a
@@ -788,6 +789,16 @@ void main() {
 		// softened by the roughness. u_occlusionParms.w = r_pbrEnvScale.
 		spec.rgb += F0 * ( metal * u_occlusionParms.w * ( 1.0 - 0.5 * rough ) );
 
+		// DUDE: the same floor for dielectrics (r_pbrDielectricSheen, u_parallaxParms2.y). A dark-painted
+		// surface with a near-black specular map - the small medkit's lid: black diffuse, a 1 % spec map -
+		// has nothing to show a light with here: GGX is narrow, so away from the mirror direction the lobe
+		// is zero and the panel renders as a hole, where vanilla's broad specular lookup still spread a
+		// faint sheen over it. F0 (4 %) of the light's energy from all directions, weighted toward the
+		// metal floor above by metalness, softened by the roughness like it, and added PAST the spec-map
+		// mask in the combine below (a black mask must not kill it); it rides the same light, shadow,
+		// AO and vertex-colour modulation as the lobe.
+		specFloor = F0 * ( ( 1.0 - metal ) * u_parallaxParms2.y * ( 1.0 - 0.5 * rough ) );
+
 		// Fresnel-weighted diffuse. Physical PBR kills diffuse entirely on metals
 		// (metal 1 -> factor 0), but that pushes the asset's painted colour into
 		// reflections stock Doom 3 can't supply, so metals read dark and off-colour.
@@ -857,6 +868,7 @@ void main() {
 		diffuse.rgb *= aoDirect;
 		if ( u_localParam1.y > 0.5 ) {
 			spec.rgb *= aoDirect;
+			specFloor *= aoDirect;
 		}
 	}
 
@@ -870,6 +882,7 @@ void main() {
 	}
 
 	vec4 color = spec * specMap + diffuse;
+	color.rgb += specFloor;		// DUDE PBR: the dielectric floor is not masked by the spec map (0 outside the PBR path)
 
 	// Floor negatives to 0 to match the 8-bit target's fixed-point clamp. N.L (the
 	// `light` term above) goes negative on pixels facing away from this light; on the
