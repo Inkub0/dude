@@ -1966,7 +1966,8 @@ void	idImage::ActuallyLoadImage( bool checkForPrecompressed, bool fromBackEnd ) 
 idImage::LoadImageCpuGL
 
 DUDE parallel texture load, GL3 without a .dds: the worker half of GenerateImage. Decodes
-the source and does everything GenerateImage does before its first GL call - the power-of-two
+the source (or produces it, for a level-content generator) and does everything GenerateImage
+does before its first GL call - the power-of-two
 check, the downsize, the border texels, the RXGB swizzle, the internal format choice and the
 full mip chain - into parallelData; UploadImageCpu then creates the texture and uploads the
 levels on the main thread, as GenerateImage would have. Returns false when the serial path
@@ -1982,7 +1983,14 @@ bool idImage::LoadImageCpuGL() {
 
 	byte *pic = NULL;
 	int width = 0, height = 0;
-	R_LoadImageProgram( imgName, &pic, &width, &height, &timestamp, &depth );
+	if ( generatorCpu ) {
+		// DUDE level-content generator (parallax / tessellation height field): its worker-safe
+		// produce-pixels half; the image's filter/repeat/depth are what its serial generator
+		// passes to GenerateImage (ImageFromLevelGenerator sets them)
+		generatorCpu( this, &pic, &width, &height );
+	} else {
+		R_LoadImageProgram( imgName, &pic, &width, &height, &timestamp, &depth );
+	}
 	if ( pic == NULL ) {
 		parallelData->failed = true;		// the main thread warns and makes the default image
 		return true;
@@ -2110,13 +2118,6 @@ bool idImage::LoadImageCpu() {
 
 	const bool isVulkan = ( glConfig.rhiBackend && rhi::GetActiveBackendType() == rhi::BT_VULKAN );
 
-	// DUDE level-content generators have no file to read precompressed: on GL3 they take the
-	// serial generate on the main thread, like any non-.dds GL image
-	if ( generatorCpu && !isVulkan ) {
-		parallelData->needsSerial = true;
-		return true;
-	}
-
 	// 1) GL3 backend. A precompressed .dds, when the cvars allow one (the serial load's gate:
 	//    a tier that turned precompressed files off decodes the source instead, so the level
 	//    load and a later reload agree on the texture), is read + inflated here on the worker
@@ -2127,7 +2128,8 @@ bool idImage::LoadImageCpu() {
 	if ( !isVulkan ) {
 		byte *dds = NULL;
 		int   ddsLen = 0;
-		if ( globalImages->image_usePrecompressedTextures.GetBool() && ReadPrecompressedImage( &dds, &ddsLen ) ) {
+		// (a level-content generator has no file: it produces its pixels in LoadImageCpuGL)
+		if ( !generatorCpu && globalImages->image_usePrecompressedTextures.GetBool() && ReadPrecompressedImage( &dds, &ddsLen ) ) {
 			parallelData->precompressedData = dds;
 			parallelData->precompressedLen = ddsLen;
 		} else if ( !LoadImageCpuGL() ) {

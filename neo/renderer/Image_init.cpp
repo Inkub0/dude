@@ -1116,32 +1116,52 @@ a 2K RGBA8 pyramid is 21 MB, and a level's thousand of them at once would be the
 Returns the thread count used.
 ===============
 */
-static int R_ParallelLoadImages( idImage **list, int count, const char *workerWarning, bool pacifier ) {
+struct parallelLoadStats_t {
+	int		threads;
+	int		decodeMsec;		// wall time the main thread waited on the worker phases
+	int		uploadMsec;		// wall time of the main-thread upload phases
+	int		uploadBytes;	// pixel / block bytes handed to the GPU
+};
+
+static int R_ParallelLoadImages( idImage **list, int count, const char *workerWarning, bool pacifier, parallelLoadStats_t &stats ) {
 	static const int CHUNK = 64;
-	int threads = 0;
 
 	for ( int base = 0; base < count; base += CHUNK ) {
 		const int n = ( count - base < CHUNK ) ? count - base : CHUNK;
 		idImage ** const chunk = list + base;
 
 		// phase 1: worker threads decode + build mip pyramids (heap / filesystem thread-safe for the window)
+		int t0 = Sys_Milliseconds();
 		{
 			idParallelWindow window;
-			threads = Com_ParallelFor( n, [&]( int idx ) { chunk[idx]->LoadImageCpu(); }, r_parallelImageLoadThreads.GetInteger() );
+			stats.threads = Com_ParallelFor( n, [&]( int idx ) { chunk[idx]->LoadImageCpu(); }, r_parallelImageLoadThreads.GetInteger() );
 		}
+		stats.decodeMsec += Sys_Milliseconds() - t0;
 
 		// surface any prints/warnings the workers buffered (order-independent)
 		Com_FlushThreadCaptureWarn( workerWarning );
 
 		// phase 2: upload the decoded pyramids on the main thread (GPU submit is not thread-safe)
+		t0 = Sys_Milliseconds();
 		for ( int i = 0; i < n; i++ ) {
+			const idImage::parallelLoad_t *pd = chunk[i]->parallelData;
+			if ( pd ) {
+				if ( pd->precompressedData ) {
+					stats.uploadBytes += pd->precompressedLen;
+				} else {
+					for ( int l = 0; l < pd->numLevels; l++ ) {
+						stats.uploadBytes += pd->levelW[l] * pd->levelH[l] * 4;
+					}
+				}
+			}
 			chunk[i]->UploadImageCpu();
 			if ( pacifier && ( ( base + i ) & 15 ) == 0 ) {
 				session->PacifierUpdate();
 			}
 		}
+		stats.uploadMsec += Sys_Milliseconds() - t0;
 	}
-	return threads;
+	return stats.threads;
 }
 
 /*
@@ -1198,15 +1218,16 @@ static void R_ReloadImages( const idCmdArgs &args, bool all, bool checkPrecompre
 			par.push_back( image );		// file images and level-content generators alike
 		}
 
-		int threads = 0;
+		parallelLoadStats_t stats = {};
 		if ( !par.empty() ) {
-			threads = R_ParallelLoadImages( par.data(), (int)par.size(),
-				"reloadImages: a worker hit an error during decode (see above); affected images use the default texture", false );
+			R_ParallelLoadImages( par.data(), (int)par.size(),
+				"reloadImages: a worker hit an error during decode (see above); affected images use the default texture", false, stats );
 		}
 
-		common->Printf( "reloadImages: %i images reloaded in %.2f seconds: %i decoded on %i threads, %i serial, %i regenerated; %i not resident, left to demand load\n",
+		common->Printf( "reloadImages: %i images reloaded in %.2f seconds: %i on %i threads (decode %.2f s, upload %.2f s, %i MB), %i serial, %i regenerated; %i not resident, left to demand load\n",
 			(int)par.size() + serialCount + regenCount, ( Sys_Milliseconds() - start ) * 0.001f,
-			(int)par.size(), threads, serialCount, regenCount, skipCount );
+			(int)par.size(), stats.threads, stats.decodeMsec * 0.001f, stats.uploadMsec * 0.001f, stats.uploadBytes >> 20,
+			serialCount, regenCount, skipCount );
 		return;
 	}
 
@@ -2293,6 +2314,7 @@ void idImageManager::EndLevelLoad() {
 	// images stay serial. Selection matches the serial condition exactly, so behaviour
 	// is identical when the cvar is off.
 	const bool useParallel = r_parallelImageLoad.GetBool();
+	parallelLoadStats_t parStats = {};
 
 	if ( useParallel ) {
 		std::vector<idImage *> par;
@@ -2324,7 +2346,7 @@ void idImageManager::EndLevelLoad() {
 		if ( !par.empty() ) {
 			// worker decode, main-thread upload, in bounded chunks (R_ParallelLoadImages)
 			R_ParallelLoadImages( par.data(), (int)par.size(),
-				"r_parallelImageLoad: a worker hit an error during decode (see above); affected images use the default texture", true );
+				"r_parallelImageLoad: a worker hit an error during decode (see above); affected images use the default texture", true, parStats );
 			loadCount += (int)par.size();
 		}
 	} else {
@@ -2357,6 +2379,10 @@ void idImageManager::EndLevelLoad() {
 		common->Printf( "%5i of them height fields generated here, not in the material parse (r_deferLevelGenerators)\n", genCount );
 	}
 	common->Printf( "all images loaded in %5.1f seconds\n", (end-start) * 0.001 );
+	if ( parStats.threads ) {
+		common->Printf( "  parallel image load: %i threads, decode %.2f s, upload %.2f s, %i MB uploaded\n",
+			parStats.threads, parStats.decodeMsec * 0.001f, parStats.uploadMsec * 0.001f, parStats.uploadBytes >> 20 );
+	}
 }
 
 /*
