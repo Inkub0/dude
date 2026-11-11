@@ -819,6 +819,7 @@ set(src_renderer
 	renderer/rhi/RhiWorld.cpp
 	renderer/Interaction.cpp
 	renderer/Material.cpp
+	renderer/MaterialPbr.cpp
 	renderer/MegaTexture.cpp
 	renderer/Model.cpp
 	renderer/ModelDecal.cpp
@@ -850,6 +851,7 @@ set(src_renderer
 	renderer/tr_light.cpp
 	renderer/tr_lightrun.cpp
 	renderer/tr_main.cpp
+	renderer/tr_rtemissive.cpp
 	renderer/RtEmissiveAuthor.cpp
 	renderer/tr_orderIndexes.cpp
 	renderer/tr_polytope.cpp

@@ -1251,6 +1251,13 @@ int  R_RtEmissiveGetScreenLabels( const rtEmissiveScreenLabel_t **out );
 void R_RtEmissiveProbe_f( const idCmdArgs &args );		// console: name the surface under the crosshair + the table's verdict on it
 bool R_RtEmissiveHideEntity( int entityIndex );	// emitter mode (r_rtEmissiveHideFlares): this entity is a fixture's flare sprite - skip its draw surfaces
 bool R_RtEmissiveIsFlareMaterial( const idMaterial *mat );	// a flare / sprite-deformed additive material (the surface the hide skips)
+// tr_rtemissive.cpp's scene-driven entry points (the RT scene in tr_main.cpp builds the table beside
+// the scene, forgets its device handles with it and frees it when RT goes off)
+class idRenderWorldLocal;
+namespace rhi { class RHI; }
+void R_RtEmissiveUpdate( const idRenderWorldLocal *world, rhi::RHI *r );
+void R_RtEmissiveForget( void );
+void R_RtEmissiveFree( void );
 extern idCVar r_rtPerforatedShadows;		// alpha-tested grate/fence casters in the RT shadow rays
 extern idCVar r_rtAllLights;				// RT shadows for EVERY shadow-casting light (mode 4 inline ray), no shadow maps at all
 extern idCVar r_rtShadowBlur;				// screen-space blur on top of the hard RT shadows (sun / moving lights), docs/rtx-shadow-blur.md
