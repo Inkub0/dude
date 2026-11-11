@@ -32,6 +32,8 @@ If you have questions concerning this license or the applicable additional terms
 #include "idlib/geometry/JointTransform.h"
 #include "renderer/Model.h"
 
+namespace rhi { class RHI; }	// DUDE: idMD5Mesh::CreateTessGpuBuffers takes the backend
+
 /*
 ===============================================================================
 
