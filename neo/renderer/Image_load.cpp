@@ -1963,6 +1963,136 @@ void	idImage::ActuallyLoadImage( bool checkForPrecompressed, bool fromBackEnd ) 
 
 /*
 ==============
+idImage::LoadImageCpuGL
+
+DUDE parallel texture load, GL3 without a .dds: the worker half of GenerateImage. Decodes
+the source and does everything GenerateImage does before its first GL call - the power-of-two
+check, the downsize, the border texels, the RXGB swizzle, the internal format choice and the
+full mip chain - into parallelData; UploadImageCpu then creates the texture and uploads the
+levels on the main thread, as GenerateImage would have. Returns false when the serial path
+must run instead: the dev cvars that write files or colour the mips, the palettised normal
+format, a non-power-of-two source (the serial path raises the error).
+==============
+*/
+bool idImage::LoadImageCpuGL() {
+	if ( globalImages->image_writePrecompressedTextures.GetBool() || globalImages->image_writeTGA.GetBool()
+	     || globalImages->image_writeNormalTGA.GetBool() || globalImages->image_colorMipLevels.GetBool() ) {
+		return false;
+	}
+
+	byte *pic = NULL;
+	int width = 0, height = 0;
+	R_LoadImageProgram( imgName, &pic, &width, &height, &timestamp, &depth );
+	if ( pic == NULL ) {
+		parallelData->failed = true;		// the main thread warns and makes the default image
+		return true;
+	}
+	if ( MakePowerOfTwo( width ) != width || MakePowerOfTwo( height ) != height ) {
+		R_StaticFree( pic );
+		return false;
+	}
+
+	// NOTE: the MD4 imageHash is skipped as on the Vulkan worker (it feeds a dev-only report)
+	parallelData->averageColor[0] = parallelData->averageColor[1] = parallelData->averageColor[2] = 1.0f;
+	R_ImageAverageColorRGBA( pic, width * height, parallelData->averageColor );
+	R_ImageEmissiveExtentsRGBA( pic, width, height, R_EMISSIVE_GLOW_THRESHOLD, &parallelData->glowExtents );
+	parallelData->hasAverageColor = true;
+
+	// the format is a pure function of the pixels, the cvars and glConfig
+	const byte *picConst = pic;
+	const GLenum format = R_CoreSafeInternalFormat( SelectInternalFormat( &picConst, 1, width, height, depth ) );
+	if ( format == GL_COLOR_INDEX8_EXT ) {
+		R_StaticFree( pic );			// the palettised normal map upload stays serial
+		return false;
+	}
+
+	int scaledWidth = width, scaledHeight = height;
+	GetDownsize( scaledWidth, scaledHeight );
+	const bool preserveBorder = ( repeat == TR_CLAMP_TO_ZERO );
+
+	// first level: a copy, or the source mipped down to the downsized size, as GenerateImage does
+	byte *scaled;
+	if ( scaledWidth == width && scaledHeight == height ) {
+		scaled = (byte *)R_StaticAlloc( sizeof( unsigned ) * width * height );
+		memcpy( scaled, pic, width * height * 4 );
+	} else {
+		scaled = R_MipMap( pic, width, height, preserveBorder );
+		width >>= 1;
+		height >>= 1;
+		if ( width < 1 ) {
+			width = 1;
+		}
+		if ( height < 1 ) {
+			height = 1;
+		}
+		while ( width > scaledWidth || height > scaledHeight ) {
+			byte *shrunk = R_MipMap( scaled, width, height, preserveBorder );
+			R_StaticFree( scaled );
+			scaled = shrunk;
+			width >>= 1;
+			height >>= 1;
+			if ( width < 1 ) {
+				width = 1;
+			}
+			if ( height < 1 ) {
+				height = 1;
+			}
+		}
+		// one might have shrunk down below the target size
+		scaledWidth = width;
+		scaledHeight = height;
+	}
+	R_StaticFree( pic );
+
+	// zero the border if desired, allowing clamped projection textures
+	if ( repeat == TR_CLAMP_TO_ZERO ) {
+		byte rgba[4] = { 0, 0, 0, 255 };
+		R_SetBorderTexels( scaled, scaledWidth, scaledHeight, rgba );
+	}
+	if ( repeat == TR_CLAMP_TO_ZERO_ALPHA ) {
+		byte rgba[4] = { 255, 255, 255, 0 };
+		R_SetBorderTexels( scaled, scaledWidth, scaledHeight, rgba );
+	}
+
+	// swap the red and alpha for rxgb support, as GenerateImage does on every normal map
+	if ( depth == TD_BUMP && globalImages->image_useNormalCompression.GetInteger() != 1 ) {
+		const int bytes = scaledWidth * scaledHeight * 4;
+		for ( int i = 0; i < bytes; i += 4 ) {
+			scaled[ i + 3 ] = scaled[ i ];
+			scaled[ i ] = 0;
+		}
+	}
+
+	// the mip chain, down to 1x1 in all cases like GenerateImage
+	parallelData->levelData[0] = scaled;
+	parallelData->levelW[0] = scaledWidth;
+	parallelData->levelH[0] = scaledHeight;
+	parallelData->numLevels = 1;
+	{
+		const byte *src = scaled;
+		int lw = scaledWidth, lh = scaledHeight;
+		while ( ( lw > 1 || lh > 1 ) && parallelData->numLevels < PARALLEL_MAX_LEVELS ) {
+			byte *shrunk = R_MipMap( src, lw, lh, preserveBorder );
+			lw = lw > 1 ? lw >> 1 : 1;
+			lh = lh > 1 ? lh >> 1 : 1;
+			const int n = parallelData->numLevels;
+			parallelData->levelData[n] = shrunk;
+			parallelData->levelW[n] = lw;
+			parallelData->levelH[n] = lh;
+			parallelData->numLevels++;
+			src = shrunk;
+		}
+	}
+
+	parallelData->width = scaledWidth;
+	parallelData->height = scaledHeight;
+	parallelData->glInternalFormat = (int)format;
+	parallelData->glPyramid = true;
+	return true;
+}
+
+/*
+==============
 idImage::LoadImageCpu
 
 DUDE parallel level load (Vulkan): the worker-thread half of an image load. Decodes
@@ -1987,18 +2117,20 @@ bool idImage::LoadImageCpu() {
 		return true;
 	}
 
-	// 1) GL3 backend: precompressed .dds path. Read + inflate the file here on the
-	//    worker; the main thread uploads the compressed blocks (UploadPrecompressedImage
-	//    is qgl-based, a no-op on Vulkan, so this branch is GL-only). Non-.dds GL images
-	//    fall back to the serial load on the main thread — we don't replicate
-	//    GenerateImage's GL-specific downsize/format work on the worker.
+	// 1) GL3 backend. A precompressed .dds, when the cvars allow one (the serial load's gate:
+	//    a tier that turned precompressed files off decodes the source instead, so the level
+	//    load and a later reload agree on the texture), is read + inflated here on the worker
+	//    and the main thread uploads the compressed blocks (UploadPrecompressedImage is
+	//    qgl-based, a no-op on Vulkan, so this branch is GL-only). Any other GL image takes
+	//    LoadImageCpuGL, GenerateImage's CPU half, and the main thread uploads its levels; the
+	//    few cases that stay serial are listed there.
 	if ( !isVulkan ) {
 		byte *dds = NULL;
 		int   ddsLen = 0;
-		if ( ReadPrecompressedImage( &dds, &ddsLen ) ) {
+		if ( globalImages->image_usePrecompressedTextures.GetBool() && ReadPrecompressedImage( &dds, &ddsLen ) ) {
 			parallelData->precompressedData = dds;
 			parallelData->precompressedLen = ddsLen;
-		} else {
+		} else if ( !LoadImageCpuGL() ) {
 			parallelData->needsSerial = true;
 		}
 		return true;
@@ -2096,6 +2228,22 @@ void idImage::UploadImageCpu() {
 	} else if ( parallelData->precompressedData ) {
 		// GL3: upload the worker-read .dds, exactly as CheckPrecompressedImage would
 		UploadPrecompressedImage( parallelData->precompressedData, parallelData->precompressedLen );
+	} else if ( parallelData->glPyramid ) {
+		// GL3: the worker-built pyramid (LoadImageCpuGL) goes up as GenerateImage's GL upload does
+		PurgeImage();
+		qglGenTextures( 1, &texnum );
+		internalFormat = parallelData->glInternalFormat;
+		uploadWidth = parallelData->width;
+		uploadHeight = parallelData->height;
+		type = TT_2D;
+		Bind();
+		for ( int i = 0; i < parallelData->numLevels; i++ ) {
+			qglTexImage2D( GL_TEXTURE_2D, i, internalFormat, parallelData->levelW[i], parallelData->levelH[i],
+				0, GL_RGBA, GL_UNSIGNED_BYTE, parallelData->levelData[i] );
+		}
+		SetImageFilterAndRepeat();
+		precompressedFile = false;
+		GL_CheckErrors();
 	} else {
 		// Vulkan: upload the worker-built RGBA8 mip pyramid
 		PurgeImage();		// drop any previous binding, matching GenerateImage
