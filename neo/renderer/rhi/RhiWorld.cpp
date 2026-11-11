@@ -2664,6 +2664,124 @@ static void RB_RHI_CaptureCurrentDepth( const viewDef_t *viewDef ) {
 
 // phase: -1 = everything; 0 = world only, captured into globalImages->worldDepthImage (ReSTIR DI's world-only
 // depth); 1 = the deferred view weapon only, then the usual _currentDepth capture of the complete depth.
+// The depth prepass's skip test for a surface (RB_RHI_FillDepthBuffer): the DI phase gate, undrawn / translucent /
+// sky materials, surfaces with no geometry, materials with every stage conditioned off.
+static bool RB_RHI_ZfillSurfSkipped( const drawSurf_t *surf, int phase ) {
+	const srfTriangles_t *tri = surf->geo;
+	const idMaterial *shader = surf->material;
+	// ReSTIR DI world-only G-buffer: phase 0 skips the view weapon, phase 1 draws only it
+	if ( phase == 0 && surf->space->weaponDepthHack ) { return true; }
+	if ( phase == 1 && !surf->space->weaponDepthHack ) { return true; }
+
+	if ( !shader->IsDrawn() ) {
+		return true;
+	}
+	// translucent surfaces don't put anything in the depth buffer
+	if ( shader->Coverage() == MC_TRANSLUCENT ) {
+		return true;
+	}
+	// sky surfaces (portal sky, skybox) render at the far plane and must
+	// NOT seal depth here — sealing is what makes forceOpaque portal-sky
+	// occlude the geometry in front of it (see the sky shaders' z = w)
+	texgen_t tg = shader->Texgen();
+	if ( tg == TG_SCREEN || tg == TG_SCREEN2 || tg == TG_SKYBOX_CUBE || tg == TG_WOBBLESKY_CUBE ) {
+		return true;
+	}
+	if ( !tri->numIndexes || ( !tri->ambientCache && !tri->gpuSkinVB ) ) {
+		return true;
+	}
+
+	const float *regs = surf->shaderRegisters;
+
+	// if all stages of a material have been conditioned off, don't draw
+	int stage;
+	for ( stage = 0; stage < shader->GetNumStages(); stage++ ) {
+		if ( regs[shader->GetStage( stage )->conditionRegister] != 0 ) {
+			break;
+		}
+	}
+	if ( stage == shader->GetNumStages() ) {
+		return true;
+	}
+	return false;
+}
+
+// The depth prepass's per-surface uniforms (RB_RHI_FillDepthBuffer): the surface's MVP, the fill colour and the subview
+// clip plane in model space; the perforated draws add their alpha test and texture matrix on top.
+static void RB_RHI_ZfillSurfParms( rhi::RenderParams &parms, const float mvp[16], const float color[4], const float localClipPlane[4] ) {
+	memset( &parms, 0, sizeof( parms ) );
+	memcpy( parms.mvpMatrix, mvp, sizeof( parms.mvpMatrix ) );
+	memcpy( parms.color, color, sizeof( parms.color ) );
+	memcpy( parms.clipPlane, localClipPlane, sizeof( parms.clipPlane ) );
+}
+
+// One depth-prepass draw (RB_RHI_FillDepthBuffer): the uniforms, unit 0 = the coverage image (white for a solid draw),
+// unit 1 = the tessellation bump when the surface tessellates, the pipeline, the draw.
+static void RB_RHI_ZfillDraw( rhi::RHI *r, const rhi::PipelineDesc &pd, rhi::DrawArgs &da, rhi::RenderParams &parms,
+                              idImage *image, bool tess, idImage *tessBump ) {
+	rhi::BufferHandle ub;
+	int uniOfs = r->AllocUniforms( &parms, sizeof( parms ), &ub );
+	RB_RHI_BindUnit( 0, image );
+	if ( tess ) {
+		RB_RHI_BindUnit( 1, tessBump );
+	}
+	RB_RHI_VkTextures( da );
+	r->BindPipeline( pd );
+	da.uniformBuffer = ub;
+	da.uniformOffset = uniOfs;
+	da.uniformSize = sizeof( parms );
+	r->Draw( da );
+	backEnd.pc.c_drawElements++;
+}
+
+// Phase 3.2b consume mode 2 (RB_RHI_FillDepthBuffer): draw the deferred solid bucket as one indirect call PER DISTINCT
+// SCISSOR - each entity's surfaces (and the BSP's) collapse into one draw rasterized with its exact scissor.
+static void RB_RHI_ZfillBatchEmit( rhi::RHI *r, const viewDef_t *viewDef, const idList<rhi::RHI::ZfillBatchItem> &zfillBatchItems,
+                                   const idList<idScreenRect> &zfillBatchScissors ) {
+	r->SetPolygonOffset( false, 0.0f, 0.0f );
+	// reorder items so each scissor's items are contiguous, and record one group (range + scissor)
+	// per distinct scissor. One DrawZfillBatch call uploads all items once and draws per group.
+	static idList<rhi::RHI::ZfillBatchItem> ordered;
+	static idList<rhi::RHI::ZfillBatchGroup> groups;
+	static idList<bool> used;
+	ordered.SetNum( 0, false );
+	groups.SetNum( 0, false );
+	const int n = zfillBatchItems.Num();
+	used.SetNum( n, false );
+	for ( int k = 0; k < n; k++ ) {
+		used[k] = false;
+	}
+	for ( int a = 0; a < n; a++ ) {
+		if ( used[a] ) {
+			continue;
+		}
+		const idScreenRect sc = zfillBatchScissors[a];
+		rhi::RHI::ZfillBatchGroup grp;
+		grp.firstItem = ordered.Num();
+		for ( int b = a; b < n; b++ ) {
+			if ( !used[b] && zfillBatchScissors[b].Equals( sc ) ) {
+				ordered.Append( zfillBatchItems[b] );
+				used[b] = true;
+			}
+		}
+		grp.itemCount = ordered.Num() - grp.firstItem;
+		// GL-convention scissor rect (as SetScissor takes); full view when scissoring is off
+		if ( r_useScissor.GetBool() ) {
+			grp.scissorX = viewDef->viewport.x1 + sc.x1;
+			grp.scissorY = viewDef->viewport.y1 + sc.y1;
+			grp.scissorW = sc.x2 + 1 - sc.x1;
+			grp.scissorH = sc.y2 + 1 - sc.y1;
+		} else {
+			grp.scissorX = viewDef->viewport.x1 + viewDef->scissor.x1;
+			grp.scissorY = viewDef->viewport.y1 + viewDef->scissor.y1;
+			grp.scissorW = viewDef->scissor.x2 + 1 - viewDef->scissor.x1;
+			grp.scissorH = viewDef->scissor.y2 + 1 - viewDef->scissor.y1;
+		}
+		groups.Append( grp );
+	}
+	r->DrawZfillBatch( ordered.Ptr(), ordered.Num(), groups.Ptr(), groups.Num() );
+}
+
 static void RB_RHI_FillDepthBuffer( rhi::RHI *r, const viewDef_t *viewDef, int phase = -1 ) {
 	rhi::ShaderHandle zfill = r->LoadShader( "zfill" );
 
@@ -2708,40 +2826,11 @@ static void RB_RHI_FillDepthBuffer( rhi::RHI *r, const viewDef_t *viewDef, int p
 		const drawSurf_t *surf = drawSurfs[i];
 		const srfTriangles_t *tri = surf->geo;
 		const idMaterial *shader = surf->material;
-		// ReSTIR DI world-only G-buffer: phase 0 skips the view weapon, phase 1 draws only it
-		if ( phase == 0 && surf->space->weaponDepthHack ) { continue; }
-		if ( phase == 1 && !surf->space->weaponDepthHack ) { continue; }
-
-		if ( !shader->IsDrawn() ) {
+		if ( RB_RHI_ZfillSurfSkipped( surf, phase ) ) {
 			continue;
 		}
-		// translucent surfaces don't put anything in the depth buffer
-		if ( shader->Coverage() == MC_TRANSLUCENT ) {
-			continue;
-		}
-		// sky surfaces (portal sky, skybox) render at the far plane and must
-		// NOT seal depth here — sealing is what makes forceOpaque portal-sky
-		// occlude the geometry in front of it (see the sky shaders' z = w)
-		texgen_t tg = shader->Texgen();
-		if ( tg == TG_SCREEN || tg == TG_SCREEN2 || tg == TG_SKYBOX_CUBE || tg == TG_WOBBLESKY_CUBE ) {
-			continue;
-		}
-		if ( !tri->numIndexes || ( !tri->ambientCache && !tri->gpuSkinVB ) ) {
-			continue;
-		}
-
 		const float *regs = surf->shaderRegisters;
-
-		// if all stages of a material have been conditioned off, don't draw
 		int stage;
-		for ( stage = 0; stage < shader->GetNumStages(); stage++ ) {
-			if ( regs[shader->GetStage( stage )->conditionRegister] != 0 ) {
-				break;
-			}
-		}
-		if ( stage == shader->GetNumStages() ) {
-			continue;
-		}
 
 		if ( surf->space != currentSpace ) {
 			currentSpace = surf->space;
@@ -2866,10 +2955,7 @@ static void RB_RHI_FillDepthBuffer( rhi::RHI *r, const viewDef_t *viewDef, int p
 				}
 
 				rhi::RenderParams parms;
-				memset( &parms, 0, sizeof( parms ) );
-				memcpy( parms.mvpMatrix, mvp, sizeof( parms.mvpMatrix ) );
-				memcpy( parms.color, color, sizeof( parms.color ) );
-				memcpy( parms.clipPlane, localClipPlane, sizeof( parms.clipPlane ) );
+				RB_RHI_ZfillSurfParms( parms, mvp, color, localClipPlane );
 				parms.alphaTest[0] = regs[pStage->alphaTestRegister];
 				parms.alphaTest[1] = 1.0f;
 				if ( pStage->texture.hasMatrix ) {
@@ -2889,21 +2975,8 @@ static void RB_RHI_FillDepthBuffer( rhi::RHI *r, const viewDef_t *viewDef, int p
 					tessBump = RB_RHI_TessBumpForZfill( surf, parms );
 				}
 
-				rhi::BufferHandle ub;
-				int uniOfs = r->AllocUniforms( &parms, sizeof( parms ), &ub );
-
 				RB_RHI_StagePolyOffsetBegin( r, pStage );
-				RB_RHI_BindUnit( 0, pStage->texture.image );
-				if ( tess ) {
-					RB_RHI_BindUnit( 1, tessBump );
-				}
-				RB_RHI_VkTextures( da );
-				r->BindPipeline( pd );
-				da.uniformBuffer = ub;
-				da.uniformOffset = uniOfs;
-				da.uniformSize = sizeof( parms );
-				r->Draw( da );
-				backEnd.pc.c_drawElements++;
+				RB_RHI_ZfillDraw( r, pd, da, parms, pStage->texture.image, tess, tessBump );
 				RB_RHI_StagePolyOffsetEnd( r, pStage, shader );
 			}
 			if ( !didDraw ) {
@@ -2913,10 +2986,7 @@ static void RB_RHI_FillDepthBuffer( rhi::RHI *r, const viewDef_t *viewDef, int p
 
 		if ( drawSolid ) {
 			rhi::RenderParams parms;
-			memset( &parms, 0, sizeof( parms ) );
-			memcpy( parms.mvpMatrix, mvp, sizeof( parms.mvpMatrix ) );
-			memcpy( parms.color, color, sizeof( parms.color ) );
-			memcpy( parms.clipPlane, localClipPlane, sizeof( parms.clipPlane ) );
+			RB_RHI_ZfillSurfParms( parms, mvp, color, localClipPlane );
 			parms.diffuseMatrixS[0] = 1.0f;
 			parms.diffuseMatrixT[1] = 1.0f;
 			idImage *tessBump = NULL;
@@ -2924,21 +2994,7 @@ static void RB_RHI_FillDepthBuffer( rhi::RHI *r, const viewDef_t *viewDef, int p
 				RB_RHI_SetTessParms( parms );
 				tessBump = RB_RHI_TessBumpForZfill( surf, parms );
 			}
-
-			rhi::BufferHandle ub;
-			int uniOfs = r->AllocUniforms( &parms, sizeof( parms ), &ub );
-
-			RB_RHI_BindUnit( 0, globalImages->whiteImage );
-			if ( tess ) {
-				RB_RHI_BindUnit( 1, tessBump );
-			}
-			RB_RHI_VkTextures( da );
-			r->BindPipeline( pd );
-			da.uniformBuffer = ub;
-			da.uniformOffset = uniOfs;
-			da.uniformSize = sizeof( parms );
-			r->Draw( da );
-			backEnd.pc.c_drawElements++;
+			RB_RHI_ZfillDraw( r, pd, da, parms, globalImages->whiteImage, tess, tessBump );
 		}
 
 		if ( shader->TestMaterialFlag( MF_POLYGONOFFSET ) ) {
@@ -2958,48 +3014,7 @@ static void RB_RHI_FillDepthBuffer( rhi::RHI *r, const viewDef_t *viewDef, int p
 	// safe for portal-clipped entities (which ignoring the scissor would not be). Clear the polygon
 	// bias once up front; the loop may have left a per-surface scissor, but every group sets its own.
 	if ( batchZfill && zfillBatchItems.Num() > 0 ) {
-		r->SetPolygonOffset( false, 0.0f, 0.0f );
-		// reorder items so each scissor's items are contiguous, and record one group (range + scissor)
-		// per distinct scissor. One DrawZfillBatch call uploads all items once and draws per group.
-		static idList<rhi::RHI::ZfillBatchItem> ordered;
-		static idList<rhi::RHI::ZfillBatchGroup> groups;
-		static idList<bool> used;
-		ordered.SetNum( 0, false );
-		groups.SetNum( 0, false );
-		const int n = zfillBatchItems.Num();
-		used.SetNum( n, false );
-		for ( int k = 0; k < n; k++ ) {
-			used[k] = false;
-		}
-		for ( int a = 0; a < n; a++ ) {
-			if ( used[a] ) {
-				continue;
-			}
-			const idScreenRect sc = zfillBatchScissors[a];
-			rhi::RHI::ZfillBatchGroup grp;
-			grp.firstItem = ordered.Num();
-			for ( int b = a; b < n; b++ ) {
-				if ( !used[b] && zfillBatchScissors[b].Equals( sc ) ) {
-					ordered.Append( zfillBatchItems[b] );
-					used[b] = true;
-				}
-			}
-			grp.itemCount = ordered.Num() - grp.firstItem;
-			// GL-convention scissor rect (as SetScissor takes); full view when scissoring is off
-			if ( r_useScissor.GetBool() ) {
-				grp.scissorX = viewDef->viewport.x1 + sc.x1;
-				grp.scissorY = viewDef->viewport.y1 + sc.y1;
-				grp.scissorW = sc.x2 + 1 - sc.x1;
-				grp.scissorH = sc.y2 + 1 - sc.y1;
-			} else {
-				grp.scissorX = viewDef->viewport.x1 + viewDef->scissor.x1;
-				grp.scissorY = viewDef->viewport.y1 + viewDef->scissor.y1;
-				grp.scissorW = viewDef->scissor.x2 + 1 - viewDef->scissor.x1;
-				grp.scissorH = viewDef->scissor.y2 + 1 - viewDef->scissor.y1;
-			}
-			groups.Append( grp );
-		}
-		r->DrawZfillBatch( ordered.Ptr(), ordered.Num(), groups.Ptr(), groups.Num() );
+		RB_RHI_ZfillBatchEmit( r, viewDef, zfillBatchItems, zfillBatchScissors );
 	}
 
 	if ( useClipPlane && qglDisable != NULL ) {
@@ -7114,6 +7129,589 @@ static float RB_RHI_Halton( int index, int base ) {
 	return r;
 }
 
+// What every stage of RB_RHI_ScreenSpaceReflections shares (the structural pass split the pass by stage).
+struct ssrCtx_t {
+	rhi::RHI *			r;
+	const viewDef_t *	viewDef;
+	bool				vkMode;
+	int					fullW, fullH;		// the view
+	int					ssrW, ssrH;			// the march / trace resolution (an integer divisor of the view)
+	int					uploadW, uploadH;	// the depth capture
+	float				invP00, invP11;		// the projection's inverse scale (view-space reconstruction)
+	float				viewYSign;			// +1 GL (bottom-up) / -1 VK (top-down FB)
+	rhi::ImageHandle	matImg;				// rough/metal as the decals left it
+};
+
+// SSR stage 0 (RB_RHI_ScreenSpaceReflections): the Hi-Z min-Z pyramid at the march resolution, or its reclaim when
+// r_ssrHiZ is off. Returns whether the march may leap through it; ssrHiZLod = the leap level.
+static bool RB_RHI_SsrHiZBuild( const ssrCtx_t &c, int &ssrHiZLod ) {
+	rhi::RHI *r = c.r;
+	const int fullW = c.fullW;
+	const int fullH = c.fullH;
+	const int ssrW = c.ssrW;
+	const int ssrH = c.ssrH;
+	const int uploadW = c.uploadW;
+	const int uploadH = c.uploadH;
+	// ---- Hi-Z (r_ssrHiZ, docs/ssao-perf-optimization.md): build a min-Z (nearest-surface)
+	// linear-depth pyramid at the SSR march resolution so the march can leap provably-empty
+	// span (see ssr.frag hiZMin). Mirrors the SSAO depth-mip build with a MIN downsample.
+	// Done BEFORE the scene snapshot below so the pyramid passes' unit-0 binds are then
+	// re-established as _currentRender by CopyFramebuffer (the GL march samples it on unit 0). ----
+	bool doSsrHiZ  = false;
+	ssrHiZLod = 0;
+	if ( r_ssrHiZ.GetBool() ) {
+		if ( RB_RHI_EnsureSsrDepthMin( r, ssrW, ssrH ) ) {
+			rhi::ShaderHandle minProg  = r->LoadShader( "ssr_depthmin" );	// linearize into level 0
+			rhi::ShaderHandle downProg = r->LoadShader( "ssr_depthdown" );	// min-downsample the chain
+			doSsrHiZ = ( minProg != 0 && downProg != 0 && rhiSsrDepthMinLevels >= 2 );
+			if ( doSsrHiZ ) {
+				rhi::RenderParams pyr;
+				memset( &pyr, 0, sizeof( pyr ) );
+				RB_RHI_IdentityMvp( pyr.mvpMatrix );
+				pyr.depthTexRecip[0] = ( (float)fullW / ssrW ) / uploadW;	// SSR frag -> depth tc
+				rhi::FillDepthParms( pyr, backEnd.viewDef ? backEnd.viewDef->projectionMatrix : NULL );	// this view's depth -> view z pair (cinematics cram the near plane)
+				pyr.depthTexRecip[1] = ( (float)fullH / ssrH ) / uploadH;
+				// level 0: linearize _currentDepth into the min-Z target
+				r->BeginTargetPass( rhiSsrDepthMinRT, NULL );
+				RB_RHI_BindUnit( 0, globalImages->currentDepthImage );
+				RB_RHI_DrawFullscreen( r, minProg, pyr, 0 );
+				r->EndPass();
+				// levels 1..N-1: MIN (nearest) downsample from the previous level. localParam0.x
+				// = the source mip level (VK binds a single-level view -> 0; GL binds the whole
+				// texture -> the real level for texelFetch), exactly like ssao_depthdown.
+				const bool vkBackend = ( rhi::GetActiveBackendType() == rhi::BT_VULKAN );
+				for ( int L = 1; L < rhiSsrDepthMinLevels; L++ ) {
+					rhi::RenderParams dp = pyr;
+					dp.localParam0[0] = vkBackend ? 0.0f : (float)( L - 1 );
+					rhi::ImageHandle src = r->GetRenderTargetMipImage( rhiSsrDepthMinRT, L - 1 );
+					r->BeginTargetMipPass( rhiSsrDepthMinRT, L, NULL );
+					RB_RHI_DrawFullscreen( r, downProg, dp, src );
+					r->EndPass();
+				}
+				backEnd.glState.tmu[0].current2DMap = -1;	// direct binds bypassed the tmu cache
+				ssrHiZLod = idMath::ClampInt( 1, rhiSsrDepthMinLevels - 1, r_ssrHiZLevel.GetInteger() );
+			}
+		}
+	} else if ( rhiSsrDepthMinRT ) {
+		// toggled off: reclaim the target so it isn't left resident (mirrors SSAO)
+		r->DestroyRenderTarget( rhiSsrDepthMinRT );
+		rhiSsrDepthMinRT = 0;
+		rhiSsrDepthMinW = rhiSsrDepthMinH = rhiSsrDepthMinLevels = 0;
+	}
+	return doSsrHiZ;
+}
+
+// SSR stage 1 (RB_RHI_ScreenSpaceReflections): snapshot the lit scene and march the reflection into rhiSsrRT. parms
+// carries the march's uniforms out for the temporal stage.
+static void RB_RHI_SsrMarch( const ssrCtx_t &c, rhi::ShaderHandle marchProg, bool doSsrHiZ, int ssrHiZLod, rhi::RenderParams &parms ) {
+	rhi::RHI *r = c.r;
+	const viewDef_t *viewDef = c.viewDef;
+	const bool vkMode = c.vkMode;
+	const int fullW = c.fullW;
+	const int fullH = c.fullH;
+	const int ssrW = c.ssrW;
+	const int ssrH = c.ssrH;
+	const int uploadW = c.uploadW;
+	const int uploadH = c.uploadH;
+	const float invP00 = c.invP00;
+	const float invP11 = c.invP11;
+	const float viewYSign = c.viewYSign;
+	const rhi::ImageHandle matImg = c.matImg;
+	// snapshot the lit opaque scene; on GL CopyFramebuffer leaves _currentRender bound
+	// on the active unit — exactly where ssr.frag samples it (unit 0), and re-establishes it
+	// after the Hi-Z build above bound depth there. On VK the copy routes through the RHI
+	// capture path and unit 0 is recorded via rhiVkUnits below, so skip the raw
+	// gl3ActiveTexture (a NULL qgl pointer on the Vulkan backend).
+	if ( !vkMode ) {
+		rhi::gl3ActiveTexture( GL_TEXTURE0 );
+		backEnd.glState.currenttmu = 0;
+	}
+	globalImages->currentRenderImage->CopyFramebuffer( viewDef->viewport.x1,
+		viewDef->viewport.y1, fullW, fullH, true );
+
+	// ---- stage 1: march into the offscreen buffer (cleared to 0 = miss) ----
+	memset( &parms, 0, sizeof( parms ) );
+	RB_RHI_IdentityMvp( parms.mvpMatrix );
+	// the real view->clip matrix projects march points back to screen; the inverse
+	// factors reconstruct view-space positions (same recipe as ssao.frag)
+	memcpy( parms.projectionMatrix, viewDef->projectionMatrix, sizeof( parms.projectionMatrix ) );
+	parms.localParam0[0] = invP00;
+	parms.localParam0[1] = invP11;
+	parms.localParam0[2] = idMath::ClampFloat( 64.0f, 8192.0f, r_ssrMaxDistance.GetFloat() );
+	parms.localParam0[3] = idMath::ClampFloat( 1.0f, 256.0f, r_ssrThickness.GetFloat() );
+	parms.localParam1[0] = (float)idMath::ClampInt( 4, 64, r_ssrSteps.GetInteger() );
+	parms.localParam1[2] = idMath::ClampFloat( 0.02f, 1.0f, r_ssrMaxRoughness.GetFloat() );
+	parms.screenCorrection[0] = 1.0f / ssrW;
+	parms.screenCorrection[1] = 1.0f / ssrH;
+	const int potW = globalImages->currentRenderImage->uploadWidth;
+	const int potH = globalImages->currentRenderImage->uploadHeight;
+	parms.screenCorrection[2] = potW > 0 ? (float)fullW / potW : 1.0f;
+	parms.screenCorrection[3] = potH > 0 ? (float)fullH / potH : 1.0f;
+	parms.depthTexRecip[0] = ( (float)fullW / ssrW ) / uploadW;		// gl_FragCoord (SSR) -> depth tc
+	rhi::FillDepthParms( parms, backEnd.viewDef ? backEnd.viewDef->projectionMatrix : NULL );	// this view's depth -> view z pair (cinematics cram the near plane)
+	parms.depthTexRecip[1] = ( (float)fullH / ssrH ) / uploadH;
+	// per-frame jitter rotation so temporal accumulation averages different march
+	// offsets (golden-ratio walk, same scheme as SSAO); 0 keeps the static dither
+	if ( r_ssrTemporal.GetBool() ) {
+		rhiSsrJitterPhase += 0.61803399f;
+		rhiSsrJitterPhase -= (float)(int)rhiSsrJitterPhase;
+		parms.windowCoord[1] = rhiSsrJitterPhase;
+	}
+	// view-Y sign (u_windowCoord.z): +1 on GL (gl_FragCoord.y bottom-up, agrees with
+	// view +Y and the bottom-up _currentRender capture), -1 on Vulkan (top-down
+	// framebuffer). Flips the reconstructed view-space Y and the project-to-screen /
+	// capture-sample rows so the march matches the G-buffer normals (same idea as
+	// ssao.frag's u_windowCoord.z). Inert at +1 on GL.
+	parms.windowCoord[2] = viewYSign;		// viewYSign hoisted above the #4a guard
+	// Hi-Z leap LOD for ssr.frag (u_localParam1.w); 0 = feature off -> exact full-res march
+	parms.localParam1[3] = (float)ssrHiZLod;
+
+	rhi::ClearArgs clear;
+	memset( &clear, 0, sizeof( clear ) );
+	clear.color = true;		// rgba 0 = miss everywhere the march discards
+
+	r->BeginTargetPass( rhiSsrRT, &clear );
+	// unit 0 = _currentRender; unit 1 = depth; units 2/3 = the G-buffer attachments.
+	// GL: the copy above left _currentRender bound on unit 0, units 2/3 raw-bind (tmu
+	// cache entries invalidated below). VK: record all four into rhiVkUnits so
+	// RB_RHI_DrawFullscreen carries them via DrawArgs.
+	if ( vkMode ) {
+		RB_RHI_BindRTImage( r, 0, globalImages->currentRenderImage->rhiHandle );
+	}
+	RB_RHI_BindUnit( 1, globalImages->currentDepthImage );
+	if ( vkMode ) {
+		RB_RHI_BindRTUnit( r, 2, rhiNormalResultRT );
+		RB_RHI_BindRTImage( r, 3, matImg );
+	} else {
+		rhi::gl3ActiveTexture( GL_TEXTURE0 + 2 );
+		qglBindTexture( GL_TEXTURE_2D, (GLuint)r->GetRenderTargetImage( rhiNormalResultRT ) );
+		rhi::gl3ActiveTexture( GL_TEXTURE0 + 3 );
+		qglBindTexture( GL_TEXTURE_2D, (GLuint)matImg );
+		rhi::gl3ActiveTexture( GL_TEXTURE0 );
+		backEnd.glState.currenttmu = 0;
+		backEnd.glState.tmu[2].current2DMap = -1;
+		backEnd.glState.tmu[3].current2DMap = -1;
+	}
+	// Hi-Z min-Z pyramid on unit 4 for the march's leap test. When off, bind _currentDepth
+	// as an unused dummy so the descriptor slot stays valid on VK (ssr.frag routes to the
+	// exact march via u_localParam1.w = 0 and never samples it). Mirrors the SSAO unit-2 idiom.
+	if ( doSsrHiZ ) {
+		RB_RHI_BindRTUnit( r, 4, rhiSsrDepthMinRT );
+	} else {
+		RB_RHI_BindUnit( 4, globalImages->currentDepthImage );
+	}
+	RB_RHI_DrawFullscreen( r, marchProg, parms, 0 );
+	r->EndPass();
+}
+
+// SSR stage 2 (RB_RHI_ScreenSpaceReflections): temporal accumulation of the march into the history ring; resultRT =
+// the target the later stages read (the written history slot, or the raw march when temporal is off).
+static void RB_RHI_SsrTemporal( const ssrCtx_t &c, const rhi::RenderParams &parms, rhi::RenderTargetHandle &resultRT ) {
+	rhi::RHI *r = c.r;
+	const viewDef_t *viewDef = c.viewDef;
+	const bool vkMode = c.vkMode;
+	const int ssrW = c.ssrW;
+	const int ssrH = c.ssrH;
+	resultRT = rhiSsrRT;
+
+	// ---- stage 2: temporal accumulation (docs/ssr.md; mirrors the SSAO history) ----
+	if ( r_ssrTemporal.GetBool() && RB_RHI_EnsureSsrHistory( r, ssrW, ssrH ) ) {
+		rhi::ShaderHandle tempProg = r->LoadShader( "ssr_temporal" );
+		if ( tempProg ) {
+			// reproject last frame's reflection by camera motion; the shared camera state
+			// (docs/fsr-temporal-pipeline.md A1) advances prev<-cur once per rendered frame
+			float reproj[16];
+			bool prevUsable;
+			const bool haveInv = RB_RHI_TemporalReproj( viewDef, reproj, &prevUsable );
+			const bool historyUsable = rhiSsrHistValid && prevUsable && haveInv;
+
+			const int writeIdx = rhiSsrHistIdx;
+			const int readIdx  = 1 - rhiSsrHistIdx;
+
+			rhi::RenderParams tempParms = parms;
+			if ( haveInv ) {
+				memcpy( tempParms.modelViewMatrix, reproj, sizeof( reproj ) );
+			}
+			tempParms.localParam0[2] = idMath::ClampFloat( 0.0f, 0.97f, r_ssrTemporalFeedback.GetFloat() );
+			tempParms.localParam0[3] = historyUsable ? 1.0f : 0.0f;
+			tempParms.localParam1[1] = 1.0f;		// history == march resolution: clip taps one texel apart
+			tempParms.localParam1[2] = tempParms.localParam1[3] = 0.0f;	// no sample-grid jitter to undo
+
+			// R1/A2 consumption: reproject the reflection history by the per-object velocity buffer
+			// when it exists (r_motionVectors, VK) so moving objects stop dragging a reflection
+			// ghost. Falls back to the camera-only matrix reproj (localParam1.x = 0).
+			rhi::ImageHandle velImg = ( rhiNormalVelThisView && rhiNormalReadyThisView )
+				? r->GetRenderTargetImage3( rhiNormalResultRT ) : 0;
+			tempParms.localParam1[0] = velImg ? 1.0f : 0.0f;
+
+			// unit 0 = current march (via DrawFullscreen), unit 1 = history read slot,
+			// unit 2 = depth, unit 3 = velocity (R1/A2)
+			r->BeginTargetPass( rhiSsrHistRT[writeIdx], NULL );
+			RB_RHI_BindUnit( 2, globalImages->currentDepthImage );
+			if ( vkMode ) {
+				// First frame after (re)alloc the read slot was never rendered, so its
+				// real layout is still UNDEFINED (the color target's tracker claims
+				// SHADER_READ_ONLY only after a write). The shader early-outs on
+				// historyUsable=0, but u_history is a statically-used sampler that VK
+				// validates regardless — bind the just-marched result (a written,
+				// SHADER_READ_ONLY target) until a real history slot exists.
+				rhi::RenderTargetHandle histRT = historyUsable ? rhiSsrHistRT[readIdx] : rhiSsrRT;
+				RB_RHI_BindRTUnit( r, 1, histRT );			// history read (VK rhiVkUnits[1])
+			} else {
+				rhi::gl3ActiveTexture( GL_TEXTURE0 + 1 );
+				qglBindTexture( GL_TEXTURE_2D, (GLuint)r->GetRenderTargetImage( rhiSsrHistRT[readIdx] ) );
+				rhi::gl3ActiveTexture( GL_TEXTURE0 );
+				backEnd.glState.currenttmu = 0;
+				backEnd.glState.tmu[1].current2DMap = -1;	// direct bind bypassed the tmu cache
+			}
+			// unit 3 = velocity MRT, or a dummy (u_velocity is a statically-used sampler VK validates)
+			if ( velImg ) { RB_RHI_BindRTImage( r, 3, velImg ); }
+			else          { RB_RHI_BindUnit( 3, globalImages->currentDepthImage ); }
+			RB_RHI_DrawFullscreen( r, tempProg, tempParms, r->GetRenderTargetImage( rhiSsrRT ) );
+			r->EndPass();
+
+			resultRT = rhiSsrHistRT[writeIdx];
+			rhiSsrHistIdx = readIdx;
+			RB_RHI_TemporalStageCur( viewDef );
+			rhiSsrHistValid  = true;
+		}
+	} else {
+		// temporal off (or history alloc failed): drop any stale history so a later
+		// re-enable starts clean instead of blending garbage
+		rhiSsrHistValid = false;
+	}
+}
+
+// SSR stage 2.5 (RB_RHI_ScreenSpaceReflections): the glossy colour pyramid of the result, or its reclaim; glossySrcRT /
+// glossyMaxLod = what the composite samples and how deep it may go by roughness (0 = sharp).
+static void RB_RHI_SsrGlossyPyramid( const ssrCtx_t &c, rhi::RenderTargetHandle resultRT, rhi::RenderTargetHandle &glossySrcRT, float &glossyMaxLod ) {
+	rhi::RHI *r = c.r;
+	const bool vkMode = c.vkMode;
+	const int ssrW = c.ssrW;
+	const int ssrH = c.ssrH;
+	// ---- stage 2.5: glossy reflection pyramid (r_ssrGlossy, docs/ssr.md) ----
+	// Build a colour mip pyramid of the reflection result so the composite can read it at a
+	// roughness-proportional LOD (rough surfaces blur, sharp stay sharp). The sharp path is
+	// left exactly as before: glossySrcRT stays the single-level resultRT and glossyMaxLod 0
+	// tells ssr_composite.frag to sample level 0 with plain texture().
+	glossySrcRT = resultRT;
+	glossyMaxLod = 0.0f;
+	if ( r_ssrGlossy.GetBool() && RB_RHI_EnsureSsrColorMip( r, ssrW, ssrH ) ) {
+		rhi::ShaderHandle downProg = r->LoadShader( "ssr_colordown" );
+		if ( downProg && rhiSsrColorMipLevels >= 2 ) {
+			rhi::RenderParams cp;
+			memset( &cp, 0, sizeof( cp ) );
+			RB_RHI_IdentityMvp( cp.mvpMatrix );
+			// level 0: 1:1 copy of the reflection result into the pyramid base (mode 0).
+			// Level 0 uses BeginTargetPass (its framebuffer is the base colorFb) — NOT
+			// BeginTargetMipPass, which only creates per-level framebuffers for L>=1 and
+			// rejects level 0 (a no-op that would leave the base black). Mirrors the Hi-Z
+			// build, whose level-0 linearize also uses BeginTargetPass.
+			cp.localParam0[0] = 0.0f;	// single-level source -> level 0
+			cp.localParam0[1] = 0.0f;	// mode 0 = copy
+			r->BeginTargetPass( rhiSsrColorMipRT, NULL );
+			RB_RHI_DrawFullscreen( r, downProg, cp, r->GetRenderTargetImage( resultRT ) );
+			r->EndPass();
+			// levels 1..N: 2x2 box average of the previous level (mode 1). localParam0.x =
+			// source level (VK binds a single-level view -> 0; GL binds the whole texture).
+			const bool vkBackend = ( rhi::GetActiveBackendType() == rhi::BT_VULKAN );
+			for ( int L = 1; L < rhiSsrColorMipLevels; L++ ) {
+				rhi::RenderParams dp = cp;
+				dp.localParam0[0] = vkBackend ? 0.0f : (float)( L - 1 );
+				dp.localParam0[1] = 1.0f;	// mode 1 = downsample
+				rhi::ImageHandle src = r->GetRenderTargetMipImage( rhiSsrColorMipRT, L - 1 );
+				r->BeginTargetMipPass( rhiSsrColorMipRT, L, NULL );
+				RB_RHI_DrawFullscreen( r, downProg, dp, src );
+				r->EndPass();
+			}
+			if ( !vkMode ) {
+				backEnd.glState.tmu[0].current2DMap = -1;	// direct binds bypassed the tmu cache
+			}
+			glossySrcRT  = rhiSsrColorMipRT;
+			// max LOD the composite may reach at the roughness cutoff, scaled by r_ssrGlossyScale
+			glossyMaxLod = (float)( rhiSsrColorMipLevels - 1 )
+			             * idMath::ClampFloat( 0.0f, 1.0f, r_ssrGlossyScale.GetFloat() );
+		}
+	} else if ( rhiSsrColorMipRT && !r_ssrGlossy.GetBool() ) {
+		// toggled off: reclaim the pyramid so it isn't left resident (mirrors the Hi-Z reclaim)
+		r->DestroyRenderTarget( rhiSsrColorMipRT );
+		rhiSsrColorMipRT = 0;
+		rhiSsrColorMipW = rhiSsrColorMipH = rhiSsrColorMipLevels = 0;
+	}
+}
+
+// SSR stage 3 (RB_RHI_ScreenSpaceReflections): the full-res additive composite of the reflection over the lit scene.
+static void RB_RHI_SsrComposite( const ssrCtx_t &c, rhi::ShaderHandle compProg, rhi::RenderTargetHandle glossySrcRT, float glossyMaxLod ) {
+	rhi::RHI *r = c.r;
+	const viewDef_t *viewDef = c.viewDef;
+	const bool vkMode = c.vkMode;
+	const int fullW = c.fullW;
+	const int fullH = c.fullH;
+	const int uploadW = c.uploadW;
+	const int uploadH = c.uploadH;
+	const float invP00 = c.invP00;
+	const float invP11 = c.invP11;
+	const float viewYSign = c.viewYSign;
+	const rhi::ImageHandle matImg = c.matImg;
+	// ---- stage 3: full-res additive composite over the lit scene (inside the #4a !rtWillRender guard) ----
+	rhi::RenderParams compParms;
+	memset( &compParms, 0, sizeof( compParms ) );
+	RB_RHI_IdentityMvp( compParms.mvpMatrix );
+	compParms.localParam0[0] = invP00;
+	compParms.localParam0[1] = invP11;
+	compParms.localParam0[2] = idMath::ClampFloat( 0.05f, 0.95f, r_ssrRoughnessFade.GetFloat() );	// roughness fade start
+	compParms.localParam0[3] = idMath::ClampFloat( 0.0f, 64.0f, r_ssrFireflyClamp.GetFloat() );	// reflected-radiance cap (fireflies)
+	compParms.localParam1[1] = r_ssrIntensity.GetFloat();
+	compParms.localParam1[2] = idMath::ClampFloat( 0.02f, 1.0f, r_ssrMaxRoughness.GetFloat() );
+	compParms.localParam1[3] = glossyMaxLod;	// r_ssrGlossy: >0 = sample the pyramid by roughness; 0 = sharp
+	// RR14 specular occlusion strength (localParam1.x): 0 when no AO ran this view so ssr_composite is a no-op
+	compParms.localParam1[0] = ( rhiSsaoAppliedThisView ? idMath::ClampFloat( 0.0f, 1.0f, r_specOcclusion.GetFloat() ) : 0.0f );
+	compParms.screenCorrection[0] = 1.0f / fullW;
+	compParms.screenCorrection[1] = 1.0f / fullH;
+	compParms.depthTexRecip[0] = 1.0f / uploadW;
+	rhi::FillDepthParms( compParms, backEnd.viewDef ? backEnd.viewDef->projectionMatrix : NULL );	// this view's depth -> view z pair (cinematics cram the near plane)
+	compParms.depthTexRecip[1] = 1.0f / uploadH;
+	compParms.windowCoord[2] = viewYSign;		// view-Y sign for the NdotV reconstruction (VK)
+
+	// EndPass restored the view scissor; keep the CPU cache in step, and cover the
+	// whole view in case the last surface left a crop before the target passes
+	r->SetScissor( tr.viewportOffset[0] + viewDef->viewport.x1,
+	               tr.viewportOffset[1] + viewDef->viewport.y1, fullW, fullH );
+	backEnd.currentScissor = viewDef->scissor;
+
+	// unit 0 = SSR result (via DrawFullscreen, a color target -> VK cancels the scene
+	// flip), unit 1 = depth, units 2/3 = G-buffer
+	RB_RHI_BindUnit( 1, globalImages->currentDepthImage );
+	if ( vkMode ) {
+		RB_RHI_BindRTUnit( r, 2, rhiNormalResultRT );
+		RB_RHI_BindRTImage( r, 3, matImg );
+	} else {
+		rhi::gl3ActiveTexture( GL_TEXTURE0 + 2 );
+		qglBindTexture( GL_TEXTURE_2D, (GLuint)r->GetRenderTargetImage( rhiNormalResultRT ) );
+		rhi::gl3ActiveTexture( GL_TEXTURE0 + 3 );
+		qglBindTexture( GL_TEXTURE_2D, (GLuint)matImg );
+		rhi::gl3ActiveTexture( GL_TEXTURE0 );
+		backEnd.glState.currenttmu = 0;
+		backEnd.glState.tmu[2].current2DMap = -1;
+		backEnd.glState.tmu[3].current2DMap = -1;
+	}
+	// RR14: AO buffer on unit 4 for specular occlusion. When AO ran this view bind it (roughness-aware
+	// dim in ssr_composite.frag); otherwise bind white so ao = 1 leaves the reflection unchanged.
+	if ( rhiSsaoAppliedThisView ) {
+		RB_RHI_BindRTUnit( r, 4, rhiSsaoResultRT );
+	} else {
+		RB_RHI_BindUnit( 4, globalImages->whiteImage );
+	}
+	RB_RHI_DrawFullscreen( r, compProg, compParms, r->GetRenderTargetImage( glossySrcRT ),
+	                       GLS_SRCBLEND_ONE | GLS_DSTBLEND_ONE );
+}
+
+// RR2/RR6/RR7: RT reflections on monsters + world (docs/rtx-reflections.md), the arm that REPLACES the SSR composite
+// (RB_RHI_ScreenSpaceReflections): the trace + hit shading into the RT target, the temporal accumulation + upscale to
+// full res, and the additive composite. Preconditions were front-loaded by the caller (rtWillRender).
+static void RB_RHI_RtReflections( const ssrCtx_t &c, rhi::ShaderHandle rtProg, rhi::ShaderHandle copyProg, const float invView[16],
+                                  unsigned long long tlasAddr, unsigned long long geoAddr ) {
+	rhi::RHI *r = c.r;
+	const viewDef_t *viewDef = c.viewDef;
+	const int fullW = c.fullW;
+	const int fullH = c.fullH;
+	const int ssrW = c.ssrW;
+	const int ssrH = c.ssrH;
+	const int uploadW = c.uploadW;
+	const int uploadH = c.uploadH;
+	const float invP00 = c.invP00;
+	const float invP11 = c.invP11;
+	const float viewYSign = c.viewYSign;
+	const rhi::ImageHandle matImg = c.matImg;
+	// item 6: the _currentRender snapshot #4a kept here (a safety net for downstream refraction /
+	// heat-haze, which sample _currentRender) is dropped — no pass in this function reads it under RT,
+	// and those materials re-capture _currentRender on demand. Saves the full-res blit. If a heat-haze /
+	// refraction surface ever reads a stale through-glass scene under RT, restore the CopyFramebuffer.
+	{
+		// RR6c per-frame sub-texel jitter for the temporal UPSCALE (Halton(2,3), in RT-target texels,
+		// scaled by r_rtReflJitter). Shifting the low-res sample grid each frame moves the fractional-
+		// upscale beat (the "striped" reflection at e.g. 3/4 res) to a different phase every frame, so the
+		// full-res history averages it out. Only meaningful WITH temporal accumulation, so zero when off.
+		const bool rtTemporal = r_rtReflTemporal.GetBool();
+		float jitterX = 0.0f, jitterY = 0.0f;
+		if ( rtTemporal ) {
+			const int   jidx   = ( tr.frameCount & 15 ) + 1;			// 16-frame Halton cycle (avoid index 0)
+			const float jscale = idMath::ClampFloat( 0.0f, 4.0f, r_rtReflJitter.GetFloat() );
+			jitterX = ( RB_RHI_Halton( jidx, 2 ) - 0.5f ) * jscale;		// ±0.5 texel at scale 1
+			jitterY = ( RB_RHI_Halton( jidx, 3 ) - 0.5f ) * jscale;
+		}
+
+		rhi::RenderParams rp;
+		memset( &rp, 0, sizeof( rp ) );
+		RB_RHI_IdentityMvp( rp.mvpMatrix );
+		memcpy( rp.modelViewMatrix, invView, sizeof( rp.modelViewMatrix ) );	// u_modelViewMatrix = view->world (invView is a parameter here: size by the destination)
+		rp.localParam0[0] = invP00;
+		rp.localParam0[1] = invP11;
+		rp.localParam0[2] = idMath::ClampFloat( 0.05f, 0.95f, r_ssrRoughnessFade.GetFloat() );	// roughness fade start
+		rp.localParam1[1] = r_ssrIntensity.GetFloat();				// reflection strength (shared with SSR)
+		rp.localParam1[2] = idMath::ClampFloat( 0.02f, 1.0f, r_ssrMaxRoughness.GetFloat() );
+		// RR6c sample-grid jitter (windowCoord.xy, in RT-target texels): ssr_rt offsets its whole
+		// reconstruction by this, shifting the low-res grid so the fractional-upscale beat averages out
+		// across the full-res history (see ssr_rt.frag).
+		rp.windowCoord[0] = jitterX;
+		rp.windowCoord[1] = jitterY;
+		// RR6: the ssr_rt TRACE runs at the SSR march resolution (cheap ray-query; shares SSR's grain and
+		// scales with r_ssrResScale). RR6c then temporally upscales the result to full res, so the
+		// composite reads a full-res history — no bilinear upscale of the fractional-res buffer (the beat).
+		rp.screenCorrection[0] = 1.0f / ssrW;
+		rp.screenCorrection[1] = 1.0f / ssrH;
+		rp.depthTexRecip[0] = ( (float)fullW / ssrW ) / uploadW;
+		rhi::FillDepthParms( rp, backEnd.viewDef ? backEnd.viewDef->projectionMatrix : NULL );	// this view's depth -> view z pair (cinematics cram the near plane)
+		rp.depthTexRecip[1] = ( (float)fullH / ssrH ) / uploadH;
+		rp.windowCoord[2] = viewYSign;
+		// TLAS + geo-table device addresses, bit-cast into the float slots (floatBitsToUint in the shader)
+		memcpy( &rp.rtParms[0], &tlasAddr, sizeof( tlasAddr ) );		// rtParms.x/y = TLAS
+		memcpy( &rp.rtParms[2], &geoAddr,  sizeof( geoAddr ) );		// rtParms.z/w = geo table
+		// RR16: gather the scene's real lights into the ring buffer; ssr_rt loops them to light the hit
+		// (so an off-screen-reflected surface is lit correctly, not by a fixed key light). color = (light-
+		// buffer device addr lo/hi bit-cast, count, ambient); diffuseModifier = (RR16f emissive glow scale,
+		// light brightness scale, RR16c frustum gate, real-lights enable). The r_rtReflRealLights 0 key light
+		// is a fixed dir hardcoded in-shader.
+		unsigned long long rtLightAddr = 0;
+		const int rtNumLights = r_rtReflRealLights.GetBool() ? RB_RHI_GatherSceneLights( r, viewDef, &rtLightAddr ) : 0;
+		memcpy( &rp.color[0], &rtLightAddr, sizeof( rtLightAddr ) );	// color.xy = light-buffer device address
+		rp.color[2] = (float)rtNumLights;
+		rp.color[3] = 0.28f;										// ambient term
+		rp.diffuseModifier[0] = idMath::ClampFloat( 0.0f, 16.0f, r_rtReflEmissive.GetFloat() );	// RR16f: self-illumination glow scale
+		rp.diffuseModifier[1] = idMath::ClampFloat( 0.0f, 8.0f, r_rtReflLightScale.GetFloat() );	// RR16: real-light diffuse brightness scale
+		rp.diffuseModifier[2] = r_rtReflLightFrustum.GetBool() ? 1.0f : 0.0f;	// RR16c: confine each light to its projection frustum
+		rp.diffuseModifier[3] = ( rtNumLights > 0 ) ? 1.0f : 0.0f;	// real-lights enable (else the fixed key-light fallback)
+		rp.localParam1[3] = idMath::ClampFloat( 0.0f, 1.0f, r_rtReflBump.GetFloat() );	// RR10: bump-normal warp amount
+		rp.localParam1[0] = ( rhiSsaoAppliedThisView ? idMath::ClampFloat( 0.0f, 1.0f, r_specOcclusion.GetFloat() ) : 0.0f );	// RR14 specular occlusion strength (0 when no AO this view)
+
+		// RR12 lit-scene reuse RETIRED 2026-09-23: RT now shades every reflective pixel at the hit (real
+		// lights + per-pixel diffuse + emissive) with ONE consistent model, so there is no on-screen reuse
+		// to feed, no reuse<->shade seam, and no dependency on a sampleable scene buffer. localParam0.w /
+		// windowCoord.w (the old reuse-enable + reused-HDR firefly clamp) stay 0 from the memset; ssr_rt
+		// no longer reads them.
+
+		// ---- Pass A: trace + shade into the dedicated RT target (replace; cleared to 0 = no
+		// contribution). unit 0 is an unused-but-bound dummy (reuse retired): bind the normal G-buffer so
+		// the fixed VK_TEX_BINDINGS slot holds a valid image. 1 = depth, 2/3 = G-buffer, 4 = AO (RR14).
+		rhi::ClearArgs rtClear;
+		memset( &rtClear, 0, sizeof( rtClear ) );
+		rtClear.color = true;
+		r->GpuScopeBegin( "rtrefl.trace" );		// RT reflection ray trace + hit shading (ssrRes)
+		r->BeginTargetPass( rhiRtReflRT, &rtClear );
+		RB_RHI_BindUnit( 1, globalImages->currentDepthImage );
+		RB_RHI_BindRTUnit( r, 2, rhiNormalResultRT );
+		RB_RHI_BindRTImage( r, 3, matImg );
+		// RR14: AO buffer on unit 4 for specular occlusion (VK-only RT path; white dummy when no AO ran)
+		if ( rhiSsaoAppliedThisView ) {
+			RB_RHI_BindRTUnit( r, 4, rhiSsaoResultRT );
+		} else {
+			RB_RHI_BindUnit( 4, globalImages->whiteImage );
+		}
+		RB_RHI_DrawFullscreen( r, rtProg, rp, r->GetRenderTargetImage( rhiNormalResultRT ) );
+		r->EndPass();
+		r->GpuScopeEnd();
+
+		rhi::RenderTargetHandle rtResultRT = rhiRtReflRT;
+		int rtResW = ssrW, rtResH = ssrH;		// resolution of rtResultRT (ssrRes until the upscale runs)
+
+		// ---- Pass B: temporal accumulation + UPSCALE (r_rtReflTemporal) — the SAME ssr_temporal
+		// machinery as SSR stage 2, but the history is FULL res: the ssrRes trace (unit 0) is bilinear-
+		// upsampled into a reprojected full-res history, and the per-frame sample-grid jitter makes the
+		// accumulation both resolve the firefly grid AND average away the fractional-upscale beat.
+		if ( rtTemporal && RB_RHI_EnsureRtReflHistory( r, fullW, fullH ) ) {
+			rhi::ShaderHandle tempProg = r->LoadShader( "ssr_temporal" );
+			if ( tempProg ) {
+				// reproject last frame by camera motion; RB_RHI_TemporalReproj advances prev<-staged
+				// only for the first temporal consumer of a frame, so calling it after SSR/SSAO
+				// already did just rebuilds this frame's reproj against the same prev (correct).
+				float reproj[16];
+				bool prevUsable;
+				const bool haveInv = RB_RHI_TemporalReproj( viewDef, reproj, &prevUsable );
+				const bool historyUsable = rhiRtReflHistValid && prevUsable && haveInv;
+
+				const int writeIdx = rhiRtReflHistIdx;
+				const int readIdx  = 1 - rhiRtReflHistIdx;
+
+				rhi::RenderParams tempParms = rp;
+				if ( haveInv ) {
+					memcpy( tempParms.modelViewMatrix, reproj, sizeof( reproj ) );
+				}
+				// RR6c: this resolve + the history run at FULL res; the current RT buffer (unit 0) is the
+				// ssrRes trace, bilinear-upsampled by the sampler. The 3x3 clip neighbourhood + depth
+				// reprojection are therefore full-res (override rp's ssrRes screen/depth mapping).
+				tempParms.screenCorrection[0] = 1.0f / fullW;
+				tempParms.screenCorrection[1] = 1.0f / fullH;
+				tempParms.depthTexRecip[0] = 1.0f / uploadW;
+				rhi::FillDepthParms( tempParms, backEnd.viewDef ? backEnd.viewDef->projectionMatrix : NULL );	// this view's depth -> view z pair (cinematics cram the near plane)
+				tempParms.depthTexRecip[1] = 1.0f / uploadH;
+				tempParms.localParam0[2] = idMath::ClampFloat( 0.0f, 0.97f, r_ssrTemporalFeedback.GetFloat() );
+				tempParms.localParam0[3] = historyUsable ? 1.0f : 0.0f;
+				// reproject moving objects by the per-object velocity MRT when it exists (R1/A2), else
+				// fall back to the camera-only matrix (localParam1.x = 0).
+				rhi::ImageHandle velImg = ( rhiNormalVelThisView && rhiNormalReadyThisView )
+					? r->GetRenderTargetImage3( rhiNormalResultRT ) : 0;
+				tempParms.localParam1[0] = velImg ? 1.0f : 0.0f;
+				// The clip neighbourhood steps in TRACE texels (Quarter: 4 output px) so its taps are distinct
+				// traced samples, and the trace's sample-grid jitter is undone when reading it - without
+				// both, a Quarter trace never accumulates and shimmers.
+				tempParms.localParam1[1] = (float)fullW / (float)ssrW;
+				tempParms.localParam1[2] = jitterX / (float)ssrW;
+				tempParms.localParam1[3] = jitterY / (float)ssrH;
+
+				// unit 0 = current RT contribution (via DrawFullscreen), 1 = history read slot,
+				// 2 = depth, 3 = velocity
+				r->GpuScopeBegin( "rtrefl.temporal" );		// temporal accumulate + upscale to full res
+				r->BeginTargetPass( rhiRtReflHistRT[writeIdx], NULL );
+				RB_RHI_BindUnit( 2, globalImages->currentDepthImage );
+				// first frame after (re)alloc the read slot was never written (VK layout UNDEFINED);
+				// bind the just-rendered cur (a written, SHADER_READ_ONLY target) until a real
+				// history slot exists — the shader early-outs on historyUsable = 0 anyway.
+				rhi::RenderTargetHandle histRT = historyUsable ? rhiRtReflHistRT[readIdx] : rhiRtReflRT;
+				RB_RHI_BindRTUnit( r, 1, histRT );
+				if ( velImg ) { RB_RHI_BindRTImage( r, 3, velImg ); }
+				else          { RB_RHI_BindUnit( 3, globalImages->currentDepthImage ); }
+				RB_RHI_DrawFullscreen( r, tempProg, tempParms, r->GetRenderTargetImage( rhiRtReflRT ) );
+				r->EndPass();
+				r->GpuScopeEnd();
+
+				rtResultRT = rhiRtReflHistRT[writeIdx];
+				rtResW = fullW; rtResH = fullH;		// the result is now the full-res upscaled history
+				rhiRtReflHistIdx = readIdx;
+				RB_RHI_TemporalStageCur( viewDef );
+				rhiRtReflHistValid = true;
+			}
+		} else {
+			rhiRtReflHistValid = false;		// temporal off: drop stale history so a re-enable starts clean
+		}
+
+		// ---- Pass C: additive composite of the (smoothed) RT reflection onto the lit scene.
+		// EndPass left the target's scissor; restore the full view before drawing to the scene
+		// (mirrors the SSR composite scissor set above).
+		r->SetScissor( tr.viewportOffset[0] + viewDef->viewport.x1,
+		               tr.viewportOffset[1] + viewDef->viewport.y1, fullW, fullH );
+		backEnd.currentScissor = viewDef->scissor;
+		rhi::RenderParams cp;
+		memset( &cp, 0, sizeof( cp ) );
+		RB_RHI_IdentityMvp( cp.mvpMatrix );
+		// RR6b: box-blur strength + tap spacing; screenCorrection = the RESULT target's texel size so
+		// the blur offsets are in its texels (full-res after the RR6c upscale, ssrRes if temporal off).
+		// At r_rtReflBlur 0 the frag is a 1:1 additive passthrough.
+		cp.localParam0[0] = idMath::ClampFloat( 0.0f, 1.0f, r_rtReflBlur.GetFloat() );
+		cp.localParam0[1] = 1.0f;			// tap spacing (texels); ±2 taps -> a 5px spread at scale 1
+		// RR8: full-res material mask (roughness fade start + cutoff) so the low-res reflection can't
+		// halo past a reflective monster onto the non-reflective background (unit 1 = the G-buffer MRT).
+		cp.localParam0[2] = idMath::ClampFloat( 0.05f, 0.95f, r_ssrRoughnessFade.GetFloat() );
+		cp.localParam1[2] = idMath::ClampFloat( 0.02f, 1.0f, r_ssrMaxRoughness.GetFloat() );
+		cp.screenCorrection[0] = 1.0f / rtResW;
+		cp.screenCorrection[1] = 1.0f / rtResH;
+		RB_RHI_BindRTImage( r, 1, matImg );		// full-res roughness/metalness for the silhouette mask
+		r->GpuScopeBegin( "rtrefl.composite" );	// RR6b blur + additive composite onto the scene
+		RB_RHI_DrawFullscreen( r, copyProg, cp, r->GetRenderTargetImage( rtResultRT ),
+		                       GLS_SRCBLEND_ONE | GLS_DSTBLEND_ONE );
+		r->GpuScopeEnd();
+	}
+}
+
 void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 	if ( !R_BackendSupportsEnhancements() ) {
 		return;
@@ -7195,6 +7793,11 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 	const float invP00 = ( viewDef->projectionMatrix[0] != 0.0f ) ? 1.0f / viewDef->projectionMatrix[0] : 1.0f;
 	const float invP11 = ( viewDef->projectionMatrix[5] != 0.0f ) ? 1.0f / viewDef->projectionMatrix[5] : 1.0f;
 	const float viewYSign = vkMode ? -1.0f : 1.0f;		// +1 GL (bottom-up) / -1 VK (top-down FB): flips reconstructed Y
+	ssrCtx_t ctx;
+	ctx.r = r; ctx.viewDef = viewDef; ctx.vkMode = vkMode;
+	ctx.fullW = fullW; ctx.fullH = fullH; ctx.ssrW = ssrW; ctx.ssrH = ssrH;
+	ctx.uploadW = uploadW; ctx.uploadH = uploadH;
+	ctx.invP00 = invP00; ctx.invP11 = invP11; ctx.viewYSign = viewYSign; ctx.matImg = matImg;
 
 	// #4a: decide RT-vs-SSR BEFORE the march so the whole SSR march chain below can be gated off when RT
 	// replaces the composite (post-RR7 ssr_rt reads none of the march's output — it's dead work under RT).
@@ -7216,310 +7819,20 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 	// indentation to match the existing composite-gate style below. ====
 	if ( r_ssr.GetBool() && !rtWillRender ) {
 
-	// ---- Hi-Z (r_ssrHiZ, docs/ssao-perf-optimization.md): build a min-Z (nearest-surface)
-	// linear-depth pyramid at the SSR march resolution so the march can leap provably-empty
-	// span (see ssr.frag hiZMin). Mirrors the SSAO depth-mip build with a MIN downsample.
-	// Done BEFORE the scene snapshot below so the pyramid passes' unit-0 binds are then
-	// re-established as _currentRender by CopyFramebuffer (the GL march samples it on unit 0). ----
-	bool doSsrHiZ  = false;
-	int  ssrHiZLod = 0;
-	if ( r_ssrHiZ.GetBool() ) {
-		if ( RB_RHI_EnsureSsrDepthMin( r, ssrW, ssrH ) ) {
-			rhi::ShaderHandle minProg  = r->LoadShader( "ssr_depthmin" );	// linearize into level 0
-			rhi::ShaderHandle downProg = r->LoadShader( "ssr_depthdown" );	// min-downsample the chain
-			doSsrHiZ = ( minProg != 0 && downProg != 0 && rhiSsrDepthMinLevels >= 2 );
-			if ( doSsrHiZ ) {
-				rhi::RenderParams pyr;
-				memset( &pyr, 0, sizeof( pyr ) );
-				RB_RHI_IdentityMvp( pyr.mvpMatrix );
-				pyr.depthTexRecip[0] = ( (float)fullW / ssrW ) / uploadW;	// SSR frag -> depth tc
-				rhi::FillDepthParms( pyr, backEnd.viewDef ? backEnd.viewDef->projectionMatrix : NULL );	// this view's depth -> view z pair (cinematics cram the near plane)
-				pyr.depthTexRecip[1] = ( (float)fullH / ssrH ) / uploadH;
-				// level 0: linearize _currentDepth into the min-Z target
-				r->BeginTargetPass( rhiSsrDepthMinRT, NULL );
-				RB_RHI_BindUnit( 0, globalImages->currentDepthImage );
-				RB_RHI_DrawFullscreen( r, minProg, pyr, 0 );
-				r->EndPass();
-				// levels 1..N-1: MIN (nearest) downsample from the previous level. localParam0.x
-				// = the source mip level (VK binds a single-level view -> 0; GL binds the whole
-				// texture -> the real level for texelFetch), exactly like ssao_depthdown.
-				const bool vkBackend = ( rhi::GetActiveBackendType() == rhi::BT_VULKAN );
-				for ( int L = 1; L < rhiSsrDepthMinLevels; L++ ) {
-					rhi::RenderParams dp = pyr;
-					dp.localParam0[0] = vkBackend ? 0.0f : (float)( L - 1 );
-					rhi::ImageHandle src = r->GetRenderTargetMipImage( rhiSsrDepthMinRT, L - 1 );
-					r->BeginTargetMipPass( rhiSsrDepthMinRT, L, NULL );
-					RB_RHI_DrawFullscreen( r, downProg, dp, src );
-					r->EndPass();
-				}
-				backEnd.glState.tmu[0].current2DMap = -1;	// direct binds bypassed the tmu cache
-				ssrHiZLod = idMath::ClampInt( 1, rhiSsrDepthMinLevels - 1, r_ssrHiZLevel.GetInteger() );
-			}
-		}
-	} else if ( rhiSsrDepthMinRT ) {
-		// toggled off: reclaim the target so it isn't left resident (mirrors SSAO)
-		r->DestroyRenderTarget( rhiSsrDepthMinRT );
-		rhiSsrDepthMinRT = 0;
-		rhiSsrDepthMinW = rhiSsrDepthMinH = rhiSsrDepthMinLevels = 0;
-	}
+	int ssrHiZLod = 0;
+	const bool doSsrHiZ = RB_RHI_SsrHiZBuild( ctx, ssrHiZLod );
 
-	// snapshot the lit opaque scene; on GL CopyFramebuffer leaves _currentRender bound
-	// on the active unit — exactly where ssr.frag samples it (unit 0), and re-establishes it
-	// after the Hi-Z build above bound depth there. On VK the copy routes through the RHI
-	// capture path and unit 0 is recorded via rhiVkUnits below, so skip the raw
-	// gl3ActiveTexture (a NULL qgl pointer on the Vulkan backend).
-	if ( !vkMode ) {
-		rhi::gl3ActiveTexture( GL_TEXTURE0 );
-		backEnd.glState.currenttmu = 0;
-	}
-	globalImages->currentRenderImage->CopyFramebuffer( viewDef->viewport.x1,
-		viewDef->viewport.y1, fullW, fullH, true );
-
-	// ---- stage 1: march into the offscreen buffer (cleared to 0 = miss) ----
 	rhi::RenderParams parms;
-	memset( &parms, 0, sizeof( parms ) );
-	RB_RHI_IdentityMvp( parms.mvpMatrix );
-	// the real view->clip matrix projects march points back to screen; the inverse
-	// factors reconstruct view-space positions (same recipe as ssao.frag)
-	memcpy( parms.projectionMatrix, viewDef->projectionMatrix, sizeof( parms.projectionMatrix ) );
-	parms.localParam0[0] = invP00;
-	parms.localParam0[1] = invP11;
-	parms.localParam0[2] = idMath::ClampFloat( 64.0f, 8192.0f, r_ssrMaxDistance.GetFloat() );
-	parms.localParam0[3] = idMath::ClampFloat( 1.0f, 256.0f, r_ssrThickness.GetFloat() );
-	parms.localParam1[0] = (float)idMath::ClampInt( 4, 64, r_ssrSteps.GetInteger() );
-	parms.localParam1[2] = idMath::ClampFloat( 0.02f, 1.0f, r_ssrMaxRoughness.GetFloat() );
-	parms.screenCorrection[0] = 1.0f / ssrW;
-	parms.screenCorrection[1] = 1.0f / ssrH;
-	const int potW = globalImages->currentRenderImage->uploadWidth;
-	const int potH = globalImages->currentRenderImage->uploadHeight;
-	parms.screenCorrection[2] = potW > 0 ? (float)fullW / potW : 1.0f;
-	parms.screenCorrection[3] = potH > 0 ? (float)fullH / potH : 1.0f;
-	parms.depthTexRecip[0] = ( (float)fullW / ssrW ) / uploadW;		// gl_FragCoord (SSR) -> depth tc
-	rhi::FillDepthParms( parms, backEnd.viewDef ? backEnd.viewDef->projectionMatrix : NULL );	// this view's depth -> view z pair (cinematics cram the near plane)
-	parms.depthTexRecip[1] = ( (float)fullH / ssrH ) / uploadH;
-	// per-frame jitter rotation so temporal accumulation averages different march
-	// offsets (golden-ratio walk, same scheme as SSAO); 0 keeps the static dither
-	if ( r_ssrTemporal.GetBool() ) {
-		rhiSsrJitterPhase += 0.61803399f;
-		rhiSsrJitterPhase -= (float)(int)rhiSsrJitterPhase;
-		parms.windowCoord[1] = rhiSsrJitterPhase;
-	}
-	// view-Y sign (u_windowCoord.z): +1 on GL (gl_FragCoord.y bottom-up, agrees with
-	// view +Y and the bottom-up _currentRender capture), -1 on Vulkan (top-down
-	// framebuffer). Flips the reconstructed view-space Y and the project-to-screen /
-	// capture-sample rows so the march matches the G-buffer normals (same idea as
-	// ssao.frag's u_windowCoord.z). Inert at +1 on GL.
-	parms.windowCoord[2] = viewYSign;		// viewYSign hoisted above the #4a guard
-	// Hi-Z leap LOD for ssr.frag (u_localParam1.w); 0 = feature off -> exact full-res march
-	parms.localParam1[3] = (float)ssrHiZLod;
+	RB_RHI_SsrMarch( ctx, marchProg, doSsrHiZ, ssrHiZLod, parms );
 
-	rhi::ClearArgs clear;
-	memset( &clear, 0, sizeof( clear ) );
-	clear.color = true;		// rgba 0 = miss everywhere the march discards
+	rhi::RenderTargetHandle resultRT;
+	RB_RHI_SsrTemporal( ctx, parms, resultRT );
 
-	r->BeginTargetPass( rhiSsrRT, &clear );
-	// unit 0 = _currentRender; unit 1 = depth; units 2/3 = the G-buffer attachments.
-	// GL: the copy above left _currentRender bound on unit 0, units 2/3 raw-bind (tmu
-	// cache entries invalidated below). VK: record all four into rhiVkUnits so
-	// RB_RHI_DrawFullscreen carries them via DrawArgs.
-	if ( vkMode ) {
-		RB_RHI_BindRTImage( r, 0, globalImages->currentRenderImage->rhiHandle );
-	}
-	RB_RHI_BindUnit( 1, globalImages->currentDepthImage );
-	if ( vkMode ) {
-		RB_RHI_BindRTUnit( r, 2, rhiNormalResultRT );
-		RB_RHI_BindRTImage( r, 3, matImg );
-	} else {
-		rhi::gl3ActiveTexture( GL_TEXTURE0 + 2 );
-		qglBindTexture( GL_TEXTURE_2D, (GLuint)r->GetRenderTargetImage( rhiNormalResultRT ) );
-		rhi::gl3ActiveTexture( GL_TEXTURE0 + 3 );
-		qglBindTexture( GL_TEXTURE_2D, (GLuint)matImg );
-		rhi::gl3ActiveTexture( GL_TEXTURE0 );
-		backEnd.glState.currenttmu = 0;
-		backEnd.glState.tmu[2].current2DMap = -1;
-		backEnd.glState.tmu[3].current2DMap = -1;
-	}
-	// Hi-Z min-Z pyramid on unit 4 for the march's leap test. When off, bind _currentDepth
-	// as an unused dummy so the descriptor slot stays valid on VK (ssr.frag routes to the
-	// exact march via u_localParam1.w = 0 and never samples it). Mirrors the SSAO unit-2 idiom.
-	if ( doSsrHiZ ) {
-		RB_RHI_BindRTUnit( r, 4, rhiSsrDepthMinRT );
-	} else {
-		RB_RHI_BindUnit( 4, globalImages->currentDepthImage );
-	}
-	RB_RHI_DrawFullscreen( r, marchProg, parms, 0 );
-	r->EndPass();
+	rhi::RenderTargetHandle glossySrcRT;
+	float glossyMaxLod;
+	RB_RHI_SsrGlossyPyramid( ctx, resultRT, glossySrcRT, glossyMaxLod );
 
-	rhi::RenderTargetHandle resultRT = rhiSsrRT;
-
-	// ---- stage 2: temporal accumulation (docs/ssr.md; mirrors the SSAO history) ----
-	if ( r_ssrTemporal.GetBool() && RB_RHI_EnsureSsrHistory( r, ssrW, ssrH ) ) {
-		rhi::ShaderHandle tempProg = r->LoadShader( "ssr_temporal" );
-		if ( tempProg ) {
-			// reproject last frame's reflection by camera motion; the shared camera state
-			// (docs/fsr-temporal-pipeline.md A1) advances prev<-cur once per rendered frame
-			float reproj[16];
-			bool prevUsable;
-			const bool haveInv = RB_RHI_TemporalReproj( viewDef, reproj, &prevUsable );
-			const bool historyUsable = rhiSsrHistValid && prevUsable && haveInv;
-
-			const int writeIdx = rhiSsrHistIdx;
-			const int readIdx  = 1 - rhiSsrHistIdx;
-
-			rhi::RenderParams tempParms = parms;
-			if ( haveInv ) {
-				memcpy( tempParms.modelViewMatrix, reproj, sizeof( reproj ) );
-			}
-			tempParms.localParam0[2] = idMath::ClampFloat( 0.0f, 0.97f, r_ssrTemporalFeedback.GetFloat() );
-			tempParms.localParam0[3] = historyUsable ? 1.0f : 0.0f;
-			tempParms.localParam1[1] = 1.0f;		// history == march resolution: clip taps one texel apart
-			tempParms.localParam1[2] = tempParms.localParam1[3] = 0.0f;	// no sample-grid jitter to undo
-
-			// R1/A2 consumption: reproject the reflection history by the per-object velocity buffer
-			// when it exists (r_motionVectors, VK) so moving objects stop dragging a reflection
-			// ghost. Falls back to the camera-only matrix reproj (localParam1.x = 0).
-			rhi::ImageHandle velImg = ( rhiNormalVelThisView && rhiNormalReadyThisView )
-				? r->GetRenderTargetImage3( rhiNormalResultRT ) : 0;
-			tempParms.localParam1[0] = velImg ? 1.0f : 0.0f;
-
-			// unit 0 = current march (via DrawFullscreen), unit 1 = history read slot,
-			// unit 2 = depth, unit 3 = velocity (R1/A2)
-			r->BeginTargetPass( rhiSsrHistRT[writeIdx], NULL );
-			RB_RHI_BindUnit( 2, globalImages->currentDepthImage );
-			if ( vkMode ) {
-				// First frame after (re)alloc the read slot was never rendered, so its
-				// real layout is still UNDEFINED (the color target's tracker claims
-				// SHADER_READ_ONLY only after a write). The shader early-outs on
-				// historyUsable=0, but u_history is a statically-used sampler that VK
-				// validates regardless — bind the just-marched result (a written,
-				// SHADER_READ_ONLY target) until a real history slot exists.
-				rhi::RenderTargetHandle histRT = historyUsable ? rhiSsrHistRT[readIdx] : rhiSsrRT;
-				RB_RHI_BindRTUnit( r, 1, histRT );			// history read (VK rhiVkUnits[1])
-			} else {
-				rhi::gl3ActiveTexture( GL_TEXTURE0 + 1 );
-				qglBindTexture( GL_TEXTURE_2D, (GLuint)r->GetRenderTargetImage( rhiSsrHistRT[readIdx] ) );
-				rhi::gl3ActiveTexture( GL_TEXTURE0 );
-				backEnd.glState.currenttmu = 0;
-				backEnd.glState.tmu[1].current2DMap = -1;	// direct bind bypassed the tmu cache
-			}
-			// unit 3 = velocity MRT, or a dummy (u_velocity is a statically-used sampler VK validates)
-			if ( velImg ) { RB_RHI_BindRTImage( r, 3, velImg ); }
-			else          { RB_RHI_BindUnit( 3, globalImages->currentDepthImage ); }
-			RB_RHI_DrawFullscreen( r, tempProg, tempParms, r->GetRenderTargetImage( rhiSsrRT ) );
-			r->EndPass();
-
-			resultRT = rhiSsrHistRT[writeIdx];
-			rhiSsrHistIdx = readIdx;
-			RB_RHI_TemporalStageCur( viewDef );
-			rhiSsrHistValid  = true;
-		}
-	} else {
-		// temporal off (or history alloc failed): drop any stale history so a later
-		// re-enable starts clean instead of blending garbage
-		rhiSsrHistValid = false;
-	}
-
-	// ---- stage 2.5: glossy reflection pyramid (r_ssrGlossy, docs/ssr.md) ----
-	// Build a colour mip pyramid of the reflection result so the composite can read it at a
-	// roughness-proportional LOD (rough surfaces blur, sharp stay sharp). The sharp path is
-	// left exactly as before: glossySrcRT stays the single-level resultRT and glossyMaxLod 0
-	// tells ssr_composite.frag to sample level 0 with plain texture().
-	rhi::RenderTargetHandle glossySrcRT = resultRT;
-	float glossyMaxLod = 0.0f;
-	if ( r_ssrGlossy.GetBool() && RB_RHI_EnsureSsrColorMip( r, ssrW, ssrH ) ) {
-		rhi::ShaderHandle downProg = r->LoadShader( "ssr_colordown" );
-		if ( downProg && rhiSsrColorMipLevels >= 2 ) {
-			rhi::RenderParams cp;
-			memset( &cp, 0, sizeof( cp ) );
-			RB_RHI_IdentityMvp( cp.mvpMatrix );
-			// level 0: 1:1 copy of the reflection result into the pyramid base (mode 0).
-			// Level 0 uses BeginTargetPass (its framebuffer is the base colorFb) — NOT
-			// BeginTargetMipPass, which only creates per-level framebuffers for L>=1 and
-			// rejects level 0 (a no-op that would leave the base black). Mirrors the Hi-Z
-			// build, whose level-0 linearize also uses BeginTargetPass.
-			cp.localParam0[0] = 0.0f;	// single-level source -> level 0
-			cp.localParam0[1] = 0.0f;	// mode 0 = copy
-			r->BeginTargetPass( rhiSsrColorMipRT, NULL );
-			RB_RHI_DrawFullscreen( r, downProg, cp, r->GetRenderTargetImage( resultRT ) );
-			r->EndPass();
-			// levels 1..N: 2x2 box average of the previous level (mode 1). localParam0.x =
-			// source level (VK binds a single-level view -> 0; GL binds the whole texture).
-			const bool vkBackend = ( rhi::GetActiveBackendType() == rhi::BT_VULKAN );
-			for ( int L = 1; L < rhiSsrColorMipLevels; L++ ) {
-				rhi::RenderParams dp = cp;
-				dp.localParam0[0] = vkBackend ? 0.0f : (float)( L - 1 );
-				dp.localParam0[1] = 1.0f;	// mode 1 = downsample
-				rhi::ImageHandle src = r->GetRenderTargetMipImage( rhiSsrColorMipRT, L - 1 );
-				r->BeginTargetMipPass( rhiSsrColorMipRT, L, NULL );
-				RB_RHI_DrawFullscreen( r, downProg, dp, src );
-				r->EndPass();
-			}
-			if ( !vkMode ) {
-				backEnd.glState.tmu[0].current2DMap = -1;	// direct binds bypassed the tmu cache
-			}
-			glossySrcRT  = rhiSsrColorMipRT;
-			// max LOD the composite may reach at the roughness cutoff, scaled by r_ssrGlossyScale
-			glossyMaxLod = (float)( rhiSsrColorMipLevels - 1 )
-			             * idMath::ClampFloat( 0.0f, 1.0f, r_ssrGlossyScale.GetFloat() );
-		}
-	} else if ( rhiSsrColorMipRT && !r_ssrGlossy.GetBool() ) {
-		// toggled off: reclaim the pyramid so it isn't left resident (mirrors the Hi-Z reclaim)
-		r->DestroyRenderTarget( rhiSsrColorMipRT );
-		rhiSsrColorMipRT = 0;
-		rhiSsrColorMipW = rhiSsrColorMipH = rhiSsrColorMipLevels = 0;
-	}
-
-	// ---- stage 3: full-res additive composite over the lit scene (inside the #4a !rtWillRender guard) ----
-	rhi::RenderParams compParms;
-	memset( &compParms, 0, sizeof( compParms ) );
-	RB_RHI_IdentityMvp( compParms.mvpMatrix );
-	compParms.localParam0[0] = invP00;
-	compParms.localParam0[1] = invP11;
-	compParms.localParam0[2] = idMath::ClampFloat( 0.05f, 0.95f, r_ssrRoughnessFade.GetFloat() );	// roughness fade start
-	compParms.localParam0[3] = idMath::ClampFloat( 0.0f, 64.0f, r_ssrFireflyClamp.GetFloat() );	// reflected-radiance cap (fireflies)
-	compParms.localParam1[1] = r_ssrIntensity.GetFloat();
-	compParms.localParam1[2] = idMath::ClampFloat( 0.02f, 1.0f, r_ssrMaxRoughness.GetFloat() );
-	compParms.localParam1[3] = glossyMaxLod;	// r_ssrGlossy: >0 = sample the pyramid by roughness; 0 = sharp
-	// RR14 specular occlusion strength (localParam1.x): 0 when no AO ran this view so ssr_composite is a no-op
-	compParms.localParam1[0] = ( rhiSsaoAppliedThisView ? idMath::ClampFloat( 0.0f, 1.0f, r_specOcclusion.GetFloat() ) : 0.0f );
-	compParms.screenCorrection[0] = 1.0f / fullW;
-	compParms.screenCorrection[1] = 1.0f / fullH;
-	compParms.depthTexRecip[0] = 1.0f / uploadW;
-	rhi::FillDepthParms( compParms, backEnd.viewDef ? backEnd.viewDef->projectionMatrix : NULL );	// this view's depth -> view z pair (cinematics cram the near plane)
-	compParms.depthTexRecip[1] = 1.0f / uploadH;
-	compParms.windowCoord[2] = viewYSign;		// view-Y sign for the NdotV reconstruction (VK)
-
-	// EndPass restored the view scissor; keep the CPU cache in step, and cover the
-	// whole view in case the last surface left a crop before the target passes
-	r->SetScissor( tr.viewportOffset[0] + viewDef->viewport.x1,
-	               tr.viewportOffset[1] + viewDef->viewport.y1, fullW, fullH );
-	backEnd.currentScissor = viewDef->scissor;
-
-	// unit 0 = SSR result (via DrawFullscreen, a color target -> VK cancels the scene
-	// flip), unit 1 = depth, units 2/3 = G-buffer
-	RB_RHI_BindUnit( 1, globalImages->currentDepthImage );
-	if ( vkMode ) {
-		RB_RHI_BindRTUnit( r, 2, rhiNormalResultRT );
-		RB_RHI_BindRTImage( r, 3, matImg );
-	} else {
-		rhi::gl3ActiveTexture( GL_TEXTURE0 + 2 );
-		qglBindTexture( GL_TEXTURE_2D, (GLuint)r->GetRenderTargetImage( rhiNormalResultRT ) );
-		rhi::gl3ActiveTexture( GL_TEXTURE0 + 3 );
-		qglBindTexture( GL_TEXTURE_2D, (GLuint)matImg );
-		rhi::gl3ActiveTexture( GL_TEXTURE0 );
-		backEnd.glState.currenttmu = 0;
-		backEnd.glState.tmu[2].current2DMap = -1;
-		backEnd.glState.tmu[3].current2DMap = -1;
-	}
-	// RR14: AO buffer on unit 4 for specular occlusion. When AO ran this view bind it (roughness-aware
-	// dim in ssr_composite.frag); otherwise bind white so ao = 1 leaves the reflection unchanged.
-	if ( rhiSsaoAppliedThisView ) {
-		RB_RHI_BindRTUnit( r, 4, rhiSsaoResultRT );
-	} else {
-		RB_RHI_BindUnit( 4, globalImages->whiteImage );
-	}
-	RB_RHI_DrawFullscreen( r, compProg, compParms, r->GetRenderTargetImage( glossySrcRT ),
-	                       GLS_SRCBLEND_ONE | GLS_DSTBLEND_ONE );
+	RB_RHI_SsrComposite( ctx, compProg, glossySrcRT, glossyMaxLod );
 	}	// end #4a guard — entire SSR march chain + composite skipped when RT replaces it
 
 	// ---- RR2/RR6/RR7: RT reflections on monsters + world (docs/rtx-reflections.md) ----
@@ -7530,193 +7843,7 @@ void RB_RHI_ScreenSpaceReflections( rhi::RHI *r, const viewDef_t *viewDef ) {
 	// REPLACING the SSR composite above. Preconditions were front-loaded into rtWillRender, so tlasAddr /
 	// geoAddr / rtProg / copyProg / invView are ready.
 	if ( rtWillRender ) {
-		// item 6: the _currentRender snapshot #4a kept here (a safety net for downstream refraction /
-		// heat-haze, which sample _currentRender) is dropped — no pass in this function reads it under RT,
-		// and those materials re-capture _currentRender on demand. Saves the full-res blit. If a heat-haze /
-		// refraction surface ever reads a stale through-glass scene under RT, restore the CopyFramebuffer.
-		{
-			// RR6c per-frame sub-texel jitter for the temporal UPSCALE (Halton(2,3), in RT-target texels,
-			// scaled by r_rtReflJitter). Shifting the low-res sample grid each frame moves the fractional-
-			// upscale beat (the "striped" reflection at e.g. 3/4 res) to a different phase every frame, so the
-			// full-res history averages it out. Only meaningful WITH temporal accumulation, so zero when off.
-			const bool rtTemporal = r_rtReflTemporal.GetBool();
-			float jitterX = 0.0f, jitterY = 0.0f;
-			if ( rtTemporal ) {
-				const int   jidx   = ( tr.frameCount & 15 ) + 1;			// 16-frame Halton cycle (avoid index 0)
-				const float jscale = idMath::ClampFloat( 0.0f, 4.0f, r_rtReflJitter.GetFloat() );
-				jitterX = ( RB_RHI_Halton( jidx, 2 ) - 0.5f ) * jscale;		// ±0.5 texel at scale 1
-				jitterY = ( RB_RHI_Halton( jidx, 3 ) - 0.5f ) * jscale;
-			}
-
-			rhi::RenderParams rp;
-			memset( &rp, 0, sizeof( rp ) );
-			RB_RHI_IdentityMvp( rp.mvpMatrix );
-			memcpy( rp.modelViewMatrix, invView, sizeof( invView ) );	// u_modelViewMatrix = view->world
-			rp.localParam0[0] = invP00;
-			rp.localParam0[1] = invP11;
-			rp.localParam0[2] = idMath::ClampFloat( 0.05f, 0.95f, r_ssrRoughnessFade.GetFloat() );	// roughness fade start
-			rp.localParam1[1] = r_ssrIntensity.GetFloat();				// reflection strength (shared with SSR)
-			rp.localParam1[2] = idMath::ClampFloat( 0.02f, 1.0f, r_ssrMaxRoughness.GetFloat() );
-			// RR6c sample-grid jitter (windowCoord.xy, in RT-target texels): ssr_rt offsets its whole
-			// reconstruction by this, shifting the low-res grid so the fractional-upscale beat averages out
-			// across the full-res history (see ssr_rt.frag).
-			rp.windowCoord[0] = jitterX;
-			rp.windowCoord[1] = jitterY;
-			// RR6: the ssr_rt TRACE runs at the SSR march resolution (cheap ray-query; shares SSR's grain and
-			// scales with r_ssrResScale). RR6c then temporally upscales the result to full res, so the
-			// composite reads a full-res history — no bilinear upscale of the fractional-res buffer (the beat).
-			rp.screenCorrection[0] = 1.0f / ssrW;
-			rp.screenCorrection[1] = 1.0f / ssrH;
-			rp.depthTexRecip[0] = ( (float)fullW / ssrW ) / uploadW;
-			rhi::FillDepthParms( rp, backEnd.viewDef ? backEnd.viewDef->projectionMatrix : NULL );	// this view's depth -> view z pair (cinematics cram the near plane)
-			rp.depthTexRecip[1] = ( (float)fullH / ssrH ) / uploadH;
-			rp.windowCoord[2] = viewYSign;
-			// TLAS + geo-table device addresses, bit-cast into the float slots (floatBitsToUint in the shader)
-			memcpy( &rp.rtParms[0], &tlasAddr, sizeof( tlasAddr ) );		// rtParms.x/y = TLAS
-			memcpy( &rp.rtParms[2], &geoAddr,  sizeof( geoAddr ) );		// rtParms.z/w = geo table
-			// RR16: gather the scene's real lights into the ring buffer; ssr_rt loops them to light the hit
-			// (so an off-screen-reflected surface is lit correctly, not by a fixed key light). color = (light-
-			// buffer device addr lo/hi bit-cast, count, ambient); diffuseModifier = (RR16f emissive glow scale,
-			// light brightness scale, RR16c frustum gate, real-lights enable). The r_rtReflRealLights 0 key light
-			// is a fixed dir hardcoded in-shader.
-			unsigned long long rtLightAddr = 0;
-			const int rtNumLights = r_rtReflRealLights.GetBool() ? RB_RHI_GatherSceneLights( r, viewDef, &rtLightAddr ) : 0;
-			memcpy( &rp.color[0], &rtLightAddr, sizeof( rtLightAddr ) );	// color.xy = light-buffer device address
-			rp.color[2] = (float)rtNumLights;
-			rp.color[3] = 0.28f;										// ambient term
-			rp.diffuseModifier[0] = idMath::ClampFloat( 0.0f, 16.0f, r_rtReflEmissive.GetFloat() );	// RR16f: self-illumination glow scale
-			rp.diffuseModifier[1] = idMath::ClampFloat( 0.0f, 8.0f, r_rtReflLightScale.GetFloat() );	// RR16: real-light diffuse brightness scale
-			rp.diffuseModifier[2] = r_rtReflLightFrustum.GetBool() ? 1.0f : 0.0f;	// RR16c: confine each light to its projection frustum
-			rp.diffuseModifier[3] = ( rtNumLights > 0 ) ? 1.0f : 0.0f;	// real-lights enable (else the fixed key-light fallback)
-			rp.localParam1[3] = idMath::ClampFloat( 0.0f, 1.0f, r_rtReflBump.GetFloat() );	// RR10: bump-normal warp amount
-			rp.localParam1[0] = ( rhiSsaoAppliedThisView ? idMath::ClampFloat( 0.0f, 1.0f, r_specOcclusion.GetFloat() ) : 0.0f );	// RR14 specular occlusion strength (0 when no AO this view)
-
-			// RR12 lit-scene reuse RETIRED 2026-09-23: RT now shades every reflective pixel at the hit (real
-			// lights + per-pixel diffuse + emissive) with ONE consistent model, so there is no on-screen reuse
-			// to feed, no reuse<->shade seam, and no dependency on a sampleable scene buffer. localParam0.w /
-			// windowCoord.w (the old reuse-enable + reused-HDR firefly clamp) stay 0 from the memset; ssr_rt
-			// no longer reads them.
-
-			// ---- Pass A: trace + shade into the dedicated RT target (replace; cleared to 0 = no
-			// contribution). unit 0 is an unused-but-bound dummy (reuse retired): bind the normal G-buffer so
-			// the fixed VK_TEX_BINDINGS slot holds a valid image. 1 = depth, 2/3 = G-buffer, 4 = AO (RR14).
-			rhi::ClearArgs rtClear;
-			memset( &rtClear, 0, sizeof( rtClear ) );
-			rtClear.color = true;
-			r->GpuScopeBegin( "rtrefl.trace" );		// RT reflection ray trace + hit shading (ssrRes)
-			r->BeginTargetPass( rhiRtReflRT, &rtClear );
-			RB_RHI_BindUnit( 1, globalImages->currentDepthImage );
-			RB_RHI_BindRTUnit( r, 2, rhiNormalResultRT );
-			RB_RHI_BindRTImage( r, 3, matImg );
-			// RR14: AO buffer on unit 4 for specular occlusion (VK-only RT path; white dummy when no AO ran)
-			if ( rhiSsaoAppliedThisView ) {
-				RB_RHI_BindRTUnit( r, 4, rhiSsaoResultRT );
-			} else {
-				RB_RHI_BindUnit( 4, globalImages->whiteImage );
-			}
-			RB_RHI_DrawFullscreen( r, rtProg, rp, r->GetRenderTargetImage( rhiNormalResultRT ) );
-			r->EndPass();
-			r->GpuScopeEnd();
-
-			rhi::RenderTargetHandle rtResultRT = rhiRtReflRT;
-			int rtResW = ssrW, rtResH = ssrH;		// resolution of rtResultRT (ssrRes until the upscale runs)
-
-			// ---- Pass B: temporal accumulation + UPSCALE (r_rtReflTemporal) — the SAME ssr_temporal
-			// machinery as SSR stage 2, but the history is FULL res: the ssrRes trace (unit 0) is bilinear-
-			// upsampled into a reprojected full-res history, and the per-frame sample-grid jitter makes the
-			// accumulation both resolve the firefly grid AND average away the fractional-upscale beat.
-			if ( rtTemporal && RB_RHI_EnsureRtReflHistory( r, fullW, fullH ) ) {
-				rhi::ShaderHandle tempProg = r->LoadShader( "ssr_temporal" );
-				if ( tempProg ) {
-					// reproject last frame by camera motion; RB_RHI_TemporalReproj advances prev<-staged
-					// only for the first temporal consumer of a frame, so calling it after SSR/SSAO
-					// already did just rebuilds this frame's reproj against the same prev (correct).
-					float reproj[16];
-					bool prevUsable;
-					const bool haveInv = RB_RHI_TemporalReproj( viewDef, reproj, &prevUsable );
-					const bool historyUsable = rhiRtReflHistValid && prevUsable && haveInv;
-
-					const int writeIdx = rhiRtReflHistIdx;
-					const int readIdx  = 1 - rhiRtReflHistIdx;
-
-					rhi::RenderParams tempParms = rp;
-					if ( haveInv ) {
-						memcpy( tempParms.modelViewMatrix, reproj, sizeof( reproj ) );
-					}
-					// RR6c: this resolve + the history run at FULL res; the current RT buffer (unit 0) is the
-					// ssrRes trace, bilinear-upsampled by the sampler. The 3x3 clip neighbourhood + depth
-					// reprojection are therefore full-res (override rp's ssrRes screen/depth mapping).
-					tempParms.screenCorrection[0] = 1.0f / fullW;
-					tempParms.screenCorrection[1] = 1.0f / fullH;
-					tempParms.depthTexRecip[0] = 1.0f / uploadW;
-					rhi::FillDepthParms( tempParms, backEnd.viewDef ? backEnd.viewDef->projectionMatrix : NULL );	// this view's depth -> view z pair (cinematics cram the near plane)
-					tempParms.depthTexRecip[1] = 1.0f / uploadH;
-					tempParms.localParam0[2] = idMath::ClampFloat( 0.0f, 0.97f, r_ssrTemporalFeedback.GetFloat() );
-					tempParms.localParam0[3] = historyUsable ? 1.0f : 0.0f;
-					// reproject moving objects by the per-object velocity MRT when it exists (R1/A2), else
-					// fall back to the camera-only matrix (localParam1.x = 0).
-					rhi::ImageHandle velImg = ( rhiNormalVelThisView && rhiNormalReadyThisView )
-						? r->GetRenderTargetImage3( rhiNormalResultRT ) : 0;
-					tempParms.localParam1[0] = velImg ? 1.0f : 0.0f;
-					// The clip neighbourhood steps in TRACE texels (Quarter: 4 output px) so its taps are distinct
-					// traced samples, and the trace's sample-grid jitter is undone when reading it - without
-					// both, a Quarter trace never accumulates and shimmers.
-					tempParms.localParam1[1] = (float)fullW / (float)ssrW;
-					tempParms.localParam1[2] = jitterX / (float)ssrW;
-					tempParms.localParam1[3] = jitterY / (float)ssrH;
-
-					// unit 0 = current RT contribution (via DrawFullscreen), 1 = history read slot,
-					// 2 = depth, 3 = velocity
-					r->GpuScopeBegin( "rtrefl.temporal" );		// temporal accumulate + upscale to full res
-					r->BeginTargetPass( rhiRtReflHistRT[writeIdx], NULL );
-					RB_RHI_BindUnit( 2, globalImages->currentDepthImage );
-					// first frame after (re)alloc the read slot was never written (VK layout UNDEFINED);
-					// bind the just-rendered cur (a written, SHADER_READ_ONLY target) until a real
-					// history slot exists — the shader early-outs on historyUsable = 0 anyway.
-					rhi::RenderTargetHandle histRT = historyUsable ? rhiRtReflHistRT[readIdx] : rhiRtReflRT;
-					RB_RHI_BindRTUnit( r, 1, histRT );
-					if ( velImg ) { RB_RHI_BindRTImage( r, 3, velImg ); }
-					else          { RB_RHI_BindUnit( 3, globalImages->currentDepthImage ); }
-					RB_RHI_DrawFullscreen( r, tempProg, tempParms, r->GetRenderTargetImage( rhiRtReflRT ) );
-					r->EndPass();
-					r->GpuScopeEnd();
-
-					rtResultRT = rhiRtReflHistRT[writeIdx];
-					rtResW = fullW; rtResH = fullH;		// the result is now the full-res upscaled history
-					rhiRtReflHistIdx = readIdx;
-					RB_RHI_TemporalStageCur( viewDef );
-					rhiRtReflHistValid = true;
-				}
-			} else {
-				rhiRtReflHistValid = false;		// temporal off: drop stale history so a re-enable starts clean
-			}
-
-			// ---- Pass C: additive composite of the (smoothed) RT reflection onto the lit scene.
-			// EndPass left the target's scissor; restore the full view before drawing to the scene
-			// (mirrors the SSR composite scissor set above).
-			r->SetScissor( tr.viewportOffset[0] + viewDef->viewport.x1,
-			               tr.viewportOffset[1] + viewDef->viewport.y1, fullW, fullH );
-			backEnd.currentScissor = viewDef->scissor;
-			rhi::RenderParams cp;
-			memset( &cp, 0, sizeof( cp ) );
-			RB_RHI_IdentityMvp( cp.mvpMatrix );
-			// RR6b: box-blur strength + tap spacing; screenCorrection = the RESULT target's texel size so
-			// the blur offsets are in its texels (full-res after the RR6c upscale, ssrRes if temporal off).
-			// At r_rtReflBlur 0 the frag is a 1:1 additive passthrough.
-			cp.localParam0[0] = idMath::ClampFloat( 0.0f, 1.0f, r_rtReflBlur.GetFloat() );
-			cp.localParam0[1] = 1.0f;			// tap spacing (texels); ±2 taps -> a 5px spread at scale 1
-			// RR8: full-res material mask (roughness fade start + cutoff) so the low-res reflection can't
-			// halo past a reflective monster onto the non-reflective background (unit 1 = the G-buffer MRT).
-			cp.localParam0[2] = idMath::ClampFloat( 0.05f, 0.95f, r_ssrRoughnessFade.GetFloat() );
-			cp.localParam1[2] = idMath::ClampFloat( 0.02f, 1.0f, r_ssrMaxRoughness.GetFloat() );
-			cp.screenCorrection[0] = 1.0f / rtResW;
-			cp.screenCorrection[1] = 1.0f / rtResH;
-			RB_RHI_BindRTImage( r, 1, matImg );		// full-res roughness/metalness for the silhouette mask
-			r->GpuScopeBegin( "rtrefl.composite" );	// RR6b blur + additive composite onto the scene
-			RB_RHI_DrawFullscreen( r, copyProg, cp, r->GetRenderTargetImage( rtResultRT ),
-			                       GLS_SRCBLEND_ONE | GLS_DSTBLEND_ONE );
-			r->GpuScopeEnd();
-		}
+		RB_RHI_RtReflections( ctx, rtProg, copyProg, invView, tlasAddr, geoAddr );
 	}
 	RB_RHI_ForgetTexBinds();
 }
