@@ -6389,306 +6389,232 @@ static idList<float>		s_emDroppedLiveLum;
 static idList<unsigned int>	s_emDroppedLiveGen;
 static unsigned int			s_emLiveGen = 0;
 
-static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsigned long long *outAddr ) {
-	static int                 cacheCount = 0;
-	static unsigned long long  cacheAddr  = 0;
-	// (s_sceneFogCount is part of the cached state: it is only rewritten when the slot is refilled below)
-	if ( viewDef != NULL && s_sceneLightCacheView == viewDef && s_sceneLightCacheFrame == tr.frameCount && s_rtReflLightBuf != 0 ) {
-		*outAddr = cacheAddr;
-		return cacheCount;
+// A stock fog volume's row (RB_RHI_GatherSceneLights): not a light, but volumetric lighting thickens its haze inside it.
+// false = the volume has no hull or sits out of reach.
+static bool RB_RHI_SceneFogRow( const idRenderLightLocal *ld, const idVec3 &viewOrg, float REACH, RtReflLightGPU &F ) {
+	// A stock fog volume: not a light, but volumetric lighting thickens its haze inside it (the
+	// point-light scale rises toward r_volFogPointLightScale). Row = volume sphere + the box planes +
+	// color[0] = strength from the fog's own opaque distance (RB_FogPass: alpha <= 1 means the
+	// 500-unit default); thicker fog = stronger. Rows go AFTER the lights, outside the light count,
+	// so RT reflections never see them.
+	if ( ld->frustumTris == NULL || ld->frustumTris->bounds.IsCleared() ) { return false; }
+	const idVec3 fc = ld->frustumTris->bounds.GetCenter();
+	const float  fr = ld->frustumTris->bounds.GetRadius( fc );
+	if ( ( fc - viewOrg ).LengthSqr() > ( fr + REACH ) * ( fr + REACH ) ) { return false; }
+	float fogDist = ld->parms.shaderParms[ SHADERPARM_ALPHA ];
+	if ( fogDist <= 1.0f ) { fogDist = 500.0f; }
+		memset( &F, 0, sizeof( F ) );
+	F.cull[0] = fc[0]; F.cull[1] = fc[1]; F.cull[2] = fc[2]; F.cull[3] = fr;
+	F.color[0] = idMath::ClampFloat( 0.2f, 1.0f, 500.0f / fogDist );
+	F.flags = 16u;											// bit4 = fog volume
+	for ( int p = 0; p < 4; p++ ) {
+		F.proj[p][0] = ld->lightProject[p][0];	F.proj[p][1] = ld->lightProject[p][1];
+		F.proj[p][2] = ld->lightProject[p][2];	F.proj[p][3] = ld->lightProject[p][3];
 	}
-	s_sceneLightCacheView = viewDef;	s_sceneLightCacheFrame = tr.frameCount;	cacheCount = 0;	cacheAddr = 0;	s_sceneRowCount = 0;
-	s_sceneLightGen++;		// every lightDef's stamp is now stale until the fill below re-includes it
-	s_sceneFogCount = 0;
-	s_sceneEmitterCount = 0;
-	s_sceneAmbStart = s_sceneAmbCount = 0;
-	*outAddr = 0;
-	s_diSkipDark = s_diSkipSuppressed = s_diSkipCapacity = s_diSkipNoShader = s_diSkipFogBlendAmb = 0;
-	s_diSkipEmissiveDrop = 0;
-	if ( viewDef == NULL || viewDef->renderWorld == NULL ) {
-		return 0;
+	return true;
+}
+
+// What a placed light contributes to the scene-light buffer (RB_RHI_GatherSceneLights' per-light body): its row and sort
+// key as a LIGHT, its row as an AMBIENT fold row, or nothing - with the skip counters, the DI coverage stamps and the
+// emissive followers' live brightness updated on the way, exactly as the loop did inline.
+enum sceneRowKind_t { SCENE_ROW_SKIP, SCENE_ROW_LIGHT, SCENE_ROW_AMBIENT };
+struct sceneGatherCtx_t {
+	const viewDef_t *			viewDef;
+	const idRenderWorldLocal *	rw;
+	idVec3						viewOrg;
+	float						REACH;			// how far off-screen a light's reach may still touch the reflection
+	bool						solo;			// the Light Editor's solo
+	int							soloLight;
+	bool						foldAmbient;	// r_rtgiAmbient fold: ambient lights become bounce-only rows
+};
+static sceneRowKind_t RB_RHI_SceneLightRow( const sceneGatherCtx_t &ctx, int i, const idRenderLightLocal *ld, const viewLight_t *vl,
+                                            bool ambFull, RtReflLightGPU &L, float &sortKey ) {
+	const viewDef_t *viewDef = ctx.viewDef;
+	const idRenderWorldLocal *rw = ctx.rw;
+	const idVec3 &viewOrg = ctx.viewOrg;
+	const float REACH = ctx.REACH;
+	const bool solo = ctx.solo;
+	const int soloLight = ctx.soloLight;
+	const bool foldAmbient = ctx.foldAmbient;
+	const idMaterial *ls = ld->lightShader;
+	if ( ls == NULL ) { if ( vl != NULL ) { s_diSkipNoShader++; } return SCENE_ROW_SKIP; }
+	if ( solo && i != soloLight && !ls->IsBlendLight() ) { s_sceneLightCoveredGen[ i ] = s_sceneLightGen; return SCENE_ROW_SKIP; }	// soloing another light
+	// an ambient light is not a light the DI / reflections / haze can use (no position the fill comes from); the
+	// r_rtgiAmbient fold keeps it as a bounce-only AMBIENT row (collected apart, appended behind the emitters)
+	const bool ambRow = ls->IsAmbientLight() && foldAmbient;
+	if ( ls->IsBlendLight() || ( ls->IsAmbientLight() && !ambRow ) ) { if ( vl != NULL ) { s_diSkipFogBlendAmb++; } return SCENE_ROW_SKIP; }
+	if ( ambRow && ambFull ) { return SCENE_ROW_SKIP; }
+	// honour the per-view light gating exactly like the frontend (tr_light.cpp): the player's THIRD-person
+	// flashlight / muzzle flash is suppressed in their own view, first-person weapon lights exist only in
+	// it. Skipping this put the body-attached world flashlight (it bobs with the walk cycle) in the buffer.
+	const int viewID = viewDef->renderView.viewID;
+	if ( ld->parms.suppressLightInViewID && ld->parms.suppressLightInViewID == viewID ) { if ( vl != NULL ) { s_diSkipSuppressed++; } return SCENE_ROW_SKIP; }
+	if ( ld->parms.allowLightInViewID && ld->parms.allowLightInViewID != viewID ) { if ( vl != NULL ) { s_diSkipSuppressed++; } return SCENE_ROW_SKIP; }
+	const float lr = ld->parms.lightRadius.Length();
+	idVec3 cullOrg = ld->globalLightOrigin;					// bounding sphere of the real light volume (frustum
+	float  cullRad = ( lr > 1.0f ) ? lr : 320.0f;			// hull when built: a spot does not use lightRadius)
+	if ( ld->frustumTris != NULL && !ld->frustumTris->bounds.IsCleared() ) {
+		cullOrg = ld->frustumTris->bounds.GetCenter();
+		cullRad = ld->frustumTris->bounds.GetRadius( cullOrg );
 	}
-	if ( s_rtReflLightBuf == 0 ) {
-		// CPU-write-only, read by the ray passes every frame: in VRAM where the CPU can still write it (BU_STORAGE_UPLOAD;
-		// the user's A/B 2026-10-27: lightgrid.fill 1.46 -> 0.99 ms, the gather and boost a little faster)
-		s_rtReflLightBuf  = r->CreateBuffer( rhi::BU_STORAGE_UPLOAD,
-			RT_REFL_LIGHT_SLOTS * RT_SCENE_MAX_ROWS * (int)sizeof( RtReflLightGPU ), NULL );
-		s_rtReflLightAddr = ( s_rtReflLightBuf != 0 ) ? r->GetBufferDeviceAddress( s_rtReflLightBuf ) : 0;
-	}
-	if ( s_rtReflLightBuf == 0 || s_rtReflLightAddr == 0 ) {
-		return 0;
-	}
-	const idRenderWorldLocal *rw = viewDef->renderWorld;
-	const idVec3 viewOrg = viewDef->renderView.vieworg;
-	const float  REACH   = 2048.0f;					// how far off-screen a light's reach may still touch the reflection
-	static RtReflLightGPU lights[ RT_REFL_MAX_LIGHTS ];
-	static RtReflLightGPU sorted[ RT_SCENE_MAX_ROWS ];
-	static float          sortKey[ RT_REFL_MAX_LIGHTS ];
-	int n = 0;
-	// Lights that are ALSO in this view carry evaluated shader registers: use them so a flickering /
-	// strobing / fading light does the same in the reflection and in its volumetric shaft. Off-view lights
-	// have no registers this frame and fall back to their static colour below.
-	const int numDefs = rw->lightDefs.Num();
-	s_emLiveGen++;											// this call's stamp for the dropped lights' live brightness
-	if ( s_sceneLightCoveredGen.Num() < numDefs ) {
-		const int first = s_sceneLightCoveredGen.Num();
-		s_sceneLightCoveredGen.SetNum( numDefs );
-		for ( int k = first; k < numDefs; k++ ) {
-			s_sceneLightCoveredGen[ k ] = 0;		// 0 never equals a live generation
-		}
-	}
-	const viewLight_t **viewLightOf = (const viewLight_t **)_alloca( ( numDefs + 1 ) * sizeof( viewLight_t * ) );
-	memset( viewLightOf, 0, ( numDefs + 1 ) * sizeof( viewLight_t * ) );
-	for ( const viewLight_t *vl = viewDef->viewLights; vl != NULL; vl = vl->next ) {
-		if ( vl->lightDef != NULL && vl->lightDef->index >= 0 && vl->lightDef->index < numDefs ) {
-			viewLightOf[ vl->lightDef->index ] = vl;
-		}
-	}
-	static RtReflLightGPU fogs[ SCENE_FOG_MAX ];
-	int nFog = 0;
-	static RtReflLightGPU ambRows[ RT_AMB_MAX_ROWS ];
-	int nAmb = 0;
-	const int ambMode = r_rtgiAmbient.GetInteger();
-	const bool foldAmbient = r_rtgi.GetBool() && ( ambMode == 2 || ambMode == 3 );
-	// Two passes: the lights the frontend LIT in this view first - under the ReSTIR DI apply the buffer IS the lit set, and a
-	// 256-entry buffer filled in lightDef order from everything within reach was full before some on-screen lights got their
-	// turn ("not-in-buffer 6 of 18: capacity 7", 2026-10-12) - then the off-screen ones (reflections, haze) until it is full.
-	// the Light Editor's SOLO (RtEmissiveAuthor.cpp): only that placed light - or only that emitter row - lights the scene.
-	// Every other light is marked DI-covered and left out, like a deleted one, so the forward pass skips it too.
-	int soloLight = -1;
-	unsigned long long soloFixture = 0;
-	const bool solo = R_EmAuthSolo( rw, &soloLight, &soloFixture );
-	for ( int pass = 0; pass < 2; pass++ ) {
-	for ( int i = 0; i < rw->lightDefs.Num(); i++ ) {
-		if ( ( viewLightOf[ i ] != NULL ) != ( pass == 0 ) ) { continue; }	// pass 0 = in view, pass 1 = off screen
-		if ( n >= RT_REFL_MAX_LIGHTS - SCENE_FOG_MAX ) {
-			if ( viewLightOf[ i ] != NULL ) { s_diSkipCapacity++; }		// in view, no room left
-			continue;
-		}
-		const idRenderLightLocal *ld = rw->lightDefs[ i ];
-		if ( ld == NULL ) { continue; }
-		const idMaterial *ls = ld->lightShader;
-		if ( ls != NULL && ls->IsFogLight() ) {
-			// A stock fog volume: not a light, but volumetric lighting thickens its haze inside it (the
-			// point-light scale rises toward r_volFogPointLightScale). Row = volume sphere + the box planes +
-			// color[0] = strength from the fog's own opaque distance (RB_FogPass: alpha <= 1 means the
-			// 500-unit default); thicker fog = stronger. Rows go AFTER the lights, outside the light count,
-			// so RT reflections never see them.
-			if ( nFog >= SCENE_FOG_MAX || ld->frustumTris == NULL || ld->frustumTris->bounds.IsCleared() ) { continue; }
-			const idVec3 fc = ld->frustumTris->bounds.GetCenter();
-			const float  fr = ld->frustumTris->bounds.GetRadius( fc );
-			if ( ( fc - viewOrg ).LengthSqr() > ( fr + REACH ) * ( fr + REACH ) ) { continue; }
-			float fogDist = ld->parms.shaderParms[ SHADERPARM_ALPHA ];
-			if ( fogDist <= 1.0f ) { fogDist = 500.0f; }
-			RtReflLightGPU &F = fogs[ nFog++ ];
-			memset( &F, 0, sizeof( F ) );
-			F.cull[0] = fc[0]; F.cull[1] = fc[1]; F.cull[2] = fc[2]; F.cull[3] = fr;
-			F.color[0] = idMath::ClampFloat( 0.2f, 1.0f, 500.0f / fogDist );
-			F.flags = 16u;											// bit4 = fog volume
-			for ( int p = 0; p < 4; p++ ) {
-				F.proj[p][0] = ld->lightProject[p][0];	F.proj[p][1] = ld->lightProject[p][1];
-				F.proj[p][2] = ld->lightProject[p][2];	F.proj[p][3] = ld->lightProject[p][3];
-			}
-			continue;
-		}
-		if ( ls == NULL ) { if ( viewLightOf[ i ] != NULL ) { s_diSkipNoShader++; } continue; }
-		if ( solo && i != soloLight && !ls->IsBlendLight() ) { s_sceneLightCoveredGen[ i ] = s_sceneLightGen; continue; }	// soloing another light
-		// an ambient light is not a light the DI / reflections / haze can use (no position the fill comes from); the
-		// r_rtgiAmbient fold keeps it as a bounce-only AMBIENT row (collected apart, appended behind the emitters)
-		const bool ambRow = ls->IsAmbientLight() && foldAmbient;
-		if ( ls->IsBlendLight() || ( ls->IsAmbientLight() && !ambRow ) ) { if ( viewLightOf[ i ] != NULL ) { s_diSkipFogBlendAmb++; } continue; }
-		if ( ambRow && nAmb >= RT_AMB_MAX_ROWS ) { continue; }
-		// honour the per-view light gating exactly like the frontend (tr_light.cpp): the player's THIRD-person
-		// flashlight / muzzle flash is suppressed in their own view, first-person weapon lights exist only in
-		// it. Skipping this put the body-attached world flashlight (it bobs with the walk cycle) in the buffer.
-		const int viewID = viewDef->renderView.viewID;
-		if ( ld->parms.suppressLightInViewID && ld->parms.suppressLightInViewID == viewID ) { if ( viewLightOf[ i ] != NULL ) { s_diSkipSuppressed++; } continue; }
-		if ( ld->parms.allowLightInViewID && ld->parms.allowLightInViewID != viewID ) { if ( viewLightOf[ i ] != NULL ) { s_diSkipSuppressed++; } continue; }
-		const float lr = ld->parms.lightRadius.Length();
-		idVec3 cullOrg = ld->globalLightOrigin;					// bounding sphere of the real light volume (frustum
-		float  cullRad = ( lr > 1.0f ) ? lr : 320.0f;			// hull when built: a spot does not use lightRadius)
-		if ( ld->frustumTris != NULL && !ld->frustumTris->bounds.IsCleared() ) {
-			cullOrg = ld->frustumTris->bounds.GetCenter();
-			cullRad = ld->frustumTris->bounds.GetRadius( cullOrg );
-		}
-		const float reach = cullRad + REACH;					// the light's own reach can bring it into play
-		const viewLight_t *vl = viewLightOf[ i ];				// non-NULL: the frontend lit this light in this view
+	const float reach = cullRad + REACH;					// the light's own reach can bring it into play
 		// A light the frontend lists as LIT in this view (it has interactions on screen) always enters the buffer: under the
-		// ReSTIR DI apply the buffer IS the lit set, and a far light dropped here fell back to the forward path with its ray
-		// shadows and blur - "not-in-buffer 10 of 21" down a long sight line (2026-10-12). The reach cull is for OFF-SCREEN
-		// lights only (reflections, volumetric haze), where a far one truly cannot matter.
-		if ( vl == NULL && ( cullOrg - viewOrg ).LengthSqr() > reach * reach ) { continue; }	// off screen and too far to matter
-		idVec3 col;
-		const float *cregs = ( vl != NULL && vl->shaderRegisters != NULL ) ? vl->shaderRegisters : ls->ConstantRegisters();
-		const int SCENE_LIGHT_MAX_REGS = 4096;		// == MAX_EXPRESSION_REGISTERS (ui/Window.h), not visible here
-		if ( cregs == NULL && ls->GetNumRegisters() <= SCENE_LIGHT_MAX_REGS ) {
-			// Not in the view's light list and not constant: evaluate the light shader here. "Not in the list"
-			// does NOT mean off-screen - the frontend also DROPS a light whose stages evaluate to black
-			// (tr_light.cpp), which is exactly a blinking light's off phase; falling back to its static
-			// colour then lit the haze at full strength while the light was off.
-			static float scratchRegs[ SCENE_LIGHT_MAX_REGS ];
-			ls->EvaluateRegisters( scratchRegs, ld->parms.shaderParms, viewDef, ld->parms.referenceSound );
-			cregs = scratchRegs;
+	// ReSTIR DI apply the buffer IS the lit set, and a far light dropped here fell back to the forward path with its ray
+	// shadows and blur - "not-in-buffer 10 of 21" down a long sight line (2026-10-12). The reach cull is for OFF-SCREEN
+	// lights only (reflections, volumetric haze), where a far one truly cannot matter.
+	if ( vl == NULL && ( cullOrg - viewOrg ).LengthSqr() > reach * reach ) { return SCENE_ROW_SKIP; }	// off screen and too far to matter
+	idVec3 col;
+	const float *cregs = ( vl != NULL && vl->shaderRegisters != NULL ) ? vl->shaderRegisters : ls->ConstantRegisters();
+	const int SCENE_LIGHT_MAX_REGS = 4096;		// == MAX_EXPRESSION_REGISTERS (ui/Window.h), not visible here
+	if ( cregs == NULL && ls->GetNumRegisters() <= SCENE_LIGHT_MAX_REGS ) {
+		// Not in the view's light list and not constant: evaluate the light shader here. "Not in the list"
+		// does NOT mean off-screen - the frontend also DROPS a light whose stages evaluate to black
+		// (tr_light.cpp), which is exactly a blinking light's off phase; falling back to its static
+		// colour then lit the haze at full strength while the light was off.
+		static float scratchRegs[ SCENE_LIGHT_MAX_REGS ];
+		ls->EvaluateRegisters( scratchRegs, ld->parms.shaderParms, viewDef, ld->parms.referenceSound );
+		cregs = scratchRegs;
+	}
+	if ( cregs != NULL ) {						// evaluated (in-view) or constant registers: sum the live stage colours
+		col.Zero();
+		for ( int s = 0; s < ls->GetNumStages(); s++ ) {
+			const shaderStage_t *st = ls->GetStage( s );
+			if ( st == NULL || cregs[ st->conditionRegister ] == 0.0f ) { continue; }
+			col[0] += Max( cregs[ st->color.registers[0] ], 0.0f );
+			col[1] += Max( cregs[ st->color.registers[1] ], 0.0f );
+			col[2] += Max( cregs[ st->color.registers[2] ], 0.0f );
 		}
-		if ( cregs != NULL ) {						// evaluated (in-view) or constant registers: sum the live stage colours
-			col.Zero();
-			for ( int s = 0; s < ls->GetNumStages(); s++ ) {
-				const shaderStage_t *st = ls->GetStage( s );
-				if ( st == NULL || cregs[ st->conditionRegister ] == 0.0f ) { continue; }
-				col[0] += Max( cregs[ st->color.registers[0] ], 0.0f );
-				col[1] += Max( cregs[ st->color.registers[1] ], 0.0f );
-				col[2] += Max( cregs[ st->color.registers[2] ], 0.0f );
-			}
-		} else {									// parametric (the usual case): the light's base RGB shader parms
-			col.Set( ld->parms.shaderParms[SHADERPARM_RED], ld->parms.shaderParms[SHADERPARM_GREEN], ld->parms.shaderParms[SHADERPARM_BLUE] );
+	} else {									// parametric (the usual case): the light's base RGB shader parms
+		col.Set( ld->parms.shaderParms[SHADERPARM_RED], ld->parms.shaderParms[SHADERPARM_GREEN], ld->parms.shaderParms[SHADERPARM_BLUE] );
+	}
+	// emissive mode: a light the map's authored setup DELETES (emissive/<map>.cfg, RtEmissiveAuthor.cpp - no heuristics).
+	// Every evaluated light's live brightness is noted before the dark test (an OFF phase must reach a follower as 0):
+	// an authored emitter may follow any of them, deleted or kept (the bounce-only rows of normal mode too)
+	const bool emDropped = R_EmAuthLightDeleted( rw, i ) && !( solo && i == soloLight );	// a soloed light shines even if deleted
+	if ( r_rtEmissiveLighting.GetBool() || r_rtEmissiveBounce.GetBool() ) {
+		if ( s_emDroppedLiveLum.Num() < rw->lightDefs.Num() ) {
+			const int was = s_emDroppedLiveLum.Num();
+			s_emDroppedLiveLum.SetNum( rw->lightDefs.Num(), false );
+			s_emDroppedLiveGen.SetNum( rw->lightDefs.Num(), false );
+			for ( int k = was; k < s_emDroppedLiveLum.Num(); k++ ) { s_emDroppedLiveLum[k] = 0.0f; s_emDroppedLiveGen[k] = 0u; }
 		}
-		// emissive mode: a light the map's authored setup DELETES (emissive/<map>.cfg, RtEmissiveAuthor.cpp - no heuristics).
-		// Every evaluated light's live brightness is noted before the dark test (an OFF phase must reach a follower as 0):
-		// an authored emitter may follow any of them, deleted or kept (the bounce-only rows of normal mode too)
-		const bool emDropped = R_EmAuthLightDeleted( rw, i ) && !( solo && i == soloLight );	// a soloed light shines even if deleted
-		if ( r_rtEmissiveLighting.GetBool() || r_rtEmissiveBounce.GetBool() ) {
-			if ( s_emDroppedLiveLum.Num() < rw->lightDefs.Num() ) {
-				const int was = s_emDroppedLiveLum.Num();
-				s_emDroppedLiveLum.SetNum( rw->lightDefs.Num(), false );
-				s_emDroppedLiveGen.SetNum( rw->lightDefs.Num(), false );
-				for ( int k = was; k < s_emDroppedLiveLum.Num(); k++ ) { s_emDroppedLiveLum[k] = 0.0f; s_emDroppedLiveGen[k] = 0u; }
-			}
-			s_emDroppedLiveLum[ i ] = col[0] * 0.2126f + col[1] * 0.7152f + col[2] * 0.0722f;
-			s_emDroppedLiveGen[ i ] = s_emLiveGen;
-		}
-		if ( col[0] < 0.001f && col[1] < 0.001f && col[2] < 0.001f ) { if ( vl != NULL ) { s_diSkipDark++; } continue; }	// dark / off (the frontend's own threshold)
-		// order: projected/parallel (the authored feature lights) first, then nearest first - consumers that
-		// keep only a short candidate list per ray (volumetrics) must not lose a spot to a crowd of fill lights
+		s_emDroppedLiveLum[ i ] = col[0] * 0.2126f + col[1] * 0.7152f + col[2] * 0.0722f;
+		s_emDroppedLiveGen[ i ] = s_emLiveGen;
+	}
+	if ( col[0] < 0.001f && col[1] < 0.001f && col[2] < 0.001f ) { if ( vl != NULL ) { s_diSkipDark++; } return SCENE_ROW_SKIP; }	// dark / off (the frontend's own threshold)
+	// order: projected/parallel (the authored feature lights) first, then nearest first - consumers that
+	// keep only a short candidate list per ray (volumetrics) must not lose a spot to a crowd of fill lights
+	if ( !ambRow ) {
+		sortKey = ( ( ld->parms.pointLight && !ld->parms.parallel ) ? 1.0e9f : 0.0f )
+		             + Max( ( cullOrg - viewOrg ).Length() - cullRad, 0.0f );
+	}
+	// R6: only the first-person weapon lights (flashlight / muzzle flash) stay forward - the R1 gradient confidence
+	// now resets history where any other light moves / switches / appears, so those ride DI + the gradient instead of
+	// flipping paths. DUDE's own fill lights (emissive screens, item glow) are never forced forward. 0 = none (all DI).
+	const bool diFast = r_rtReStirDIDynamicForward.GetBool() && !ld->dudeFillLight
+		&& ( ld->parms.allowLightInViewID != 0 );
+	// E5 (docs/rtx-experimental-lighting.md): emissive mode DROPS a fixtured placed light - its surface is the light now.
+	// Marked DI-covered so the forward path does not draw it either; it leaves every consumer of this buffer (DI, the
+	// bounce, volumetrics, reflections). Ambience washes, suns, weapon lights and lights born after the build stay.
+	if ( emDropped ) {
+		s_sceneLightCoveredGen[ i ] = s_sceneLightGen;
+		s_diSkipEmissiveDrop++;
+		return SCENE_ROW_SKIP;
+	}
 		if ( !ambRow ) {
-			sortKey[ n ] = ( ( ld->parms.pointLight && !ld->parms.parallel ) ? 1.0e9f : 0.0f )
-			             + Max( ( cullOrg - viewOrg ).Length() - cullRad, 0.0f );
+		s_sceneLightCoveredGen[ i ] = diFast ? 0u : s_sceneLightGen;	// Stage D membership: DI covers this lightDef in this view (a weapon light stays forward)
+	}
+	L.cull[0] = cullOrg[0]; L.cull[1] = cullOrg[1]; L.cull[2] = cullOrg[2]; L.cull[3] = cullRad;
+	L.pos[0] = ld->globalLightOrigin[0];
+	L.pos[1] = ld->globalLightOrigin[1];
+	L.pos[2] = ld->globalLightOrigin[2];
+	L.radius = ( lr > 1.0f ) ? lr : 320.0f;					// a sane reach for degenerate/zero radii
+	L.color[0] = col[0]; L.color[1] = col[1]; L.color[2] = col[2];
+	L.flags = ( ld->parms.parallel ? 1u : 0u )				// bit0 = parallel/sun (no distance falloff)
+	        | ( ld->parms.pointLight ? 0u : 2u )			// bit1 = projected (spot) light: falloff runs along the frustum axis
+	        | ( ( ld->parms.noShadows || !ls->LightCastsShadows() ) ? 4u : 0u )	// bit2 = casts no shadows in stock (the entity's
+	                                                                        // noshadows OR a light material that casts none, as the forward
+	                                                                        // path's lightMayShadow): DI / volumetrics skip its visibility ray
+	        | ( ld->parms.allowLightInViewID ? 8u : 0u )	// bit3 = first-person weapon light (flashlight, muzzle flash)
+	        | ( diFast ? 32u : 0u );						// bit5 = fast-changing: ReSTIR DI skips it, the forward path lights it
+	if ( ambRow ) {
+		L.flags = ( L.flags & 3u ) | 4u | 128u;	// parallel / projected kept; no shadows (vanilla's never cast any); BOUNCEONLY without EMISSIVE = ambient row; no haze
+	} else {
+		// bits 8..15 = volumetric haze scale (0..255). A HUGE light (a cave-wide "sky glow", an outdoor
+		// fill) is ambience, not a shaft: integrated over its whole volume it washes the view in its own
+		// colour. Its haze fades with size beyond r_volLargeLightRadius; room-scale lights stay at 1.
+		const float ref = r_volLargeLightRadius.GetFloat();
+		float vs = ( ref > 0.0f && cullRad > ref ) ? ( ref / cullRad ) : 1.0f;
+		vs *= vs;
+		L.flags |= ( (unsigned int)idMath::ClampInt( 0, 255, (int)( vs * 255.0f + 0.5f ) ) ) << 8;
+	}
+	// bits 16..31 = the hybrid shadow blur's per-light blur scale (world units) as a half float, for the ReSTIR DI
+	// visibility ray's soft grate coverage (restir_di_shade.glsl traceVisibility): the very number
+	// RB_RHI_RtShadowBlurLight derives for this light, so a grate's shadow softens identically on both tiers.
+	// 0 (hard texels) while r_rtShadowBlur is off. (The retired reservoir's stable lightDef id lived here before.)
+	if ( !ambRow && r_rtShadowBlur.GetBool() && r_rtShadowBlurIntensity.GetFloat() > 0.0f ) {
+		const float bs = RB_RHI_RtShadowBlurLightRadius( ld->parms, ld->globalLightOrigin, viewOrg );
+		L.flags |= RB_RHI_FloatToHalfBits( idMath::ClampFloat( 0.0f, 65000.0f, bs ) ) << 16;
+	}
+	for ( int p = 0; p < 4; p++ ) {							// RR16c: global-space S/T/Q/falloff planes
+		L.proj[p][0] = ld->lightProject[p][0];
+		L.proj[p][1] = ld->lightProject[p][1];
+		L.proj[p][2] = ld->lightProject[p][2];
+		L.proj[p][3] = ld->lightProject[p][3];
+	}
+	// The light's TEXTURES (r_rtLightTextures): the projection cookie of its first live stage + its falloff
+	// ramp, as bindless slots, with the stage's texture matrix (a scrolling / rotating cookie) baked into
+	// the S/T planes exactly as the forward draw does (tr_render.cpp). A multi-stage light (rare) sums all
+	// its stage colours above but carries the first live stage's cookie - the other stages' shapes are
+	// approximated by it. 0 = untextured -> the consumer's analytic frustum attenuation.
+	L.projTex = L.falloffTex = L.pad0 = L.pad1 = 0;
+	L.pad0 = ambRow ? 0u : (unsigned int)i + 1u;	// R1: lightDef index + 1 (the table key; 0 = not a DI light: fog / ambient rows)
+	L.pad1 = ambRow ? 0u : ld->dudeSerial;		// R1: creation serial - the lightDef slot is reused on free, the serial never is
+	if ( r_rtLightTextures.GetBool() ) {
+		const shaderStage_t *liveStage = NULL;
+		for ( int s = 0; s < ls->GetNumStages(); s++ ) {
+			const shaderStage_t *st = ls->GetStage( s );
+			if ( st == NULL || ( cregs != NULL && cregs[ st->conditionRegister ] == 0.0f ) ) { continue; }
+			liveStage = st;
+			break;
 		}
-		// R6: only the first-person weapon lights (flashlight / muzzle flash) stay forward - the R1 gradient confidence
-		// now resets history where any other light moves / switches / appears, so those ride DI + the gradient instead of
-		// flipping paths. DUDE's own fill lights (emissive screens, item glow) are never forced forward. 0 = none (all DI).
-		const bool diFast = r_rtReStirDIDynamicForward.GetBool() && !ld->dudeFillLight
-			&& ( ld->parms.allowLightInViewID != 0 );
-		// E5 (docs/rtx-experimental-lighting.md): emissive mode DROPS a fixtured placed light - its surface is the light now.
-		// Marked DI-covered so the forward path does not draw it either; it leaves every consumer of this buffer (DI, the
-		// bounce, volumetrics, reflections). Ambience washes, suns, weapon lights and lights born after the build stay.
-		if ( emDropped ) {
-			s_sceneLightCoveredGen[ i ] = s_sceneLightGen;
-			s_diSkipEmissiveDrop++;
-			continue;
-		}
-		RtReflLightGPU &L = ambRow ? ambRows[ nAmb++ ] : lights[ n++ ];
-		if ( !ambRow ) {
-			s_sceneLightCoveredGen[ i ] = diFast ? 0u : s_sceneLightGen;	// Stage D membership: DI covers this lightDef in this view (a weapon light stays forward)
-		}
-		L.cull[0] = cullOrg[0]; L.cull[1] = cullOrg[1]; L.cull[2] = cullOrg[2]; L.cull[3] = cullRad;
-		L.pos[0] = ld->globalLightOrigin[0];
-		L.pos[1] = ld->globalLightOrigin[1];
-		L.pos[2] = ld->globalLightOrigin[2];
-		L.radius = ( lr > 1.0f ) ? lr : 320.0f;					// a sane reach for degenerate/zero radii
-		L.color[0] = col[0]; L.color[1] = col[1]; L.color[2] = col[2];
-		L.flags = ( ld->parms.parallel ? 1u : 0u )				// bit0 = parallel/sun (no distance falloff)
-		        | ( ld->parms.pointLight ? 0u : 2u )			// bit1 = projected (spot) light: falloff runs along the frustum axis
-		        | ( ( ld->parms.noShadows || !ls->LightCastsShadows() ) ? 4u : 0u )	// bit2 = casts no shadows in stock (the entity's
-		                                                                        // noshadows OR a light material that casts none, as the forward
-		                                                                        // path's lightMayShadow): DI / volumetrics skip its visibility ray
-		        | ( ld->parms.allowLightInViewID ? 8u : 0u )	// bit3 = first-person weapon light (flashlight, muzzle flash)
-		        | ( diFast ? 32u : 0u );						// bit5 = fast-changing: ReSTIR DI skips it, the forward path lights it
-		if ( ambRow ) {
-			L.flags = ( L.flags & 3u ) | 4u | 128u;	// parallel / projected kept; no shadows (vanilla's never cast any); BOUNCEONLY without EMISSIVE = ambient row; no haze
-		} else {
-			// bits 8..15 = volumetric haze scale (0..255). A HUGE light (a cave-wide "sky glow", an outdoor
-			// fill) is ambience, not a shaft: integrated over its whole volume it washes the view in its own
-			// colour. Its haze fades with size beyond r_volLargeLightRadius; room-scale lights stay at 1.
-			const float ref = r_volLargeLightRadius.GetFloat();
-			float vs = ( ref > 0.0f && cullRad > ref ) ? ( ref / cullRad ) : 1.0f;
-			vs *= vs;
-			L.flags |= ( (unsigned int)idMath::ClampInt( 0, 255, (int)( vs * 255.0f + 0.5f ) ) ) << 8;
-		}
-		// bits 16..31 = the hybrid shadow blur's per-light blur scale (world units) as a half float, for the ReSTIR DI
-		// visibility ray's soft grate coverage (restir_di_shade.glsl traceVisibility): the very number
-		// RB_RHI_RtShadowBlurLight derives for this light, so a grate's shadow softens identically on both tiers.
-		// 0 (hard texels) while r_rtShadowBlur is off. (The retired reservoir's stable lightDef id lived here before.)
-		if ( !ambRow && r_rtShadowBlur.GetBool() && r_rtShadowBlurIntensity.GetFloat() > 0.0f ) {
-			const float bs = RB_RHI_RtShadowBlurLightRadius( ld->parms, ld->globalLightOrigin, viewOrg );
-			L.flags |= RB_RHI_FloatToHalfBits( idMath::ClampFloat( 0.0f, 65000.0f, bs ) ) << 16;
-		}
-		for ( int p = 0; p < 4; p++ ) {							// RR16c: global-space S/T/Q/falloff planes
-			L.proj[p][0] = ld->lightProject[p][0];
-			L.proj[p][1] = ld->lightProject[p][1];
-			L.proj[p][2] = ld->lightProject[p][2];
-			L.proj[p][3] = ld->lightProject[p][3];
-		}
-		// The light's TEXTURES (r_rtLightTextures): the projection cookie of its first live stage + its falloff
-		// ramp, as bindless slots, with the stage's texture matrix (a scrolling / rotating cookie) baked into
-		// the S/T planes exactly as the forward draw does (tr_render.cpp). A multi-stage light (rare) sums all
-		// its stage colours above but carries the first live stage's cookie - the other stages' shapes are
-		// approximated by it. 0 = untextured -> the consumer's analytic frustum attenuation.
-		L.projTex = L.falloffTex = L.pad0 = L.pad1 = 0;
-		L.pad0 = ambRow ? 0u : (unsigned int)i + 1u;	// R1: lightDef index + 1 (the table key; 0 = not a DI light: fog / ambient rows)
-		L.pad1 = ambRow ? 0u : ld->dudeSerial;		// R1: creation serial - the lightDef slot is reused on free, the serial never is
-		if ( r_rtLightTextures.GetBool() ) {
-			const shaderStage_t *liveStage = NULL;
-			for ( int s = 0; s < ls->GetNumStages(); s++ ) {
-				const shaderStage_t *st = ls->GetStage( s );
-				if ( st == NULL || ( cregs != NULL && cregs[ st->conditionRegister ] == 0.0f ) ) { continue; }
-				liveStage = st;
-				break;
-			}
-			// only a plain 2D texture can ride the sampler2D bindless array: a cube map or a video (cinematic)
-			// stage has no written slot there (RB_RHI_RtShadowBlurLight applies the same filter), so such a
-			// light keeps the analytic attenuation instead of sampling an unwritten descriptor
-			if ( liveStage != NULL && liveStage->texture.image != NULL && liveStage->texture.image->type == TT_2D
-					&& liveStage->texture.cinematic == NULL ) {
-				L.projTex = RB_RHI_LightCookieWord( liveStage->texture.image );	// slot + 1 | the cookie's size (rt_light_tex.glsl)
-				// Bake the stage's texture matrix ONLY into a zero-clamped cookie. The consumer (rt_light_tex.glsl)
-				// treats s/t outside [0,1] as black - exact for a CLAMP_TO_ZERO cookie, where a scroll/rotate really
-				// moves its black border - but a REPEATING cookie (lights/cloudscroll*: no zeroClamp, "translate
-				// time * .03") tiles forever: baked, its time-growing offset pushed the WHOLE box outside [0,1] after
-				// ~30 s and the light went dark everywhere under DI / GI bounce / reflections / haze (hell1's red
-				// cave wash, 2026-10-22). Unbaked, s/t stay the light box's own [0,1] (an exact box clip) and the
-				// cookie lights its whole volume; the trade-off is a static pattern (no spare room in the 128 B row
-				// to carry the offset separately).
-				const textureRepeat_t cookieWrap = liveStage->texture.image->repeat;
-				const bool cookieZeroClamped = cookieWrap == TR_CLAMP_TO_ZERO || cookieWrap == TR_CLAMP_TO_ZERO_ALPHA
-					|| cookieWrap == TR_CLAMP_TO_BORDER;
-				if ( L.projTex != 0 && liveStage->texture.hasMatrix && cregs != NULL && cookieZeroClamped ) {
-					float texMat[16];
-					RB_GetShaderTextureMatrix( cregs, &liveStage->texture, texMat );
-					RB_RHI_BakeLightTextureMatrix( L.proj, texMat );
-				}
-			}
-			if ( ld->falloffImage != NULL && ld->falloffImage->type == TT_2D ) {
-				L.falloffTex = RB_RHI_LightImageIndex( ld->falloffImage );
+		// only a plain 2D texture can ride the sampler2D bindless array: a cube map or a video (cinematic)
+		// stage has no written slot there (RB_RHI_RtShadowBlurLight applies the same filter), so such a
+		// light keeps the analytic attenuation instead of sampling an unwritten descriptor
+		if ( liveStage != NULL && liveStage->texture.image != NULL && liveStage->texture.image->type == TT_2D
+				&& liveStage->texture.cinematic == NULL ) {
+			L.projTex = RB_RHI_LightCookieWord( liveStage->texture.image );	// slot + 1 | the cookie's size (rt_light_tex.glsl)
+			// Bake the stage's texture matrix ONLY into a zero-clamped cookie. The consumer (rt_light_tex.glsl)
+			// treats s/t outside [0,1] as black - exact for a CLAMP_TO_ZERO cookie, where a scroll/rotate really
+			// moves its black border - but a REPEATING cookie (lights/cloudscroll*: no zeroClamp, "translate
+			// time * .03") tiles forever: baked, its time-growing offset pushed the WHOLE box outside [0,1] after
+			// ~30 s and the light went dark everywhere under DI / GI bounce / reflections / haze (hell1's red
+			// cave wash, 2026-10-22). Unbaked, s/t stay the light box's own [0,1] (an exact box clip) and the
+			// cookie lights its whole volume; the trade-off is a static pattern (no spare room in the 128 B row
+			// to carry the offset separately).
+			const textureRepeat_t cookieWrap = liveStage->texture.image->repeat;
+			const bool cookieZeroClamped = cookieWrap == TR_CLAMP_TO_ZERO || cookieWrap == TR_CLAMP_TO_ZERO_ALPHA
+				|| cookieWrap == TR_CLAMP_TO_BORDER;
+			if ( L.projTex != 0 && liveStage->texture.hasMatrix && cregs != NULL && cookieZeroClamped ) {
+				float texMat[16];
+				RB_GetShaderTextureMatrix( cregs, &liveStage->texture, texMat );
+				RB_RHI_BakeLightTextureMatrix( L.proj, texMat );
 			}
 		}
+		if ( ld->falloffImage != NULL && ld->falloffImage->type == TT_2D ) {
+			L.falloffTex = RB_RHI_LightImageIndex( ld->falloffImage );
+		}
 	}
-	}
-	int order[ RT_REFL_MAX_LIGHTS ];
-	for ( int i = 0; i < n; i++ ) {					// insertion sort of indices by key (n <= 256, mostly a handful)
-		int j = i;
-		while ( j > 0 && sortKey[ order[ j - 1 ] ] > sortKey[ i ] ) { order[ j ] = order[ j - 1 ]; j--; }
-		order[ j ] = i;
-	}
-	for ( int i = 0; i < n; i++ ) { sorted[ i ] = lights[ order[ i ] ]; }
-	for ( int i = 0; i < nFog; i++ ) { sorted[ n + i ] = fogs[ i ]; }		// fog volumes ride behind the lights
-	s_sceneFogCount = nFog;
-	// E2 v3: the EMITTER rows, behind the fog rows (the fog consumers index [n, n + nFog) and never see them; DI, the
-	// grid fill and the bounce iterate every row and skip the fog rows by flag). One row per emissive surface run
-	// (tr_main.cpp R_RtEmissiveRows): a DUDE_LIGHT_EMISSIVE light whose "shade" draws a triangle of its run by flux
-	// and a point on it by solid angle (rt_emissive.glsl rtEmissiveShadeRow). radius = the REACH: the authored radius of
-	// the placed light the emitter replaced (E5 census) x r_rtEmissiveReach, else r_rtEmissiveReachDefault - the grid's
-	// importance (lum x radius^2 / d^2) and the shade's reach boost both read it. colour = the row's irradiance proxy at
-	// distance radius (mean radiance x intensity x area / radius^2), so the grid ranks it against the placed lights by
-	// what it actually delivers. The projection planes (unused by an emitter) carry: projS.w = intensity, projT.xy = the
-	// table's device address, projQ.x/y = first triangle / count (bits), projQ.z = the reach-boost knee (0 = off).
-	// pad0 = 0: not a lightDef (the gradient pass skips emissive rows outright); pad1 = row index + 1 (debugging).
-	// cull.xyz = the row's CENTROID (pos carries its cone axis since 2026-11-03): the light direction and the visibility ray aim at the fixture, the receiver cosine is per area
-	// sample (rt_emissive.glsl). The paired placed light lends only its reach and power (2026-10-29: aiming at its authored
-	// origin painted its hot spot on the wall behind it and blacked the emitter out wherever that origin was hidden).
-	// With emissive mode OFF and r_rtEmissiveBounce on, the rows are BOUNCEONLY: the DI gather skips them (the placed
-	// lights keep the direct term), the bounce lights its hits with them. Capped at r_rtEmissiveMaxRows per view by
-	// importance at the eye; a row whose reach cannot touch the view (centre farther than reach + REACH) is left out.
-	int nEm = 0, nEmTotal = 0, nEmCandidates = 0;
+	return ambRow ? SCENE_ROW_AMBIENT : SCENE_ROW_LIGHT;
+}
+
+// E2 v3: the EMITTER rows of the scene-light buffer (RB_RHI_GatherSceneLights), written to dst (the slots behind the
+// lights and the fog rows), at most roomLeft of them. Returns the count; nEmTotal / nEmCandidates feed the mode log.
+static int RB_RHI_SceneEmitterRows( const idRenderWorldLocal *rw, const idVec3 &viewOrg, bool solo, unsigned long long soloFixture,
+                                    int roomLeft, RtReflLightGPU *dst, int &nEmTotal, int &nEmCandidates ) {
+	int nEm = 0;
+	nEmTotal = 0;
+	nEmCandidates = 0;
 	if ( r_rtEmissiveLighting.GetBool() || r_rtEmissiveBounce.GetBool() ) {
 		const rtEmissiveRow_t *rows = NULL;
 		int emTris = 0; float emTotal = 0.0f, emMean = 0.0f;
@@ -6699,7 +6625,7 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 			const float intensity = idMath::ClampFloat( 0.0f, 64.0f, r_rtEmissiveIntensity.GetFloat() );
 			const float reachMul  = idMath::ClampFloat( 0.0f, 8.0f, r_rtEmissiveReach.GetFloat() );
 			const float reachDef  = idMath::ClampFloat( 0.0f, 4096.0f, r_rtEmissiveReachDefault.GetFloat() );
-			const int   cap       = Min( idMath::ClampInt( 0, RT_EMIT_MAX_ROWS, r_rtEmissiveMaxRows.GetInteger() ), RT_SCENE_MAX_ROWS - n - nFog - nAmb );
+			const int   cap       = Min( idMath::ClampInt( 0, RT_EMIT_MAX_ROWS, r_rtEmissiveMaxRows.GetInteger() ), roomLeft );
 			const bool  physical  = r_rtEmissivePhysical.GetBool();
 			const float cullE     = Max( r_rtEmissiveCullIrradiance.GetFloat(), 1e-5f );
 			// how far a row may sit from the camera and still enter the buffer. A tight camera-distance cutoff switched
@@ -6792,7 +6718,7 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 				float R = ( ap.reach > 0.0f ) ? ap.reach : reachDef;
 				if ( !( R > 0.0f ) ) { R = Max( row.boundRadius * 4.0f, 64.0f ); }
 				const float radius = R * ( ( reachMul > 0.0f ) ? reachMul : 1.0f );
-				RtReflLightGPU &L = sorted[ n + nFog + nEm ];
+				RtReflLightGPU &L = dst[ nEm ];
 				memset( &L, 0, sizeof( L ) );
 				// the row occupies the VOLUME of the light it replaced: cut at ONE reach like a Doom light (the shade fades out
 				// over the last quarter). A 2 x reach sphere put eight times the volume - and several times the candidates - of
@@ -6865,6 +6791,11 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 			}
 		}
 	}
+	return nEm;
+}
+
+// E5: say how many fixtured placed lights this view drops whenever that changes (the proof the drop is live).
+static void RB_RHI_SceneEmissiveModeLog( int n, int nEm, int nEmCandidates, int nEmTotal, int roomBeforeEmitters ) {
 	// E5: say how many fixtured placed lights this view drops whenever that changes (the proof the drop is live)
 	{
 		// once when the mode comes on and once per table rebuild - not on every change of the in-view count (that
@@ -6877,34 +6808,21 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 		const unsigned int gen = R_EmAuthGeneration();
 		if ( mode && ( !lastMode || table != lastTable || gen != lastGen ) && table != 0 ) {
 			R_RtEmissiveLog( "emissive mode (authored): %d placed lights deleted in this view, %d kept; %d emitter rows (%d authored fixtures in reach of the view; %d glowing fixtures in the map; cap %d)%s\n",
-				s_diSkipEmissiveDrop, n, nEm, nEmCandidates, nEmTotal, Min( r_rtEmissiveMaxRows.GetInteger(), RT_SCENE_MAX_ROWS - n - nFog ),
+				s_diSkipEmissiveDrop, n, nEm, nEmCandidates, nEmTotal, Min( r_rtEmissiveMaxRows.GetInteger(), roomBeforeEmitters ),
 				( nEmCandidates > nEm ) ? " - CAP HIT: the weakest fixtures at the eye are missing" : "" );
 		}
 		lastMode = mode; lastTable = table; lastGen = gen;
 	}
-	// r_rtgiAmbient fold: the ambient rows go LAST, behind the emitter rows (the emitter cap above left them room)
-	nAmb = Min( nAmb, RT_SCENE_MAX_ROWS - n - nFog - nEm );
-	for ( int k = 0; k < nAmb; k++ ) { sorted[ n + nFog + nEm + k ] = ambRows[ k ]; }
-	s_sceneEmitterCount = nEm;
-	if ( n + nFog + nEm + nAmb == 0 ) {
-		return 0;
-	}
-	const int slot      = (int)( tr.frameCount % RT_REFL_LIGHT_SLOTS );
-	const int slotBytes = RT_SCENE_MAX_ROWS * (int)sizeof( RtReflLightGPU );
-	r->UpdateBuffer( s_rtReflLightBuf, slot * slotBytes, ( n + nFog + nEm + nAmb ) * (int)sizeof( RtReflLightGPU ), sorted );
-	*outAddr = s_rtReflLightAddr + (unsigned long long)( slot * slotBytes );
-	cacheCount = n;	cacheAddr = *outAddr;
-	s_sceneRowCount = n + nFog + nEm + nAmb;
-	s_sceneAmbStart = n + nFog + nEm;
-	s_sceneAmbCount = nAmb;
+}
+
+// R1 (docs/rtx-restir-di.md Plan R1): the lightDef -> row table for THIS frame's buffer (RTXDI's light index mapping
+// buffer), so next frame's gradient pass can find "the same light" after the sort reshuffles the rows. row + 1 per
+// lightDef, 0 = not in the buffer this frame (switched off / culled). Same ring slot idiom as the light buffer.
+static void RB_RHI_SceneLightMapUpload( rhi::RHI *r, int slot, const RtReflLightGPU *sorted, int n, int numDefs ) {
 	// R1 (docs/rtx-restir-di.md Plan R1): the lightDef -> row table for THIS frame's buffer (RTXDI's light index
 	// mapping buffer), so next frame's gradient pass can find "the same light" after the sort reshuffles the rows.
 	// row + 1 per lightDef, 0 = not in the buffer this frame (switched off / culled). Same ring slot idiom as the
 	// light buffer; the slot's addresses + frame stamp are kept so the DI pass can name LAST frame's pair.
-	s_sceneLightSlotAddr[ slot ]  = *outAddr;
-	s_sceneLightSlotFrame[ slot ] = tr.frameCount;
-	s_sceneLightSlotCount[ slot ] = n + nFog + nEm + nAmb;	// EVERY row (the gradient's stored rows may be emitter rows)
-	s_diLightMapSlotAddr[ slot ]  = 0;
 	if ( numDefs <= DI_LIGHTMAP_MAX ) {
 		if ( s_diLightMapBuf == 0 ) {
 			s_diLightMapBuf  = r->CreateBuffer( rhi::BU_STORAGE_UPLOAD,	// CPU-write-only (as the rows above)
@@ -6923,6 +6841,153 @@ static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsi
 			s_diLightMapSlotAddr[ slot ] = s_diLightMapAddr + (unsigned long long)mapOfs;
 		}
 	}
+}
+
+static int RB_RHI_GatherSceneLights( rhi::RHI *r, const viewDef_t *viewDef, unsigned long long *outAddr ) {
+	static int                 cacheCount = 0;
+	static unsigned long long  cacheAddr  = 0;
+	// (s_sceneFogCount is part of the cached state: it is only rewritten when the slot is refilled below)
+	if ( viewDef != NULL && s_sceneLightCacheView == viewDef && s_sceneLightCacheFrame == tr.frameCount && s_rtReflLightBuf != 0 ) {
+		*outAddr = cacheAddr;
+		return cacheCount;
+	}
+	s_sceneLightCacheView = viewDef;	s_sceneLightCacheFrame = tr.frameCount;	cacheCount = 0;	cacheAddr = 0;	s_sceneRowCount = 0;
+	s_sceneLightGen++;		// every lightDef's stamp is now stale until the fill below re-includes it
+	s_sceneFogCount = 0;
+	s_sceneEmitterCount = 0;
+	s_sceneAmbStart = s_sceneAmbCount = 0;
+	*outAddr = 0;
+	s_diSkipDark = s_diSkipSuppressed = s_diSkipCapacity = s_diSkipNoShader = s_diSkipFogBlendAmb = 0;
+	s_diSkipEmissiveDrop = 0;
+	if ( viewDef == NULL || viewDef->renderWorld == NULL ) {
+		return 0;
+	}
+	if ( s_rtReflLightBuf == 0 ) {
+		// CPU-write-only, read by the ray passes every frame: in VRAM where the CPU can still write it (BU_STORAGE_UPLOAD;
+		// the user's A/B 2026-10-27: lightgrid.fill 1.46 -> 0.99 ms, the gather and boost a little faster)
+		s_rtReflLightBuf  = r->CreateBuffer( rhi::BU_STORAGE_UPLOAD,
+			RT_REFL_LIGHT_SLOTS * RT_SCENE_MAX_ROWS * (int)sizeof( RtReflLightGPU ), NULL );
+		s_rtReflLightAddr = ( s_rtReflLightBuf != 0 ) ? r->GetBufferDeviceAddress( s_rtReflLightBuf ) : 0;
+	}
+	if ( s_rtReflLightBuf == 0 || s_rtReflLightAddr == 0 ) {
+		return 0;
+	}
+	const idRenderWorldLocal *rw = viewDef->renderWorld;
+	const idVec3 viewOrg = viewDef->renderView.vieworg;
+	const float  REACH   = 2048.0f;					// how far off-screen a light's reach may still touch the reflection
+	static RtReflLightGPU lights[ RT_REFL_MAX_LIGHTS ];
+	static RtReflLightGPU sorted[ RT_SCENE_MAX_ROWS ];
+	static float          sortKey[ RT_REFL_MAX_LIGHTS ];
+	int n = 0;
+	// Lights that are ALSO in this view carry evaluated shader registers: use them so a flickering /
+	// strobing / fading light does the same in the reflection and in its volumetric shaft. Off-view lights
+	// have no registers this frame and fall back to their static colour below.
+	const int numDefs = rw->lightDefs.Num();
+	s_emLiveGen++;											// this call's stamp for the dropped lights' live brightness
+	if ( s_sceneLightCoveredGen.Num() < numDefs ) {
+		const int first = s_sceneLightCoveredGen.Num();
+		s_sceneLightCoveredGen.SetNum( numDefs );
+		for ( int k = first; k < numDefs; k++ ) {
+			s_sceneLightCoveredGen[ k ] = 0;		// 0 never equals a live generation
+		}
+	}
+	const viewLight_t **viewLightOf = (const viewLight_t **)_alloca( ( numDefs + 1 ) * sizeof( viewLight_t * ) );
+	memset( viewLightOf, 0, ( numDefs + 1 ) * sizeof( viewLight_t * ) );
+	for ( const viewLight_t *vl = viewDef->viewLights; vl != NULL; vl = vl->next ) {
+		if ( vl->lightDef != NULL && vl->lightDef->index >= 0 && vl->lightDef->index < numDefs ) {
+			viewLightOf[ vl->lightDef->index ] = vl;
+		}
+	}
+	static RtReflLightGPU fogs[ SCENE_FOG_MAX ];
+	int nFog = 0;
+	static RtReflLightGPU ambRows[ RT_AMB_MAX_ROWS ];
+	int nAmb = 0;
+	const int ambMode = r_rtgiAmbient.GetInteger();
+	const bool foldAmbient = r_rtgi.GetBool() && ( ambMode == 2 || ambMode == 3 );
+	// Two passes: the lights the frontend LIT in this view first - under the ReSTIR DI apply the buffer IS the lit set, and a
+	// 256-entry buffer filled in lightDef order from everything within reach was full before some on-screen lights got their
+	// turn ("not-in-buffer 6 of 18: capacity 7", 2026-10-12) - then the off-screen ones (reflections, haze) until it is full.
+	// the Light Editor's SOLO (RtEmissiveAuthor.cpp): only that placed light - or only that emitter row - lights the scene.
+	// Every other light is marked DI-covered and left out, like a deleted one, so the forward pass skips it too.
+	int soloLight = -1;
+	unsigned long long soloFixture = 0;
+	const bool solo = R_EmAuthSolo( rw, &soloLight, &soloFixture );
+	sceneGatherCtx_t ctx;
+	ctx.viewDef = viewDef; ctx.rw = rw; ctx.viewOrg = viewOrg; ctx.REACH = REACH;
+	ctx.solo = solo; ctx.soloLight = soloLight; ctx.foldAmbient = foldAmbient;
+	for ( int pass = 0; pass < 2; pass++ ) {
+	for ( int i = 0; i < rw->lightDefs.Num(); i++ ) {
+		if ( ( viewLightOf[ i ] != NULL ) != ( pass == 0 ) ) { continue; }	// pass 0 = in view, pass 1 = off screen
+		if ( n >= RT_REFL_MAX_LIGHTS - SCENE_FOG_MAX ) {
+			if ( viewLightOf[ i ] != NULL ) { s_diSkipCapacity++; }		// in view, no room left
+			continue;
+		}
+		const idRenderLightLocal *ld = rw->lightDefs[ i ];
+		if ( ld == NULL ) { continue; }
+		const idMaterial *ls = ld->lightShader;
+		if ( ls != NULL && ls->IsFogLight() ) {
+			// rows go AFTER the lights, outside the light count, so RT reflections never see them
+			if ( nFog < SCENE_FOG_MAX && RB_RHI_SceneFogRow( ld, viewOrg, REACH, fogs[ nFog ] ) ) { nFog++; }
+			continue;
+		}
+		RtReflLightGPU row;
+		float key = 0.0f;
+		switch ( RB_RHI_SceneLightRow( ctx, i, ld, viewLightOf[ i ], nAmb >= RT_AMB_MAX_ROWS, row, key ) ) {
+		case SCENE_ROW_LIGHT:	lights[ n ] = row; sortKey[ n ] = key; n++; break;
+		case SCENE_ROW_AMBIENT:	ambRows[ nAmb++ ] = row; break;
+		default:				break;
+		}
+	}
+	}
+	int order[ RT_REFL_MAX_LIGHTS ];
+	for ( int i = 0; i < n; i++ ) {					// insertion sort of indices by key (n <= 256, mostly a handful)
+		int j = i;
+		while ( j > 0 && sortKey[ order[ j - 1 ] ] > sortKey[ i ] ) { order[ j ] = order[ j - 1 ]; j--; }
+		order[ j ] = i;
+	}
+	for ( int i = 0; i < n; i++ ) { sorted[ i ] = lights[ order[ i ] ]; }
+	for ( int i = 0; i < nFog; i++ ) { sorted[ n + i ] = fogs[ i ]; }		// fog volumes ride behind the lights
+	s_sceneFogCount = nFog;
+	// E2 v3: the EMITTER rows, behind the fog rows (the fog consumers index [n, n + nFog) and never see them; DI, the
+	// grid fill and the bounce iterate every row and skip the fog rows by flag). One row per emissive surface run
+	// (tr_main.cpp R_RtEmissiveRows): a DUDE_LIGHT_EMISSIVE light whose "shade" draws a triangle of its run by flux
+	// and a point on it by solid angle (rt_emissive.glsl rtEmissiveShadeRow). radius = the REACH: the authored radius of
+	// the placed light the emitter replaced (E5 census) x r_rtEmissiveReach, else r_rtEmissiveReachDefault - the grid's
+	// importance (lum x radius^2 / d^2) and the shade's reach boost both read it. colour = the row's irradiance proxy at
+	// distance radius (mean radiance x intensity x area / radius^2), so the grid ranks it against the placed lights by
+	// what it actually delivers. The projection planes (unused by an emitter) carry: projS.w = intensity, projT.xy = the
+	// table's device address, projQ.x/y = first triangle / count (bits), projQ.z = the reach-boost knee (0 = off).
+	// pad0 = 0: not a lightDef (the gradient pass skips emissive rows outright); pad1 = row index + 1 (debugging).
+	// cull.xyz = the row's CENTROID (pos carries its cone axis since 2026-11-03): the light direction and the visibility ray aim at the fixture, the receiver cosine is per area
+	// sample (rt_emissive.glsl). The paired placed light lends only its reach and power (2026-10-29: aiming at its authored
+	// origin painted its hot spot on the wall behind it and blacked the emitter out wherever that origin was hidden).
+	// With emissive mode OFF and r_rtEmissiveBounce on, the rows are BOUNCEONLY: the DI gather skips them (the placed
+	// lights keep the direct term), the bounce lights its hits with them. Capped at r_rtEmissiveMaxRows per view by
+	// importance at the eye; a row whose reach cannot touch the view (centre farther than reach + REACH) is left out.
+	int nEmTotal = 0, nEmCandidates = 0;
+	const int nEm = RB_RHI_SceneEmitterRows( rw, viewOrg, solo, soloFixture, RT_SCENE_MAX_ROWS - n - nFog - nAmb,
+	                                         sorted + n + nFog, nEmTotal, nEmCandidates );
+	RB_RHI_SceneEmissiveModeLog( n, nEm, nEmCandidates, nEmTotal, RT_SCENE_MAX_ROWS - n - nFog );
+	// r_rtgiAmbient fold: the ambient rows go LAST, behind the emitter rows (the emitter cap above left them room)
+	nAmb = Min( nAmb, RT_SCENE_MAX_ROWS - n - nFog - nEm );
+	for ( int k = 0; k < nAmb; k++ ) { sorted[ n + nFog + nEm + k ] = ambRows[ k ]; }
+	s_sceneEmitterCount = nEm;
+	if ( n + nFog + nEm + nAmb == 0 ) {
+		return 0;
+	}
+	const int slot      = (int)( tr.frameCount % RT_REFL_LIGHT_SLOTS );
+	const int slotBytes = RT_SCENE_MAX_ROWS * (int)sizeof( RtReflLightGPU );
+	r->UpdateBuffer( s_rtReflLightBuf, slot * slotBytes, ( n + nFog + nEm + nAmb ) * (int)sizeof( RtReflLightGPU ), sorted );
+	*outAddr = s_rtReflLightAddr + (unsigned long long)( slot * slotBytes );
+	cacheCount = n;	cacheAddr = *outAddr;
+	s_sceneRowCount = n + nFog + nEm + nAmb;
+	s_sceneAmbStart = n + nFog + nEm;
+	s_sceneAmbCount = nAmb;
+	s_sceneLightSlotAddr[ slot ]  = *outAddr;
+	s_sceneLightSlotFrame[ slot ] = tr.frameCount;
+	s_sceneLightSlotCount[ slot ] = n + nFog + nEm + nAmb;	// EVERY row (the gradient's stored rows may be emitter rows)
+	s_diLightMapSlotAddr[ slot ]  = 0;
+	RB_RHI_SceneLightMapUpload( r, slot, sorted, n, numDefs );
 	return n;
 }
 
