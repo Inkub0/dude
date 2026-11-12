@@ -1686,7 +1686,7 @@ void RB_RHI_AddTessJob( unsigned int shader, unsigned int srcVB, const void *src
 // DUDE: GPU bake jobs (md5tessbake.comp) - one per mesh, the first time it is deformed (idMD5Mesh::BakeTessOnGpu)
 struct rbTessBakeJob_t {
 	rhi::ShaderHandle	shader;
-	const void *		stSeam;			// R_FrameAlloc'd vec4 per output vertex
+	const void *		stSeam;			// Mem_Alloc16'd vec4 per output vertex, the job's to free (RB_RHI_FreeTessBakeJobs)
 	int					numOutVerts;
 	const void *		indexes;		// the mesh's triangle list (glIndex_t = int)
 	int					numIndexes;
@@ -1705,6 +1705,17 @@ void RB_RHI_AddTessBakeJob( unsigned int shader, const void *stSeam, int numOutV
 	j.outBarySeam = outBarySeam; j.outSrcTri = outSrcTri; j.outHeight = outHeight; j.heightImage = heightImage;
 	j.numTessVerts = numTessVerts; j.level = level;
 	rbTessBakeJobs.Append( j );
+}
+
+// the jobs' stSeam arrays, uploaded or not, then the list
+static void RB_RHI_FreeTessBakeJobs( void ) {
+	for ( int i = 0; i < rbTessBakeJobs.Num(); i++ ) {
+		if ( rbTessBakeJobs[i].stSeam ) {
+			Mem_Free16( (void *)rbTessBakeJobs[i].stSeam );
+			rbTessBakeJobs[i].stSeam = NULL;
+		}
+	}
+	rbTessBakeJobs.SetNum( 0 );
 }
 
 // the bakes, before the deforms that read their output
@@ -1732,7 +1743,15 @@ static void RB_RHI_FlushTessBakeJobs( rhi::RHI *r ) {
 			ca.storage[2] = j.outBarySeam;
 			ca.storage[3] = j.outSrcTri;
 			ca.storage[4] = j.outHeight;
-			ca.images[0] = j.heightImage;		// binding 8
+			// binding 8: no relief still needs a valid descriptor (the "never updated" validation error on
+			// Quake 4's bump-less meshes): the flat height, what the draws bind for that case; the kernel's
+			// hasHeight stays 0 so it is never sampled
+			rhi::ImageHandle heightImg = j.heightImage;
+			if ( heightImg == 0 ) {
+				const idImage *flat = R_TessFlatHeightImage();
+				heightImg = ( flat != NULL && flat->rhiHandle != 0 ) ? flat->rhiHandle : globalImages->whiteImage->rhiHandle;
+			}
+			ca.images[0] = heightImg;
 			ca.pushConstants = &pc;
 			ca.pushConstantSize = (int)sizeof( pc );
 			ca.groupsX = ( j.numTessVerts + 63 ) / 64; ca.groupsY = 1; ca.groupsZ = 1;
@@ -1742,7 +1761,7 @@ static void RB_RHI_FlushTessBakeJobs( rhi::RHI *r ) {
 		RB_RHI_ReleaseStorage( r, st );
 		RB_RHI_ReleaseStorage( r, idx );
 	}
-	rbTessBakeJobs.SetNum( 0 );
+	RB_RHI_FreeTessBakeJobs();
 	r->PostComputeBarrier();					// the baked buffers -> the deform jobs' reads
 }
 
@@ -1751,7 +1770,7 @@ void RB_RHI_FlushTessJobs( void ) {
 	if ( r ) {
 		RB_RHI_FlushTessBakeJobs( r );			// DUDE: first-use GPU bakes, ahead of the deforms reading them
 	} else {
-		rbTessBakeJobs.SetNum( 0 );
+		RB_RHI_FreeTessBakeJobs();
 	}
 	if ( rbTessJobs.Num() == 0 ) {
 		return;

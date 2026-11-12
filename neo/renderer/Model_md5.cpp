@@ -1458,13 +1458,16 @@ bool idMD5Mesh::BakeTessOnGpu( void ) {
 
 	// per output vertex (s, t, seam, 0): the bind texcoords and the UV-seam mask, mirror-seam copies included
 	// (the same values the CPU bake reads from its bind-pose verts)
+	// heap, not frame memory: a frame block is 1 MB and a big Quake 4 mesh overflows it (18k output verts of
+	// idDrawVert = 1.1 MB: the tram intro's re-bake after a partial vid_restart ended the session)
 	const int numOut = deformInfo->numOutputVerts;
-	idDrawVert *verts = (idDrawVert *)R_FrameAlloc( numOut * (int)sizeof( idDrawVert ) );
+	idDrawVert *verts = (idDrawVert *)Mem_Alloc16( numOut * (int)sizeof( idDrawVert ) );
 	StageTessBindVerts( verts, NULL );
-	idVec4 *stSeam = (idVec4 *)R_FrameAlloc( numOut * (int)sizeof( idVec4 ) );
+	idVec4 *stSeam = (idVec4 *)Mem_Alloc16( numOut * (int)sizeof( idVec4 ) );		// the bake job owns it until its upload
 	for ( int i = 0; i < numOut; i++ ) {
 		stSeam[i].Set( verts[i].st.x, verts[i].st.y, verts[i].color[3] / 255.0f, 0.0f );
 	}
+	Mem_Free16( verts );
 
 	RB_RHI_AddTessBakeJob( R_MD5_TessBakeShader( r ), stSeam, numOut, deformInfo->indexes, deformInfo->numIndexes,
 	                       tessGpuBarySeam, tessGpuSrcTri, tessGpuHeight, heightHandle, numTessOutVerts, tessBakeLevel );
