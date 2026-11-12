@@ -340,6 +340,11 @@ static void R_ImageAdd( byte *data1, int width1, int height1, byte *data2, int w
 // into their own buffer instead of clobbering a shared one. Reset per top-level call
 // in R_LoadImageProgram / R_ParsePastImageProgram, so per-thread storage is correct.
 static thread_local char parseBuffer[MAX_IMAGE_NAME];
+// DUDE: the summed file lengths of a timestamp-only R_LoadImageProgram (see R_LastImageProgramBytes)
+static thread_local unsigned int s_imageProgramBytes = 0;
+unsigned int R_LastImageProgramBytes( void ) {
+	return s_imageProgramBytes;
+}
 
 /*
 ===================
@@ -615,6 +620,9 @@ static bool R_ParseImageProgram_r( idLexer &src, byte **pic, int *width, int *he
 	if ( timestamp == FILE_NOT_FOUND_TIMESTAMP ) {
 		return false;
 	}
+	if ( !pic && R_LastImageFileLength() > 0 ) {
+		s_imageProgramBytes += (unsigned int)R_LastImageFileLength();		// the program's content signature (height-field cache)
+	}
 
 	// add this to the timestamp
 	if ( timestamps ) {
@@ -641,6 +649,9 @@ void R_LoadImageProgram( const char *name, byte **pic, int *width, int *height, 
 	parseBuffer[0] = 0;
 	if ( timestamps ) {
 		*timestamps = 0;
+	}
+	if ( !pic ) {
+		s_imageProgramBytes = 0;
 	}
 
 	R_ParseImageProgram_r( src, pic, width, height, timestamps, depth );
@@ -828,11 +839,19 @@ idCVar r_heightFieldCache( "r_heightFieldCache", "1", CVAR_RENDERER | CVAR_ARCHI
 static const int HF_MAGIC = ( 'D' ) | ( 'H' << 8 ) | ( 'F' << 16 ) | ( '1' << 24 );
 // Bump when the pixels a source produces change: R_NormalMapToHeightMap (the solver, its iteration count,
 // the high-pass radius), R_CenterHeight, or the bump-program decode they read.
-static const int HF_VERSION = 1;
+//   2: the key gains each source's byte length (files inside a pak report timestamp 0)
+static const int HF_VERSION = 2;
+
+// DUDE: what identifies a source program's content without decoding it: the newest file's timestamp (0 for files
+// inside a pak) and the summed file lengths (R_LastImageProgramBytes); a repacked texture of another size misses
+struct hfSource_t {
+	ID_TIME_T		time;
+	unsigned int	bytes;
+};
 
 struct hfPendingWrite_t {
 	idStr		name, spec;
-	ID_TIME_T	sourceTime[2];
+	hfSource_t	source[2];
 	int			w, h;
 	byte *		mono;		// R_StaticAlloc'd w*h
 };
@@ -858,13 +877,14 @@ static idStr R_HeightFieldCachePath( const char *name, const char *spec ) {
 	return idStr( va( "generated/heightfields/%016llx.hf", h ) );
 }
 
-// the source files' timestamps, without decoding (R_LoadImageProgram with no pixel pointer); 0 when none
-static ID_TIME_T R_HeightFieldSourceTime( const char *program ) {
-	ID_TIME_T ts = 0;
+// the source program's signature, without decoding (R_LoadImageProgram with no pixel pointer); zeros when none
+static hfSource_t R_HeightFieldSource( const char *program ) {
+	hfSource_t src = { 0, 0 };
 	if ( program && program[0] ) {
-		R_LoadImageProgram( program, NULL, NULL, NULL, &ts, NULL );
+		R_LoadImageProgram( program, NULL, NULL, NULL, &src.time, NULL );
+		src.bytes = R_LastImageProgramBytes();
 	}
-	return ts;
+	return src;
 }
 
 static void R_HeightFieldCacheWriteNow( const hfPendingWrite_t &e ) {
@@ -877,7 +897,7 @@ static void R_HeightFieldCacheWriteNow( const hfPendingWrite_t &e ) {
 	f->WriteString( ENGINE_VERSION );
 	f->WriteString( e.name );
 	f->WriteString( e.spec );
-	f->Write( e.sourceTime, sizeof( e.sourceTime ) );
+	f->Write( e.source, sizeof( e.source ) );
 	f->WriteInt( e.w );
 	f->WriteInt( e.h );
 	f->Write( e.mono, e.w * e.h );
@@ -885,15 +905,15 @@ static void R_HeightFieldCacheWriteNow( const hfPendingWrite_t &e ) {
 }
 
 // keep a solved field (grey RGBA8, alpha 255) for the next load; writes now on the main thread, queues on a worker
-static void R_HeightFieldCacheStore( const char *name, const char *spec, const ID_TIME_T sourceTime[2], const byte *rgba, int w, int h ) {
+static void R_HeightFieldCacheStore( const char *name, const char *spec, const hfSource_t source[2], const byte *rgba, int w, int h ) {
 	if ( !r_heightFieldCache.GetBool() || w <= 0 || h <= 0 ) {
 		return;
 	}
 	hfPendingWrite_t e;
 	e.name = name;
 	e.spec = spec;
-	e.sourceTime[0] = sourceTime[0];
-	e.sourceTime[1] = sourceTime[1];
+	e.source[0] = source[0];
+	e.source[1] = source[1];
 	e.w = w;
 	e.h = h;
 	e.mono = (byte *)R_StaticAlloc( w * h );
@@ -930,25 +950,31 @@ void R_HeightFieldCacheStats( int &hits, int &misses ) {
 }
 
 // a cached field for this name + spec + source timestamps, expanded back to grey RGBA8 (caller R_StaticFree()s)
-static bool R_HeightFieldCacheRead( const char *name, const char *spec, const ID_TIME_T sourceTime[2], byte **outPic, int *outW, int *outH ) {
+static bool R_HeightFieldCacheRead( const char *name, const char *spec, const hfSource_t source[2], byte **outPic, int *outW, int *outH ) {
 	if ( !r_heightFieldCache.GetBool() ) {
 		return false;
 	}
 	void *buf = NULL;
-	const int len = fileSystem->ReadFile( R_HeightFieldCachePath( name, spec ), &buf, NULL );
+	const idStr path = R_HeightFieldCachePath( name, spec );
+	const int len = fileSystem->ReadFile( path, &buf, NULL );
 	if ( len <= 0 || buf == NULL ) {
 		s_hfMisses++;
+		if ( com_developer.GetBool() ) {
+			common->Printf( "height-field cache miss: no file %s for '%s' spec '%s' (sources %llu/%u %llu/%u)\n", path.c_str(), name, spec,
+				(unsigned long long)source[0].time, source[0].bytes, (unsigned long long)source[1].time, source[1].bytes );
+		}
 		return false;
 	}
 	const byte *p = (const byte *)buf, *end = p + len;
 	bool ok = false;
 	byte *pic = NULL;
 	int w = 0, h = 0;
+	const char *why = "header";
 	do {
 		int magic, version;
 		if ( end - p < 8 ) { break; }
 		memcpy( &magic, p, 4 ); memcpy( &version, p + 4, 4 ); p += 8;
-		if ( magic != HF_MAGIC || version != HF_VERSION ) { break; }
+		if ( magic != HF_MAGIC || version != HF_VERSION ) { why = "version"; break; }
 		// three length-prefixed strings (idFile::WriteString: int length + bytes), each compared
 		const char *expect[3] = { ENGINE_VERSION, name, spec };
 		bool strOk = true;
@@ -959,13 +985,13 @@ static bool R_HeightFieldCacheRead( const char *name, const char *spec, const ID
 			if ( n < 0 || end - p < n || (int)strlen( expect[s] ) != n || memcmp( p, expect[s], n ) != 0 ) { strOk = false; break; }
 			p += n;
 		}
-		if ( !strOk ) { break; }
-		ID_TIME_T ts[2];
-		if ( end - p < (int)sizeof( ts ) + 8 ) { break; }
-		memcpy( ts, p, sizeof( ts ) ); p += sizeof( ts );
-		if ( ts[0] != sourceTime[0] || ts[1] != sourceTime[1] ) { break; }
+		if ( !strOk ) { why = "name / spec / engine version"; break; }
+		hfSource_t src[2];
+		if ( end - p < (int)sizeof( src ) + 8 ) { break; }
+		memcpy( src, p, sizeof( src ) ); p += sizeof( src );
+		if ( src[0].time != source[0].time || src[0].bytes != source[0].bytes || src[1].time != source[1].time || src[1].bytes != source[1].bytes ) { why = "source signature"; break; }
 		memcpy( &w, p, 4 ); memcpy( &h, p + 4, 4 ); p += 8;
-		if ( w <= 0 || h <= 0 || w > 16384 || h > 16384 || end - p != w * h ) { break; }
+		if ( w <= 0 || h <= 0 || w > 16384 || h > 16384 || end - p != w * h ) { why = "size"; break; }
 		pic = (byte *)R_StaticAlloc( w * h * 4 );
 		for ( int i = 0; i < w * h; i++ ) {
 			pic[i * 4 + 0] = pic[i * 4 + 1] = pic[i * 4 + 2] = p[i];
@@ -981,6 +1007,9 @@ static bool R_HeightFieldCacheRead( const char *name, const char *spec, const ID
 		*outH = h;
 	} else {
 		s_hfMisses++;
+		if ( com_developer.GetBool() ) {
+			common->Printf( "height-field cache miss: %s mismatch in %s for '%s' spec '%s'\n", why, path.c_str(), name, spec );
+		}
 	}
 	return ok;
 }
@@ -1004,14 +1033,14 @@ static bool R_ParallaxHeightCpu( idImage *image, byte **outPic, int *outW, int *
 	byte  *pic = NULL;
 	int    w = 0, hgt = 0;
 
-	ID_TIME_T sourceTime[2] = { 0, 0 };
+	hfSource_t source[2] = { { 0, 0 }, { 0, 0 } };
 	if ( r_parallaxSources.Get( image->imgName, &bumpProgram ) && bumpProgram ) {
-		sourceTime[0] = R_HeightFieldSourceTime( bumpProgram->c_str() );
-		if ( !R_HeightFieldCacheRead( image->imgName, bumpProgram->c_str(), sourceTime, &pic, &w, &hgt ) ) {
+		source[0] = R_HeightFieldSource( bumpProgram->c_str() );
+		if ( !R_HeightFieldCacheRead( image->imgName, bumpProgram->c_str(), source, &pic, &w, &hgt ) ) {
 			R_LoadImageProgram( bumpProgram->c_str(), &pic, &w, &hgt, NULL, NULL );
 			if ( pic ) {
 				R_NormalMapToHeightMap( pic, w, hgt );
-				R_HeightFieldCacheStore( image->imgName, bumpProgram->c_str(), sourceTime, pic, w, hgt );
+				R_HeightFieldCacheStore( image->imgName, bumpProgram->c_str(), source, pic, w, hgt );
 			}
 		}
 	}
@@ -1226,9 +1255,9 @@ static bool R_LoadTessHeightPixels( const char *generatedName, byte **outPic, in
 	byte *pic = NULL;
 	int w = 0, hgt = 0;
 	bool integrated = false;
-	// the cache: keyed on both sources' timestamps, so an _h that ships later misses and is used
-	const ID_TIME_T sourceTime[2] = { R_HeightFieldSourceTime( authored.c_str() ), R_HeightFieldSourceTime( bumpProgram.c_str() ) };
-	if ( R_HeightFieldCacheRead( generatedName, spec->c_str(), sourceTime, &pic, &w, &hgt ) ) {
+	// the cache: keyed on both sources' signatures, so an _h that ships later misses and is used
+	const hfSource_t source[2] = { R_HeightFieldSource( authored.c_str() ), R_HeightFieldSource( bumpProgram.c_str() ) };
+	if ( R_HeightFieldCacheRead( generatedName, spec->c_str(), source, &pic, &w, &hgt ) ) {
 		*outPic = pic;
 		*outW = w;
 		*outH = hgt;
@@ -1252,7 +1281,7 @@ static bool R_LoadTessHeightPixels( const char *generatedName, byte **outPic, in
 		return false;
 	}
 	R_CenterHeight( pic, w, hgt, integrated );
-	R_HeightFieldCacheStore( generatedName, spec->c_str(), sourceTime, pic, w, hgt );
+	R_HeightFieldCacheStore( generatedName, spec->c_str(), source, pic, w, hgt );
 	*outPic = pic;
 	*outW = w;
 	*outH = hgt;

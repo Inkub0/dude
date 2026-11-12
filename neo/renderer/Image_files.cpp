@@ -159,6 +159,13 @@ void R_WritePalTGA( const char *filename, const byte *data, const byte *palette,
 
 
 static void LoadBMP( const char *name, byte **pic, int *width, int *height, ID_TIME_T *timestamp );
+// DUDE: the length of the file a timestamp-only R_LoadImage (pic == NULL) found, per thread (the parallel
+// loaders): with the file's timestamp it keys the height-field cache (R_LastImageFileLength). -1 = none.
+static thread_local int r_imageFileLength = -1;
+int R_LastImageFileLength( void ) {
+	return r_imageFileLength;
+}
+
 static void LoadTGA( const char *name, byte **pic, int *width, int *height, ID_TIME_T *timestamp );
 static void LoadJPG( const char *name, byte **pic, int *width, int *height, ID_TIME_T *timestamp );
 static void LoadDDS( const char *name, byte **pic, int *width, int *height, ID_TIME_T *timestamp );
@@ -251,8 +258,8 @@ static void LoadBMP( const char *name, byte **pic, int *width, int *height, ID_T
 	byte		*bmpRGBA;
 
 	if ( !pic ) {
-		fileSystem->ReadFile ( name, NULL, timestamp );
-		return;	// just getting timestamp
+		r_imageFileLength = fileSystem->ReadFile( name, NULL, timestamp );
+		return;	// just getting timestamp (and the length, for the height-field cache key)
 	}
 
 	*pic = NULL;
@@ -419,8 +426,8 @@ static void LoadPCX ( const char *filename, byte **pic, byte **palette, int *wid
 	int		xmax, ymax;
 
 	if ( !pic ) {
-		fileSystem->ReadFile( filename, NULL, timestamp );
-		return;	// just getting timestamp
+		r_imageFileLength = fileSystem->ReadFile( filename, NULL, timestamp );
+		return;	// just getting timestamp (and the length, for the height-field cache key)
 	}
 
 	*pic = NULL;
@@ -515,8 +522,8 @@ static void LoadPCX32 ( const char *filename, byte **pic, int *width, int *heigh
 	byte	*pic32;
 
 	if ( !pic ) {
-		fileSystem->ReadFile( filename, NULL, timestamp );
-		return;	// just getting timestamp
+		r_imageFileLength = fileSystem->ReadFile( filename, NULL, timestamp );
+		return;	// just getting timestamp (and the length, for the height-field cache key)
 	}
 	LoadPCX (filename, &pic8, &palette, width, height, timestamp);
 	if (!pic8) {
@@ -562,8 +569,8 @@ static void LoadTGA( const char *name, byte **pic, int *width, int *height, ID_T
 	byte		*targa_rgba;
 
 	if ( !pic ) {
-		fileSystem->ReadFile( name, NULL, timestamp );
-		return;	// just getting timestamp
+		r_imageFileLength = fileSystem->ReadFile( name, NULL, timestamp );
+		return;	// just getting timestamp (and the length, for the height-field cache key)
 	}
 
 	*pic = NULL;
@@ -804,8 +811,9 @@ static void LoadJPG( const char *filename, unsigned char **pic, int *width, int 
 		*timestamp = f->Timestamp();
 	}
 	if ( !pic ) {
+		r_imageFileLength = len;
 		fileSystem->CloseFile( f );
-		return;	// just getting timestamp
+		return;	// just getting timestamp (and the length, for the height-field cache key)
 	}
 	byte *fbuffer = (byte *)Mem_ClearedAlloc( len );
 	f->Read( fbuffer, len );
@@ -1000,8 +1008,8 @@ bool R_DecodeDDSLevelRGBA( const byte *blocks, int w, int h, unsigned int fourCC
 
 static void LoadDDS( const char *name, byte **pic, int *width, int *height, ID_TIME_T *timestamp ) {
 	if ( !pic ) {
-		fileSystem->ReadFile( name, NULL, timestamp );
-		return;	// just getting timestamp
+		r_imageFileLength = fileSystem->ReadFile( name, NULL, timestamp );
+		return;	// just getting timestamp (and the length, for the height-field cache key)
 	}
 	*pic = NULL;
 

@@ -619,6 +619,11 @@ IMAGEPROGRAM
 */
 
 void R_LoadImageProgram( const char *name, byte **pic, int *width, int *height, ID_TIME_T *timestamp, textureDepth_t *depth = NULL );
+// DUDE: after a timestamp-only load (pic == NULL): the length of the file R_LoadImage found (this thread), and the
+// summed lengths of every file a timestamp-only R_LoadImageProgram touched (this thread) - a content signature for
+// the height-field cache, since files inside a pak report timestamp 0
+int R_LastImageFileLength( void );
+unsigned int R_LastImageProgramBytes( void );
 // DUDE: the parallel image load's worker phase timers (CPU seconds summed over the threads; Image_load.cpp)
 void R_ImageWorkerTimersReset( void );
 void R_ImageWorkerTimersGet( float &sourceSec, float &generatorSec, float &statsSec, float &mipsSec, float &encodeSec );
