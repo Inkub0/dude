@@ -2311,24 +2311,25 @@ static void R_EncodeBlockLevels( int format, byte **levelData, const int *levelW
 R_ImageWorkerTimers
 
 DUDE: where the parallel image load's worker time goes, summed over the threads (CPU seconds, not wall):
-reading / decoding the source (or inflating a .dds, or a generator producing its pixels), the per-image
+reading / decoding the source (or inflating a .dds), a level generator producing its pixels, the per-image
 statistics and format decision (pixel scans), the mip chain (incl. the downsize), and the Vulkan block
 encode. Reset per R_ParallelLoadImages call and printed with its decode / upload wall times, so a slow
 level load or preset reload says which phase to look at.
 ==============
 */
-static std::atomic<long long> r_imgWorkerSourceUs( 0 ), r_imgWorkerStatsUs( 0 ), r_imgWorkerMipsUs( 0 ), r_imgWorkerEncodeUs( 0 );
+static std::atomic<long long> r_imgWorkerSourceUs( 0 ), r_imgWorkerGenUs( 0 ), r_imgWorkerStatsUs( 0 ), r_imgWorkerMipsUs( 0 ), r_imgWorkerEncodeUs( 0 );
 
 static ID_INLINE void R_ImageWorkerAdd( std::atomic<long long> &acc, double t0 ) {
 	acc.fetch_add( (long long)( ( Sys_MillisecondsPrecise() - t0 ) * 1000.0 ), std::memory_order_relaxed );
 }
 
 void R_ImageWorkerTimersReset( void ) {
-	r_imgWorkerSourceUs = 0;	r_imgWorkerStatsUs = 0;	r_imgWorkerMipsUs = 0;	r_imgWorkerEncodeUs = 0;
+	r_imgWorkerSourceUs = 0;	r_imgWorkerGenUs = 0;	r_imgWorkerStatsUs = 0;	r_imgWorkerMipsUs = 0;	r_imgWorkerEncodeUs = 0;
 }
 
-void R_ImageWorkerTimersGet( float &sourceSec, float &statsSec, float &mipsSec, float &encodeSec ) {
+void R_ImageWorkerTimersGet( float &sourceSec, float &generatorSec, float &statsSec, float &mipsSec, float &encodeSec ) {
 	sourceSec = r_imgWorkerSourceUs.load() * 1e-6f;
+	generatorSec = r_imgWorkerGenUs.load() * 1e-6f;
 	statsSec  = r_imgWorkerStatsUs.load() * 1e-6f;
 	mipsSec   = r_imgWorkerMipsUs.load() * 1e-6f;
 	encodeSec = r_imgWorkerEncodeUs.load() * 1e-6f;
@@ -2365,7 +2366,7 @@ bool idImage::LoadImageCpuGL() {
 	} else {
 		R_LoadImageProgram( imgName, &pic, &width, &height, &timestamp, &depth );
 	}
-	R_ImageWorkerAdd( r_imgWorkerSourceUs, t0 );
+	R_ImageWorkerAdd( generatorCpu ? r_imgWorkerGenUs : r_imgWorkerSourceUs, t0 );
 	if ( pic == NULL ) {
 		parallelData->failed = true;		// the main thread warns and makes the default image
 		return true;
@@ -2547,7 +2548,7 @@ bool idImage::LoadImageCpu() {
 	} else {
 		R_LoadImageProgram( imgName, &pic, &width, &height, &timestamp, &depth );
 	}
-	R_ImageWorkerAdd( r_imgWorkerSourceUs, t0 );
+	R_ImageWorkerAdd( generatorCpu ? r_imgWorkerGenUs : r_imgWorkerSourceUs, t0 );
 
 	if ( pic == NULL ) {
 		parallelData->failed = true;

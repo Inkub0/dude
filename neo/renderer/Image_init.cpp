@@ -42,6 +42,9 @@ If you have questions concerning this license or the applicable additional terms
 #include "framework/ParallelFor.h"	// DUDE: parallel image load
 #include <atomic>						// DUDE: parallel image load
 #include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <algorithm>
 #include <vector>
 
 const char *imageFilter[] = {
@@ -1137,49 +1140,103 @@ static generatorDownSize_t R_CurrentGeneratorDownSize( void ) {
 
 struct parallelLoadStats_t {
 	int		threads;
-	int		decodeMsec;		// wall time the main thread waited on the worker phases
-	int		uploadMsec;		// wall time of the main-thread upload phases
+	int		decodeMsec;		// wall time the main thread spent waiting for a decoded image (workers behind)
+	int		uploadMsec;		// wall time of the main-thread uploads
 	int		uploadBytes;	// pixel / block bytes handed to the GPU
-	float	workerSource, workerStats, workerMips, workerEncode;	// the worker phases, CPU seconds summed over the threads (R_ImageWorkerTimersGet)
+	float	workerSource, workerGenerators, workerStats, workerMips, workerEncode;	// the worker phases, CPU seconds summed over the threads (R_ImageWorkerTimersGet)
 };
 
-// the worker phase split for the stats line: "worker CPU: source x s, stats x s, mips x s, encode x s"
+// the worker phase split for the stats line
 static const char *R_ParallelLoadWorkerSplit( const parallelLoadStats_t &stats ) {
-	return va( "worker CPU over %i threads: source %.2f s, stats %.2f s, mips %.2f s, encode %.2f s", stats.threads,
-		stats.workerSource, stats.workerStats, stats.workerMips, stats.workerEncode );
+	return va( "worker CPU over %i threads: source %.2f s, generators %.2f s, stats %.2f s, mips %.2f s, encode %.2f s", stats.threads,
+		stats.workerSource, stats.workerGenerators, stats.workerStats, stats.workerMips, stats.workerEncode );
 }
 
+/*
+===============
+R_ParallelLoadImages
+
+DUDE: the parallel image load's engine (level load and the preset change's texture reload). Worker threads
+run LoadImageCpu over the whole list, each taking the next image as it finishes the last, while the main
+thread uploads the decoded images in the order they complete (UploadImageCpu: GPU submit is not
+thread-safe), batched for the RHI. The decoded-but-not-uploaded pyramids are bounded (MAX_PENDING; a 2K
+RGBA8 pyramid is 21 MB) so RAM stays flat: a worker waits for a slot once the main thread falls behind.
+
+Earlier the list went in chunks of 64 with a barrier after each - decode the chunk, then upload it - and
+every chunk ended when its slowest image did (a 2K texture against hundreds of small ones), so the
+workers sat idle for most of the run: 24 threads summing 4.5 s of CPU took 1.0 s of wall on a reload,
+5x the ideal. One pass with no barriers, the upload overlapped, brings the wall toward the CPU sum
+divided by the threads.
+
+The thread-safe heap / filesystem window spans the whole run (the main thread's uploads allocate under
+it too; both gates are plain recursive mutexes). The workers' prints are flushed once at the end.
+===============
+*/
 static int R_ParallelLoadImages( idImage **list, int count, const char *workerWarning, bool pacifier, parallelLoadStats_t &stats ) {
-	static const int CHUNK = 64;
+	static const int MAX_PENDING = 64;	// decoded images awaiting upload, workers' in-flight ones included (> the 32-thread cap)
+	static const int BATCH = 64;		// uploads per RHI submit (what one chunk was)
 
 	R_ImageWorkerTimersReset();
-	for ( int base = 0; base < count; base += CHUNK ) {
-		const int n = ( count - base < CHUNK ) ? count - base : CHUNK;
-		idImage ** const chunk = list + base;
+	const int nThreads = Com_ParallelThreadCount( count, r_parallelImageLoadThreads.GetInteger() );
+	if ( nThreads > stats.threads ) {
+		stats.threads = nThreads;
+	}
 
-		// phase 1: worker threads decode + build mip pyramids (heap / filesystem thread-safe for the window)
-		int t0 = Sys_Milliseconds();
-		{
-			idParallelWindow window;
-			const int threads = Com_ParallelFor( n, [&]( int idx ) { chunk[idx]->LoadImageCpu(); }, r_parallelImageLoadThreads.GetInteger() );
-			if ( threads > stats.threads ) {
-				stats.threads = threads;		// the last chunk is a short one
-			}
+	std::mutex				mtx;
+	std::condition_variable	cvDone;			// a decoded image is ready for upload
+	std::condition_variable	cvSlot;			// a pending slot freed by an upload
+	std::vector<int>		done;			// decoded indices, completion order
+	int						pending = 0;	// decoding or decoded, not yet uploaded
+	std::atomic<int>		nextIndex( 0 );
+	done.reserve( count );
+
+	{
+		idParallelWindow window;
+		std::vector<std::thread> pool;
+		pool.reserve( nThreads );
+		for ( int k = 0; k < nThreads; k++ ) {
+			pool.push_back( std::thread( [&]() {
+				Com_BeginThreadCapture();
+				for ( ;; ) {
+					const int idx = nextIndex.fetch_add( 1, std::memory_order_relaxed );
+					if ( idx >= count ) {
+						break;
+					}
+					{
+						std::unique_lock<std::mutex> lk( mtx );
+						cvSlot.wait( lk, [&]() { return pending < MAX_PENDING; } );
+						pending++;
+					}
+					list[idx]->LoadImageCpu();
+					{
+						std::lock_guard<std::mutex> lk( mtx );
+						done.push_back( idx );
+					}
+					cvDone.notify_one();
+				}
+				Com_EndThreadCapture();
+			} ) );
 		}
-		stats.decodeMsec += Sys_Milliseconds() - t0;
 
-		// surface any prints/warnings the workers buffered (order-independent)
-		Com_FlushThreadCaptureWarn( workerWarning );
-
-		// phase 2: upload the decoded pyramids on the main thread (GPU submit is not thread-safe);
-		// the RHI backend submits the chunk's uploads in one batch (a no-op on GL)
-		t0 = Sys_Milliseconds();
+		// the main thread: upload each image as it comes out, in RHI batches
 		rhi::RHI * const r = glConfig.rhiBackend ? rhi::GetRHI() : NULL;
-		if ( r ) {
-			r->BeginTextureUploadBatch();
-		}
-		for ( int i = 0; i < n; i++ ) {
-			const idImage::parallelLoad_t *pd = chunk[i]->parallelData;
+		int uploaded = 0, inBatch = 0;
+		while ( uploaded < count ) {
+			int idx;
+			int t0 = Sys_Milliseconds();
+			{
+				std::unique_lock<std::mutex> lk( mtx );
+				cvDone.wait( lk, [&]() { return !done.empty(); } );
+				idx = done.back();
+				done.pop_back();
+			}
+			stats.decodeMsec += Sys_Milliseconds() - t0;
+
+			t0 = Sys_Milliseconds();
+			if ( r && inBatch == 0 ) {
+				r->BeginTextureUploadBatch();
+			}
+			const idImage::parallelLoad_t *pd = list[idx]->parallelData;
 			if ( pd ) {
 				if ( pd->precompressedData ) {
 					stats.uploadBytes += pd->precompressedLen;
@@ -1190,17 +1247,32 @@ static int R_ParallelLoadImages( idImage **list, int count, const char *workerWa
 					}
 				}
 			}
-			chunk[i]->UploadImageCpu();
-			if ( pacifier && ( ( base + i ) & 15 ) == 0 ) {
+			list[idx]->UploadImageCpu();
+			uploaded++;
+			inBatch++;
+			{
+				std::lock_guard<std::mutex> lk( mtx );
+				pending--;
+			}
+			cvSlot.notify_one();
+			if ( r && ( inBatch == BATCH || uploaded == count ) ) {
+				r->EndTextureUploadBatch();
+				inBatch = 0;
+			}
+			if ( pacifier && ( uploaded & 15 ) == 0 ) {
 				session->PacifierUpdate();
 			}
+			stats.uploadMsec += Sys_Milliseconds() - t0;
 		}
-		if ( r ) {
-			r->EndTextureUploadBatch();
+
+		for ( size_t k = 0; k < pool.size(); k++ ) {
+			pool[k].join();
 		}
-		stats.uploadMsec += Sys_Milliseconds() - t0;
 	}
-	R_ImageWorkerTimersGet( stats.workerSource, stats.workerStats, stats.workerMips, stats.workerEncode );
+
+	// surface any prints/warnings the workers buffered (order-independent)
+	Com_FlushThreadCaptureWarn( workerWarning );
+	R_ImageWorkerTimersGet( stats.workerSource, stats.workerGenerators, stats.workerStats, stats.workerMips, stats.workerEncode );
 	return stats.threads;
 }
 
@@ -1266,6 +1338,11 @@ static void R_ReloadImages( const idCmdArgs &args, bool all, bool checkPrecompre
 
 		parallelLoadStats_t stats = {};
 		if ( !par.empty() ) {
+			// largest first: a resident image's upload size is known, and the big ones at the end of a
+			// dynamic schedule are what leaves threads idle at the tail
+			std::stable_sort( par.begin(), par.end(), []( const idImage *a, const idImage *b ) {
+				return a->uploadWidth * a->uploadHeight > b->uploadWidth * b->uploadHeight;
+			} );
 			R_ParallelLoadImages( par.data(), (int)par.size(),
 				"reloadImages: a worker hit an error during decode (see above); affected images use the default texture", false, stats );
 		}
@@ -1274,7 +1351,7 @@ static void R_ReloadImages( const idCmdArgs &args, bool all, bool checkPrecompre
 			r_generatorDownSize = R_CurrentGeneratorDownSize();		// the height fields were just produced with these
 		}
 
-		common->Printf( "reloadImages: %i images reloaded in %.2f seconds: %i on %i threads (decode %.2f s, upload %.2f s, %i MB), %i serial, %i regenerated; %i height fields kept, %i not resident, left to demand load\n",
+		common->Printf( "reloadImages: %i images reloaded in %.2f seconds: %i on %i threads (waited %.2f s, upload %.2f s, %i MB), %i serial, %i regenerated; %i height fields kept, %i not resident, left to demand load\n",
 			(int)par.size() + serialCount + regenCount, ( Sys_Milliseconds() - start ) * 0.001f,
 			(int)par.size(), stats.threads, stats.decodeMsec * 0.001f, stats.uploadMsec * 0.001f, stats.uploadBytes >> 20,
 			serialCount, regenCount, keptCount, skipCount );
@@ -2436,7 +2513,7 @@ void idImageManager::EndLevelLoad() {
 	}
 	common->Printf( "all images loaded in %5.1f seconds\n", (end-start) * 0.001 );
 	if ( parStats.threads ) {
-		common->Printf( "  parallel image load: %i threads, decode %.2f s, upload %.2f s, %i MB uploaded\n",
+		common->Printf( "  parallel image load: %i threads, waited %.2f s, upload %.2f s, %i MB uploaded\n",
 			parStats.threads, parStats.decodeMsec * 0.001f, parStats.uploadMsec * 0.001f, parStats.uploadBytes >> 20 );
 		common->Printf( "  %s\n", R_ParallelLoadWorkerSplit( parStats ) );
 	}
