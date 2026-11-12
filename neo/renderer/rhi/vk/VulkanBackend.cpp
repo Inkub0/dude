@@ -1243,43 +1243,42 @@ private:
 
 	// H4 RTAO (docs/rtx-rtao.md): denoised-occlusion output — an R16F STORAGE image NRD's
 	// last dispatch writes; lives in GENERAL for its whole life and is sampled by the
-	// resolve/debug passes via rtaoOutSampleImage. Recreated on resize.
+	// resolve/debug passes via rtaoOut.sample. Recreated on resize.
 	virtual bool		RtaoDenoise( const rhi::RtaoDenoiseArgs &args );
-	virtual ImageHandle	GetRtaoOutputImage() { return rtaoOutSampleImage; }
+	// DUDE: a backend-owned STORAGE image a denoiser writes and the passes sample: image + view + its slot in the merge
+	// sample table. StorageImageCreate / StorageImageDrain / StorageImageDestroy are its one lifecycle (structural pass).
+	struct storageImage_t {
+		VkImage			image = VK_NULL_HANDLE;
+		VmaAllocation	alloc = NULL;
+		VkImageView		view = VK_NULL_HANDLE;
+		ImageHandle		sample = 0;
+	};
+	bool				StorageImageCreate( storageImage_t &si, VkFormat format, int w, int h, const char *tag );
+	void				StorageImageDrain();
+	void				StorageImageDestroy( storageImage_t &si );
+	virtual ImageHandle	GetRtaoOutputImage() { return rtaoOut.sample; }
 	bool				RtaoEnsureOutput( int w, int h );
 	void				RtaoDestroyOutput();
-	VkImage				rtaoOutImage = VK_NULL_HANDLE;
-	VmaAllocation		rtaoOutAlloc = VK_NULL_HANDLE;
-	VkImageView			rtaoOutView = VK_NULL_HANDLE;
-	ImageHandle			rtaoOutSampleImage = 0;
+	storageImage_t		rtaoOut;
 	int					rtaoOutW = 0, rtaoOutH = 0;
 	bool				rtaoOutReady = false;	// transitioned UNDEFINED->GENERAL
 	// H6b RT GI (docs/rtx-rtgi.md): denoised GI radiance — RGBA16F STORAGE (radiance .rgb, occlusion .w)
 	// that REBLUR_DIFFUSE writes via the RtaoDenoise giMode path; same lifecycle as the RTAO output.
-	virtual ImageHandle	GetRtgiOutputImage() { return rtgiOutSampleImage; }
-	virtual ImageHandle	GetRtgiOutputSh1Image() { return rtgiOutSh1SampleImage; }
+	virtual ImageHandle	GetRtgiOutputImage() { return rtgiOut.sample; }
+	virtual ImageHandle	GetRtgiOutputSh1Image() { return rtgiOutSh1.sample; }
 	// R0 (docs/rtx-restir-di.md Plan R0): NRD OUT_VALIDATION, an RGBA8 overlay NRD renders when CommonSettings::enableValidation
 	// is set (accumulated frames, history resets, antilag firing per pixel). Sized to the denoise that asked for it; shared
 	// by every consumer (one asks per frame). Same mid-frame destroy contract as the RTGI output.
-	virtual ImageHandle	GetNrdValidationImage() { return nrdValidSampleImage; }
+	virtual ImageHandle	GetNrdValidationImage() { return nrdValid.sample; }
 	bool				NrdEnsureValidation( int w, int h );
 	void				NrdDestroyValidation();
-	VkImage				nrdValidImage = VK_NULL_HANDLE;
-	VmaAllocation		nrdValidAlloc = NULL;
-	VkImageView			nrdValidView = VK_NULL_HANDLE;
-	ImageHandle			nrdValidSampleImage = 0;
+	storageImage_t		nrdValid;
 	int					nrdValidW = 0, nrdValidH = 0;
 	bool				nrdValidReady = false;
-	VkImage				rtgiOutSh1Image = VK_NULL_HANDLE;		// SH mode: OUT_DIFF_SH1 (same size / lifecycle as rtgiOutImage)
-	VmaAllocation		rtgiOutSh1Alloc = NULL;
-	VkImageView			rtgiOutSh1View = VK_NULL_HANDLE;
-	ImageHandle			rtgiOutSh1SampleImage = 0;
+	storageImage_t		rtgiOutSh1;			// SH mode: OUT_DIFF_SH1 (same size / lifecycle as rtgiOut)
 	bool				RtgiEnsureOutput( int w, int h );
 	void				RtgiDestroyOutput();
-	VkImage				rtgiOutImage = VK_NULL_HANDLE;
-	VmaAllocation		rtgiOutAlloc = VK_NULL_HANDLE;
-	VkImageView			rtgiOutView = VK_NULL_HANDLE;
-	ImageHandle			rtgiOutSampleImage = 0;
+	storageImage_t		rtgiOut;
 	int					rtgiOutW = 0, rtgiOutH = 0;
 	bool				rtgiOutReady = false;
 	bool						haveComputeDerivatives = false;	// VK_KHR_compute_shader_derivatives (quads)
@@ -8173,16 +8172,29 @@ bool VulkanBackend::NrdEnsureMvScratch( int w, int h ) {
 	return true;
 }
 
-bool VulkanBackend::RtaoEnsureOutput( int w, int h ) {
-	if ( rtaoOutImage != VK_NULL_HANDLE && rtaoOutW == w && rtaoOutH == h ) {
-		return true;
-	}
-	RtaoDestroyOutput();
+/*
+====================
+VulkanBackend::StorageImageCreate / StorageImageDrain / StorageImageDestroy
 
+DUDE: the lifecycle shared by the backend-owned STORAGE images a denoiser writes and the passes sample (the
+RTAO and RTGI outputs, NRD's validation overlay): a 2D single-mip STORAGE|SAMPLED image, its view and a slot
+in the merge sample table, registered with the standard SHADER_READ_ONLY resting layout - the fullscreen-draw
+descriptor path hardcodes it, so a denoiser transitions GENERAL only around its own storage writes and parks
+the image back afterwards. Create leaves the half-made image to the caller's Destroy on a view failure.
+Destroying while a frame records: the image may still be bound to this slot's command buffer (a resize /
+scale change mid-view; the resolve, debug and history-confidence passes sampled it earlier this frame) and
+vkDeviceWaitIdle does NOT drain a still-recording command buffer, so destroying it now would invalidate the
+buffer (the "VkImage was destroyed" validation cascade). It goes to the slot's retire list instead, freed
+after its fence in BeginFrame - the contract DestroyImage/RetireImage use for mid-frame image destruction.
+Between frames (shutdown/vid_restart) Drain waits for the device once and Destroy frees immediately. The
+sample slot is released; the caller invalidates the cached texture sets once after all its images are gone.
+====================
+*/
+bool VulkanBackend::StorageImageCreate( storageImage_t &si, VkFormat format, int w, int h, const char *tag ) {
 	VkImageCreateInfo ici = {};
 	ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
 	ici.imageType = VK_IMAGE_TYPE_2D;
-	ici.format = VK_FORMAT_R16_SFLOAT;
+	ici.format = format;
 	ici.extent = { (uint32_t)w, (uint32_t)h, 1 };
 	ici.mipLevels = 1;
 	ici.arrayLayers = 1;
@@ -8192,26 +8204,58 @@ bool VulkanBackend::RtaoEnsureOutput( int w, int h ) {
 	ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 	VmaAllocationCreateInfo aci = {};
 	aci.usage = VMA_MEMORY_USAGE_AUTO;
-	if ( !vkCheck( vmaCreateImage( vma, &ici, &aci, &rtaoOutImage, &rtaoOutAlloc, NULL ), "vmaCreateImage(RTAO out)" ) ) {
-		rtaoOutImage = VK_NULL_HANDLE;
+	if ( !vkCheck( vmaCreateImage( vma, &ici, &aci, &si.image, &si.alloc, NULL ), va( "vmaCreateImage(%s)", tag ) ) ) {
+		si.image = VK_NULL_HANDLE;
 		return false;
 	}
 	VkImageViewCreateInfo vwi = {};
 	vwi.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-	vwi.image = rtaoOutImage;
+	vwi.image = si.image;
 	vwi.viewType = VK_IMAGE_VIEW_TYPE_2D;
-	vwi.format = VK_FORMAT_R16_SFLOAT;
+	vwi.format = format;
 	vwi.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
 	vwi.subresourceRange.levelCount = 1;
 	vwi.subresourceRange.layerCount = 1;
-	if ( !vkCheck( vkCreateImageView( device, &vwi, NULL, &rtaoOutView ), "vkCreateImageView(RTAO out)" ) ) {
+	if ( !vkCheck( vkCreateImageView( device, &vwi, NULL, &si.view ), va( "vkCreateImageView(%s)", tag ) ) ) {
+		return false;		// the caller's Destroy frees the image
+	}
+	si.sample = RegisterMergeSampleImage( si.image, si.view, w, h );
+	return true;
+}
+
+void VulkanBackend::StorageImageDrain() {
+	if ( !( frameOpen && !skipFrame ) && device != VK_NULL_HANDLE ) {
+		vkDeviceWaitIdle( device );
+	}
+}
+
+void VulkanBackend::StorageImageDestroy( storageImage_t &si ) {
+	if ( frameOpen && !skipFrame ) {
+		if ( si.image != VK_NULL_HANDLE || si.view != VK_NULL_HANDLE ) {
+			retiredImages[frameIndex].push_back( { si.image, si.alloc, si.view } );	// freed after this slot's fence
+		}
+	} else {
+		if ( si.view )  { vkDestroyImageView( device, si.view, NULL ); }
+		if ( si.image ) { vmaDestroyImage( vma, si.image, si.alloc ); }
+	}
+	si.view = VK_NULL_HANDLE;
+	si.image = VK_NULL_HANDLE;
+	si.alloc = NULL;
+	if ( si.sample >= 1 && si.sample <= (ImageHandle)imageTable.size() ) {
+		imageTable[si.sample - 1].live = false;
+	}
+	si.sample = 0;
+}
+
+bool VulkanBackend::RtaoEnsureOutput( int w, int h ) {
+	if ( rtaoOut.image != VK_NULL_HANDLE && rtaoOutW == w && rtaoOutH == h ) {
+		return true;
+	}
+	RtaoDestroyOutput();
+	if ( !StorageImageCreate( rtaoOut, VK_FORMAT_R16_SFLOAT, w, h, "RTAO out" ) ) {
 		RtaoDestroyOutput();
 		return false;
 	}
-	// registered with the standard SHADER_READ_ONLY resting layout — the fullscreen-draw
-	// descriptor path hardcodes it, so the denoiser transitions GENERAL only around its
-	// own storage writes and parks the image back afterwards
-	rtaoOutSampleImage = RegisterMergeSampleImage( rtaoOutImage, rtaoOutView, w, h );
 	rtaoOutW = w;
 	rtaoOutH = h;
 	rtaoOutReady = false;
@@ -8219,88 +8263,30 @@ bool VulkanBackend::RtaoEnsureOutput( int w, int h ) {
 }
 
 void VulkanBackend::RtaoDestroyOutput() {
-	if ( rtaoOutImage == VK_NULL_HANDLE && rtaoOutView == VK_NULL_HANDLE ) {
+	if ( rtaoOut.image == VK_NULL_HANDLE && rtaoOut.view == VK_NULL_HANDLE ) {
 		return;
 	}
-	// A recording frame may still have this image bound to its command buffer (resolve/debug
-	// passes sample it through rtaoOutSampleImage earlier in the frame). vkDeviceWaitIdle
-	// drains submitted work but NOT the still-recording command buffer, so a mid-frame
-	// resize/scale change must defer the destroy to this slot's retire list (freed after its
-	// fence in BeginFrame) rather than invalidate the live command buffer — same contract as
-	// DestroyImage/RetireImage. Between frames (shutdown/vid_restart) the waitIdle path frees
-	// immediately.
-	if ( frameOpen && !skipFrame ) {
-		retiredImages[frameIndex].push_back( { rtaoOutImage, rtaoOutAlloc, rtaoOutView } );
-		rtaoOutView = VK_NULL_HANDLE;
-		rtaoOutImage = VK_NULL_HANDLE;
-		rtaoOutAlloc = NULL;
-	} else {
-		if ( device != VK_NULL_HANDLE ) {
-			vkDeviceWaitIdle( device );
-		}
-		if ( rtaoOutView )  { vkDestroyImageView( device, rtaoOutView, NULL ); rtaoOutView = VK_NULL_HANDLE; }
-		if ( rtaoOutImage ) { vmaDestroyImage( vma, rtaoOutImage, rtaoOutAlloc ); rtaoOutImage = VK_NULL_HANDLE; rtaoOutAlloc = NULL; }
-	}
-	if ( rtaoOutSampleImage >= 1 && rtaoOutSampleImage <= (ImageHandle)imageTable.size() ) {
-		imageTable[rtaoOutSampleImage - 1].live = false;
-	}
+	StorageImageDrain();
+	StorageImageDestroy( rtaoOut );
 	InvalidateTextureSets();	// cached descriptor sets referencing the freed handle are stale
-	rtaoOutSampleImage = 0;
 	rtaoOutW = rtaoOutH = 0;
 	rtaoOutReady = false;
 }
 
-// H6b RT GI (docs/rtx-rtgi.md): the denoised GI radiance output — mirrors RtaoEnsureOutput but RGBA16F
+// H6b RT GI (docs/rtx-rtgi.md): the denoised GI radiance output - mirrors RtaoEnsureOutput but RGBA16F
 // (radiance .rgb + occlusion .w), the format REBLUR_DIFFUSE's OUT_DIFF_RADIANCE_HITDIST writes.
 bool VulkanBackend::RtgiEnsureOutput( int w, int h ) {
-	if ( rtgiOutImage != VK_NULL_HANDLE && rtgiOutW == w && rtgiOutH == h ) {
+	if ( rtgiOut.image != VK_NULL_HANDLE && rtgiOutW == w && rtgiOutH == h ) {
 		return true;
 	}
 	RtgiDestroyOutput();
-
-	VkImageCreateInfo ici = {};
-	ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-	ici.imageType = VK_IMAGE_TYPE_2D;
-	ici.format = VK_FORMAT_R16G16B16A16_SFLOAT;
-	ici.extent = { (uint32_t)w, (uint32_t)h, 1 };
-	ici.mipLevels = 1;
-	ici.arrayLayers = 1;
-	ici.samples = VK_SAMPLE_COUNT_1_BIT;
-	ici.tiling = VK_IMAGE_TILING_OPTIMAL;
-	ici.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
-	ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-	VmaAllocationCreateInfo aci = {};
-	aci.usage = VMA_MEMORY_USAGE_AUTO;
-	if ( !vkCheck( vmaCreateImage( vma, &ici, &aci, &rtgiOutImage, &rtgiOutAlloc, NULL ), "vmaCreateImage(RTGI out)" ) ) {
-		rtgiOutImage = VK_NULL_HANDLE;
-		return false;
-	}
-	VkImageViewCreateInfo vwi = {};
-	vwi.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-	vwi.image = rtgiOutImage;
-	vwi.viewType = VK_IMAGE_VIEW_TYPE_2D;
-	vwi.format = VK_FORMAT_R16G16B16A16_SFLOAT;
-	vwi.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-	vwi.subresourceRange.levelCount = 1;
-	vwi.subresourceRange.layerCount = 1;
-	if ( !vkCheck( vkCreateImageView( device, &vwi, NULL, &rtgiOutView ), "vkCreateImageView(RTGI out)" ) ) {
-		RtgiDestroyOutput();
-		return false;
-	}
-	rtgiOutSampleImage = RegisterMergeSampleImage( rtgiOutImage, rtgiOutView, w, h );
 	// SH mode's second output (OUT_DIFF_SH1): same description, same lifecycle; always created so a
 	// GI / DI(SH) swap never resizes mid-view
-	if ( !vkCheck( vmaCreateImage( vma, &ici, &aci, &rtgiOutSh1Image, &rtgiOutSh1Alloc, NULL ), "vmaCreateImage(RTGI out SH1)" ) ) {
-		rtgiOutSh1Image = VK_NULL_HANDLE;
+	if ( !StorageImageCreate( rtgiOut, VK_FORMAT_R16G16B16A16_SFLOAT, w, h, "RTGI out" )
+	     || !StorageImageCreate( rtgiOutSh1, VK_FORMAT_R16G16B16A16_SFLOAT, w, h, "RTGI out SH1" ) ) {
 		RtgiDestroyOutput();
 		return false;
 	}
-	vwi.image = rtgiOutSh1Image;
-	if ( !vkCheck( vkCreateImageView( device, &vwi, NULL, &rtgiOutSh1View ), "vkCreateImageView(RTGI out SH1)" ) ) {
-		RtgiDestroyOutput();
-		return false;
-	}
-	rtgiOutSh1SampleImage = RegisterMergeSampleImage( rtgiOutSh1Image, rtgiOutSh1View, w, h );
 	rtgiOutW = w;
 	rtgiOutH = h;
 	rtgiOutReady = false;
@@ -8308,47 +8294,13 @@ bool VulkanBackend::RtgiEnsureOutput( int w, int h ) {
 }
 
 void VulkanBackend::RtgiDestroyOutput() {
-	if ( rtgiOutImage == VK_NULL_HANDLE && rtgiOutView == VK_NULL_HANDLE ) {
+	if ( rtgiOut.image == VK_NULL_HANDLE && rtgiOut.view == VK_NULL_HANDLE ) {
 		return;
 	}
-	// A frame may be recording when a resize/scale change triggers this (RtgiEnsureOutput
-	// runs mid-view): the previous output is still bound to this slot's command buffer — the
-	// H6f history-confidence pass sampled it this frame through rtgiOutSampleImage.
-	// vkDeviceWaitIdle does NOT drain the still-recording command buffer, so destroying the
-	// image now invalidates it (the "VkImage was destroyed" validation cascade). Defer to
-	// this slot's retire list instead, freed after its fence in BeginFrame — the same
-	// contract DestroyImage/RetireImage use for mid-frame image destruction.
-	if ( frameOpen && !skipFrame ) {
-		if ( rtgiOutImage != VK_NULL_HANDLE || rtgiOutView != VK_NULL_HANDLE ) {
-			retiredImages[frameIndex].push_back( { rtgiOutImage, rtgiOutAlloc, rtgiOutView } );
-		}
-		if ( rtgiOutSh1Image != VK_NULL_HANDLE || rtgiOutSh1View != VK_NULL_HANDLE ) {
-			retiredImages[frameIndex].push_back( { rtgiOutSh1Image, rtgiOutSh1Alloc, rtgiOutSh1View } );
-		}
-		rtgiOutView = VK_NULL_HANDLE;
-		rtgiOutImage = VK_NULL_HANDLE;
-		rtgiOutAlloc = NULL;
-		rtgiOutSh1View = VK_NULL_HANDLE;
-		rtgiOutSh1Image = VK_NULL_HANDLE;
-		rtgiOutSh1Alloc = NULL;
-	} else {
-		if ( device != VK_NULL_HANDLE ) {
-			vkDeviceWaitIdle( device );
-		}
-		if ( rtgiOutView )  { vkDestroyImageView( device, rtgiOutView, NULL ); rtgiOutView = VK_NULL_HANDLE; }
-		if ( rtgiOutImage ) { vmaDestroyImage( vma, rtgiOutImage, rtgiOutAlloc ); rtgiOutImage = VK_NULL_HANDLE; rtgiOutAlloc = NULL; }
-		if ( rtgiOutSh1View )  { vkDestroyImageView( device, rtgiOutSh1View, NULL ); rtgiOutSh1View = VK_NULL_HANDLE; }
-		if ( rtgiOutSh1Image ) { vmaDestroyImage( vma, rtgiOutSh1Image, rtgiOutSh1Alloc ); rtgiOutSh1Image = VK_NULL_HANDLE; rtgiOutSh1Alloc = NULL; }
-	}
-	if ( rtgiOutSampleImage >= 1 && rtgiOutSampleImage <= (ImageHandle)imageTable.size() ) {
-		imageTable[rtgiOutSampleImage - 1].live = false;
-	}
-	if ( rtgiOutSh1SampleImage >= 1 && rtgiOutSh1SampleImage <= (ImageHandle)imageTable.size() ) {
-		imageTable[rtgiOutSh1SampleImage - 1].live = false;
-	}
+	StorageImageDrain();
+	StorageImageDestroy( rtgiOut );
+	StorageImageDestroy( rtgiOutSh1 );
 	InvalidateTextureSets();
-	rtgiOutSampleImage = 0;
-	rtgiOutSh1SampleImage = 0;
 	rtgiOutW = rtgiOutH = 0;
 	rtgiOutReady = false;
 }
@@ -8364,40 +8316,14 @@ Same mid-frame destroy contract as the RTGI output (retire list while a frame re
 ====================
 */
 bool VulkanBackend::NrdEnsureValidation( int w, int h ) {
-	if ( nrdValidImage != VK_NULL_HANDLE && nrdValidW == w && nrdValidH == h ) {
+	if ( nrdValid.image != VK_NULL_HANDLE && nrdValidW == w && nrdValidH == h ) {
 		return true;
 	}
 	NrdDestroyValidation();
-	VkImageCreateInfo ici = {};
-	ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-	ici.imageType = VK_IMAGE_TYPE_2D;
-	ici.format = VK_FORMAT_R8G8B8A8_UNORM;
-	ici.extent = { (uint32_t)w, (uint32_t)h, 1 };
-	ici.mipLevels = 1;
-	ici.arrayLayers = 1;
-	ici.samples = VK_SAMPLE_COUNT_1_BIT;
-	ici.tiling = VK_IMAGE_TILING_OPTIMAL;
-	ici.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
-	ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-	VmaAllocationCreateInfo aci = {};
-	aci.usage = VMA_MEMORY_USAGE_AUTO;
-	if ( !vkCheck( vmaCreateImage( vma, &ici, &aci, &nrdValidImage, &nrdValidAlloc, NULL ), "vmaCreateImage(NRD validation)" ) ) {
-		nrdValidImage = VK_NULL_HANDLE;
-		return false;
-	}
-	VkImageViewCreateInfo vwi = {};
-	vwi.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-	vwi.image = nrdValidImage;
-	vwi.viewType = VK_IMAGE_VIEW_TYPE_2D;
-	vwi.format = VK_FORMAT_R8G8B8A8_UNORM;
-	vwi.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-	vwi.subresourceRange.levelCount = 1;
-	vwi.subresourceRange.layerCount = 1;
-	if ( !vkCheck( vkCreateImageView( device, &vwi, NULL, &nrdValidView ), "vkCreateImageView(NRD validation)" ) ) {
+	if ( !StorageImageCreate( nrdValid, VK_FORMAT_R8G8B8A8_UNORM, w, h, "NRD validation" ) ) {
 		NrdDestroyValidation();
 		return false;
 	}
-	nrdValidSampleImage = RegisterMergeSampleImage( nrdValidImage, nrdValidView, w, h );
 	nrdValidW = w;
 	nrdValidH = h;
 	nrdValidReady = false;
@@ -8405,26 +8331,12 @@ bool VulkanBackend::NrdEnsureValidation( int w, int h ) {
 }
 
 void VulkanBackend::NrdDestroyValidation() {
-	if ( nrdValidImage == VK_NULL_HANDLE && nrdValidView == VK_NULL_HANDLE ) {
+	if ( nrdValid.image == VK_NULL_HANDLE && nrdValid.view == VK_NULL_HANDLE ) {
 		return;
 	}
-	if ( frameOpen && !skipFrame ) {
-		retiredImages[frameIndex].push_back( { nrdValidImage, nrdValidAlloc, nrdValidView } );	// freed after this slot's fence
-		nrdValidView = VK_NULL_HANDLE;
-		nrdValidImage = VK_NULL_HANDLE;
-		nrdValidAlloc = NULL;
-	} else {
-		if ( device != VK_NULL_HANDLE ) {
-			vkDeviceWaitIdle( device );
-		}
-		if ( nrdValidView )  { vkDestroyImageView( device, nrdValidView, NULL ); nrdValidView = VK_NULL_HANDLE; }
-		if ( nrdValidImage ) { vmaDestroyImage( vma, nrdValidImage, nrdValidAlloc ); nrdValidImage = VK_NULL_HANDLE; nrdValidAlloc = NULL; }
-	}
-	if ( nrdValidSampleImage >= 1 && nrdValidSampleImage <= (ImageHandle)imageTable.size() ) {
-		imageTable[nrdValidSampleImage - 1].live = false;
-	}
+	StorageImageDrain();
+	StorageImageDestroy( nrdValid );
 	InvalidateTextureSets();
-	nrdValidSampleImage = 0;
 	nrdValidW = nrdValidH = 0;
 	nrdValidReady = false;
 }
@@ -8613,13 +8525,13 @@ void VulkanBackend::RtaoDenoiseBindViews( const rhi::RtaoDenoiseArgs &a, const r
 		nrdUserViews[(uint32_t)nrd::ResourceType::IN_DISOCCLUSION_THRESHOLD_MIX] = mix->view;	// R1 forced resets
 	}
 	if ( validation ) {
-		nrdUserViews[(uint32_t)nrd::ResourceType::OUT_VALIDATION] = nrdValidView;		// R0 debug overlay
+		nrdUserViews[(uint32_t)nrd::ResourceType::OUT_VALIDATION] = nrdValid.view;		// R0 debug overlay
 	}
 	if ( shMode ) {
 		nrdUserViews[(uint32_t)nrd::ResourceType::IN_DIFF_SH0]  = targetView( ray, 0 );		// RGBA16F YCoCg radiance + hitdist
 		nrdUserViews[(uint32_t)nrd::ResourceType::IN_DIFF_SH1]  = targetView( ray, a.shAtt );	// RGBA32F direction * luminance (+ the row id in .w)
 		nrdUserViews[(uint32_t)nrd::ResourceType::OUT_DIFF_SH0] = outView;
-		nrdUserViews[(uint32_t)nrd::ResourceType::OUT_DIFF_SH1] = rtgiOutSh1View;
+		nrdUserViews[(uint32_t)nrd::ResourceType::OUT_DIFF_SH1] = rtgiOutSh1.view;
 	} else if ( a.giMode ) {
 		nrdUserViews[(uint32_t)nrd::ResourceType::IN_DIFF_RADIANCE_HITDIST]  = targetView( ray, 0 );	// RGBA16F radiance+hitdist
 		nrdUserViews[(uint32_t)nrd::ResourceType::OUT_DIFF_RADIANCE_HITDIST] = outView;
@@ -8731,10 +8643,10 @@ void VulkanBackend::RtaoDenoisePreBarriers( VkCommandBuffer cb, const rhi::RtaoD
 	addPre( outImg,              outReady ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED );
 	if ( shMode ) {
 		addPre( ray->colorImage[a.shAtt], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL );
-		addPre( rtgiOutSh1Image,          outReady ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED );
+		addPre( rtgiOutSh1.image,          outReady ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED );
 	}
 	if ( validation ) {
-		addPre( nrdValidImage, nrdValidReady ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED );
+		addPre( nrdValid.image, nrdValidReady ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED );
 		nrdValidReady = true;
 	}
 	vkCmdPipelineBarrier( cb,
@@ -8786,9 +8698,9 @@ void VulkanBackend::RtaoDenoisePostBarriers( VkCommandBuffer cb, const rhi::Rtao
 																						// confidence pass samples / targets it wrongly (validation 09600)
 	if ( shMode ) {
 		addPost( ray->colorImage[a.shAtt], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL );
-		addPost( rtgiOutSh1Image,          VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL );
+		addPost( rtgiOutSh1.image,          VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL );
 	}
-	if ( validation ) { addPost( nrdValidImage, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL ); }
+	if ( validation ) { addPost( nrdValid.image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL ); }
 	// dst includes COMPUTE: FSR2 consumes the velocity image (and could consume others)
 	// from compute later in the frame
 	vkCmdPipelineBarrier( cb,
@@ -8840,10 +8752,10 @@ bool VulkanBackend::RtaoDenoise( const rhi::RtaoDenoiseArgs &a ) {
 	// H6b (docs/rtx-rtgi.md): giMode swaps the output image + denoiser id + the DIFF resource enums so the
 	// single NRD instance denoises GI radiance this frame instead of RTAO occlusion. RTAO (giMode false)
 	// is byte-identical below.
-	VkImage      outImg   = a.giMode ? rtgiOutImage : rtaoOutImage;
-	VkImageView  outView  = a.giMode ? rtgiOutView  : rtaoOutView;
+	VkImage      outImg   = a.giMode ? rtgiOut.image : rtaoOut.image;
+	VkImageView  outView  = a.giMode ? rtgiOut.view  : rtaoOut.view;
 	bool        &outReady = a.giMode ? rtgiOutReady : rtaoOutReady;
-	const bool shMode = a.giMode && a.shMode && rtgiOutSh1View != VK_NULL_HANDLE;
+	const bool shMode = a.giMode && a.shMode && rtgiOutSh1.view != VK_NULL_HANDLE;
 	// R2: the ReLAX family on request (and only if the instance was created with it - a flip rebuilds via the gfx signature)
 	const bool relax = a.giMode && a.denoiser == 1 && nrdRelax;
 	const nrd::Identifier denId = a.giMode ? ( relax ? ( shMode ? NRD_ID_RELAX_DI_SH : NRD_ID_RELAX_DI )
