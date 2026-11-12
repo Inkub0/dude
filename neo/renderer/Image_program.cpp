@@ -841,9 +841,17 @@ static idList<hfPendingWrite_t>	s_hfPending;
 static const std::thread::id	s_hfMainThread = std::this_thread::get_id();	// static init runs on the main thread
 static std::atomic<int>			s_hfHits( 0 ), s_hfMisses( 0 );
 
-static idStr R_HeightFieldCachePath( const char *name ) {
-	unsigned long long h = 1469598103934665603ULL;		// FNV-1a over the generated image's name
+// one file per name + spec: two materials can share a generated name (a tess height named after an authored
+// _h both use) with different bump programs behind it, and each must keep its own field
+static idStr R_HeightFieldCachePath( const char *name, const char *spec ) {
+	unsigned long long h = 1469598103934665603ULL;		// FNV-1a over the generated image's name, a separator, the spec
 	for ( const unsigned char *p = (const unsigned char *)name; *p; p++ ) {
+		h ^= *p;
+		h *= 1099511628211ULL;
+	}
+	h ^= '\n';
+	h *= 1099511628211ULL;
+	for ( const unsigned char *p = (const unsigned char *)spec; *p; p++ ) {
 		h ^= *p;
 		h *= 1099511628211ULL;
 	}
@@ -860,7 +868,7 @@ static ID_TIME_T R_HeightFieldSourceTime( const char *program ) {
 }
 
 static void R_HeightFieldCacheWriteNow( const hfPendingWrite_t &e ) {
-	idFile *f = fileSystem->OpenFileWrite( R_HeightFieldCachePath( e.name ) );
+	idFile *f = fileSystem->OpenFileWrite( R_HeightFieldCachePath( e.name, e.spec ) );
 	if ( !f ) {
 		return;
 	}
@@ -927,7 +935,7 @@ static bool R_HeightFieldCacheRead( const char *name, const char *spec, const ID
 		return false;
 	}
 	void *buf = NULL;
-	const int len = fileSystem->ReadFile( R_HeightFieldCachePath( name ), &buf, NULL );
+	const int len = fileSystem->ReadFile( R_HeightFieldCachePath( name, spec ), &buf, NULL );
 	if ( len <= 0 || buf == NULL ) {
 		s_hfMisses++;
 		return false;
