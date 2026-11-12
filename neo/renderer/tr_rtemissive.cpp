@@ -738,6 +738,11 @@ void R_RtEmissiveForget( void ) {
 	s_rtEmissiveMap.Clear();
 }
 
+// DUDE: the table's glow texture slots are stale (a texture reload moved them): rebuild it on the next RT frame
+void R_RtEmissiveInvalidate( void ) {
+	s_rtEmissiveMap.Clear();
+}
+
 void R_RtEmissiveFree( void ) {
 	rhi::RHI *r = rhi::GetRHI();
 	if ( r != NULL ) {

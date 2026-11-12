@@ -1358,6 +1358,7 @@ static void R_ReloadImages( const idCmdArgs &args, bool all, bool checkPrecompre
 		if ( !par.empty() ) {
 			common->Printf( "  %s\n", R_ParallelLoadWorkerSplit( stats ) );
 		}
+		R_RtInvalidateScene();		// the images have new GPU slots: the RT scene's baked texture slots are stale
 		return;
 	}
 
@@ -1366,6 +1367,7 @@ static void R_ReloadImages( const idCmdArgs &args, bool all, bool checkPrecompre
 		image->Reload( checkPrecompressed, all );
 	}
 	r_generatorDownSize = R_CurrentGeneratorDownSize();
+	R_RtInvalidateScene();
 }
 
 void R_ReloadImages_f( const idCmdArgs &args ) {

@@ -1258,6 +1258,8 @@ namespace rhi { class RHI; }
 void R_RtEmissiveUpdate( const idRenderWorldLocal *world, rhi::RHI *r );
 void R_RtEmissiveForget( void );
 void R_RtEmissiveFree( void );
+void R_RtEmissiveInvalidate( void );		// DUDE: rebuild the table next RT frame (its glow texture slots moved)
+void R_RtInvalidateScene( void );			// DUDE: rebuild the static RT scene + emissive table next RT frame (tr_main.cpp; a texture reload moved the slots)
 extern idCVar r_rtPerforatedShadows;		// alpha-tested grate/fence casters in the RT shadow rays
 extern idCVar r_rtAllLights;				// RT shadows for EVERY shadow-casting light (mode 4 inline ray), no shadow maps at all
 extern idCVar r_rtShadowBlur;				// screen-space blur on top of the hard RT shadows (sun / moving lights), docs/rtx-shadow-blur.md

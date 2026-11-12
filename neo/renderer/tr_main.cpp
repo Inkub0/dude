@@ -2733,6 +2733,26 @@ void R_RtResetSceneState( void ) {
 	R_RtEmissiveForget();
 }
 
+/*
+====================
+R_RtInvalidateScene
+
+DUDE: the static scene's surface descriptors bake each material's bindless texture slots (idImage::rhiHandle:
+the diffuse, the glow, a perforated caster's coverage), and the emissive table bakes its glow slots. A texture
+reload (reloadImages: the preset change's compression flip) purges every image and uploads it again, and the
+backend hands each one the first free slot, so the slots move - a reflection ray then samples whatever
+texture sits in the old slot (blue normal maps and red specular maps on the floor). Drop the "built for this
+map" latches: the next RT frame rebuilds the scene and the table through the map-change path
+(R_RtWorldUpdate: DestroyRtScene + fresh BLASes, a few ms), with the live slots. The per-frame paths
+(animated casters, light cookies, the per-frame TLAS) read the slots each frame and need nothing.
+====================
+*/
+void R_RtInvalidateScene( void ) {
+	s_rtWorldMap.Clear();
+	s_rtWorldFailedMap.Clear();
+	R_RtEmissiveInvalidate();
+}
+
 // DUDE: the six cvars that imply the persistent ray-query scene. r_rtWorld is the explicit
 // toggle; r_rtSunShadows (R3) / r_rtMovingLights (Option A) / r_rtAllLights / r_rtao (H4) /
 // r_rtgi (H6) each auto-build it as a prerequisite. Kept in one place so every "is the scene
