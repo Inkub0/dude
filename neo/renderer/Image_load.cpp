@@ -32,6 +32,7 @@ If you have questions concerning this license or the applicable additional terms
 
 #include "renderer/Image.h"
 #include "renderer/rhi/RHI.h"		// DUDE Phase 4 M2: Vulkan-backend image uploads
+#include <atomic>					// DUDE: the parallel load's worker phase timers
 
 // DUDE: modern GL enums for the RGBA16F _currentRender capture (r_hdr). The legacy
 // renderer pulls SDL_opengl.h, which may predate GL3, so guard like rhi/GL3Local.h does.
@@ -2307,6 +2308,34 @@ static void R_EncodeBlockLevels( int format, byte **levelData, const int *levelW
 
 /*
 ==============
+R_ImageWorkerTimers
+
+DUDE: where the parallel image load's worker time goes, summed over the threads (CPU seconds, not wall):
+reading / decoding the source (or inflating a .dds, or a generator producing its pixels), the per-image
+statistics and format decision (pixel scans), the mip chain (incl. the downsize), and the Vulkan block
+encode. Reset per R_ParallelLoadImages call and printed with its decode / upload wall times, so a slow
+level load or preset reload says which phase to look at.
+==============
+*/
+static std::atomic<long long> r_imgWorkerSourceUs( 0 ), r_imgWorkerStatsUs( 0 ), r_imgWorkerMipsUs( 0 ), r_imgWorkerEncodeUs( 0 );
+
+static ID_INLINE void R_ImageWorkerAdd( std::atomic<long long> &acc, double t0 ) {
+	acc.fetch_add( (long long)( ( Sys_MillisecondsPrecise() - t0 ) * 1000.0 ), std::memory_order_relaxed );
+}
+
+void R_ImageWorkerTimersReset( void ) {
+	r_imgWorkerSourceUs = 0;	r_imgWorkerStatsUs = 0;	r_imgWorkerMipsUs = 0;	r_imgWorkerEncodeUs = 0;
+}
+
+void R_ImageWorkerTimersGet( float &sourceSec, float &statsSec, float &mipsSec, float &encodeSec ) {
+	sourceSec = r_imgWorkerSourceUs.load() * 1e-6f;
+	statsSec  = r_imgWorkerStatsUs.load() * 1e-6f;
+	mipsSec   = r_imgWorkerMipsUs.load() * 1e-6f;
+	encodeSec = r_imgWorkerEncodeUs.load() * 1e-6f;
+}
+
+/*
+==============
 idImage::LoadImageCpuGL
 
 DUDE parallel texture load, GL3 without a .dds: the worker half of GenerateImage. Decodes
@@ -2327,6 +2356,7 @@ bool idImage::LoadImageCpuGL() {
 
 	byte *pic = NULL;
 	int width = 0, height = 0;
+	double t0 = Sys_MillisecondsPrecise();
 	if ( generatorCpu ) {
 		// DUDE level-content generator (parallax / tessellation height field): its worker-safe
 		// produce-pixels half; the image's filter/repeat/depth are what its serial generator
@@ -2335,6 +2365,7 @@ bool idImage::LoadImageCpuGL() {
 	} else {
 		R_LoadImageProgram( imgName, &pic, &width, &height, &timestamp, &depth );
 	}
+	R_ImageWorkerAdd( r_imgWorkerSourceUs, t0 );
 	if ( pic == NULL ) {
 		parallelData->failed = true;		// the main thread warns and makes the default image
 		return true;
@@ -2345,6 +2376,7 @@ bool idImage::LoadImageCpuGL() {
 	}
 
 	// NOTE: the MD4 imageHash is skipped as on the Vulkan worker (it feeds a dev-only report)
+	t0 = Sys_MillisecondsPrecise();
 	if ( !R_ImageStatsCurrent( this ) ) {		// a same-source reload keeps the statistics it has
 		parallelData->averageColor[0] = parallelData->averageColor[1] = parallelData->averageColor[2] = 1.0f;
 		R_ImageStatsRGBA( pic, width, height, parallelData->averageColor, &parallelData->glowExtents, depth != TD_BUMP );
@@ -2354,6 +2386,7 @@ bool idImage::LoadImageCpuGL() {
 	// the format is a pure function of the pixels, the cvars and glConfig
 	const byte *picConst = pic;
 	const GLenum format = R_CoreSafeInternalFormat( SelectInternalFormat( &picConst, 1, width, height, depth ) );
+	R_ImageWorkerAdd( r_imgWorkerStatsUs, t0 );
 	if ( format == GL_COLOR_INDEX8_EXT ) {
 		R_StaticFree( pic );			// the palettised normal map upload stays serial
 		return false;
@@ -2364,6 +2397,7 @@ bool idImage::LoadImageCpuGL() {
 	const bool preserveBorder = ( repeat == TR_CLAMP_TO_ZERO );
 
 	// first level: a copy, or the source mipped down to the downsized size, as GenerateImage does
+	t0 = Sys_MillisecondsPrecise();
 	byte *scaled;
 	if ( scaledWidth == width && scaledHeight == height ) {
 		scaled = (byte *)R_StaticAlloc( sizeof( unsigned ) * width * height );
@@ -2437,6 +2471,8 @@ bool idImage::LoadImageCpuGL() {
 		}
 	}
 
+	R_ImageWorkerAdd( r_imgWorkerMipsUs, t0 );
+
 	parallelData->width = scaledWidth;
 	parallelData->height = scaledHeight;
 	parallelData->glInternalFormat = (int)format;
@@ -2470,16 +2506,21 @@ bool idImage::LoadImageCpu() {
 	//    main thread uploads the blocks: GL through UploadPrecompressedImage (qgl), Vulkan
 	//    through UploadPrecompressedImageRhi (BC formats, when the device has them -
 	//    ReadPrecompressedImage returns false otherwise). A level-content generator has no file.
+	double t0 = Sys_MillisecondsPrecise();
 	if ( !generatorCpu && globalImages->image_usePrecompressedTextures.GetBool() ) {
 		byte *dds = NULL;
 		int   ddsLen = 0;
-		if ( ReadPrecompressedImage( &dds, &ddsLen ) ) {
+		const bool haveDds = ReadPrecompressedImage( &dds, &ddsLen );
+		R_ImageWorkerAdd( r_imgWorkerSourceUs, t0 );
+		if ( haveDds ) {
 			parallelData->precompressedData = dds;
 			parallelData->precompressedLen = ddsLen;
 			// Vulkan's RT emissive table wants the mean colour and glow extents the decoded
 			// source would have given: take them from a small mip of the blocks, here on the worker
 			if ( isVulkan && depth != TD_BUMP && !R_ImageStatsCurrent( this ) ) {
+				t0 = Sys_MillisecondsPrecise();
 				parallelData->hasAverageColor = R_DdsEmissiveStats( dds, ddsLen, parallelData->averageColor, &parallelData->glowExtents );
+				R_ImageWorkerAdd( r_imgWorkerStatsUs, t0 );
 			}
 			return true;
 		}
@@ -2498,6 +2539,7 @@ bool idImage::LoadImageCpu() {
 	byte *pic = NULL;
 	int width = 0, height = 0;
 
+	t0 = Sys_MillisecondsPrecise();
 	if ( generatorCpu ) {
 		// DUDE level-content generator (parallax / tessellation height field): produce the
 		// pixels here on the worker instead of decoding a file; everything below is identical
@@ -2505,6 +2547,7 @@ bool idImage::LoadImageCpu() {
 	} else {
 		R_LoadImageProgram( imgName, &pic, &width, &height, &timestamp, &depth );
 	}
+	R_ImageWorkerAdd( r_imgWorkerSourceUs, t0 );
 
 	if ( pic == NULL ) {
 		parallelData->failed = true;
@@ -2517,11 +2560,13 @@ bool idImage::LoadImageCpu() {
 	// DUDE: the source statistics (emissive GUI fill-light tint, RT emissive extents), sampled before the
 	// RXGB swizzle. Stashed in parallelData and copied to the image on the main thread; a same-source
 	// reload keeps the statistics it has.
+	t0 = Sys_MillisecondsPrecise();
 	if ( !R_ImageStatsCurrent( this ) ) {
 		parallelData->averageColor[0] = parallelData->averageColor[1] = parallelData->averageColor[2] = 1.0f;
 		R_ImageStatsRGBA( pic, width, height, parallelData->averageColor, &parallelData->glowExtents, depth != TD_BUMP );
 		parallelData->hasAverageColor = true;
 	}
+	R_ImageWorkerAdd( r_imgWorkerStatsUs, t0 );
 
 	// swap red into alpha for RXGB normal maps, matching GenerateImage's Vulkan branch
 	// (interaction.frag decodes bump.x from the alpha channel). Done in place — pic is
@@ -2536,6 +2581,7 @@ bool idImage::LoadImageCpu() {
 
 	// build the mip chain; allowMips == (filter == TF_DEFAULT) and preserveBorder ==
 	// (repeat == TR_CLAMP_TO_ZERO) exactly mirror CreateTexture2D's caller in GenerateImage
+	t0 = Sys_MillisecondsPrecise();
 	parallelData->levelData[0] = pic;
 	parallelData->levelW[0] = width;
 	parallelData->levelH[0] = height;
@@ -2558,14 +2604,18 @@ bool idImage::LoadImageCpu() {
 		}
 	}
 
+	R_ImageWorkerAdd( r_imgWorkerMipsUs, t0 );
+
 	// DUDE Vulkan "compress on upload": at a compressing tier the worker encodes the levels to
 	// the block format the GL decision would have picked (VulkanBlockFormat), and the main
 	// thread uploads the blocks
+	t0 = Sys_MillisecondsPrecise();
 	parallelData->bcFormat = VulkanBlockFormat( pic, width, height );
 	if ( parallelData->bcFormat >= 0 ) {
 		R_EncodeBlockLevels( parallelData->bcFormat, parallelData->levelData, parallelData->levelW, parallelData->levelH,
 			parallelData->levelBytes, parallelData->numLevels );
 	}
+	R_ImageWorkerAdd( r_imgWorkerEncodeUs, t0 );
 
 	parallelData->width = width;
 	parallelData->height = height;

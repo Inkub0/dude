@@ -619,6 +619,9 @@ IMAGEPROGRAM
 */
 
 void R_LoadImageProgram( const char *name, byte **pic, int *width, int *height, ID_TIME_T *timestamp, textureDepth_t *depth = NULL );
+// DUDE: the parallel image load's worker phase timers (CPU seconds summed over the threads; Image_load.cpp)
+void R_ImageWorkerTimersReset( void );
+void R_ImageWorkerTimersGet( float &sourceSec, float &statsSec, float &mipsSec, float &encodeSec );
 const char *R_ParsePastImageProgram( idLexer &src );
 
 // DUDE: build a parallax height image by integrating a bump stage's combined normal-map

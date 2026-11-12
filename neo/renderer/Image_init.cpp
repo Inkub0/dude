@@ -1140,11 +1140,19 @@ struct parallelLoadStats_t {
 	int		decodeMsec;		// wall time the main thread waited on the worker phases
 	int		uploadMsec;		// wall time of the main-thread upload phases
 	int		uploadBytes;	// pixel / block bytes handed to the GPU
+	float	workerSource, workerStats, workerMips, workerEncode;	// the worker phases, CPU seconds summed over the threads (R_ImageWorkerTimersGet)
 };
+
+// the worker phase split for the stats line: "worker CPU: source x s, stats x s, mips x s, encode x s"
+static const char *R_ParallelLoadWorkerSplit( const parallelLoadStats_t &stats ) {
+	return va( "worker CPU over %i threads: source %.2f s, stats %.2f s, mips %.2f s, encode %.2f s", stats.threads,
+		stats.workerSource, stats.workerStats, stats.workerMips, stats.workerEncode );
+}
 
 static int R_ParallelLoadImages( idImage **list, int count, const char *workerWarning, bool pacifier, parallelLoadStats_t &stats ) {
 	static const int CHUNK = 64;
 
+	R_ImageWorkerTimersReset();
 	for ( int base = 0; base < count; base += CHUNK ) {
 		const int n = ( count - base < CHUNK ) ? count - base : CHUNK;
 		idImage ** const chunk = list + base;
@@ -1192,6 +1200,7 @@ static int R_ParallelLoadImages( idImage **list, int count, const char *workerWa
 		}
 		stats.uploadMsec += Sys_Milliseconds() - t0;
 	}
+	R_ImageWorkerTimersGet( stats.workerSource, stats.workerStats, stats.workerMips, stats.workerEncode );
 	return stats.threads;
 }
 
@@ -1269,6 +1278,9 @@ static void R_ReloadImages( const idCmdArgs &args, bool all, bool checkPrecompre
 			(int)par.size() + serialCount + regenCount, ( Sys_Milliseconds() - start ) * 0.001f,
 			(int)par.size(), stats.threads, stats.decodeMsec * 0.001f, stats.uploadMsec * 0.001f, stats.uploadBytes >> 20,
 			serialCount, regenCount, keptCount, skipCount );
+		if ( !par.empty() ) {
+			common->Printf( "  %s\n", R_ParallelLoadWorkerSplit( stats ) );
+		}
 		return;
 	}
 
@@ -2426,6 +2438,7 @@ void idImageManager::EndLevelLoad() {
 	if ( parStats.threads ) {
 		common->Printf( "  parallel image load: %i threads, decode %.2f s, upload %.2f s, %i MB uploaded\n",
 			parStats.threads, parStats.decodeMsec * 0.001f, parStats.uploadMsec * 0.001f, parStats.uploadBytes >> 20 );
+		common->Printf( "  %s\n", R_ParallelLoadWorkerSplit( parStats ) );
 	}
 }
 
