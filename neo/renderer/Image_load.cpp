@@ -575,52 +575,73 @@ There is no way to specify explicit mip map levels
 
 ================
 */
-/*
-================
-R_ImageAverageColorRGBA
+static const float R_EMISSIVE_GLOW_THRESHOLD   = 0.08f;	// a glow map's lit texels (its black is not light)
 
-DUDE: alpha-weighted mean RGB (0..1) of an RGBA byte buffer, strided so large textures
-stay cheap. Used to tint emissive GUI fill lights toward the screen's actual content.
-Leaves out[] untouched when there's nothing meaningful to sample (NULL / fully transparent).
-================
-*/
-static void R_ImageAverageColorRGBA( const byte *pic, int numTexels, float out[3] ) {
-	if ( pic == NULL || numTexels <= 0 ) {
-		return;
+// sRGB -> linear for every byte value: the expression the extents pass evaluated per bright texel channel
+// (powf), tabled once at start-up with the same floats. On a bright 2K texture that powf was most of the pass.
+struct srgbToLinearTable_t {
+	float	v[256];
+	srgbToLinearTable_t() {
+		for ( int i = 0; i < 256; i++ ) {
+			const float g = i * ( 1.0f / 255.0f );
+			v[i] = ( g <= 0.04045f ) ? g / 12.92f : powf( ( g + 0.055f ) / 1.055f, 2.4f );
+		}
 	}
-	const int stride = ( numTexels > 4096 ) ? ( numTexels / 4096 ) : 1;
-	double sum[3] = { 0.0, 0.0, 0.0 };
-	double wsum = 0.0;
-	for ( int i = 0; i < numTexels; i += stride ) {
-		const byte *p = pic + i * 4;
-		const double a = p[3] * ( 1.0 / 255.0 );
-		sum[0] += p[0] * a;
-		sum[1] += p[1] * a;
-		sum[2] += p[2] * a;
-		wsum += a;
-	}
-	if ( wsum > 0.0 ) {
-		const double inv = 1.0 / ( wsum * 255.0 );
-		out[0] = (float)( sum[0] * inv );
-		out[1] = (float)( sum[1] * inv );
-		out[2] = (float)( sum[2] * inv );
-	}
-}
+};
+static const srgbToLinearTable_t r_srgbToLinear;
 
 /*
 ================
-R_ImageEmissiveExtentsRGBA
+R_ImageStatsRGBA
 
-DUDE RT emissive table (Q2RTX's recipe, textures.c): the st rectangle enclosing the texels whose gamma luminance
-exceeds `threshold`, their mean LINEAR colour and their share of the samples. Sampled on a grid of at most ~256 x 256
-texels (the extents are then exact to 1/256 of the image), so a 2K texture costs 65k reads at load.
+DUDE: the per-image statistics taken from the decoded RGBA8 source at load, in one place:
+
+averageColor (avg, 0..1): alpha-weighted mean RGB, strided so large textures stay cheap (at most ~4096 samples). Tints
+the emissive GUI fill lights toward the screen's actual content and stands in as the RT emissive table's fallback
+albedo. Left untouched when there is nothing meaningful to sample (NULL / fully transparent).
+
+glowExtents (ext, when given; filled only when wantExtents): the RT emissive table's clip rectangle (Q2RTX's
+recipe, textures.c) - the st rectangle enclosing the texels whose gamma luminance exceeds the glow threshold,
+their mean LINEAR colour and their share of the samples, on a grid of at most ~256 x 256 texels (exact to 1/256
+of the image; 65k reads for a 2K texture). Zeroed (= not valid) when not wanted: a normal map is never a glow
+or diffuse stage, so its extents are never read.
 ================
 */
-static void R_ImageEmissiveExtentsRGBA( const byte *pic, int w, int h, float threshold, imageEmissiveExtents_t *out ) {
-	memset( out, 0, sizeof( *out ) );
+static void R_ImageStatsRGBA( const byte *pic, int w, int h, float avg[3], imageEmissiveExtents_t *ext, bool wantExtents ) {
+	if ( ext ) {
+		memset( ext, 0, sizeof( *ext ) );
+	}
+	const int numTexels = w * h;
 	if ( pic == NULL || w <= 0 || h <= 0 ) {
 		return;
 	}
+
+	// the mean
+	{
+		const int stride = ( numTexels > 4096 ) ? ( numTexels / 4096 ) : 1;
+		double sum[3] = { 0.0, 0.0, 0.0 };
+		double wsum = 0.0;
+		for ( int i = 0; i < numTexels; i += stride ) {
+			const byte *p = pic + i * 4;
+			const double a = p[3] * ( 1.0 / 255.0 );
+			sum[0] += p[0] * a;
+			sum[1] += p[1] * a;
+			sum[2] += p[2] * a;
+			wsum += a;
+		}
+		if ( wsum > 0.0 ) {
+			const double inv = 1.0 / ( wsum * 255.0 );
+			avg[0] = (float)( sum[0] * inv );
+			avg[1] = (float)( sum[1] * inv );
+			avg[2] = (float)( sum[2] * inv );
+		}
+	}
+
+	// the bright extents
+	if ( !ext || !wantExtents ) {
+		return;
+	}
+	const float threshold = R_EMISSIVE_GLOW_THRESHOLD;
 	const int sx = ( w > 256 ) ? w / 256 : 1, sy = ( h > 256 ) ? h / 256 : 1;
 	int minX = w, minY = h, maxX = -1, maxY = -1, bright = 0, samples = 0;
 	double sum[3] = { 0.0, 0.0, 0.0 };
@@ -633,10 +654,9 @@ static void R_ImageEmissiveExtentsRGBA( const byte *pic, int w, int h, float thr
 				continue;
 			}
 			bright++;
-			for ( int c = 0; c < 3; c++ ) {
-				const float g = px[c] * ( 1.0f / 255.0f );
-				sum[c] += ( g <= 0.04045f ) ? g / 12.92f : powf( ( g + 0.055f ) / 1.055f, 2.4f );		// sRGB -> linear
-			}
+			sum[0] += r_srgbToLinear.v[px[0]];		// sRGB -> linear
+			sum[1] += r_srgbToLinear.v[px[1]];
+			sum[2] += r_srgbToLinear.v[px[2]];
 			if ( x < minX ) { minX = x; }	if ( x > maxX ) { maxX = x; }
 			if ( y < minY ) { minY = y; }	if ( y > maxY ) { maxY = y; }
 		}
@@ -644,15 +664,28 @@ static void R_ImageEmissiveExtentsRGBA( const byte *pic, int w, int h, float thr
 	if ( bright == 0 ) {
 		return;
 	}
-	out->valid = true;
-	out->minST[0] = (float)minX / w;			out->minST[1] = (float)minY / h;
-	out->maxST[0] = (float)( maxX + sx ) / w;	out->maxST[1] = (float)( maxY + sy ) / h;
-	for ( int c = 0; c < 3; c++ ) { out->mean[c] = (float)( sum[c] / bright ); }
-	out->coverage = (float)bright / (float)samples;
-	out->entire = ( out->maxST[0] - out->minST[0] ) >= 0.9f && ( out->maxST[1] - out->minST[1] ) >= 0.9f;
+	ext->valid = true;
+	ext->minST[0] = (float)minX / w;			ext->minST[1] = (float)minY / h;
+	ext->maxST[0] = (float)( maxX + sx ) / w;	ext->maxST[1] = (float)( maxY + sy ) / h;
+	for ( int c = 0; c < 3; c++ ) { ext->mean[c] = (float)( sum[c] / bright ); }
+	ext->coverage = (float)bright / (float)samples;
+	ext->entire = ( ext->maxST[0] - ext->minST[0] ) >= 0.9f && ( ext->maxST[1] - ext->minST[1] ) >= 0.9f;
 }
 
-static const float R_EMISSIVE_GLOW_THRESHOLD   = 0.08f;	// a glow map's lit texels (its black is not light)
+/*
+================
+R_ImageStatsCurrent
+
+DUDE: true when the image already holds the statistics of this very source (statsTimestamp stamps the source
+timestamp they were taken from), so a reload of the same file - the preset change's texture reload, a purged
+image loaded again on demand - keeps them instead of decoding for them again. A changed file (reloadImages
+after an edit) carries a new timestamp. Generators and defaulted images are never current.
+================
+*/
+static bool R_ImageStatsCurrent( const idImage *img ) {
+	return img->statsTimestamp != 0 && img->statsTimestamp != FILE_NOT_FOUND_TIMESTAMP
+	    && img->statsTimestamp == img->timestamp && img->generatorFunction == NULL;
+}
 
 void idImage::GenerateImage( const byte *pic, int width, int height,
 					   textureFilter_t filterParm, bool allowDownSizeParm,
@@ -688,11 +721,13 @@ void idImage::GenerateImage( const byte *pic, int width, int height,
 				rhi::GetRHI()->DestroyImage( rhiHandle );
 				rhiHandle = 0;
 			}
-			// DUDE: capture a mean RGB of the source pixels for emissive GUI fill-light tinting,
-			// before the RXGB swizzle below — the GL path samples it at line ~667, but the Vulkan
-			// branch returns before reaching it, so sample here or averageColor stays white
-			R_ImageAverageColorRGBA( pic, width * height, averageColor );
-			R_ImageEmissiveExtentsRGBA( pic, width, height, R_EMISSIVE_GLOW_THRESHOLD, &glowExtents );
+			// DUDE: the source statistics (emissive GUI fill-light tint, RT emissive extents), before the
+			// RXGB swizzle below — the GL path samples them further down, but the Vulkan branch returns
+			// before reaching it, so sample here or averageColor stays white
+			if ( !R_ImageStatsCurrent( this ) ) {
+				R_ImageStatsRGBA( pic, width, height, averageColor, &glowExtents, depth != TD_BUMP );
+				statsTimestamp = timestamp;
+			}
 			// normal maps: the shaders decode the RXGB layout unconditionally
 			// (interaction.frag does bump.x = bump.a), and the GL upload path
 			// swaps red into alpha "even on tga normal maps so we only have to
@@ -781,9 +816,11 @@ void idImage::GenerateImage( const byte *pic, int width, int height,
 		common->Error( "R_CreateImage: not a power of 2 image" );
 	}
 
-	// DUDE: capture a mean RGB of the source pixels for emissive GUI fill-light tinting
-	R_ImageAverageColorRGBA( pic, width * height, averageColor );
-	R_ImageEmissiveExtentsRGBA( pic, width, height, R_EMISSIVE_GLOW_THRESHOLD, &glowExtents );
+	// DUDE: the source statistics (emissive GUI fill-light tint, RT emissive extents)
+	if ( !R_ImageStatsCurrent( this ) ) {
+		R_ImageStatsRGBA( pic, width, height, averageColor, &glowExtents, depth != TD_BUMP );
+		statsTimestamp = timestamp;
+	}
 
 	// Optionally modify our width/height based on options/hardware
 	GetDownsize( scaled_width, scaled_height );
@@ -1813,8 +1850,7 @@ static bool R_DdsEmissiveStats( const byte *data, int len, float averageColor[3]
 			byte *rgba = (byte *)R_StaticAlloc( w * h * 4 );
 			const bool ok = R_DecodeDDSLevelRGBA( level, w, h, fourCC, rgba );
 			if ( ok ) {
-				R_ImageAverageColorRGBA( rgba, w * h, averageColor );
-				R_ImageEmissiveExtentsRGBA( rgba, w, h, R_EMISSIVE_GLOW_THRESHOLD, ext );
+				R_ImageStatsRGBA( rgba, w, h, averageColor, ext, true );
 			}
 			R_StaticFree( rgba );
 			return ok;
@@ -1928,8 +1964,9 @@ void idImage::UploadPrecompressedImageRhi( const byte *data, int len, bool sampl
 
 	// the stats the decoded source would have given (see R_DdsEmissiveStats); a normal map has
 	// no use for them, and the parallel load sampled them on the worker already (sampleStats false)
-	if ( sampleStats && depth != TD_BUMP ) {
+	if ( sampleStats && depth != TD_BUMP && !R_ImageStatsCurrent( this ) ) {
 		R_DdsEmissiveStats( data, len, averageColor, &glowExtents );
+		statsTimestamp = timestamp;
 	}
 }
 
@@ -2308,10 +2345,11 @@ bool idImage::LoadImageCpuGL() {
 	}
 
 	// NOTE: the MD4 imageHash is skipped as on the Vulkan worker (it feeds a dev-only report)
-	parallelData->averageColor[0] = parallelData->averageColor[1] = parallelData->averageColor[2] = 1.0f;
-	R_ImageAverageColorRGBA( pic, width * height, parallelData->averageColor );
-	R_ImageEmissiveExtentsRGBA( pic, width, height, R_EMISSIVE_GLOW_THRESHOLD, &parallelData->glowExtents );
-	parallelData->hasAverageColor = true;
+	if ( !R_ImageStatsCurrent( this ) ) {		// a same-source reload keeps the statistics it has
+		parallelData->averageColor[0] = parallelData->averageColor[1] = parallelData->averageColor[2] = 1.0f;
+		R_ImageStatsRGBA( pic, width, height, parallelData->averageColor, &parallelData->glowExtents, depth != TD_BUMP );
+		parallelData->hasAverageColor = true;
+	}
 
 	// the format is a pure function of the pixels, the cvars and glConfig
 	const byte *picConst = pic;
@@ -2440,7 +2478,7 @@ bool idImage::LoadImageCpu() {
 			parallelData->precompressedLen = ddsLen;
 			// Vulkan's RT emissive table wants the mean colour and glow extents the decoded
 			// source would have given: take them from a small mip of the blocks, here on the worker
-			if ( isVulkan && depth != TD_BUMP ) {
+			if ( isVulkan && depth != TD_BUMP && !R_ImageStatsCurrent( this ) ) {
 				parallelData->hasAverageColor = R_DdsEmissiveStats( dds, ddsLen, parallelData->averageColor, &parallelData->glowExtents );
 			}
 			return true;
@@ -2476,12 +2514,14 @@ bool idImage::LoadImageCpu() {
 	// NOTE: the MD4 imageHash the serial path computes here is deliberately skipped —
 	// it feeds only a dev-only duplicate-image report and costs ~10% of load time.
 
-	// DUDE: mean source RGB for emissive GUI fill-light tinting, sampled before the RXGB
-	// swizzle. Stashed in parallelData and copied to averageColor on the main thread.
-	parallelData->averageColor[0] = parallelData->averageColor[1] = parallelData->averageColor[2] = 1.0f;
-	R_ImageAverageColorRGBA( pic, width * height, parallelData->averageColor );
-	R_ImageEmissiveExtentsRGBA( pic, width, height, R_EMISSIVE_GLOW_THRESHOLD, &parallelData->glowExtents );
-	parallelData->hasAverageColor = true;
+	// DUDE: the source statistics (emissive GUI fill-light tint, RT emissive extents), sampled before the
+	// RXGB swizzle. Stashed in parallelData and copied to the image on the main thread; a same-source
+	// reload keeps the statistics it has.
+	if ( !R_ImageStatsCurrent( this ) ) {
+		parallelData->averageColor[0] = parallelData->averageColor[1] = parallelData->averageColor[2] = 1.0f;
+		R_ImageStatsRGBA( pic, width, height, parallelData->averageColor, &parallelData->glowExtents, depth != TD_BUMP );
+		parallelData->hasAverageColor = true;
+	}
 
 	// swap red into alpha for RXGB normal maps, matching GenerateImage's Vulkan branch
 	// (interaction.frag decodes bump.x from the alpha channel). Done in place — pic is
@@ -2614,6 +2654,7 @@ void idImage::UploadImageCpu() {
 		averageColor[1] = parallelData->averageColor[1];
 		averageColor[2] = parallelData->averageColor[2];
 		glowExtents   = parallelData->glowExtents;
+		statsTimestamp = timestamp;
 	}
 
 	// free worker-allocated buffers
@@ -3074,7 +3115,7 @@ void idImage::UploadScratch( const byte *data, int cols, int rows ) {
 			return;
 		}
 		// keep the mean colour current for the emissive video-screen fill light
-		R_ImageAverageColorRGBA( data, cols * rows, averageColor );
+		R_ImageStatsRGBA( data, cols, rows, averageColor, NULL, false );
 
 		rhi::RHI *r = rhi::GetRHI();
 		if ( rhiHandle == 0 || uploadWidth != cols || uploadHeight != rows || type != TT_2D ) {
@@ -3134,7 +3175,7 @@ void idImage::UploadScratch( const byte *data, int cols, int rows ) {
 
 		// DUDE: keep the mean colour current for cinematic/video screens so their
 		// emissive fill light tracks what's actually playing
-		R_ImageAverageColorRGBA( data, cols * rows, averageColor );
+		R_ImageStatsRGBA( data, cols, rows, averageColor, NULL, false );
 
 		Bind();
 

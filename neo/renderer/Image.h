@@ -319,6 +319,8 @@ public:
 	// averageColor. glowExtents = texels above a low threshold (a glow map's lit part: an LED panel's LEDs). The table
 	// clips an emissive triangle to the rectangle so the light covers only what glows.
 	imageEmissiveExtents_t	glowExtents;
+	ID_TIME_T			statsTimestamp;			// DUDE: the source timestamp averageColor / glowExtents were taken from (0 = none); a
+												// same-source reload keeps them (R_ImageStatsCurrent)
 
 	idImage				*cacheUsagePrev, *cacheUsageNext;	// for dynamic cache purging of old images
 
@@ -390,6 +392,7 @@ ID_INLINE idImage::idImage() {
 	internalFormat = 0;
 	averageColor[0] = averageColor[1] = averageColor[2] = 1.0f;
 	memset( &glowExtents, 0, sizeof( glowExtents ) );
+	statsTimestamp = 0;
 	cacheUsagePrev = cacheUsageNext = NULL;
 	hashNext = NULL;
 	refCount = 0;
