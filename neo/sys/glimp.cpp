@@ -40,6 +40,7 @@ If you have questions concerning this license or the applicable additional terms
 
 #include "sys/platform.h"
 #include "framework/Licensee.h"
+#include "framework/GameTitle.h"
 
 #include "renderer/tr_local.h"
 
@@ -131,13 +132,12 @@ static SDL_Surface *window = NULL;
 
 extern idCVar in_grabKeyboard;
 
-static void SetSDLIcon()
+// RGBA bytes, rows top to bottom
+static void SetSDLIconRGBA( const byte *pixels, int width, int height )
 {
-	#include "doom_icon.h" // contains the struct d3_icon
-
-	SDL_Surface* icon = SDL_CreateSurfaceFrom(d3_icon.width, d3_icon.height,
-	                                          SDL_PIXELFORMAT_RGBA32, (void*)d3_icon.pixel_data,
-	                                          d3_icon.bytes_per_pixel*d3_icon.width);
+	SDL_Surface* icon = SDL_CreateSurfaceFrom(width, height,
+	                                          SDL_PIXELFORMAT_RGBA32, (void*)pixels,
+	                                          4*width);
 
 	SDL_SetWindowIcon(window, icon);
 	SDL_DestroySurface(icon);
@@ -145,7 +145,8 @@ static void SetSDLIcon()
 
 #else // SDL2 and SDL1.2
 
-static void SetSDLIcon()
+// RGBA bytes, rows top to bottom
+static void SetSDLIconRGBA( const byte *pixels, int width, int height )
 {
 	Uint32 rmask, gmask, bmask, amask;
 
@@ -163,11 +164,8 @@ static void SetSDLIcon()
 	amask = 0xff000000;
 #endif
 
-	#include "doom_icon.h" // contains the struct d3_icon
-
-	SDL_Surface* icon = SDL_CreateRGBSurfaceFrom((void*)d3_icon.pixel_data, d3_icon.width, d3_icon.height,
-			d3_icon.bytes_per_pixel*8, d3_icon.bytes_per_pixel*d3_icon.width,
-			rmask, gmask, bmask, amask);
+	SDL_Surface* icon = SDL_CreateRGBSurfaceFrom((void*)pixels, width, height,
+			32, 4*width, rmask, gmask, bmask, amask);
 
 #if SDL_VERSION_ATLEAST(2, 0, 0)
 	SDL_SetWindowIcon(window, icon);
@@ -178,6 +176,219 @@ static void SetSDLIcon()
 	SDL_FreeSurface(icon);
 }
 #endif // SDL2 and SDL1.2
+
+/*
+===============
+LoadExeIcon
+
+DUDE: the largest 32-bit program icon of a Windows executable (its first RT_GROUP_ICON),
+as top-down RGBA. Reads the PE resource directory by hand, so it works on every
+platform; every offset is bounds-checked (the file is whatever sits in the install).
+Only uncompressed 32-bit DIB icons are taken (Quake4.exe: 16, 32 and 48 px).
+===============
+*/
+static bool LoadExeIcon( const char *path, idList<byte> &rgba, int &width, int &height )
+{
+	FILE *f = fopen( path, "rb" );
+	if ( f == NULL ) {
+		return false;
+	}
+	idList<byte> d;
+	fseek( f, 0, SEEK_END );
+	const long len = ftell( f );
+	fseek( f, 0, SEEK_SET );
+	if ( len < 0x40 || len > 64 * 1024 * 1024 ) {
+		fclose( f );
+		return false;
+	}
+	d.SetNum( (int)len );
+	const bool read = fread( d.Ptr(), 1, (size_t)len, f ) == (size_t)len;
+	fclose( f );
+	if ( !read ) {
+		return false;
+	}
+	const unsigned int size = (unsigned int)len;
+
+	#define EXE_ICON_FITS( o, n ) ( (unsigned int)(o) <= size && (unsigned int)(n) <= size - (unsigned int)(o) )
+	struct reader_t {
+		const byte *p;
+		unsigned int U16( unsigned int o ) const { return p[o] | ( p[o + 1] << 8 ); }
+		unsigned int U32( unsigned int o ) const { return p[o] | ( p[o + 1] << 8 ) | ( p[o + 2] << 16 ) | ( (unsigned int)p[o + 3] << 24 ); }
+	} r = { d.Ptr() };
+
+	// PE header, optional header, resource data directory (index 2)
+	const unsigned int pe = r.U32( 0x3c );
+	if ( !EXE_ICON_FITS( pe, 24 ) || r.U32( pe ) != 0x00004550 ) {
+		return false;
+	}
+	const unsigned int numSections = r.U16( pe + 6 );
+	const unsigned int optSize = r.U16( pe + 20 );
+	const unsigned int opt = pe + 24;
+	if ( !EXE_ICON_FITS( opt, 2 ) ) {
+		return false;
+	}
+	const unsigned int dataDirs = opt + ( r.U16( opt ) == 0x20b ? 112 : 96 );	// PE32+ : PE32
+	if ( !EXE_ICON_FITS( dataDirs + 2 * 8, 8 ) || !EXE_ICON_FITS( opt + optSize, numSections * 40 ) ) {
+		return false;
+	}
+	const unsigned int resRva = r.U32( dataDirs + 2 * 8 );
+
+	// RVA -> file offset through the section table
+	struct sections_t {
+		const reader_t *r; unsigned int table, count;
+		bool Offset( unsigned int rva, unsigned int &out ) const {
+			for ( unsigned int i = 0; i < count; i++ ) {
+				const unsigned int s = table + i * 40;
+				const unsigned int vsize = r->U32( s + 8 ), va = r->U32( s + 12 );
+				const unsigned int rawSize = r->U32( s + 16 ), raw = r->U32( s + 20 );
+				const unsigned int span = vsize > rawSize ? vsize : rawSize;
+				if ( rva >= va && rva - va < span ) {
+					out = rva - va + raw;
+					return true;
+				}
+			}
+			return false;
+		}
+	} sections = { &r, opt + optSize, numSections };
+
+	unsigned int resBase;
+	if ( resRva == 0 || !sections.Offset( resRva, resBase ) ) {
+		return false;
+	}
+
+	// a resource directory's entry with this id (0 = the first entry); top bit of the
+	// result set = a subdirectory, offsets relative to resBase
+	struct resDir_t {
+		const reader_t *r; unsigned int base, size;
+		bool Entry( unsigned int dir, unsigned int id, unsigned int &out ) const {
+			const unsigned int o = base + dir;
+			if ( !EXE_ICON_FITS( o, 16 ) ) {
+				return false;
+			}
+			const unsigned int n = r->U16( o + 12 ) + r->U16( o + 14 );
+			if ( !EXE_ICON_FITS( o + 16, n * 8 ) ) {
+				return false;
+			}
+			for ( unsigned int i = 0; i < n; i++ ) {
+				if ( id == 0 || r->U32( o + 16 + i * 8 ) == id ) {
+					out = r->U32( o + 16 + i * 8 + 4 );
+					return true;
+				}
+			}
+			return false;
+		}
+		// type -> name -> language -> data entry: file offset + size of the data
+		bool Data( unsigned int type, unsigned int name, unsigned int &offset, unsigned int &bytes, const sections_t &secs ) const {
+			unsigned int e;
+			if ( !Entry( 0, type, e ) || !( e & 0x80000000u ) || !Entry( e & 0x7fffffffu, name, e ) ) {
+				return false;
+			}
+			for ( int depth = 0; ( e & 0x80000000u ) && depth < 4; depth++ ) {
+				if ( !Entry( e & 0x7fffffffu, 0, e ) ) {
+					return false;
+				}
+			}
+			if ( ( e & 0x80000000u ) || !EXE_ICON_FITS( base + e, 8 ) ) {
+				return false;
+			}
+			bytes = r->U32( base + e + 4 );
+			return secs.Offset( r->U32( base + e ), offset ) && EXE_ICON_FITS( offset, bytes );
+		}
+	} res = { &r, resBase, size };
+
+	// RT_GROUP_ICON (14): 6-byte header + 14-byte entries naming RT_ICON (3) ids
+	unsigned int group, groupBytes;
+	if ( !res.Data( 14, 0, group, groupBytes, sections ) || groupBytes < 6 ) {
+		return false;
+	}
+	const unsigned int count = r.U16( group + 4 );
+	unsigned int bestId = 0, bestSize = 0;
+	for ( unsigned int i = 0; i < count && 6 + ( i + 1 ) * 14 <= groupBytes; i++ ) {
+		const unsigned int e = group + 6 + i * 14;
+		const unsigned int w = d[e] ? d[e] : 256;
+		if ( r.U16( e + 6 ) == 32 && w > bestSize && w <= 256 ) {
+			bestSize = w;
+			bestId = r.U16( e + 12 );
+		}
+	}
+	unsigned int icon, iconBytes;
+	if ( bestId == 0 || !res.Data( 3, bestId, icon, iconBytes, sections ) || iconBytes < 40 ) {
+		return false;
+	}
+
+	// BITMAPINFOHEADER: height covers the colour rows plus the AND mask
+	const int w = (int)r.U32( icon + 4 );
+	const int h = (int)r.U32( icon + 8 ) / 2;
+	const unsigned int headerSize = r.U32( icon );
+	if ( headerSize < 40 || w <= 0 || w > 256 || h <= 0 || h > 256 || r.U16( icon + 14 ) != 32 || r.U32( icon + 16 ) != 0 ) {
+		return false;	// PNG-compressed, palettised, or not a plain DIB
+	}
+	const unsigned int colourBytes = (unsigned int)( w * h * 4 );
+	const unsigned int maskStride = ( ( w + 31 ) / 32 ) * 4;
+	if ( headerSize + colourBytes > iconBytes ) {
+		return false;
+	}
+	const bool haveMask = headerSize + colourBytes + maskStride * h <= iconBytes;
+	const byte *colour = d.Ptr() + icon + headerSize;
+	const byte *mask = colour + colourBytes;
+
+	rgba.SetNum( w * h * 4 );
+	bool anyAlpha = false;
+	for ( int y = 0; y < h; y++ ) {
+		const byte *src = colour + ( h - 1 - y ) * w * 4;	// DIB rows are bottom-up
+		byte *dst = rgba.Ptr() + y * w * 4;
+		for ( int x = 0; x < w; x++ ) {
+			dst[x * 4 + 0] = src[x * 4 + 2];
+			dst[x * 4 + 1] = src[x * 4 + 1];
+			dst[x * 4 + 2] = src[x * 4 + 0];
+			dst[x * 4 + 3] = src[x * 4 + 3];
+			anyAlpha |= src[x * 4 + 3] != 0;
+		}
+	}
+	// an old-style 32-bit icon with an empty alpha channel: transparency from the AND mask
+	if ( !anyAlpha ) {
+		for ( int y = 0; y < h; y++ ) {
+			const byte *m = mask + ( h - 1 - y ) * maskStride;
+			for ( int x = 0; x < w; x++ ) {
+				const bool transparent = haveMask && ( m[x >> 3] & ( 0x80 >> ( x & 7 ) ) );
+				rgba[( y * w + x ) * 4 + 3] = transparent ? 0 : 255;
+			}
+		}
+	}
+	#undef EXE_ICON_FITS
+
+	width = w;
+	height = h;
+	return true;
+}
+
+static void SetSDLIcon()
+{
+	// DUDE: a title with its own program icon (Quake 4, GitHub #19) takes it from the
+	// retail executable in the player's install; anything missing -> the Doom 3 icon
+	const char *iconExe = GameTitle::Get().iconExe;
+	const char *basePath = cvarSystem->GetCVarString( "fs_basepath" );
+	if ( iconExe != NULL && basePath != NULL && basePath[0] != '\0' ) {
+		idStr exe = basePath;
+		exe.AppendPath( iconExe );
+		idStr lower = basePath;
+		idStr lowerName = iconExe;
+		lowerName.ToLower();
+		lower.AppendPath( lowerName );
+
+		idList<byte> rgba;
+		int width, height;
+		if ( LoadExeIcon( exe.c_str(), rgba, width, height ) || LoadExeIcon( lower.c_str(), rgba, width, height ) ) {
+			common->Printf( "Window icon: %dx%d from %s\n", width, height, iconExe );
+			SetSDLIconRGBA( rgba.Ptr(), width, height );
+			return;
+		}
+		common->Printf( "Window icon: no 32-bit program icon in %s/%s, using DUDE's own\n", basePath, iconExe );
+	}
+
+	#include "doom_icon.h" // contains the struct d3_icon
+	SetSDLIconRGBA( d3_icon.pixel_data, d3_icon.width, d3_icon.height );
+}
 
 #if !SDL_VERSION_ATLEAST(3, 0, 0)
 /*
