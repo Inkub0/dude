@@ -106,9 +106,9 @@ vec3 rtgiBounceDir( RtgiBounceParms bp, vec3 Nw, vec2 sfrag ) {
 	vec3 T, B;
 	onb( Nw, T, B );
 	vec3 dir = T * ( cos( phi ) * sinT ) + B * ( sin( phi ) * sinT ) + Nw * cosT;
-	float dl2 = dot( dir, dir );
-	if ( !( dl2 > 1e-6 ) ) { return vec3( 0.0 ); }
-	return dir * inversesqrt( dl2 );
+	// unit by construction (an orthonormal basis, sin^2 + cos^2 = 1): the length test only catches a degenerate normal
+	if ( !( dot( dir, dir ) > 1e-6 ) ) { return vec3( 0.0 ); }
+	return dir;
 }
 
 // Trace + shade the bounce for the surface point Pw / normal Nw (world), seen from eyeW at view depth d, dithered

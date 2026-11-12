@@ -8,6 +8,8 @@
 // The grid is DENSE and rewritten whole every frame (no clear, no history; L4's feedback would add temporal learning).
 // An out-of-range / lightless cell writes count 0 and the consumer falls back to its old path.
 #extension GL_EXT_buffer_reference_uvec2 : require
+#extension GL_KHR_shader_subgroup_ballot : require		// the packing offset (lgFillBlock: an exclusive bit count over the pass flags)
+#extension GL_KHR_shader_subgroup_basic : require
 
 // rt_light_eval.glsl: RtLight / RtLights / DUDE_LIGHT_* / dudeLightInRange. rtgi_light_grid.glsl: LgGrid + mapping + layout.
 #include "rt_light_eval.glsl"
@@ -45,6 +47,7 @@ shared float sLum[ 64 ];
 shared float sRadius[ 64 ];
 shared vec3  sPos[ 64 ];
 shared uint  sPass[ 64 ];
+shared uint  sSubCount[ 4 ];		// passing rows per subgroup (a 64-wide workgroup is 1 or 2 subgroups; 4 covers a 16-wide one)
 shared uint  sCount;
 
 // A cell of cascade c >= 1 that lies well inside cascade c - 1's box is NEVER looked up: every consumer resolves a point
@@ -131,10 +134,15 @@ void lgFillBlock() {
 			}
 		}
 		sPass[ lid ] = pass ? 1u : 0u;
+		// the packing offset = the passing rows before this one, in invocation order: the exclusive bit count of the
+		// subgroup's ballot plus the totals of the subgroups before it (invocations map to subgroups linearly in a 1D
+		// workgroup, so the order is the lid order the serial scan of sPass walked - the same list, the same ties)
+		const uvec4 ballot = subgroupBallot( pass );
+		if ( subgroupElect() ) { sSubCount[ gl_SubgroupID ] = subgroupBallotBitCount( ballot ); }
 		memoryBarrierShared();
 		barrier();
-		uint at = 0u;
-		for ( uint j = 0u; j < lid; j++ ) { at += sPass[ j ]; }
+		uint at = subgroupBallotExclusiveBitCount( ballot );
+		for ( uint g = 0u; g < gl_SubgroupID; g++ ) { at += sSubCount[ g ]; }
 		if ( pass ) {
 			sRow[ at ]    = rli;
 			sFlags[ at ]  = rflags;

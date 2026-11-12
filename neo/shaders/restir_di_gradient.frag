@@ -198,7 +198,8 @@ void main() {
 				float pdc = -Pc.z;
 				if ( pdc > 1e-3 ) {
 					vec2 camUV = vec2( Pc.x / ( pdc * u_localParam0.x ), Pc.y / ( pdc * u_windowCoord.z * u_localParam0.y ) ) * 0.5 + 0.5;
-					isStatic = length( ( camUV - prevUV ) * fullRes ) <= staticPx;
+					const vec2 dpx = ( camUV - prevUV ) * fullRes;
+					isStatic = staticPx >= 0.0 && dot( dpx, dpx ) <= staticPx * staticPx;	// the same test on squared lengths (no square root)
 				}
 			}
 			// the darkest-previous candidate: static, a light was chosen there last frame (a valid row, not an emitter). The

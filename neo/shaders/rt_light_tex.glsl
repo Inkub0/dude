@@ -38,7 +38,8 @@ vec3 dudeLightAttenTex( RtLights lights, uint li, vec3 p, float dl, uint flags, 
 	vec4  hw = vec4( p, 1.0 );
 	float q  = dot( hw, lights.l[ li ].projQ );
 	if ( q <= 1e-4 ) { return vec3( 0.0 ); }							// behind the projection apex
-	vec2  st = vec2( dot( hw, lights.l[ li ].projS ), dot( hw, lights.l[ li ].projT ) ) / q;
+	const float invQ = 1.0 / q;		// one reciprocal: the two projective coordinates and the six gradient components below multiply by it
+	vec2  st = vec2( dot( hw, lights.l[ li ].projS ), dot( hw, lights.l[ li ].projT ) ) * invQ;
 	// EXACT early-out before any fetch: the cookie is CLAMP_TO_ZERO (black border) and the falloff ramp likewise, so
 	// outside [0,1] in s, t or the falloff coordinate the textures would return 0 anyway. Most candidates that pass
 	// the sphere cull sit outside the light's box, so this skips two divergent bindless fetches for them (the DI
@@ -47,15 +48,17 @@ vec3 dudeLightAttenTex( RtLights lights, uint li, vec3 p, float dl, uint flags, 
 	if ( st.x <= 0.0 || st.x >= 1.0 || st.y <= 0.0 || st.y >= 1.0 || f <= 0.0 || f >= 1.0 ) { return vec3( 0.0 ); }
 	float lod = 0.0;
 	if ( pixelWorld > 0.0 ) {
-		vec3  gs = ( lights.l[ li ].projS.xyz - st.x * lights.l[ li ].projQ.xyz ) / q;
-		vec3  gt = ( lights.l[ li ].projT.xyz - st.y * lights.l[ li ].projQ.xyz ) / q;
+		vec3  gs = ( lights.l[ li ].projS.xyz - st.x * lights.l[ li ].projQ.xyz ) * invQ;
+		vec3  gt = ( lights.l[ li ].projT.xyz - st.y * lights.l[ li ].projQ.xyz ) * invQ;
 		// the cookie's base size: from the row for a power-of-two image (bit 24), the exact value textureSize returns - the query
 		// is a texture-unit round trip in the middle of every DI candidate's dependency chain - else queried
 		const vec2 cookieSize = ( ( projWord & 0x1000000u ) != 0u )
 			? vec2( float( 1u << ( ( projWord >> 16u ) & 0xFu ) ), float( 1u << ( ( projWord >> 20u ) & 0xFu ) ) )
 			: vec2( textureSize( u_rtTextures[ nonuniformEXT( projTex - 1u ) ], 0 ) );
-		vec2  texels = cookieSize * vec2( length( gs ), length( gt ) ) * pixelWorld;
-		lod = log2( max( max( texels.x, texels.y ), 1e-6 ) );
+		// the footprint in texels, SQUARED: half the log2 of the larger squared length is the same lod with no square roots
+		// (the 1e-6 texel floor becomes 1e-12 squared)
+		const vec2 t2 = ( cookieSize * cookieSize ) * vec2( dot( gs, gs ), dot( gt, gt ) ) * ( pixelWorld * pixelWorld );
+		lod = 0.5 * log2( max( max( t2.x, t2.y ), 1e-12 ) );
 	}
 	vec3  atten = textureLod( u_rtTextures[ nonuniformEXT( projTex - 1u ) ], st, lod ).rgb;
 	uint  falloffTex = lights.l[ li ].falloffTex;

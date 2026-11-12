@@ -163,7 +163,7 @@ vec4 packNrdNormal( vec3 Nraw ) {
 	if ( !( nl2 > 1e-4 ) ) {
 		n = vec3( 0.0, 0.0, 1.0 );
 	} else {
-		n = normalize( mat3( u_modelViewMatrix ) * ( Nraw * inversesqrt( nl2 ) ) );	// world-space
+		n = mat3( u_modelViewMatrix ) * ( Nraw * inversesqrt( nl2 ) );	// world-space (a rotation of a unit vector: no second normalize)
 	}
 	n /= abs( n.x ) + abs( n.y ) + abs( n.z );
 	vec3 r;

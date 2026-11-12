@@ -51,7 +51,7 @@ bool dudeLightInRange( RtLights lights, uint li, vec3 p ) {
 void dudeLightDir( RtLights lights, uint li, vec3 p, out vec3 ldir, out float dl ) {
 	vec3 d = lights.l[ li ].pos - p;
 	dl   = length( d );
-	ldir = ( dl > 1e-3 ) ? ( d / dl ) : vec3( 0.0, 0.0, 1.0 );
+	ldir = ( dl > 1e-3 ) ? d * ( 1.0 / dl ) : vec3( 0.0, 0.0, 1.0 );		// one reciprocal, three multiplies
 }
 
 // Attenuation of light li at p, 0 = does not reach. Linear radial falloff (Doom's falloff ramp is ~linear);
@@ -69,7 +69,8 @@ float dudeLightAtten( RtLights lights, uint li, vec3 p, float dl, uint flags, bo
 		vec4  hw = vec4( p, 1.0 );
 		float q  = dot( hw, lights.l[ li ].projQ );
 		if ( q <= 1e-4 ) { return 0.0; }										// behind a spot's apex
-		vec3  stf = vec3( dot( hw, lights.l[ li ].projS ) / q, dot( hw, lights.l[ li ].projT ) / q, dot( hw, lights.l[ li ].projF ) );
+		const float invQ = 1.0 / q;
+		vec3  stf = vec3( dot( hw, lights.l[ li ].projS ) * invQ, dot( hw, lights.l[ li ].projT ) * invQ, dot( hw, lights.l[ li ].projF ) );
 		vec3  e   = smoothstep( vec3( 0.0 ), vec3( 0.15 ), min( stf, vec3( 1.0 ) - stf ) );	// 0 at/outside a face
 		if ( ( flags & DUDE_LIGHT_PROJECTED ) != 0u ) {
 			float win = e.x * e.y;

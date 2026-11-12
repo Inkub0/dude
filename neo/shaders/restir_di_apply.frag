@@ -102,13 +102,14 @@ void main() {
 			// including non-power-of-2 where a single block's edges drift off di's bilinear footprint = square artifacts.
 			float ll  = length( sh1 );
 			vec3  Lw  = ( ll > 1.0e-6 ) ? sh1 / ll : vec3( 0.0, 0.0, 1.0 );
+			const vec3 Lv = Lw * mat3( u_modelViewMatrix );		// the SH direction in VIEW space (the rotation's transpose): one transform, not four
 			ivec2 nsz = textureSize( u_normalBuffer, 0 );
 			float cg  = 0.0;
 			for ( int k = 0; k < 4; k++ ) {
 				vec2 gUV = ( b + offs[k] ) * texel;
-				vec3 nkn = normalize( mat3( u_modelViewMatrix )
-					* ( texelFetch( u_normalBuffer, clamp( ivec2( floor( gUV * vec2( nsz ) ) ), ivec2( 0 ), nsz - 1 ), 0 ).xyz * 2.0 - 1.0 ) );
-				cg += max( dot( nkn, Lw ), 0.0 ) * wkArr[k];	// per-texel UNIT cosine (as the gather baked), same weights as di
+				vec3  nk = texelFetch( u_normalBuffer, clamp( ivec2( floor( gUV * vec2( nsz ) ) ), ivec2( 0 ), nsz - 1 ), 0 ).xyz * 2.0 - 1.0;
+				float l2 = dot( nk, nk );
+				if ( l2 > 0.0 ) { cg += max( dot( nk, Lv ) * inversesqrt( l2 ), 0.0 ) * wkArr[k]; }	// per-texel UNIT cosine (as the gather baked), same weights as di
 			}
 			shCosGath = ( wsum > 1.0e-4 ) ? cg / wsum : 1.0;
 		}
@@ -125,13 +126,14 @@ void main() {
 			vec2  offs[4] = vec2[4]( vec2( 0.5, 0.5 ), vec2( 1.5, 0.5 ), vec2( 0.5, 1.5 ), vec2( 1.5, 1.5 ) );
 			float ll  = length( sh1 );
 			vec3  Lw  = ( ll > 1.0e-6 ) ? sh1 / ll : vec3( 0.0, 0.0, 1.0 );
+			const vec3 Lv = Lw * mat3( u_modelViewMatrix );		// the SH direction in VIEW space: one transform, not four
 			ivec2 nsz = textureSize( u_normalBuffer, 0 );
 			float cg  = 0.0;
 			for ( int k = 0; k < 4; k++ ) {
 				vec2 gUV = ( b + offs[k] ) * texel;
-				vec3 nkn = normalize( mat3( u_modelViewMatrix )
-					* ( texelFetch( u_normalBuffer, clamp( ivec2( floor( gUV * vec2( nsz ) ) ), ivec2( 0 ), nsz - 1 ), 0 ).xyz * 2.0 - 1.0 ) );
-				cg += max( dot( nkn, Lw ), 0.0 ) * bw[k];
+				vec3  nk = texelFetch( u_normalBuffer, clamp( ivec2( floor( gUV * vec2( nsz ) ) ), ivec2( 0 ), nsz - 1 ), 0 ).xyz * 2.0 - 1.0;
+				float l2 = dot( nk, nk );
+				if ( l2 > 0.0 ) { cg += max( dot( nk, Lv ) * inversesqrt( l2 ), 0.0 ) * bw[k]; }
 			}
 			shCosGath = cg;
 		}

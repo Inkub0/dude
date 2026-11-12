@@ -161,12 +161,18 @@ bool rtEmissiveSampleSolidAngleV( vec3 p0, vec3 p1, vec3 p2, vec3 P, vec2 rnd, o
 	}
 	float rA = inversesqrt( dot( v0, v0 ) ), rB = inversesqrt( dot( v1, v1 ) ), rC = inversesqrt( dot( v2, v2 ) );
 	vec3 A = v0 * rA, B = v1 * rB, C = v2 * rC;
-	vec3 norm_AB = normalize( cross( A, B ) ), norm_CA = normalize( cross( C, A ) );
 	float cos_c = dot( A, B );
-	float cos_alpha = dot( norm_AB, -norm_CA );
+	const float cBC = dot( B, C ), cAC = dot( A, C );
+	// the interior angle at A: cos = normalize( A x B ) . -normalize( C x A ), as the dot of the raw crosses over the product of
+	// their lengths (one inverse square root instead of two normalizes). The crosses STAY: Lagrange's identity would give the
+	// same cosine from the three dots alone, but 1 - cos^2 cancels catastrophically for the long thin triangles beside their
+	// receivers (offline, float32 vs float64: errors up to 0.99 where the crosses keep 5e-4; 2026-11-12), and the sampler is
+	// what draws from exactly those.
+	const vec3  xAB = cross( A, B ), xCA = cross( C, A );
+	float cos_alpha = clamp( -dot( xAB, xCA ) * inversesqrt( max( dot( xAB, xAB ) * dot( xCA, xCA ), 1e-30 ) ), -1.0, 1.0 );
 	// |A.( B x C )| = |v0.( v1 x v2 )| / ( |v0| |v1| |v2| ) and v0.( v1 x v2 ) = n.v0 = nl x o (rtEmissiveTriWeight): the same
 	// spherical area without a cross of two nearly parallel unit vectors (exact algebra; better conditioned far away)
-	float area = 2.0 * atan( abs( o ) * nl * ( rA * rB * rC ), 1.0 + cos_c + dot( B, C ) + dot( A, C ) );
+	float area = 2.0 * atan( abs( o ) * nl * ( rA * rB * rC ), 1.0 + cos_c + cBC + cAC );
 	if ( !( area > 1e-7 ) ) { return false; }
 	float new_area = rnd.x * area;
 	float sin_alpha = sqrt( max( 1.0 - cos_alpha * cos_alpha, 0.0 ) );

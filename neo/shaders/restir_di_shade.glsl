@@ -50,7 +50,7 @@ vec3 diSurfacePw( vec2 sfrag, float d ) {
 vec3 diSurfaceNw( vec4 nt ) {
 	vec3  Nraw = nt.xyz * 2.0 - 1.0;
 	vec3  N    = Nraw * inversesqrt( dot( Nraw, Nraw ) );
-	return normalize( mat3( u_modelViewMatrix ) * N );
+	return mat3( u_modelViewMatrix ) * N;		// the inverse view is a rotation: a unit vector stays unit (no second normalize)
 }
 
 // Reconstruct the surface under SCREEN pixel sfrag (internal-res pixel centre, 0.5 offsets). Returns false for sky /
