@@ -5354,6 +5354,16 @@ static bool VK_ReadShaderSource( const char *fileName, idStr &out ) {
 		fclose( f );
 	}
 #endif
+	// the copy embedded in the binary (embed_shaders.py packs every .glsl too): a release build
+	// has no source folder, so the runtime compiler (custom ARB, md5 kernels) reads its prelude
+	// and includes from here - the same order as GL3's loader (VFS, dev tree, embedded)
+	const unsigned char *edata = NULL;
+	int elen = 0;
+	if ( Dude_GetEmbeddedShader( fileName, &edata, &elen ) && elen > 0 ) {
+		out.Clear();
+		out.Append( (const char *)edata, elen );
+		return true;
+	}
 	return false;
 }
 
