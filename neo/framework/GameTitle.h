@@ -74,6 +74,11 @@ typedef struct gameTitleProfile_s {
 	// The retail game's r_brightness default (Doom 3 1, Quake 4 1.2): the starting point of the
 	// LDR brightness (an HDR tonemap curve replaces r_brightness / r_gamma when it is on)
 	float			defaultBrightness;
+
+	// The retail executable, under fs_basepath, whose program icon the game window shows
+	// (read from the player's own install, so DUDE ships none of the title's artwork).
+	// NULL, or no such file / icon: DUDE's built-in Doom 3 icon.
+	const char *	iconExe;
 } gameTitleProfile_t;
 
 // Stem of the null game library (nullgame.so / nullgame.dll): a spectator-only idGame

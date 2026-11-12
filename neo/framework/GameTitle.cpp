@@ -56,6 +56,7 @@ static const gameTitleProfile_t titleProfiles[GAME_TITLE_COUNT] = {
 		NULL, NULL, NULL,				// gameLibrary*: base.so ships with DUDE
 		false,							// runByDefault: Doom 3 walks; always-run is MP only (in_allowAlwaysRunInSP)
 		1.0f,							// defaultBrightness
+		NULL,							// iconExe: the built-in Doom 3 icon
 	},
 	{
 		GAME_TITLE_QUAKE4, "quake4", "Quake 4",
@@ -87,6 +88,7 @@ static const gameTitleProfile_t titleProfiles[GAME_TITLE_COUNT] = {
 		"and only with the full retail Quake 4.",
 		true,							// runByDefault: retail in_alwaysRun "1", honoured in single player
 		1.2f,							// defaultBrightness: retail Quake4.exe r_brightness "1.2"
+		"Quake4.exe",					// iconExe: Steam and GOG installs ship it next to q4base/ (GitHub #19)
 	},
 };
 
