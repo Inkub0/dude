@@ -1399,6 +1399,9 @@ private:
 	// pass): reset + begin + checkpoint, then end + submit on uploadFence + guarded wait
 	void						BeginSyncUpload( const char *checkpoint );
 	bool						EndSyncUpload( const char *waitName );
+	// DUDE: a freshly created colour image starts in a defined state: cleared to zero and in
+	// SHADER_READ_ONLY (one sync submit at creation; see the definition)
+	void						InitColorImage( VkImage *images, int count, uint32_t mipLevels, const char *tag );
 	// DUDE: true after a vkDeviceWaitIdle with nothing submitted since, so DestroyImage between
 	// frames waits once for a run of destroys (a reload purges thousands of images in a row)
 	bool						deviceIdle = false;
@@ -1752,6 +1755,16 @@ static bool vkCheck( VkResult res, const char *what ) {
 VulkanDebugCallback
 ====================
 */
+// DUDE: the GPU scopes open on the main thread right now (string literals, pushed by GpuScopeBegin
+// whether or not the timers run), so a validation message can say which pass it came from
+static const char *s_vkScopeOpen[32];
+static int s_vkScopeDepth = 0;
+// DUDE: NRD's own SPIR-V declares its spherical-harmonics transients as float3 (RELAX_SH_TYPE /
+// REBLUR_SH_TYPE) while its pool asks for RGBA16F - a known upstream violation of
+// VUID-vkCmdDispatch-OpImageWrite-08795 that every hardware writes as xyz. Counted apart, printed
+// once, so the session's "validation clean" bar is about our own usage.
+static int s_vkNrdShWritesSuppressed = 0;
+
 static VKAPI_ATTR VkBool32 VKAPI_CALL VulkanDebugCallback(
 		VkDebugUtilsMessageSeverityFlagBitsEXT severity,
 		VkDebugUtilsMessageTypeFlagsEXT types,
@@ -1762,11 +1775,20 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL VulkanDebugCallback(
 	// "validation clean" bar that gates every milestone
 	const bool loaderMsg = ( data->pMessageIdName != NULL
 		&& idStr::Icmp( data->pMessageIdName, "Loader Message" ) == 0 );
+	if ( data->pMessageIdName != NULL && data->pMessage != NULL
+			&& strstr( data->pMessageIdName, "VUID-vkCmdDispatch-OpImageWrite-08795" ) != NULL
+			&& strstr( data->pMessage, "\"gOut_" ) != NULL ) {
+		if ( s_vkNrdShWritesSuppressed++ == 0 ) {
+			common->Printf( "VK validation: NRD's SH shaders write float3 into RGBA16F transients (upstream, VUID-vkCmdDispatch-OpImageWrite-08795); counted apart from here on\n" );
+		}
+		return VK_FALSE;
+	}
+	const char *scope = ( s_vkScopeDepth > 0 && s_vkScopeOpen[s_vkScopeDepth - 1] ) ? s_vkScopeOpen[s_vkScopeDepth - 1] : NULL;
 	if ( ( severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT ) && !loaderMsg ) {
 		vkValidationErrors++;
-		common->Warning( "VK validation ERROR: %s", data->pMessage );
+		common->Warning( "VK validation ERROR%s%s: %s", scope ? " in " : "", scope ? scope : "", data->pMessage );
 	} else {
-		common->Warning( "VK %s: %s", loaderMsg ? "loader" : "validation", data->pMessage );
+		common->Warning( "VK %s%s%s: %s", loaderMsg ? "loader" : "validation", scope ? " in " : "", scope ? scope : "", data->pMessage );
 	}
 
 	// Append to the in-memory history for the crash dump / debug HUD. Keep the ring bounded.
@@ -3075,6 +3097,10 @@ void VulkanBackend::Shutdown() {
 	physical = VK_NULL_HANDLE;
 	frameOpen = skipFrame = insideScenePass = sceneWritten = false;
 
+	if ( s_vkNrdShWritesSuppressed ) {
+		common->Printf( "VK: %d known NRD SH-write validation messages not counted this session\n", s_vkNrdShWritesSuppressed );
+		s_vkNrdShWritesSuppressed = 0;
+	}
 	if ( vkValidationErrors ) {
 		common->Warning( "VK: session had %d validation errors (%d frames presented)", vkValidationErrors, presentedFrames );
 	} else {
@@ -3151,6 +3177,10 @@ void VulkanBackend::DumpQueueCheckpoints( FILE *f ) {
 }
 
 void VulkanBackend::GpuScopeBegin( const char *name ) {
+	if ( s_vkScopeDepth < 32 ) {
+		s_vkScopeOpen[s_vkScopeDepth] = name;		// for the validation callback (a literal)
+	}
+	s_vkScopeDepth++;
 	CheckpointMark( name, false );
 	if ( !gpuScopesActive || !( frameOpen || gpuScopesBeginFrame ) || skipFrame
 			|| gpuScopeCount[frameIndex] >= GPU_SCOPE_MAX_PAIRS
@@ -3165,6 +3195,9 @@ void VulkanBackend::GpuScopeBegin( const char *name ) {
 }
 
 void VulkanBackend::GpuScopeEnd() {
+	if ( s_vkScopeDepth > 0 ) {
+		s_vkScopeDepth--;
+	}
 	CheckpointMark( NULL, true );
 	if ( gpuScopeDepth[frameIndex] <= 0 ) {
 		return;
@@ -8200,7 +8233,7 @@ bool VulkanBackend::StorageImageCreate( storageImage_t &si, VkFormat format, int
 	ici.arrayLayers = 1;
 	ici.samples = VK_SAMPLE_COUNT_1_BIT;
 	ici.tiling = VK_IMAGE_TILING_OPTIMAL;
-	ici.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+	ici.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;	// TRANSFER_DST: the creation clear
 	ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 	VmaAllocationCreateInfo aci = {};
 	aci.usage = VMA_MEMORY_USAGE_AUTO;
@@ -8208,6 +8241,7 @@ bool VulkanBackend::StorageImageCreate( storageImage_t &si, VkFormat format, int
 		si.image = VK_NULL_HANDLE;
 		return false;
 	}
+	InitColorImage( &si.image, 1, 1, tag );		// zeroed, resting in SHADER_READ_ONLY (its sample slot's layout)
 	VkImageViewCreateInfo vwi = {};
 	vwi.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
 	vwi.image = si.image;
@@ -10107,6 +10141,55 @@ the fence and an unguarded wait would hang. Returns whether the submission compl
 the GPU: never per-frame.
 ====================
 */
+/*
+====================
+VulkanBackend::InitColorImage
+
+DUDE: every colour target and storage image is created in the UNDEFINED layout and registered as a
+sampleable ImageRec resting in SHADER_READ_ONLY. Until its first write nothing moved it there, so a
+draw that bound it before that write - a history or denoiser buffer on the first frame after a
+resize, a partial vid_restart or the RT scene rebuild - was one validation error per recreation
+("expects SHADER_READ_ONLY, current layout is UNDEFINED"), and read whatever memory the image got.
+Clear the new image to zero and leave it in SHADER_READ_ONLY on the sync upload command buffer:
+one submit at creation (resizes and first use only), a legal layout for any pass that samples it
+early, zeros instead of garbage for a history's first frame. A later transition that names
+UNDEFINED as the old layout stays legal (the contents are discardable then anyway).
+====================
+*/
+void VulkanBackend::InitColorImage( VkImage *images, int count, uint32_t mipLevels, const char *tag ) {
+	if ( device == VK_NULL_HANDLE || uploadCb == VK_NULL_HANDLE || count <= 0 ) {
+		return;
+	}
+	BeginSyncUpload( "sync:InitColorImage" );
+	VkImageSubresourceRange range = {};
+	range.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	range.levelCount = mipLevels;
+	range.layerCount = 1;
+	const VkClearColorValue zero = {};
+	for ( int i = 0; i < count; i++ ) {
+		if ( images[i] == VK_NULL_HANDLE ) {
+			continue;
+		}
+		VkImageMemoryBarrier b = {};
+		b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+		b.srcAccessMask = 0;
+		b.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+		b.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+		b.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+		b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		b.image = images[i];
+		b.subresourceRange = range;
+		vkCmdPipelineBarrier( uploadCb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &b );
+		vkCmdClearColorImage( uploadCb, images[i], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &zero, 1, &range );
+		b.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+		b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+		b.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+		b.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+		vkCmdPipelineBarrier( uploadCb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, NULL, 0, NULL, 1, &b );
+	}
+	EndSyncUpload( va( "vkWaitForFences(init %s)", tag ) );
+}
+
 void VulkanBackend::BeginSyncUpload( const char *checkpoint ) {
 	vkResetCommandBuffer( uploadCb, 0 );
 	VkCommandBufferBeginInfo bi = {};
@@ -12296,6 +12379,9 @@ bool VulkanBackend::CreateColorTarget( RenderTarget &t, int w, int h, VkFormat c
 		FreeTargetObjects( t );
 		return false;
 	}
+
+	// zeroed and resting in SHADER_READ_ONLY before anything can sample it (InitColorImage)
+	InitColorImage( t.colorImage, colorCount, (uint32_t)mipLevels, "color target" );
 
 	// register each color attachment as a sampleable ImageRec (SHADER_READ_ONLY,
 	// linear/clamp — the resolve samples 1:1). Views/images owned by the target.
