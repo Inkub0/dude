@@ -7,17 +7,18 @@ A stability and Quake 4 release on top of [0.9.8](https://github.com/Inkub0/dude
 - **Random crashes since 0.9.7 (GitHub #10).** With frame interpolation (high fps), a smoke puff's vertices could be freed twice when its light surfaces outlived the puff, corrupting memory that a later level change tripped over (often at a level start, for example when hell breaks loose in Mars City Underground). Fixed at the source.
 - **"Assertion failed" dialogs and the crashes behind them (GitHub #11, #14).** The release builds stopped on internal consistency checks that the original games compiled out, for example one of Raven's own self-correcting checks in the Quake 4 hangar. A failed check is now written to the log once and the game carries on, as the original games did.
 - **Quake 4: crash loading `mcc_1`, and when the MCC ship lands.** The map's navigation file for one creature size is an empty stub that was read as a real one; it is now treated as absent. The landing crash was one of the checks above, now harmless.
-- **Fullscreen on Wayland (GitHub #8, Hyprland).** Opening the Graphics settings in fullscreen aborted when the window manager had changed the fullscreen state on its own. DUDE now follows the window's real state.
-- **Frozen picture with ray tracing (GitHub #12, Intel Arc).** Every ray is checked before it is traced, so an invalid ray can no longer lose the GPU. If the GPU is lost anyway, DUDE restarts the renderer by itself (up to 3 times a session, `r_vkDeviceLostRestart`) instead of freezing; from the second loss in a session it also steps ray tracing down one level for the rest of that session, without touching your saved settings.
+- **Fullscreen on Wayland (GitHub #8, Hyprland).** Opening the Graphics settings in fullscreen aborted when the window manager had changed the fullscreen state on its own. DUDE now follows the window's real state. The problem occurred on Wayland, and it's fixed there. Hyprland should behave similarly.
 - **OpenGL 3: crash when changing the quality preset** with a level loaded. The settings menu's own OpenGL loader went stale after the renderer restarted.
 - **Linux: DUDE starts from Steam.** The Linux build no longer links libcurl, whose Steam runtime copy refused to load it (`./dude # %command%` in the Launch Options now works). libcurl only served multiplayer pak downloads.
-- **Quake 4 paks copied into Doom 3's `base/`** now stop with a message saying so, instead of "bad type: 15".
+- **Quake 4 paks copied into Doom 3's `base/`** now stop with a message saying so, instead of "bad type: 15". Following install instructions should avoid this problem in the first place.
+- **Frozen picture with ray tracing (GitHub #12, Intel Arc).** Every ray is checked before it is traced, so an invalid ray can no longer lose the GPU. If the GPU is lost anyway, DUDE restarts the renderer by itself (up to 3 times a session, `r_vkDeviceLostRestart`) instead of freezing; from the second loss in a session it also steps ray tracing down one level for the rest of that session, without touching your saved settings. This is not a proper fix, but I don't have an Arc card to work with it.
 
 ## Quake 4
 
 - **Terrain blends show as in Raven's game (GitHub #18).** Ground that crossfades between soil, sand and rock (the canyons from the second level on) rendered as a single coarse rock layer, and burn marks painted into the map were missing: Quake 4's map files leave out a vertex's colour when it is the default, and DUDE filled the gap with white instead of black.
 - **Smooth above 60 fps (GitHub #13).** The Quake 4 game library now draws characters, the view, weapons, effects and particles between game tics, as Doom 3 already did; with frame interpolation on, 144 fps now looks like 144 fps. Doom 3's effects, particles and animated materials are drawn between tics too.
-- **You run by default, Shift walks**, as in the original Quake 4 (it walked at half speed in 0.9.8). **The default brightness is Quake 4's own** (1.2). Existing Quake 4 configs are updated once on the first start.
+- **You run by default, Shift walks**, as in the original Quake 4 (it walked at half speed in 0.9.8).
+- **The default brightness is Quake 4's own** (1.2). Existing Quake 4 configs are updated once on the first start.
 - **The window and taskbar show Quake 4's icon (GitHub #19)**, read from the `Quake4.exe` in your install (DUDE ships none of Quake 4's art). Without it, DUDE's own icon is used.
 - **Bullet-hole highlights follow the light.** Quake 4's bullet holes carry a painted-on shine at full strength, so they glowed on unlit walls; the shine is now scaled by the light on the wall (`r_decalLitHighlights`, on by default, off at Potato, the faithful floor).
 - **Path Tracing lighting no longer trails tessellated characters.** Quake 4's marines and talking heads (and Doom 3's characters with tessellation on) had no animation motion, so their lighting lagged their movement by up to a second.
@@ -62,9 +63,8 @@ A stability and Quake 4 release on top of [0.9.8](https://github.com/Inkub0/dude
 
 ## Known limitations
 
-- **Quake 4 terrain at High and above** shows parallax relief that Raven's renderer never drew (`r_parallax` applies to every material with a height map); `r_parallax 0` matches Raven's look exactly.
 - **Emissive Mode is still experimental and ships off.**
-- Quake 4 multiplayer is not supported yet.
+- **Quake 4 multiplayer** is not supported yet.
 
 ## Setup for Doom 3 (same as 0.9.8)
 
