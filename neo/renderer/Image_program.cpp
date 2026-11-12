@@ -859,6 +859,18 @@ static std::mutex				s_hfMutex;
 static idList<hfPendingWrite_t>	s_hfPending;
 static const std::thread::id	s_hfMainThread = std::this_thread::get_id();	// static init runs on the main thread
 static std::atomic<int>			s_hfHits( 0 ), s_hfMisses( 0 );
+static idList<idStr>			s_hfMissNotes;		// why fields missed (developer 1), for the load report; mutex: s_hfMutex
+
+static void R_HeightFieldCacheNoteMiss( const char *why, const char *path, const char *name, const char *spec, const hfSource_t source[2] ) {
+	if ( !com_developer.GetBool() ) {
+		return;
+	}
+	std::lock_guard<std::mutex> lk( s_hfMutex );
+	if ( s_hfMissNotes.Num() < 32 ) {
+		s_hfMissNotes.Append( va( "%s: '%s' spec '%s' (%s; sources %llu/%u %llu/%u)", why, name, spec, path,
+			(unsigned long long)source[0].time, source[0].bytes, (unsigned long long)source[1].time, source[1].bytes ) );
+	}
+}
 
 // one file per name + spec: two materials can share a generated name (a tess height named after an authored
 // _h both use) with different bump programs behind it, and each must keep its own field
@@ -906,7 +918,7 @@ static void R_HeightFieldCacheWriteNow( const hfPendingWrite_t &e ) {
 
 // keep a solved field (grey RGBA8, alpha 255) for the next load; writes now on the main thread, queues on a worker
 static void R_HeightFieldCacheStore( const char *name, const char *spec, const hfSource_t source[2], const byte *rgba, int w, int h ) {
-	if ( !r_heightFieldCache.GetBool() || w <= 0 || h <= 0 ) {
+	if ( !r_heightFieldCache.GetBool() || w <= 0 || h <= 0 || ( source[0].bytes == 0 && source[1].bytes == 0 ) ) {
 		return;
 	}
 	hfPendingWrite_t e;
@@ -943,26 +955,33 @@ void R_HeightFieldCacheFlush( void ) {
 	}
 }
 
-// the cache's hits and misses since the last call (for the load report)
+// the cache's hits and misses since the last call (for the load report), and under developer 1 the reasons of
+// up to 32 misses, printed here (a worker's own prints are captured and may not all surface)
 void R_HeightFieldCacheStats( int &hits, int &misses ) {
 	hits = s_hfHits.exchange( 0 );
 	misses = s_hfMisses.exchange( 0 );
+	idList<idStr> notes;
+	{
+		std::lock_guard<std::mutex> lk( s_hfMutex );
+		notes = s_hfMissNotes;
+		s_hfMissNotes.Clear();
+	}
+	for ( int i = 0; i < notes.Num(); i++ ) {
+		common->Printf( "  height-field cache miss %s\n", notes[i].c_str() );
+	}
 }
 
 // a cached field for this name + spec + source timestamps, expanded back to grey RGBA8 (caller R_StaticFree()s)
 static bool R_HeightFieldCacheRead( const char *name, const char *spec, const hfSource_t source[2], byte **outPic, int *outW, int *outH ) {
-	if ( !r_heightFieldCache.GetBool() ) {
-		return false;
+	if ( !r_heightFieldCache.GetBool() || ( source[0].bytes == 0 && source[1].bytes == 0 ) ) {
+		return false;		// off, or no source file at all (a built-in like _flat, a missing file): nothing to cache
 	}
 	void *buf = NULL;
 	const idStr path = R_HeightFieldCachePath( name, spec );
 	const int len = fileSystem->ReadFile( path, &buf, NULL );
 	if ( len <= 0 || buf == NULL ) {
 		s_hfMisses++;
-		if ( com_developer.GetBool() ) {
-			common->Printf( "height-field cache miss: no file %s for '%s' spec '%s' (sources %llu/%u %llu/%u)\n", path.c_str(), name, spec,
-				(unsigned long long)source[0].time, source[0].bytes, (unsigned long long)source[1].time, source[1].bytes );
-		}
+		R_HeightFieldCacheNoteMiss( "no file", path.c_str(), name, spec, source );
 		return false;
 	}
 	const byte *p = (const byte *)buf, *end = p + len;
@@ -1007,9 +1026,7 @@ static bool R_HeightFieldCacheRead( const char *name, const char *spec, const hf
 		*outH = h;
 	} else {
 		s_hfMisses++;
-		if ( com_developer.GetBool() ) {
-			common->Printf( "height-field cache miss: %s mismatch in %s for '%s' spec '%s'\n", why, path.c_str(), name, spec );
-		}
+		R_HeightFieldCacheNoteMiss( va( "%s mismatch", why ), path.c_str(), name, spec, source );
 	}
 	return ok;
 }
