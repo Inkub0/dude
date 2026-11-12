@@ -644,5 +644,9 @@ void R_TessFlatHeightForget( void );
 // DUDE: the same pixels the tess height image uploads, for CPU-side sampling (the
 // r_tessDeform pre-deform path, which must match dudeTessDisplace). Caller R_StaticFree()s *pic.
 bool R_TessHeightPixelsForImage( const idImage *image, byte **pic, int *w, int *h );
+// DUDE: the height-field cache (Image_program.cpp): the fields solved on worker threads are written by the main
+// thread after they join; the hits / misses since the last call, for the load report
+void R_HeightFieldCacheFlush( void );
+void R_HeightFieldCacheStats( int &hits, int &misses );
 
 #endif

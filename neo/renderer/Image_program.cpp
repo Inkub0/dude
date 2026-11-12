@@ -28,6 +28,10 @@ If you have questions concerning this license or the applicable additional terms
 
 #include "sys/platform.h"
 #include "idlib/containers/HashTable.h"	// DUDE: parallax height source table
+#include "framework/Licensee.h"			// DUDE: ENGINE_VERSION keys the height-field cache
+#include <mutex>							// DUDE: the height-field cache's pending writes (worker threads)
+#include <thread>
+#include <atomic>
 #include "renderer/tr_local.h"
 
 #include "renderer/Image.h"
@@ -801,6 +805,179 @@ static void R_NormalMapToHeightMap( byte *data, int width, int height ) {
 }
 
 /*
+===============================================================================
+
+	DUDE: the height-field cache
+
+	The parallax and tessellation height fields are integrated out of the normal maps
+	(R_NormalMapToHeightMap: 64 Jacobi sweeps + a wrap-aware high-pass per texel, after decoding
+	the bump program) on every map load: 961 of them on mars_city1 were 25 of the 33 CPU seconds
+	of the parallel image load (2026-11-12). The pixels depend only on the source files and the
+	solver, so they are kept as generated/heightfields/<hash>.hf in the writable dude folder,
+	one byte per texel (the fields are grey, alpha 255), keyed on the generated image's name, its
+	source spec, the source files' timestamps, HF_VERSION and ENGINE_VERSION; any mismatch solves
+	again and rewrites. Workers (the parallel level load, the tess-bake flush) read the cache under
+	the filesystem's thread-safe window; a miss on a worker queues its write for the main thread
+	(R_HeightFieldCacheFlush, after the workers join), a miss on the main thread writes at once.
+
+===============================================================================
+*/
+idCVar r_heightFieldCache( "r_heightFieldCache", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL,
+	"cache the parallax / tessellation height fields integrated out of the normal maps as generated/heightfields/*.hf in the dude folder and load those instead of solving them on every map load; 0 = always solve and never write" );
+
+static const int HF_MAGIC = ( 'D' ) | ( 'H' << 8 ) | ( 'F' << 16 ) | ( '1' << 24 );
+// Bump when the pixels a source produces change: R_NormalMapToHeightMap (the solver, its iteration count,
+// the high-pass radius), R_CenterHeight, or the bump-program decode they read.
+static const int HF_VERSION = 1;
+
+struct hfPendingWrite_t {
+	idStr		name, spec;
+	ID_TIME_T	sourceTime[2];
+	int			w, h;
+	byte *		mono;		// R_StaticAlloc'd w*h
+};
+static std::mutex				s_hfMutex;
+static idList<hfPendingWrite_t>	s_hfPending;
+static const std::thread::id	s_hfMainThread = std::this_thread::get_id();	// static init runs on the main thread
+static std::atomic<int>			s_hfHits( 0 ), s_hfMisses( 0 );
+
+static idStr R_HeightFieldCachePath( const char *name ) {
+	unsigned long long h = 1469598103934665603ULL;		// FNV-1a over the generated image's name
+	for ( const unsigned char *p = (const unsigned char *)name; *p; p++ ) {
+		h ^= *p;
+		h *= 1099511628211ULL;
+	}
+	return idStr( va( "generated/heightfields/%016llx.hf", h ) );
+}
+
+// the source files' timestamps, without decoding (R_LoadImageProgram with no pixel pointer); 0 when none
+static ID_TIME_T R_HeightFieldSourceTime( const char *program ) {
+	ID_TIME_T ts = 0;
+	if ( program && program[0] ) {
+		R_LoadImageProgram( program, NULL, NULL, NULL, &ts, NULL );
+	}
+	return ts;
+}
+
+static void R_HeightFieldCacheWriteNow( const hfPendingWrite_t &e ) {
+	idFile *f = fileSystem->OpenFileWrite( R_HeightFieldCachePath( e.name ) );
+	if ( !f ) {
+		return;
+	}
+	f->Write( &HF_MAGIC, sizeof( HF_MAGIC ) );
+	f->Write( &HF_VERSION, sizeof( HF_VERSION ) );
+	f->WriteString( ENGINE_VERSION );
+	f->WriteString( e.name );
+	f->WriteString( e.spec );
+	f->Write( e.sourceTime, sizeof( e.sourceTime ) );
+	f->WriteInt( e.w );
+	f->WriteInt( e.h );
+	f->Write( e.mono, e.w * e.h );
+	fileSystem->CloseFile( f );
+}
+
+// keep a solved field (grey RGBA8, alpha 255) for the next load; writes now on the main thread, queues on a worker
+static void R_HeightFieldCacheStore( const char *name, const char *spec, const ID_TIME_T sourceTime[2], const byte *rgba, int w, int h ) {
+	if ( !r_heightFieldCache.GetBool() || w <= 0 || h <= 0 ) {
+		return;
+	}
+	hfPendingWrite_t e;
+	e.name = name;
+	e.spec = spec;
+	e.sourceTime[0] = sourceTime[0];
+	e.sourceTime[1] = sourceTime[1];
+	e.w = w;
+	e.h = h;
+	e.mono = (byte *)R_StaticAlloc( w * h );
+	for ( int i = 0; i < w * h; i++ ) {
+		e.mono[i] = rgba[i * 4];
+	}
+	if ( std::this_thread::get_id() == s_hfMainThread ) {
+		R_HeightFieldCacheWriteNow( e );
+		R_StaticFree( e.mono );
+		return;
+	}
+	std::lock_guard<std::mutex> lk( s_hfMutex );
+	s_hfPending.Append( e );
+}
+
+// the fields solved on worker threads since the last flush, written by the main thread
+void R_HeightFieldCacheFlush( void ) {
+	idList<hfPendingWrite_t> pending;
+	{
+		std::lock_guard<std::mutex> lk( s_hfMutex );
+		pending = s_hfPending;
+		s_hfPending.Clear();
+	}
+	for ( int i = 0; i < pending.Num(); i++ ) {
+		R_HeightFieldCacheWriteNow( pending[i] );
+		R_StaticFree( pending[i].mono );
+	}
+}
+
+// the cache's hits and misses since the last call (for the load report)
+void R_HeightFieldCacheStats( int &hits, int &misses ) {
+	hits = s_hfHits.exchange( 0 );
+	misses = s_hfMisses.exchange( 0 );
+}
+
+// a cached field for this name + spec + source timestamps, expanded back to grey RGBA8 (caller R_StaticFree()s)
+static bool R_HeightFieldCacheRead( const char *name, const char *spec, const ID_TIME_T sourceTime[2], byte **outPic, int *outW, int *outH ) {
+	if ( !r_heightFieldCache.GetBool() ) {
+		return false;
+	}
+	void *buf = NULL;
+	const int len = fileSystem->ReadFile( R_HeightFieldCachePath( name ), &buf, NULL );
+	if ( len <= 0 || buf == NULL ) {
+		s_hfMisses++;
+		return false;
+	}
+	const byte *p = (const byte *)buf, *end = p + len;
+	bool ok = false;
+	byte *pic = NULL;
+	int w = 0, h = 0;
+	do {
+		int magic, version;
+		if ( end - p < 8 ) { break; }
+		memcpy( &magic, p, 4 ); memcpy( &version, p + 4, 4 ); p += 8;
+		if ( magic != HF_MAGIC || version != HF_VERSION ) { break; }
+		// three length-prefixed strings (idFile::WriteString: int length + bytes), each compared
+		const char *expect[3] = { ENGINE_VERSION, name, spec };
+		bool strOk = true;
+		for ( int s = 0; s < 3 && strOk; s++ ) {
+			int n;
+			if ( end - p < 4 ) { strOk = false; break; }
+			memcpy( &n, p, 4 ); p += 4;
+			if ( n < 0 || end - p < n || (int)strlen( expect[s] ) != n || memcmp( p, expect[s], n ) != 0 ) { strOk = false; break; }
+			p += n;
+		}
+		if ( !strOk ) { break; }
+		ID_TIME_T ts[2];
+		if ( end - p < (int)sizeof( ts ) + 8 ) { break; }
+		memcpy( ts, p, sizeof( ts ) ); p += sizeof( ts );
+		if ( ts[0] != sourceTime[0] || ts[1] != sourceTime[1] ) { break; }
+		memcpy( &w, p, 4 ); memcpy( &h, p + 4, 4 ); p += 8;
+		if ( w <= 0 || h <= 0 || w > 16384 || h > 16384 || end - p != w * h ) { break; }
+		pic = (byte *)R_StaticAlloc( w * h * 4 );
+		for ( int i = 0; i < w * h; i++ ) {
+			pic[i * 4 + 0] = pic[i * 4 + 1] = pic[i * 4 + 2] = p[i];
+			pic[i * 4 + 3] = 255;
+		}
+		ok = true;
+	} while ( 0 );
+	fileSystem->FreeFile( buf );
+	if ( ok ) {
+		s_hfHits++;
+		*outPic = pic;
+		*outW = w;
+		*outH = h;
+	} else {
+		s_hfMisses++;
+	}
+	return ok;
+}
+
+/*
 ===============
 R_ParallaxHeightCpu
 
@@ -819,8 +996,16 @@ static bool R_ParallaxHeightCpu( idImage *image, byte **outPic, int *outW, int *
 	byte  *pic = NULL;
 	int    w = 0, hgt = 0;
 
+	ID_TIME_T sourceTime[2] = { 0, 0 };
 	if ( r_parallaxSources.Get( image->imgName, &bumpProgram ) && bumpProgram ) {
-		R_LoadImageProgram( bumpProgram->c_str(), &pic, &w, &hgt, NULL, NULL );
+		sourceTime[0] = R_HeightFieldSourceTime( bumpProgram->c_str() );
+		if ( !R_HeightFieldCacheRead( image->imgName, bumpProgram->c_str(), sourceTime, &pic, &w, &hgt ) ) {
+			R_LoadImageProgram( bumpProgram->c_str(), &pic, &w, &hgt, NULL, NULL );
+			if ( pic ) {
+				R_NormalMapToHeightMap( pic, w, hgt );
+				R_HeightFieldCacheStore( image->imgName, bumpProgram->c_str(), sourceTime, pic, w, hgt );
+			}
+		}
 	}
 
 	if ( !pic ) {
@@ -829,8 +1014,6 @@ static bool R_ParallaxHeightCpu( idImage *image, byte **outPic, int *outW, int *
 		pic[0] = pic[1] = pic[2] = 128;
 		pic[3] = 255;
 		w = hgt = 1;
-	} else {
-		R_NormalMapToHeightMap( pic, w, hgt );
 	}
 
 	*outPic = pic;
@@ -1035,6 +1218,14 @@ static bool R_LoadTessHeightPixels( const char *generatedName, byte **outPic, in
 	byte *pic = NULL;
 	int w = 0, hgt = 0;
 	bool integrated = false;
+	// the cache: keyed on both sources' timestamps, so an _h that ships later misses and is used
+	const ID_TIME_T sourceTime[2] = { R_HeightFieldSourceTime( authored.c_str() ), R_HeightFieldSourceTime( bumpProgram.c_str() ) };
+	if ( R_HeightFieldCacheRead( generatedName, spec->c_str(), sourceTime, &pic, &w, &hgt ) ) {
+		*outPic = pic;
+		*outW = w;
+		*outH = hgt;
+		return true;
+	}
 	if ( authored.Length() ) {
 		// lone-heightmap material: the authored _h IS the ground truth, in the artist's own
 		// amplitude. Re-centre it, do not rescale it.
@@ -1053,6 +1244,7 @@ static bool R_LoadTessHeightPixels( const char *generatedName, byte **outPic, in
 		return false;
 	}
 	R_CenterHeight( pic, w, hgt, integrated );
+	R_HeightFieldCacheStore( generatedName, spec->c_str(), sourceTime, pic, w, hgt );
 	*outPic = pic;
 	*outW = w;
 	*outH = hgt;

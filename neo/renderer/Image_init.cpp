@@ -1272,6 +1272,7 @@ static int R_ParallelLoadImages( idImage **list, int count, const char *workerWa
 
 	// surface any prints/warnings the workers buffered (order-independent)
 	Com_FlushThreadCaptureWarn( workerWarning );
+	R_HeightFieldCacheFlush();		// the height fields the workers solved, kept for the next load
 	R_ImageWorkerTimersGet( stats.workerSource, stats.workerGenerators, stats.workerStats, stats.workerMips, stats.workerEncode );
 	return stats.threads;
 }
@@ -2518,6 +2519,13 @@ void idImageManager::EndLevelLoad() {
 		common->Printf( "  parallel image load: %i threads, waited %.2f s, upload %.2f s, %i MB uploaded\n",
 			parStats.threads, parStats.decodeMsec * 0.001f, parStats.uploadMsec * 0.001f, parStats.uploadBytes >> 20 );
 		common->Printf( "  %s\n", R_ParallelLoadWorkerSplit( parStats ) );
+	}
+	{
+		int hfHits = 0, hfMisses = 0;
+		R_HeightFieldCacheStats( hfHits, hfMisses );
+		if ( hfHits + hfMisses > 0 ) {
+			common->Printf( "  height-field cache: %i hits, %i solved and written\n", hfHits, hfMisses );
+		}
 	}
 }
 

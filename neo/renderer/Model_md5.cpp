@@ -1141,6 +1141,7 @@ void R_MD5_FlushTessBakes( void ) {
 			filled[i] = job.mesh->FillTessTopology( job.bindVerts, px ? px->pic : NULL, px ? px->w : 0, px ? px->h : 0 );
 		} ) );
 	}
+	R_HeightFieldCacheFlush();		// height fields the decode phase solved on the workers
 
 	// surface what the workers printed
 	Com_FlushThreadCaptureWarn( "parallel tess bake: a worker hit an error (see above)" );
