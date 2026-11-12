@@ -365,6 +365,9 @@ void R_FreeStaticTriSurfVertexCaches( srfTriangles_t *tri ) {
 	}
 }
 
+// DUDE: the mark R_ReallyFreeStaticTriSurf leaves in a released struct's deferred link (see there)
+#define R_TRISURF_RELEASED ( (srfTriangles_t *)(uintptr_t)0xDEADDEADDEADDEADULL )
+
 /*
 ==============
 R_ReallyFreeStaticTriSurf
@@ -494,6 +497,12 @@ void R_ReallyFreeStaticTriSurf( srfTriangles_t *tri ) {
 #endif
 
 	srfTrianglesAllocator.Free( tri );
+	// DUDE: the struct sits in a pool, so a stale pointer to it stays readable: mark it released, and
+	// R_FreeStaticTriSurf names a second free of it instead of letting the pool hand out its arrays
+	// twice (the double free ASAN reports from the next deferred flush, GitHub #10's family). The
+	// pool's free-list link overwrites the first pointer of the struct only; a fresh R_AllocStaticTriSurf
+	// clears the mark.
+	tri->nextDeferredFree = R_TRISURF_RELEASED;
 }
 
 /*
@@ -566,10 +575,16 @@ void R_FreeStaticTriSurf( srfTriangles_t *tri ) {
 		return;
 	}
 
-	if ( tri->nextDeferredFree ) {
-		common->Error( "R_FreeStaticTriSurf: freed a freed triangle" );
-	}
 	frame = frameData;
+
+	// a second free: the surface is already on this frame's deferred list (as its last entry it would
+	// pass a link check and chain to itself), or it was released by an earlier flush (R_TRISURF_RELEASED)
+	if ( tri->nextDeferredFree != NULL || ( frame != NULL && frame->lastDeferredFreeTriSurf == tri ) ) {
+		// the debug / ASAN build stops here with this caller's stack (handle_sigtrap): it is the culprit
+		assert( !"R_FreeStaticTriSurf: freed a freed triangle" );
+		common->Error( "R_FreeStaticTriSurf: freed a freed triangle (%s)",
+			tri->nextDeferredFree == R_TRISURF_RELEASED ? "released by an earlier frame" : "already on this frame's deferred list" );
+	}
 
 	if ( !frame ) {
 		// command line utility, or rendering in editor preview mode ( force )
