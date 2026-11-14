@@ -29,4 +29,11 @@ extern idCVar com_allowModDownload;
 // if no display is available to ask on.
 bool ModDownload_Confirm( const modRegistryMod_t &mod, const modRegistryAsset_t &asset );
 
+// If fsGame is a registry mod whose library is missing and the user consents,
+// download the library from its pinned release, verify it against the pinned
+// SHA-256, and place it in fs_savepath/<fsGame>/ where the loader looks.
+// Returns true only when a verified library is now present. Safe (returns
+// false) for unknown mods, when disabled, or when there is no display to ask on.
+bool ModDownload_EnsureLibrary( const char *fsGame );
+
 #endif /* !__MODDOWNLOAD_H__ */

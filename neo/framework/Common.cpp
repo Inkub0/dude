@@ -50,6 +50,7 @@ If you have questions concerning this license or the applicable additional terms
 #include "framework/KeyInput.h"
 #include "framework/EventLoop.h"
 #include "framework/ModCvarTranslation.h"
+#include "framework/ModDownload.h"
 #include "framework/GameTitle.h"
 #include "renderer/Image.h"
 #include "renderer/Model.h"
@@ -3633,6 +3634,15 @@ void idCommonLocal::LoadGameDLL( void ) {
 
 	sys->DLL_GetFileName(fs_game, dll, sizeof(dll));
 	LoadGameDLLbyName(dll, fs_game, s);
+
+	// DUDE: a mod listed in the auto-download registry can fetch its missing
+	// library from its pinned release (with user consent) and we retry, before
+	// falling back to another library. See framework/ModDownload and
+	// docs/mod-auto-download.md.
+	if ( !gameDLL && ModDownload_EnsureLibrary( fs_game ) ) {
+		sys->DLL_GetFileName(fs_game, dll, sizeof(dll));
+		LoadGameDLLbyName(dll, fs_game, s);
+	}
 
 	// there was no gamelib for this mod, use default one from base game
 	if (!gameDLL) {
