@@ -1148,6 +1148,7 @@ set(src_idlib
 	idlib/hashing/CRC32.cpp
 	idlib/hashing/MD4.cpp
 	idlib/hashing/MD5.cpp
+	idlib/hashing/SHA256.cpp
 	idlib/math/Angles.cpp
 	idlib/math/Lcp.cpp
 	idlib/math/Math.cpp
