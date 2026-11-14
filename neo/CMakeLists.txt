@@ -976,6 +976,7 @@ set(src_framework
 	framework/GameTitle.cpp
 	framework/ModCvarTranslation.cpp
 	framework/ModRegistry.cpp
+	framework/ModDownload.cpp
 	framework/KeyInput.cpp
 	framework/UsercmdGen.cpp
 	framework/Session_menu.cpp
