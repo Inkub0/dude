@@ -724,6 +724,13 @@ void main() {
 		// clean plate around it still does
 		float rough = u_pbrParms.y;
 		float metal = u_pbrParms.x;
+		// Phase D PBR sidecar (docs/pbr-materials.md sec. 7): an authored <diffuse>_orm / _rmao texture on
+		// unit 10 replaces the table's per-material scalars per texel (same diffuse UV, parallax included)
+		if ( u_ormParms.y > 0.5 ) {
+			vec2 rm = dudeUnit10RoughMetal( texture( u_occlusionMap, uvDiffuse ) );
+			rough = rm.x;
+			metal = rm.y;
+		}
 		// (the film is its own surface on top of all that - the mask describes the wall under it)
 		if ( u_pbrParms.z > 1.5 && filmMode < 0.5 ) {
 			vec2 keep = texture( u_decalMask, gl_FragCoord.xy / vec2( textureSize( u_decalMask, 0 ) ) ).rg;
@@ -865,7 +872,7 @@ void main() {
 	// on direct diffuse is scaled (u_occlusionParms.z, from r_occlusionMapScale * direct) and
 	// stays below full by default. Sampled with the diffuse UV; stacks with SSAO when both on.
 	if ( u_occlusionParms.x > 0.5 ) {
-		float aoMap = texture( u_occlusionMap, uvDiffuse ).r;
+		float aoMap = dudeUnit10Ao( texture( u_occlusionMap, uvDiffuse ) );	// R, or B of an RMAO sidecar
 		diffuse.rgb *= mix( 1.0, aoMap, u_occlusionParms.z );
 	}
 

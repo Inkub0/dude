@@ -4894,6 +4894,18 @@ static void DrawDbgGroup_DebugViews()
 		            "shows, in grey." );
 	}
 
+	if ( SettingsRow( "PBR Material View", "r_pbrDebugView" ) ) {
+		int view = idMath::ClampInt( 0, 4, r_pbrDebugView.GetInteger() );
+		const char *views[] = { "Off (normal view)", "Ambient occlusion", "Roughness", "Metalness", "ORM texture (R AO, G rough, B metal)" };
+		if ( ImGui::Combo( "PBR Material View", &view, views, IM_ARRAYSIZE( views ) ) ) {
+			r_pbrDebugView.SetInteger( view );
+		}
+		CvarTip( r_pbrDebugView, "Show one PBR material channel over the frame instead of the lit scene: the per-texel "
+			"values of a material's ORM / RMAO sidecar texture where it has one, the PBR table's flat values elsewhere. "
+			"AO is the sidecar's AO channel, else the baked occlusion map (with Material AO on); white = none. "
+			"Bind pbrDebugViewNext to a key to cycle the views in game. Vulkan and OpenGL 3 only." );
+	}
+
 	CvarSliderI( "Wireframe", r_showTris, 0, 3, "0 = off, 1 = visible triangles, 2 = all front-facing, 3 = all." );
 
 	if ( SettingsRow( "Lights (dynamic lighting)", "r_skipInteractions" ) ) {
@@ -4932,7 +4944,7 @@ static void DrawDbgGroup_DebugViews()
 			static const char *views[] = {
 				"r_whiteWorld", "r_showTris", "r_showLightCount", "r_showOverDraw", "r_showSurfaceInfo", "r_showLights",
 				"r_showPortals", "r_ssaoDebug", "r_rtaoDebug", "r_rtgiDebug", "r_rtgiCacheDebug", "r_rtReStirDIDebug",
-				"r_rtLightGridDebug", "r_rtEmissiveTableDebug", "r_mvDebug", "r_hdrEyeAdaptDebug",
+				"r_rtLightGridDebug", "r_rtEmissiveTableDebug", "r_mvDebug", "r_hdrEyeAdaptDebug", "r_pbrDebugView",
 			};
 			for ( int i = 0; i < IM_ARRAYSIZE( views ); i++ ) {
 				ResetNamedCvar( views[i] );
@@ -7559,14 +7571,78 @@ static const idMaterial *pbrEditMat = NULL;	// material under edit (NULL = none 
 static idStr pbrEditName;
 static int   pbrEditCat = 0;
 static float pbrEditMetal = 0.0f, pbrEditRough = 0.58f, pbrEditWet = 1.0f, pbrEditEnv = 1.0f;
+static idStr pbrEditTexFile;					// Phase D sidecar texture found for it ("" = none), probed at pick
+static int   pbrEditTexLayout = PBR_MAP_NONE;
+
+static idStr pbrEditTexStatus;					// last "Save to texture" result line
+static bool  pbrEditTexStatusOk = false;
+
+// live brightness / contrast / gamma edit of the sidecar's channels (rPbrSidecarAdjust), then "Save to texture"
+static void PbrEditor_DrawChannelEdit()
+{
+	if ( !ImGui::CollapsingHeader( "Edit texture channels", ImGuiTreeNodeFlags_DefaultOpen ) ) {
+		return;
+	}
+	ImGui::TextWrapped( "Brightness, contrast and gamma per channel, previewed live on every surface that uses this "
+		"texture (also in the PBR Material View debug view). Save writes them into the texture." );
+	static const char *chanNames[3] = { "Ambient occlusion", "Roughness", "Metalness" };
+	pbrSidecarAdjust_t &adj = rPbrSidecarAdjust;
+	bool changed = false;
+	for ( int c = 0; c < 3; c++ ) {
+		ImGui::PushID( c );
+		ImGui::SeparatorText( chanNames[c] );
+		changed |= ImGui::SliderFloat( "Brightness", &adj.brightness[c], -1.0f, 1.0f, "%+.2f" );
+		ImGui::SetItemTooltip( "Adds to every texel (after contrast). 0 = unchanged." );
+		changed |= ImGui::SliderFloat( "Contrast", &adj.contrast[c], 0.0f, 4.0f, "%.2f" );
+		ImGui::SetItemTooltip( "Spreads values away from (above 1) or towards (below 1) mid grey. 1 = unchanged." );
+		changed |= ImGui::SliderFloat( "Gamma", &adj.gamma[c], 0.2f, 5.0f, "%.2f", ImGuiSliderFlags_Logarithmic );
+		ImGui::SetItemTooltip( "Above 1 lifts the darker values, below 1 pushes them down; black and white stay. 1 = unchanged." );
+		ImGui::PopID();
+	}
+	if ( changed ) {
+		int layout;
+		adj.img = R_PbrTextureMap( pbrEditMat, layout );	// preview on every draw that uses this image
+		pbrEditTexStatus.Clear();
+	}
+	const bool identity = R_PbrSidecarAdjustIsIdentity();
+	ImGui::BeginDisabled( identity );
+	if ( ImGui::Button( "Reset channels" ) ) {
+		R_PbrSidecarAdjustReset();
+	}
+	ImGui::SameLine();
+	if ( ImGui::Button( "Save to texture" ) ) {
+		idStr written, error;
+		pbrEditTexStatusOk = R_PbrSaveSidecarEdit( pbrEditMat, written, error );
+		pbrEditTexStatus = pbrEditTexStatusOk ? va( "Saved %s (fs_savepath). It now overrides the packed copy.", written.c_str() )
+		                                      : va( "Not saved: %s", error.c_str() );
+		if ( pbrEditTexStatusOk ) {
+			R_PbrTextureMapInfo( pbrEditMat, pbrEditTexFile, pbrEditTexLayout );	// now the loose .tga
+		}
+	}
+	ImGui::EndDisabled();
+	ImGui::SetItemTooltip( "Writes the edited channels into <name>.tga in your save folder (fs_savepath), next to "
+		"where the game looks first, so it replaces the texture from the .pk4 for every material that uses it. "
+		"tools/bake_pbr_sidecars.sh keeps loose sidecars like this one out of its packs." );
+	if ( pbrEditTexStatus.Length() ) {
+		ImGui::TextColored( pbrEditTexStatusOk ? ImVec4( 0.45f, 1.0f, 0.55f, 1.0f ) : ImVec4( 1.0f, 0.5f, 0.4f, 1.0f ),
+			"%s", pbrEditTexStatus.c_str() );
+	}
+}
 
 static void PbrEditor_LoadFrom( const idMaterial *mat )
 {
+	if ( mat != pbrEditMat ) {
+		R_PbrSidecarAdjustReset();		// an unsaved channel edit belongs to the previous pick
+		pbrEditTexStatus.Clear();
+	}
 	pbrEditMat = mat;
 	pbrEditName = mat ? mat->GetName() : "";
+	pbrEditTexFile.Clear();
+	pbrEditTexLayout = PBR_MAP_NONE;
 	if ( !mat ) {
 		return;
 	}
+	R_PbrTextureMapInfo( mat, pbrEditTexFile, pbrEditTexLayout );
 	pbrEditCat = mat->GetPbrCategory();
 	if ( pbrEditCat > PBR_CAT_NONE && pbrEditCat < PBR_CAT_COUNT ) {
 		// tracking a category: pre-fill all 4 sliders from that category's live preset,
@@ -7611,6 +7687,28 @@ static void PbrEditor_DrawMaterialTab()
 		ImGui::TextColored( ImVec4( 1.0f, 0.7f, 0.3f, 1.0f ),
 			"r_pbr is 0 — enable PBR (Graphics tab) to see edits." );
 	}
+	// Phase D PBR sidecar (docs/pbr-materials.md sec. 7): a <diffuse>_orm / _rmao texture overrides this
+	// material's metalness/roughness per texel, so say so - the two sliders would otherwise look broken
+	const idStr &texFile = pbrEditTexFile;
+	const int texLayout = pbrEditTexLayout;
+	const bool hasTexMap = texFile.Length() > 0;
+	const bool texMapLive = hasTexMap && r_pbrTextureMaps.GetBool();
+	if ( hasTexMap ) {
+		ImGui::Separator();
+		ImGui::TextColored( ImVec4( 0.45f, 1.0f, 0.55f, 1.0f ), "Material set by texture:" );
+		ImGui::TextWrapped( "%s", texFile.c_str() );
+		ImGui::TextDisabled( "%s", texLayout == PBR_MAP_RMAO
+			? "RMAO: R = roughness, G = metalness, B = ambient occlusion"
+			: "ORM: R = ambient occlusion, G = roughness, B = metalness" );
+		if ( texMapLive ) {
+			ImGui::TextWrapped( "The texture sets metalness and roughness per texel, so those two sliders do nothing here. "
+				"Wetness and env glow still apply, and its AO channel replaces this surface's occlusion map (with Material AO on)." );
+			PbrEditor_DrawChannelEdit();
+		} else {
+			ImGui::TextColored( ImVec4( 1.0f, 0.7f, 0.3f, 1.0f ),
+				"r_pbrTextureMaps is 0 — the texture is ignored and the sliders below apply." );
+		}
+	}
 	ImGui::Separator();
 
 	const int comboCount = R_PbrNumCategoryInfos() + 1;
@@ -7645,8 +7743,10 @@ static void PbrEditor_DrawMaterialTab()
 	// all four sliders are always live — no greying. Pre-filled from the category preset
 	// when tracking; touching ANY of them forks this one material to a pinned custom.
 	bool edited = false;
-	edited |= ImGui::SliderFloat( "Metalness", &pbrEditMetal, 0.0f, 1.0f, "%.2f" );
-	edited |= ImGui::SliderFloat( "Roughness", &pbrEditRough, 0.03f, 1.0f, "%.2f" );
+	ImGui::BeginDisabled( texMapLive );		// set per texel by the sidecar texture (see above)
+	edited |= ImGui::SliderFloat( "Metalness", &pbrEditMetal, 0.0f, 1.0f, texMapLive ? "from texture" : "%.2f" );
+	edited |= ImGui::SliderFloat( "Roughness", &pbrEditRough, 0.03f, 1.0f, texMapLive ? "from texture" : "%.2f" );
+	ImGui::EndDisabled();
 	edited |= ImGui::SliderFloat( "Wetness (spec energy)", &pbrEditWet, 0.0f, 4.0f, "%.2f" );
 	edited |= ImGui::SliderFloat( "Env glow (metal)", &pbrEditEnv, 0.0f, 4.0f, "%.2f" );
 
@@ -7724,6 +7824,24 @@ void Com_DrawPbrMaterialEditor()
 	bool show = true;
 	ImGui::SetNextWindowSize( ImVec2( 470.0f, 0.0f ), ImGuiCond_FirstUseEver );
 	if ( ImGui::Begin( "PBR Material Editor", &show ) ) {
+		// the same selector as Debug Views > PBR Material View (r_pbrDebugView), here so a channel can be
+		// isolated while editing it; the legend says what black and white mean for the channel shown
+		{
+			int view = idMath::ClampInt( 0, 4, r_pbrDebugView.GetInteger() );
+			const char *views[] = { "Off (normal view)", "Ambient occlusion", "Roughness", "Metalness", "ORM texture (R AO, G rough, B metal)" };
+			if ( ImGui::Combo( "Debug view", &view, views, IM_ARRAYSIZE( views ) ) ) {
+				r_pbrDebugView.SetInteger( view );
+			}
+			ImGui::SetItemTooltip( "Show one PBR channel over the frame instead of the lit scene, as exact values "
+				"(black 0, mid grey 0.5, white 1). Same as Debug Views > PBR Material View, or pbrDebugViewNext. (r_pbrDebugView)" );
+			static const char *legend[] = { NULL, "black = buried crease, white = open (no occlusion)",
+				"black = smooth / glossy, white = rough / matte", "black = not metal, white = bare metal",
+				"red = AO, green = roughness, blue = metalness" };
+			if ( view > 0 ) {
+				ImGui::TextDisabled( "%s", legend[view] );
+			}
+		}
+		ImGui::Separator();
 		if ( ImGui::BeginTabBar( "PbrEditorTabs" ) ) {
 			if ( ImGui::BeginTabItem( "Material" ) ) {
 				PbrEditor_DrawMaterialTab();

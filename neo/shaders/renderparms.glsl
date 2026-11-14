@@ -149,7 +149,35 @@ UBO_BINDING(0) uniform RenderParams {
 	vec4 u_vertexColorAdd2;      // (u_vertexColorModulate/Add is the FIRST stage's). gbuffer.frag weights each
 	                            // diffuse stage of a vertex-COLOUR BLEND by its OWN term, so sand*vertexColor +
 	                            // rock*inverseVertexColor is captured as the forward path blends it.
+
+	vec4 u_ormParms;             // DUDE Phase D PBR sidecar (docs/pbr-materials.md sec. 7): unit 10 (u_occlusionMap)
+	                            // holds a packed texture. x = layout (0 = plain AO map in R, 1 = ORM: R AO / G rough /
+	                            // B metal, 2 = RMAO: R rough / G metal / B AO), y = 1: its roughness/metalness replace
+	                            // u_pbrParms.yx. z = 1: the PBR editor's live channel edit applies (u_ormAdj*). w = 1: write the AO to the material attachment for r_pbrDebugView. Read through dudeUnit10Ao / dudeUnit10RoughMetal below.
+	vec4 u_ormAdjB;              // in-game PBR editor live channel edit (u_ormParms.z): brightness, contrast, gamma;
+	vec4 u_ormAdjC;              // xyz = AO, roughness, metalness. Same formula as "Save to texture"
+	vec4 u_ormAdjG;              // (R_PbrSidecarAdjustValue). Appended LAST.
 };
+
+float dudeOrmAdjust( float v, float b, float c, float g ) {
+	return pow( clamp( ( v - 0.5 ) * c + 0.5 + b, 0.0, 1.0 ), 1.0 / max( g, 0.05 ) );
+}
+
+// Unit 10's AO channel: R for a plain AO map and an ORM sidecar, B for an RMAO one.
+float dudeUnit10Ao( vec4 t ) {
+	float a = ( u_ormParms.x > 1.5 ) ? t.b : t.r;
+	return ( u_ormParms.z > 0.5 ) ? dudeOrmAdjust( a, u_ormAdjB.x, u_ormAdjC.x, u_ormAdjG.x ) : a;
+}
+
+// A unit-10 PBR sidecar's ( roughness, metalness ).
+vec2 dudeUnit10RoughMetal( vec4 t ) {
+	vec2 rm = ( u_ormParms.x > 1.5 ) ? t.rg : t.gb;
+	if ( u_ormParms.z > 0.5 ) {
+		rm.x = dudeOrmAdjust( rm.x, u_ormAdjB.y, u_ormAdjC.y, u_ormAdjG.y );
+		rm.y = dudeOrmAdjust( rm.y, u_ormAdjB.z, u_ormAdjC.z, u_ormAdjG.z );
+	}
+	return rm;
+}
 
 // GPU-skin weld decoupling (u_tessParms2.x): when the skinned vertex normal was seam-welded for
 // crack-free PN tessellation, rebuild the un-welded per-vertex normal for LIGHTING from the

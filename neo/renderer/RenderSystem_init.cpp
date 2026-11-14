@@ -396,6 +396,8 @@ idCVar r_specularExp( "r_specularExp", "16", CVAR_RENDERER | CVAR_ARCHIVE | CVAR
 // classifier table supplies per-material values.
 idCVar r_pbr( "r_pbr", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "physically based (GGX/Cook-Torrance) specular + energy-conserving diffuse in the per-light interaction pass. Supersedes r_shading and the specular scale/exponent while on. Non-vanilla; opengl3/Vulkan only" );
 idCVar r_pbrRoughness( "r_pbrRoughness", "0.58", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "global fallback roughness for r_pbr until the per-material classifier table exists (docs/pbr-materials.md Phase B). 0.58 matches the Blinn-Phong exponent-16 highlight width via alpha = sqrt(2/(n+2)); in-game A/B put the perceptual match between 0.5 and 0.58", 0.03f, 1.0f );
+idCVar r_pbrTextureMaps( "r_pbrTextureMaps", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "per-texel PBR sidecar textures: a <diffuse>_orm (R = AO, G = roughness, B = metalness) or <diffuse>_rmao (R = roughness, G = metalness, B = AO) texture next to a material's diffuse map overrides that material's table metalness/roughness, and its AO channel feeds r_occlusionMaps. Inert without such files (none ship with the games). Non-vanilla; opengl3/Vulkan only" );
+idCVar r_pbrDebugView( "r_pbrDebugView", "0", CVAR_RENDERER | CVAR_INTEGER, "PBR material debug view over the finished frame (opengl3/Vulkan): 0 = off (normal view), 1 = ambient occlusion (a sidecar's AO channel, else the baked occlusion map while r_occlusionMaps is on; white = none), 2 = roughness, 3 = metalness, 4 = the ORM texture as glTF packs it (R = AO, G = roughness, B = metalness; an _rmao sidecar is shown in the same order). Shows sidecar values where a material has one, else the PBR table's. While it is up, exposure / eye adaptation / bloom / tonemap / gamma are bypassed, so the grey shown is the stored value. pbrDebugViewNext cycles it", 0, 4, idCmdSystem::ArgCompletion_Integer<0,4> );
 idCVar r_pbrSpecScale( "r_pbrSpecScale", "1.66", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "artistic energy scale on the r_pbr specular lobe (the PBR path's counterpart to r_specularScale, which it deliberately doesn't read). Dielectric-weighted: fades to 1 as metalness rises. 1.66 is the confirmed in-game perceptual match to the calibrated Blinn-Phong look now that the Toksvig baseline keeps lobes tight (the earlier 3 was calibrated against flattened lobes)", 0.0f, 8.0f );
 idCVar r_pbrMetalDiffuse( "r_pbrMetalDiffuse", "0.75", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "how much of a metal's albedo colour survives in the diffuse term. Physical PBR kills diffuse entirely on metals (0), pushing the colour into reflections Doom 3 has no environment to supply, so metals read dark and off-colour; raising this keeps the asset's painted colour while the metallic specular still rides on top (1 = keep all, 0 = physical). A stylized, energy-relaxed metal for the enhancement path (docs/pbr-materials.md sec. 5)", 0.0f, 1.0f );
 idCVar r_pbrToksvigBase( "r_pbrToksvigBase", "0.08", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "normal-variance baseline subtracted before the Toksvig specular widening. Low = more anti-firefly widening but softer highlights; high = tighter highlights but white pixel spikes on seams return. 0.08 = calibrated split alongside the 2026-08-01 SSR/reflection retune (docs/pbr-materials.md sec. 4)", 0.0f, 0.6f );
@@ -1897,6 +1899,20 @@ static void R_ReloadSurface_f( const idCmdArgs &args ) {
 
 	// reload any images used by the decl
 	mt.material->ReloadImages( false );
+}
+
+/*
+=================
+R_PbrDebugViewNext_f
+
+DUDE: cycle the PBR material debug view (r_pbrDebugView) from one key
+=================
+*/
+static void R_PbrDebugViewNext_f( const idCmdArgs &args ) {
+	static const char *names[] = { "normal view", "ambient occlusion", "roughness", "metalness", "ORM texture" };
+	const int next = ( idMath::ClampInt( 0, 4, r_pbrDebugView.GetInteger() ) + 1 ) % 5;
+	r_pbrDebugView.SetInteger( next );
+	common->Printf( "r_pbrDebugView %d: %s\n", next, names[next] );
 }
 
 /*
@@ -3507,6 +3523,7 @@ void R_InitCommands( void ) {
 	cmdSystem->AddCommand( "listModes", R_ListModes_f, CMD_FL_RENDERER, "lists all video modes" );
 	cmdSystem->AddCommand( "listParallaxMaps", R_ListParallaxMaps_f, CMD_FL_RENDERER, "lists materials with a captured parallax height map (docs/parallax.md); needs r_parallax 1 + reloadDecls" );
 	cmdSystem->AddCommand( "reloadSurface", R_ReloadSurface_f, CMD_FL_RENDERER, "reloads the decl and images for selected surface" );
+	cmdSystem->AddCommand( "pbrDebugViewNext", R_PbrDebugViewNext_f, CMD_FL_RENDERER, "cycles r_pbrDebugView: normal -> AO -> roughness -> metalness -> ORM -> normal (bind it to a key)" );
 	cmdSystem->AddCommand( "reloadPbrTable", R_ReloadPbrTable_f, CMD_FL_RENDERER, "re-reads pbr/pbr_materials.cfg + pbr/pbr_overrides.cfg and re-applies to loaded materials (docs/pbr-materials.md)" );
 }
 

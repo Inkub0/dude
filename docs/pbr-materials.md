@@ -332,14 +332,68 @@ opt-in download/generation, and the base game stays untouched; with no table pre
 `r_pbr 1` still works on Phase A defaults. Note `fs_savepath` shadows `fs_basepath`
 for pk4s (see pk4-savepath notes) — document where the table pk4 must live.
 
-## 7. Per-texel maps — the authored future (Phase D, optional)
+## 7. Per-texel maps — authored sidecar textures (Phase D, built 2026-11-12)
 
-For authored/replacement assets: `roughnessmap` / `metalnessmap` (or a combined
-`rmamap`: R = roughness, G = metalness, B = AO) stage keywords, mirroring exactly how
-`occlusionmap` was added (new `stageLighting_t` entry, shortcut keyword, sampler in the
-interaction pass, inert on stock assets). Per-texel values override the per-material
-scalars where bound. Synthesizing per-texel roughness textures from stock specular maps
-is explicitly a non-goal until the scalar pipeline proves itself.
+The modder-facing guide is [pbr-texture-maps.md](pbr-texture-maps.md); this section is the design.
+
+A packed texture sitting next to a material's **diffuse map** overrides that material's
+table metalness/roughness per texel. No `.mtr` edit: the file's name is the opt-in.
+
+| file | R | G | B | origin |
+|---|---|---|---|---|
+| `<diffuse>_orm.tga` | AO | roughness | metalness | glTF / Unreal / Substance "ORM" |
+| `<diffuse>_rmao.tga` | roughness | metalness | AO | RBDOOM-3-BFG; also what the community `batch_orm.py` writes, despite its name |
+
+Both orders are accepted because both are in circulation and a swapped file reads as
+"metal where it should be rough"; the suffix says which one the author meant. A `foo_d`
+diffuse also finds `foo_orm` / `foo_rmao` (same rule as the `_ao` convention). Lookup tries
+`.tga`, then `.jpg`, then `.dds` (what `R_LoadImage` falls through for a `.tga` request).
+
+**Runtime** (`R_PbrTextureMap`, RhiWorld.cpp). Resolved once per material and cached
+(`reloadPbrTable` clears the cache, so a dropped-in file is picked up without a restart; a
+changed file's *pixels* need `reloadImages`, as any texture). Loaded `TD_HIGH_QUALITY`
+(never block-compressed: DXT would bleed one channel's edges into the others) with the
+diffuse stage's wrap mode, since the sidecar tiles with it. It rides **unit 10** in place of
+the occlusion map, so no new sampler binding on either backend; `u_ormParms` (appended last
+to `RenderParams`, now 1120 bytes) carries x = layout (0 = plain AO map, 1 = ORM, 2 = RMAO)
+and y = override roughness/metalness. `dudeUnit10Ao` / `dudeUnit10RoughMetal` in
+`renderparms.glsl` do the swizzle.
+
+- **interaction.frag** (r_pbr branch): the texture's roughness/metalness replace
+  `u_pbrParms.yx`, sampled with the parallax-offset diffuse UV. The decal metal mask, the
+  Toksvig widening and the film path still apply on top. Wetness and env (per material or
+  per category) still apply: the texture only replaces the two scalars it carries.
+- **AO channel**: with `r_occlusionMaps` on it **replaces** every other occlusion source for
+  that surface (explicit `occlusionmap` stage, `_ao` file, generated bake), in the ambient
+  and direct terms alike, on world geometry too (the generated bake skips the world BSP; an
+  authored map is the author's call). Author white AO if the surface should keep none.
+- **gbuffer.frag** (SSR / RT reflections / ReSTIR DI material attachment): the same
+  per-texel values, so reflections and the deferred DI shade agree with the forward pass.
+  When the albedo capture is off the pass fills the diffuse texture matrix itself
+  (`RB_RHI_DiffuseStageMatrix`) so `var_TexCoverage` is the diffuse UV.
+- **Not covered**: secondary RT hits (RTGI bounce, RT reflection hit shading) still use
+  the per-material scalars; they have no per-texel material fetch.
+
+`r_pbrTextureMaps` (default 1) gates it all. **Fidelity note: none on stock assets** — no
+`_orm` / `_rmao` file ships with Doom 3, RoE, LM or Quake 4, so the feature is inert until a
+modpack adds them; roughness/metalness only matter under `r_pbr`, AO only under
+`r_occlusionMaps`.
+
+**Editor**: `editPbrMaterial` on a surface with a sidecar shows "Material set by texture:"
+with the file and its channel order, and greys the Metalness / Roughness sliders (Wetness
+and Env glow stay live). With `r_pbrTextureMaps 0` it says the texture is ignored and the
+sliders apply.
+
+**Authoring tool**: `tools/pbr_pack_orm.py` packs `<base>_roughness` / `_metallic` / `_ao`
+maps into `<base>_orm.tga` (or `--layout rmao`), filling missing channels with constants,
+with an optional `--rough-from-spec` starting point. `tools/pbr_extract_maps.py` derives
+first-pass sidecars for stock materials straight from the pk4s (roughness from the specular
+map, metalness from bright specular on an unsaturated diffuse, gated by the table class and
+name tokens, AO from height-field crevices; Quake 4 guides expanded, its darker specular maps
+gained 1.47) plus editable per-channel maps and preview sheets. Synthesizing per-texel maps from stock
+specular maps *at runtime* stays a non-goal (§1): the spec map has no unique PBR meaning,
+which is also what the modders who tried it concluded; it takes a hand pass, especially for
+metalness masks.
 
 **Phase D backlog, found during Phase B calibration** — stock assets whose
 *material decls* (not the engine) block the PBR treatment; all fixable with a
@@ -373,6 +427,8 @@ modpack `.mtr` that redefines them with lit stages, zero engine work:
 | `r_pbrToksvigBase` | 0.08 | normal-variance baseline before Toksvig widening — the anti-firefly vs highlight-tightness trade (§4). Recalibrated 0.2 → 0.08 in the 2026-08-01 reflection retune: with SSR intensity halved and glass on probes, the softer widening reads right and the extra spike energy is absorbed by the raised firefly clamp |
 | `r_pbrFireflyClamp` | 12 | GGX lobe ceiling — spike suppression; also the bounded core skin rides at (§4). Raised 6 → 12 with the 0.08 baseline (same retune): hotter highlight cores, spikes still bounded |
 | `r_pbrEnvScale` | 0.3 | Phase C.1 light-glow environment floor for metals |
+| `r_pbrTextureMaps` | 1 | Phase D: `<diffuse>_orm` / `_rmao` sidecar textures override the table metalness/roughness per texel, and their AO channel feeds `r_occlusionMaps` (§7). Inert without such files |
+| `r_pbrDebugView` | 0 | Debug view of the material attachment over the frame: 1 AO, 2 roughness, 3 metalness, 4 ORM (R AO, G rough, B metal); sidecar values per texel, table values elsewhere. Forces the normal prepass's material attachment while on, and bypasses exposure / eye adaptation / bloom / tonemap / gamma so greys are exact values. `pbrDebugViewNext` cycles; settings menu Debug Views > PBR Material View |
 | `r_ssr*` | off | Phase C.2 screen-space reflections — own cvar family, see docs/ssr.md §4 |
 
 **Per-category live values** (same Developer-tab section): each table entry is
@@ -581,8 +637,10 @@ calibration-only cvars were folded once tuned.
   (`r_ssrGlossy`, built 2026-08-12 on `feat/ssr-glossy`, default off pending A/B →
   Ultra+); the rough/metal MRT can ride the merged SSAO prepass. Together C.1/C.2
   decide the metalness clamp's fate.
-- **Phase D — per-texel map keywords / authored packs**: **optional, deferred**
-  (plus the Phase-D backlog of asset-decl blockers in §7).
+- **Phase D — per-texel maps**: **built 2026-11-12** as `<diffuse>_orm` / `_rmao` sidecar
+  textures (§7, `r_pbrTextureMaps`), forward + G-buffer paths, editor notice. Not yet
+  checked in-game with real assets. The Phase-D backlog of asset-decl blockers in §7 is
+  still open.
 - **Category-model refactor — built 2026-08-12 on `feat/ssr-glossy`** (pending in-engine
   verify). The 14 per-category cvars were replaced by a per-category **defaults table**
   ({metalness, roughness, wetness, env} × 8, `Material.cpp`), persisted as `@cat` rows in

@@ -343,6 +343,7 @@ void R_PbrTableInvalidate( void ) {
 // the reloadPbrTable command and the material editor's save. Returns the count.
 int R_PbrTableReloadApply( void ) {
 	R_PbrTableInvalidate();
+	R_ResetPbrTextureMapCache();	// re-probe the <diffuse>_orm / _rmao sidecars too, so a dropped-in file shows up
 	int applied = 0;
 	const int n = declManager->GetNumDecls( DECL_MATERIAL );
 	for ( int i = 0; i < n; i++ ) {

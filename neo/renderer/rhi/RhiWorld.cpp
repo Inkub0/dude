@@ -1089,6 +1089,213 @@ static idImage *RB_RHI_ModAoConvention( const idMaterial *mat ) {
 	return NULL;
 }
 
+// ---- Phase D per-texel PBR maps (docs/pbr-materials.md sec. 7) ----
+// A packed sidecar texture next to the material's diffuse map overrides the table's metalness /
+// roughness per texel, and its AO channel stands in for the material's occlusion map:
+//   <diffuse>_orm   glTF / Unreal order:            R = AO,        G = roughness, B = metalness
+//   <diffuse>_rmao  RBDOOM-3-BFG / Substance order: R = roughness, G = metalness, B = AO
+// (`foo_d` diffuse names also try foo_orm / foo_rmao, as the _ao convention does.) Lets a modpack
+// author real PBR materials without touching a .mtr. Inert on stock assets: none ship such files.
+// Cached per material (NULL = "checked, none"); idImage objects persist across vid_restart.
+struct rhiPbrMapEntry_t { const idMaterial *mat; idImage *img; int layout; };
+static idList<rhiPbrMapEntry_t> rhiPbrMapCache;
+static idHashIndex               rhiPbrMapHash;
+
+void R_ResetPbrTextureMapCache( void ) {
+	rhiPbrMapCache.Clear();
+	rhiPbrMapHash.Free();
+}
+
+// ---- in-game PBR editor: live channel edit of one sidecar, and writing it into the texture ----
+pbrSidecarAdjust_t rPbrSidecarAdjust = { NULL, { 0, 0, 0 }, { 1, 1, 1 }, { 1, 1, 1 } };
+
+void R_PbrSidecarAdjustReset( void ) {
+	rPbrSidecarAdjust.img = NULL;
+	for ( int c = 0; c < 3; c++ ) {
+		rPbrSidecarAdjust.brightness[c] = 0.0f;
+		rPbrSidecarAdjust.contrast[c] = 1.0f;
+		rPbrSidecarAdjust.gamma[c] = 1.0f;
+	}
+}
+
+bool R_PbrSidecarAdjustIsIdentity( void ) {
+	for ( int c = 0; c < 3; c++ ) {
+		if ( rPbrSidecarAdjust.brightness[c] != 0.0f || rPbrSidecarAdjust.contrast[c] != 1.0f || rPbrSidecarAdjust.gamma[c] != 1.0f ) {
+			return false;
+		}
+	}
+	return true;
+}
+
+// the shader's dudeOrmAdjust (renderparms.glsl), so the saved texture matches the preview
+float R_PbrSidecarAdjustValue( float v, int c ) {
+	const float x = idMath::ClampFloat( 0.0f, 1.0f, ( v - 0.5f ) * rPbrSidecarAdjust.contrast[c] + 0.5f + rPbrSidecarAdjust.brightness[c] );
+	return idMath::Pow( x, 1.0f / Max( rPbrSidecarAdjust.gamma[c], 0.05f ) );
+}
+
+// set the edit on this draw when it uses the sidecar under edit
+static void RB_RHI_FillOrmAdjust( rhi::RenderParams &parms, const idImage *pbrMap ) {
+	if ( pbrMap == NULL || pbrMap != rPbrSidecarAdjust.img ) {
+		return;
+	}
+	parms.ormParms[2] = 1.0f;
+	for ( int c = 0; c < 3; c++ ) {
+		parms.ormAdjust[0][c] = rPbrSidecarAdjust.brightness[c];
+		parms.ormAdjust[1][c] = rPbrSidecarAdjust.contrast[c];
+		parms.ormAdjust[2][c] = rPbrSidecarAdjust.gamma[c];
+	}
+}
+
+// the material's plain diffuse image name (extension stripped), or false for none / an image program
+static bool RB_RHI_DiffuseBaseName( const idMaterial *mat, idStr &base, textureRepeat_t &repeat ) {
+	for ( int i = 0; i < mat->GetNumStages(); i++ ) {
+		const shaderStage_t *st = mat->GetStage( i );
+		if ( st->lighting == SL_DIFFUSE && st->texture.image ) {
+			const char *name = st->texture.image->imgName.c_str();
+			if ( !name[0] || strchr( name, '(' ) ) {
+				return false;	// addnormals() / heightmap() programs have no sibling files
+			}
+			base = name;
+			base.StripFileExtension();
+			repeat = st->texture.image->repeat;
+			return true;
+		}
+	}
+	return false;
+}
+
+// Probe the sidecar files for a material (file existence only, nothing loaded). On a hit: the extensionless
+// image name to load, the file found, its layout, and the diffuse's wrap mode. False = none.
+static bool RB_RHI_FindPbrSidecar( const idMaterial *mat, idStr &stem, idStr &file, int &layout,
+                                   textureRepeat_t &repeat ) {
+	idStr base;
+	repeat = TR_REPEAT;
+	if ( !mat || !RB_RHI_DiffuseBaseName( mat, base, repeat ) ) {
+		return false;
+	}
+	idStr stems[2];
+	int nStems = 0;
+	stems[nStems++] = base;
+	if ( base.Length() > 2 && idStr::Icmp( base.Right( 2 ).c_str(), "_d" ) == 0 ) {
+		stems[nStems++] = base.Left( base.Length() - 2 );	// foo_d -> foo_orm
+	}
+	static const struct { const char *suffix; int layout; } kinds[] = {
+		{ "_orm", PBR_MAP_ORM }, { "_rmao", PBR_MAP_RMAO }
+	};
+	static const char *exts[] = { ".tga", ".jpg", ".dds" };	// what R_LoadImage falls through for a .tga request
+	for ( int s = 0; s < nStems; s++ ) {
+		for ( int k = 0; k < 2; k++ ) {
+			for ( int x = 0; x < 3; x++ ) {
+				const idStr candidate = stems[s] + kinds[k].suffix + exts[x];
+				if ( RB_RHI_AoFileExists( candidate.c_str() ) ) {
+					stem = stems[s] + kinds[k].suffix;
+					file = candidate;
+					layout = kinds[k].layout;
+					return true;
+				}
+			}
+		}
+	}
+	return false;
+}
+
+bool R_PbrTextureMapInfo( const idMaterial *mat, idStr &file, int &layout ) {
+	idStr stem;
+	textureRepeat_t repeat;
+	layout = PBR_MAP_NONE;
+	file.Clear();
+	return RB_RHI_FindPbrSidecar( mat, stem, file, layout, repeat );
+}
+
+idImage *R_PbrTextureMap( const idMaterial *mat, int &layout ) {
+	layout = PBR_MAP_NONE;
+	if ( !mat ) {
+		return NULL;
+	}
+	const int key = rhiPbrMapHash.GenerateKey( (int)( ( (size_t)mat >> 4 ) & 0x7fffffff ), 0 );
+	for ( int i = rhiPbrMapHash.First( key ); i != -1; i = rhiPbrMapHash.Next( i ) ) {
+		if ( rhiPbrMapCache[i].mat == mat ) {
+			layout = rhiPbrMapCache[i].layout;
+			return rhiPbrMapCache[i].img;
+		}
+	}
+
+	rhiPbrMapEntry_t e;
+	e.mat = mat;
+	e.img = NULL;
+	e.layout = PBR_MAP_NONE;
+	idStr stem, file;
+	int found = PBR_MAP_NONE;
+	textureRepeat_t repeat;
+	if ( RB_RHI_FindPbrSidecar( mat, stem, file, found, repeat ) ) {
+		// TD_HIGH_QUALITY: packed data channels, never block-compressed (DXT would bleed one channel's
+		// edges into the others); the diffuse stage's wrap mode, since the sidecar tiles with it
+		idImage *img = globalImages->ImageFromFile( stem.c_str(), TF_DEFAULT, true, repeat, TD_HIGH_QUALITY );
+		if ( img && img != globalImages->defaultImage ) {
+			e.img = img;
+			e.layout = found;
+		}
+	}
+	const int idx = rhiPbrMapCache.Append( e );
+	rhiPbrMapHash.Add( key, idx );
+	layout = e.layout;
+	return e.img;
+}
+
+// In-game PBR editor "Save to texture": read the sidecar's pixels, apply the live channel edit in its own channel
+// order, write <stem>.tga to fs_savepath (a loose file there overrides the pk4 copy, and tools/bake_pbr_sidecars.sh
+// leaves loose sidecars alone), reload the image and clear the edit (it now lives in the texture).
+bool R_PbrSaveSidecarEdit( const idMaterial *mat, idStr &written, idStr &error ) {
+	idStr stem, file;
+	int layout = PBR_MAP_NONE;
+	textureRepeat_t repeat;
+	written.Clear();
+	error.Clear();
+	if ( !mat || !RB_RHI_FindPbrSidecar( mat, stem, file, layout, repeat ) ) {
+		error = "this material has no sidecar texture";
+		return false;
+	}
+	idStr ext;
+	file.ExtractFileExtension( ext );
+	if ( ext.Icmp( "dds" ) == 0 ) {
+		error = "the sidecar is a .dds (block-compressed); repack it as .tga to edit it here";
+		return false;
+	}
+	byte *pic = NULL;
+	int w = 0, h = 0;
+	R_LoadImage( file.c_str(), &pic, &w, &h, NULL, false );
+	if ( pic == NULL || w <= 0 || h <= 0 ) {
+		error = va( "could not read %s", file.c_str() );
+		return false;
+	}
+	// channel byte offsets for AO, roughness, metalness
+	const int ofs[3] = { layout == PBR_MAP_RMAO ? 2 : 0, layout == PBR_MAP_RMAO ? 0 : 1, layout == PBR_MAP_RMAO ? 1 : 2 };
+	byte lut[3][256];
+	for ( int c = 0; c < 3; c++ ) {
+		for ( int v = 0; v < 256; v++ ) {
+			lut[c][v] = (byte)idMath::ClampInt( 0, 255, idMath::Ftoi( R_PbrSidecarAdjustValue( v / 255.0f, c ) * 255.0f + 0.5f ) );
+		}
+	}
+	for ( int i = 0; i < w * h; i++ ) {
+		byte *px = pic + i * 4;
+		for ( int c = 0; c < 3; c++ ) {
+			px[ofs[c]] = lut[c][px[ofs[c]]];
+		}
+		px[3] = 255;
+	}
+	written = stem + ".tga";
+	R_WriteTGA( written.c_str(), pic, w, h, false );
+	R_StaticFree( pic );
+
+	idImage *img = R_PbrTextureMap( mat, layout );
+	if ( img ) {
+		img->Reload( false, true );
+	}
+	R_PbrSidecarAdjustReset();
+	common->Printf( "PBR editor: wrote %s (from %s)\n", written.c_str(), file.c_str() );
+	return true;
+}
+
 // Resolve (and cache) this surface's occlusion map. Order: a mod-supplied <diffuse>_ao texture,
 // else our generated per-model-surface bake (generated/aomaps/<model>_sN), optionally lazily
 // baked when r_occlusionMapsAutoBake is on. An explicit occlusionmap material stage is handled
@@ -2081,7 +2288,44 @@ static idImage *RB_RHI_SurfaceOcclusionImage( const drawSurf_t *surf ) {
 	return occlusionImage;
 }
 
+// The material's Phase D ORM / RMAO sidecar (R_PbrTextureMap) when r_pbrTextureMaps allows it on this
+// backend, else NULL. It rides unit 10 in place of the occlusion map: its AO channel IS the surface's
+// occlusion, and u_ormParms.x tells the shaders which channel order to read (renderparms.glsl).
+static idImage *RB_RHI_SurfacePbrMap( const idMaterial *mat, int &layout ) {
+	layout = PBR_MAP_NONE;
+	if ( !mat || !r_pbrTextureMaps.GetBool() || !R_BackendSupportsEnhancements() ) {
+		return NULL;
+	}
+	return R_PbrTextureMap( mat, layout );
+}
+
+// u_occlusionParms for a draw that has an occlusion source on unit 10 (a plain AO map or a sidecar)
+static void RB_RHI_SetOcclusionStrength( rhi::RenderParams &parms, bool ambientPass ) {
+	const float scale = idMath::ClampFloat( 0.0f, 1.0f, r_occlusionMapScale.GetFloat() );
+	parms.occlusionParms[0] = 1.0f;
+	parms.occlusionParms[1] = scale;	// ambient-term strength (ambientlight.frag reads .y)
+	// direct-diffuse strength (interaction.frag reads .z); left 0 on the ambient pass
+	parms.occlusionParms[2] = ambientPass ? 0.0f
+		: scale * idMath::ClampFloat( 0.0f, 1.0f, r_occlusionMapDirect.GetFloat() );
+}
+
 static idImage *RB_RHI_FillOcclusionParms( rhi::RenderParams &parms, const drawInteraction_t *din ) {
+	// DUDE Phase D PBR sidecar (docs/pbr-materials.md sec. 7): a <diffuse>_orm / _rmao texture
+	// overrides the table metalness/roughness per texel (interaction.frag, r_pbr path) and its AO
+	// channel replaces every other occlusion source for this surface (under r_occlusionMaps).
+	if ( r_pbr.GetBool() || r_occlusionMaps.GetBool() ) {
+		int layout;
+		idImage *pbrMap = RB_RHI_SurfacePbrMap( din->surf->material, layout );
+		if ( pbrMap ) {
+			parms.ormParms[0] = (float)layout;
+			parms.ormParms[1] = 1.0f;	// override metalness/roughness (read only on the r_pbr branch)
+			RB_RHI_FillOrmAdjust( parms, pbrMap );
+			if ( r_occlusionMaps.GetBool() ) {
+				RB_RHI_SetOcclusionStrength( parms, din->ambientLight );
+			}
+			return pbrMap;
+		}
+	}
 	// DUDE material AO map (docs/occlusion-maps.md). A per-surface baked occlusion texture
 	// (the material's `occlusionmap` stage) darkens the ambient term, and -- scaled by
 	// r_occlusionMapDirect -- the direct-light diffuse, reusing the SSAO application path in
@@ -2090,12 +2334,7 @@ static idImage *RB_RHI_FillOcclusionParms( rhi::RenderParams &parms, const drawI
 	// GetOcclusionStage() is NULL on every stock material, so this stays inert on the base game.
 	idImage *occlusionImage = RB_RHI_SurfaceOcclusionImage( din->surf );
 	if ( occlusionImage ) {
-		const float scale = idMath::ClampFloat( 0.0f, 1.0f, r_occlusionMapScale.GetFloat() );
-		parms.occlusionParms[0] = 1.0f;
-		parms.occlusionParms[1] = scale;	// ambient-term strength (ambientlight.frag reads .y)
-		// direct-diffuse strength (interaction.frag reads .z); left 0 on the ambient pass
-		parms.occlusionParms[2] = din->ambientLight ? 0.0f
-			: scale * idMath::ClampFloat( 0.0f, 1.0f, r_occlusionMapDirect.GetFloat() );
+		RB_RHI_SetOcclusionStrength( parms, din->ambientLight );
 	}
 	return occlusionImage;
 }
@@ -5256,7 +5495,8 @@ static bool RB_RHI_NormalPrepassWants( rhi::RHI *r, const viewDef_t *viewDef, bo
 	// no G-buffer to reflect about.
 	const bool rtReflWants = r_rtReflections.GetBool()
 		&& rhi::GetActiveBackendType() == rhi::BT_VULKAN && r->SupportsRayQuery();
-	ssrWants = r_ssr.GetBool() || wantAlbedo || rtReflWants;
+	// r_pbrDebugView shows the material attachment, so it needs the prepass to write it
+	ssrWants = r_ssr.GetBool() || wantAlbedo || rtReflWants || r_pbrDebugView.GetInteger() > 0;
 	ssaoWants = r_ssao.GetBool()
 		&& ( r_ssaoNormalBuffer.GetBool() || r_ssaoDebug.GetInteger() == 3 );
 	// R1/A2: per-object motion vectors are VK-only (GL3 has no float-colour RT). When on they
@@ -5394,6 +5634,28 @@ static void RB_RHI_NormalPrepassBump( const idMaterial *shader, const float *reg
 			if ( bumpS[3] < -40.0f || bumpS[3] > 40.0f ) bumpS[3] -= (int)bumpS[3];
 			if ( bumpT[3] < -40.0f || bumpT[3] > 40.0f ) bumpT[3] -= (int)bumpT[3];
 		}
+	}
+}
+
+// The first live diffuse stage's texture matrix into u_diffuseMatrixS/T (identity without one), so the G-buffer's
+// var_TexCoverage samples a Phase D PBR sidecar with the diffuse UV when the albedo capture didn't already set it.
+static void RB_RHI_DiffuseStageMatrix( const idMaterial *shader, const float *regs, rhi::RenderParams &parms ) {
+	parms.diffuseMatrixS[0] = 1.0f; parms.diffuseMatrixS[1] = 0.0f; parms.diffuseMatrixS[3] = 0.0f;
+	parms.diffuseMatrixT[0] = 0.0f; parms.diffuseMatrixT[1] = 1.0f; parms.diffuseMatrixT[3] = 0.0f;
+	for ( int s = 0; s < shader->GetNumStages(); s++ ) {
+		const shaderStage_t *dst = shader->GetStage( s );
+		if ( dst->lighting != SL_DIFFUSE || dst->texture.image == NULL || regs[dst->conditionRegister] == 0 ) {
+			continue;
+		}
+		if ( dst->texture.hasMatrix ) {
+			parms.diffuseMatrixS[0] = regs[dst->texture.matrix[0][0]];
+			parms.diffuseMatrixS[1] = regs[dst->texture.matrix[0][1]];
+			parms.diffuseMatrixS[3] = regs[dst->texture.matrix[0][2]];
+			parms.diffuseMatrixT[0] = regs[dst->texture.matrix[1][0]];
+			parms.diffuseMatrixT[1] = regs[dst->texture.matrix[1][1]];
+			parms.diffuseMatrixT[3] = regs[dst->texture.matrix[1][2]];
+		}
+		return;
 	}
 }
 
@@ -5714,6 +5976,34 @@ static bool RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef, int pha
 		idImage *diOcclImg = NULL;
 		if ( wantAlbedo ) {
 			RB_RHI_NormalPrepassAlbedo( surf, shader, regs, parms, rtgiDiffuseImg, rtgiDiffuseImg2, diSpecImg, diOcclImg );
+		}
+		// Phase D PBR sidecar (docs/pbr-materials.md sec. 7): the material attachment carries the per-texel
+		// metalness/roughness the forward pass shades with, so SSR / RT reflections / the ReSTIR DI apply agree
+		// with it; the sidecar's AO channel replaces the occlusion map in .a, as it does on the forward path.
+		if ( ssrWants ) {
+			int ormLayout;
+			idImage *pbrMap = RB_RHI_SurfacePbrMap( shader, ormLayout );
+			if ( pbrMap ) {
+				parms.ormParms[0] = (float)ormLayout;
+				parms.ormParms[1] = 1.0f;
+				RB_RHI_FillOrmAdjust( parms, pbrMap );
+				if ( !wantAlbedo ) {
+					RB_RHI_DiffuseStageMatrix( shader, regs, parms );	// var_TexCoverage = the diffuse UV
+				}
+				parms.occlusionParms[0] = ( wantAlbedo && r_occlusionMaps.GetBool() ) ? 1.0f : 0.0f;
+				diOcclImg = pbrMap;
+			}
+			// r_pbrDebugView: .a always carries this surface's AO (the sidecar's, else the baked occlusion map)
+			// so the debug view can show it without the albedo prepass. ormParms.w lets gbuffer.frag write it.
+			if ( r_pbrDebugView.GetInteger() > 0 ) {
+				if ( !diOcclImg ) {
+					diOcclImg = RB_RHI_SurfaceOcclusionImage( surf );	// plain AO map: ormParms.x stays 0 (R)
+					if ( diOcclImg && !wantAlbedo ) {
+						RB_RHI_DiffuseStageMatrix( shader, regs, parms );
+					}
+				}
+				parms.ormParms[3] = diOcclImg ? 1.0f : 0.0f;
+			}
 		}
 
 		// DUDE tessellation: subdivide character/monster surfaces here identically to the
@@ -11411,6 +11701,41 @@ void RB_RHI_SSAODebugOverlay( rhi::RHI *r, const viewDef_t *viewDef ) {
 	RB_RHI_DrawFullscreen( r, prog, parms, r->GetRenderTargetImage( srcRT ) );
 
 	// direct bind above; forget the tmu cache so later 2D/GUI binds re-issue
+	RB_RHI_ForgetTexBinds();
+}
+
+/*
+===================
+RB_RHI_PbrDebugOverlay
+
+r_pbrDebugView: show the material attachment the normal prepass wrote (forced on while the view
+is up) over the finished primary view: 1 = AO, 2 = roughness, 3 = metalness, 4 = all three as an
+ORM texture. Sidecar values where a material has one (gbuffer.frag), the PBR table's elsewhere.
+===================
+*/
+void RB_RHI_PbrDebugOverlay( rhi::RHI *r, const viewDef_t *viewDef ) {
+	const int mode = idMath::ClampInt( 0, 4, r_pbrDebugView.GetInteger() );
+	if ( mode == 0 || !R_BackendSupportsEnhancements() || viewDef->isSubview ) {
+		return;
+	}
+	if ( !rhiNormalReadyThisView || !rhiNormalMrtThisView || rhiNormalResultRT == 0 ) {
+		return;
+	}
+	const rhi::ImageHandle matImg = r->GetRenderTargetImage2( rhiNormalResultRT );
+	rhi::ShaderHandle prog = r->LoadShader( "ssao_debug" );
+	if ( !matImg || !prog ) {
+		return;
+	}
+	const int w = viewDef->viewport.x2 - viewDef->viewport.x1 + 1;
+	const int h = viewDef->viewport.y2 - viewDef->viewport.y1 + 1;
+
+	rhi::RenderParams parms;
+	memset( &parms, 0, sizeof( parms ) );
+	RB_RHI_IdentityMvp( parms.mvpMatrix );
+	parms.localParam0[0] = (float)( 5 + mode );	// ssao_debug.frag: 6 AO, 7 roughness, 8 metalness, 9 ORM
+
+	RB_RHI_SetViewViewportScissor( r, viewDef, w, h );
+	RB_RHI_DrawFullscreen( r, prog, parms, matImg );
 	RB_RHI_ForgetTexBinds();
 }
 

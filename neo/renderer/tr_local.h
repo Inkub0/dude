@@ -962,6 +962,31 @@ bool R_PbrWriteOverrideLine( const idMaterial *mat, float metal, float rough,
                              float wet, float env, int category );
 extern idCVar r_pbr;					// GGX interaction path; supersedes r_shading while on
 extern idCVar r_pbrRoughness;			// Phase A global fallback roughness (per-material in Phase B)
+extern idCVar r_pbrTextureMaps;			// per-texel ORM / RMAO sidecar textures override the table scalars
+extern idCVar r_pbrDebugView;			// PBR material debug view: 0 off, 1 AO, 2 roughness, 3 metalness, 4 ORM (RB_RHI_PbrDebugOverlay)
+// Phase D per-texel PBR maps (RhiWorld.cpp): the sidecar texture next to a material's diffuse map
+// (<diffuse>_orm = glTF R=AO G=rough B=metal, <diffuse>_rmao = R=rough G=metal B=AO). Returns the
+// loaded image (NULL = none) and its layout (PBR_MAP_ORM / PBR_MAP_RMAO). Backend use: cached per
+// material, R_ResetPbrTextureMapCache drops the cache (reloadPbrTable does). R_PbrTextureMapInfo only
+// probes the files (loads nothing) and names the one found, for the in-game material editor.
+enum { PBR_MAP_NONE = 0, PBR_MAP_ORM = 1, PBR_MAP_RMAO = 2 };
+idImage *R_PbrTextureMap( const idMaterial *mat, int &layout );
+bool R_PbrTextureMapInfo( const idMaterial *mat, idStr &file, int &layout );
+void R_ResetPbrTextureMapCache( void );
+// In-game PBR editor: a live brightness / contrast / gamma edit of one sidecar texture's channels (index 0 = AO,
+// 1 = roughness, 2 = metalness), previewed on every surface that uses that image, then written into the texture by
+// R_PbrSaveSidecarEdit. img NULL = no edit.
+struct pbrSidecarAdjust_t {
+	idImage *	img;
+	float		brightness[3], contrast[3], gamma[3];
+};
+extern pbrSidecarAdjust_t rPbrSidecarAdjust;
+void  R_PbrSidecarAdjustReset( void );
+bool  R_PbrSidecarAdjustIsIdentity( void );
+float R_PbrSidecarAdjustValue( float v, int channel );
+// writes the material's sidecar with the current edit applied, as <stem>.tga in fs_savepath (overrides a pk4 copy),
+// then reloads it and clears the edit. False + reason when it cannot (no sidecar, .dds, unreadable).
+bool  R_PbrSaveSidecarEdit( const idMaterial *mat, idStr &written, idStr &error );
 extern idCVar r_pbrSpecScale;			// artistic energy scale on the GGX lobe (1.66 = calibrated look)
 extern idCVar r_pbrMetalDiffuse;		// how much albedo colour metals keep (1 = all, 0 = physical kill)
 extern idCVar r_pbrToksvigBase;			// Toksvig variance baseline (anti-firefly vs highlight tightness)
