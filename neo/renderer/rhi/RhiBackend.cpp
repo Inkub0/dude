@@ -654,9 +654,19 @@ r_gammaInShader is off (hardware path) or when both values are identity, which
 makes it a zero-cost no-op at the default settings.
 =============
 */
+// r_pbrDebugView shows stored material values (0..1) as greys: while it is up, the resolve and the
+// gamma pass leave the frame untouched (no exposure, eye adaptation, bloom, grain, tonemap or gamma),
+// so the grey on screen IS the value. The HUD is drawn without them too for that time.
+static bool RB_RHI_DisplayTransformBypassed() {
+	return r_pbrDebugView.GetInteger() > 0 && R_BackendSupportsEnhancements();
+}
+
 static void RB_RHI_GammaBrightness( rhi::RHI *r ) {
 	if ( !r_gammaInShader.GetBool() ) {
 		return;		// hardware-gamma path (GLimp_SetGamma) handles it
+	}
+	if ( RB_RHI_DisplayTransformBypassed() ) {
+		return;
 	}
 	// An HDR tonemap curve is this frame's display transform; applying the user's
 	// r_gamma/r_brightness on top of the tonemapped image skews it (same reason the VK
@@ -1154,6 +1164,13 @@ static bool RB_RHI_HdrResolveSmaaFused( rhi::RHI *r, int w, int h ) {
 		parms.localParam1[1] = r_brightness.GetFloat();
 		parms.localParam1[2] = ( r_gamma.GetFloat() > 0.0f ) ? 1.0f / r_gamma.GetFloat() : 1.0f;
 	}
+	if ( RB_RHI_DisplayTransformBypassed() ) {		// r_pbrDebugView: show the stored values as they are
+		parms.windowCoord[0] = 0.0f;	// grain
+		parms.windowCoord[2] = 1.0f;	// exposure
+		parms.localParam1[1] = 1.0f;	// brightness
+		parms.localParam1[2] = 1.0f;	// 1/gamma
+		parms.localParam1[3] = 0.0f;	// tonemap off
+	}
 
 	rhi::BufferHandle vb, ib, ub;
 	int vertOfs, idxOfs;
@@ -1290,6 +1307,16 @@ static void RB_RHI_HdrResolve( rhi::RHI *r ) {
 	} else if ( rhi::GetActiveBackendType() == rhi::BT_VULKAN && r_gammaInShader.GetBool() ) {
 		parms.localParam1[1] = r_brightness.GetFloat();
 		parms.localParam1[2] = ( r_gamma.GetFloat() > 0.0f ) ? 1.0f / r_gamma.GetFloat() : 1.0f;
+	}
+	if ( RB_RHI_DisplayTransformBypassed() ) {		// r_pbrDebugView: show the stored values as they are
+		parms.localParam0[0] = 1.0f;	// exposure
+		parms.localParam0[1] = 0.0f;	// grain
+		parms.localParam1[1] = 1.0f;	// brightness
+		parms.localParam1[2] = 1.0f;	// 1/gamma
+		parms.localParam1[3] = 0.0f;	// tonemap off
+		parms.windowCoord[0] = 0.0f;	// no eye adaptation (and none of its low-light grain / desaturation)
+		parms.windowCoord[1] = 0.0f;
+		parms.color[3] = 0.0f;			// no bloom
 	}
 
 	// fullscreen NDC quad, st 0..1 (the HDR target is exact screen size, so no NPOT correction)
@@ -4147,6 +4174,8 @@ static void RB_RHI_DrawViewPost( rhi::RHI *r, viewDef_t *viewDef ) {
 		// r_ssaoDebug: overlay the AO buffer on top of the finished view. RHI fullscreen
 		// draw, so it works on both backends (the SSAO buffer is produced on Vulkan too).
 		RB_RHI_SSAODebugOverlay( r, viewDef );
+		// r_pbrDebugView: the material attachment's AO / roughness / metalness (Phase D sidecars)
+		RB_RHI_PbrDebugOverlay( r, viewDef );
 		// r_rtaoDebug: overlay the RTAO chain's intermediates (H4a raw rays / H4c denoised)
 		RB_RHI_RtaoDebugOverlay( r, viewDef );
 		// r_rtgiDebug: overlay the raw RT GI radiance gather (H6a bring-up)

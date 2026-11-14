@@ -79,7 +79,7 @@ void main() {
 	// screen-space SSAO above; the two stack multiplicatively when both are on. Sampled with
 	// the diffuse UV. u_occlusionParms.x gates it, .y is the strength (mix toward the map).
 	if ( u_occlusionParms.x > 0.5 ) {
-		float aoMap = texture( u_occlusionMap, var_TexDiffuse ).r;
+		float aoMap = dudeUnit10Ao( texture( u_occlusionMap, var_TexDiffuse ) );	// R, or B of an RMAO sidecar
 		outRgb *= mix( 1.0, aoMap, u_occlusionParms.y );
 	}
 

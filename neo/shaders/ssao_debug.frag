@@ -15,6 +15,22 @@ layout(location = 0) out vec4 fragColor;
 
 void main() {
 	vec4 s = texture( u_ssao, var_TexCoord );
+	// r_pbrDebugView (RB_RHI_PbrDebugOverlay) reuses this blit on the material attachment
+	// (R = roughness, G = metalness, B = spec luminance, A = AO): 6 AO, 7 roughness, 8 metalness,
+	// 9 ORM as glTF packs it (R = AO, G = roughness, B = metalness)
+	if ( u_localParam0.x > 8.5 ) {
+		fragColor = vec4( s.a, s.r, s.g, 1.0 );
+		return;
+	} else if ( u_localParam0.x > 7.5 ) {
+		fragColor = vec4( vec3( s.g ), 1.0 );
+		return;
+	} else if ( u_localParam0.x > 6.5 ) {
+		fragColor = vec4( vec3( s.r ), 1.0 );
+		return;
+	} else if ( u_localParam0.x > 5.5 ) {
+		fragColor = vec4( vec3( s.a ), 1.0 );
+		return;
+	}
 	if ( u_localParam0.x > 4.5 ) {
 		// velocity magnitude (r_mvDebug 2): brightness = |motion| * scale
 		fragColor = vec4( vec3( length( s.rg ) * u_localParam0.y ), 1.0 );

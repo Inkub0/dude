@@ -62,8 +62,14 @@ void main() {
 	float specLum = ( u_localParam0.y > 0.5 ) ? dot( texture( u_specularMask, var_TexCoverage ).rgb, vec3( 0.2126, 0.7152, 0.0722 ) ) : 0.0;
 	// .a = the baked occlusion map (docs/occlusion-maps.md), sampled with the diffuse UV as interaction.frag does; 1 =
 	// none. The DI apply scales its lighting by it exactly as the forward direct diffuse is (r_occlusionMapScale * Direct).
-	float occl = ( u_localParam0.y > 0.5 && u_occlusionParms.x > 0.5 ) ? texture( u_occlusionMap, var_TexCoverage ).r : 1.0;
-	out_Material = vec4( u_pbrParms.y, u_pbrParms.x, specLum, occl );
+	// A Phase D PBR sidecar (docs/pbr-materials.md sec. 7) on unit 10 supplies both: its AO channel here, and its
+	// per-texel roughness/metalness in place of the table scalars (u_ormParms.y), matching interaction.frag.
+	// u_ormParms.w: r_pbrDebugView wants the AO in .a whatever the albedo prepass does
+	bool wantOccl = ( u_localParam0.y > 0.5 && u_occlusionParms.x > 0.5 ) || u_ormParms.w > 0.5;
+	vec4 unit10 = ( u_ormParms.y > 0.5 || wantOccl ) ? texture( u_occlusionMap, var_TexCoverage ) : vec4( 1.0 );
+	float occl = wantOccl ? dudeUnit10Ao( unit10 ) : 1.0;
+	vec2 roughMetal = ( u_ormParms.y > 0.5 ) ? dudeUnit10RoughMetal( unit10 ) : u_pbrParms.yx;
+	out_Material = vec4( roughMetal, specLum, occl );
 
 	// per-pixel screen velocity (docs/fsr-temporal-pipeline.md R1/A2): divide each interpolated
 	// clip by its OWN w so large world triangles reproject correctly, take the NDC delta, scale

@@ -177,6 +177,20 @@ struct RenderParams {
 								// forward blend instead of one weight on the sum (which collapsed the rock layer to
 								// black on sand-blended ground -> DI too dark). Default IGNORE (add2 = 1): a
 								// crossfade (same mode on both) stays byte-identical. Appended LAST.
+
+	float	ormParms[4];		// DUDE Phase D PBR sidecar (docs/pbr-materials.md sec. 7): unit 10 carries a packed
+								// <diffuse>_orm / _rmao texture instead of a plain AO map. x = channel layout (0 = plain
+								// AO map in R, 1 = ORM: R AO / G rough / B metal, 2 = RMAO: R rough / G metal / B AO),
+								// y = 1: the texture's roughness/metalness replace u_pbrParms.yx (interaction.frag's
+								// r_pbr branch, gbuffer.frag's material attachment). w = 1: gbuffer.frag writes the
+								// surface AO to the material attachment's .a for r_pbrDebugView. z = 1: the in-game PBR
+								// editor's live channel edit applies (ormAdjust below).
+								// The AO channel still obeys u_occlusionParms.x. 0 on every draw without a sidecar.
+
+	float	ormAdjust[3][4];	// DUDE in-game PBR editor: live edit of the sidecar being edited, applied when ormParms.z
+								// is set. [0] = brightness, [1] = contrast, [2] = gamma; xyz = AO, roughness, metalness.
+								// v' = pow( clamp( ( v - 0.5 ) * contrast + 0.5 + brightness, 0, 1 ), 1 / gamma ),
+								// the same formula "Save to texture" writes (R_PbrSidecarAdjustValue). Appended LAST.
 };
 
 // window depth -> view z for a view, from its projection matrix (column-major GL layout):
@@ -190,8 +204,8 @@ inline void FillDepthParms( RenderParams &p, const float *proj ) {
 	}
 }
 
-// 4 mat4 (256) + 53 vec4 (848) = 1104 bytes, zero padding
-static_assert( sizeof( RenderParams ) == 1104, "RenderParams must match the std140 layout of renderparms.glsl" );
+// 4 mat4 (256) + 57 vec4 (912) = 1168 bytes, zero padding
+static_assert( sizeof( RenderParams ) == 1168, "RenderParams must match the std140 layout of renderparms.glsl" );
 
 } // namespace rhi
 
