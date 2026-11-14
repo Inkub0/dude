@@ -293,6 +293,12 @@ const char *	Sys_TimeStampToStr( ID_TIME_T timeStamp );
 
 bool			Sys_GetPath(sysPath_t type, idStr &path);
 
+// Download a file over HTTPS to destPath (overwriting it). The URL must be
+// https; anything else is refused. Verifies nothing itself - the caller checks
+// the result against a pinned hash. Returns false on any failure (non-https
+// URL, network/HTTP error, write error). Used by the mod-library auto-download.
+bool			Sys_DownloadURL( const char *url, const char *destPath );
+
 // use fs_debug to verbose Sys_ListFiles
 // returns -1 if directory was not found (the list is cleared)
 int				Sys_ListFiles( const char *directory, const char *extension, idList<class idStr> &list );

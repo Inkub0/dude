@@ -736,6 +736,7 @@ if(WIN32)
 		iphlpapi
 		wsock32
 		ole32
+		winhttp
 	)
 endif()
 
@@ -1546,6 +1547,7 @@ elseif(APPLE)
 		sys/sys_local.cpp
 		sys/posix/posix_net.cpp
 		sys/posix/posix_main.cpp
+		sys/posix/posix_download.cpp
 	)
 
 	set(src_sys_core
@@ -1567,6 +1569,7 @@ elseif(WIN32)
 		sys/win32/win_net.cpp
 		sys/win32/win_shared.cpp
 		sys/win32/win_syscon.cpp
+		sys/win32/win_download.cpp
 	)
 
 	if(NOT SDL2 AND NOT SDL3)
@@ -1602,6 +1605,7 @@ else()
 		sys/sys_local.cpp
 		sys/posix/posix_net.cpp
 		sys/posix/posix_main.cpp
+		sys/posix/posix_download.cpp
 		sys/linux/main.cpp
 	)
 
