@@ -12369,8 +12369,17 @@ windowDef MultiplayerLANParent {
 			bordercolor 	0.4, 0.6, 0.8, 0.5
 			textscale 	0.25  
 			listName 	"serverlist"
-			tabstops	"2, 247, 316, 356, 453" // SERVER NAME, PLAYERS, GAMETYPE, MAP NAME
-			tabAligns	"0, 1, 1, 0, 0"
+			tabstops	"2, 202, 225, 247, 316, 356, 453"	// SERVER NAME, PB, GAME, PLAYERS, PING, GAMETYPE, MAP NAME
+			tabAligns	"0, 1, 1, 1, 1, 0, 0"				//LEFT, CENTER, CENTER, CENTER, CENTER, TEXT, TEXT
+			tabTypes	"0, 1, 1, 0, 0, 0, 0"				//TEXT, ICON, ICON, TEXT, TEXT, TEXT, TEXT
+			tabIconSizes "0,0, 11,11, 11,11, 0,0, 0,0, 0,0, 0,0"
+			tabIconVOffset	 "0, 1, 1, 0, 0, 0, 0"
+			tabvaligns	"0, 1, 1, 0, 0, 0, 0"				//Only works for icon columns
+
+			mtr_doom3Icon	"guis/assets/mainmenu/doom3icon.tga"
+			mtr_doom3XPIcon	"guis/assets/mainmenu/doom3xpicon.tga"
+			mtr_doom3Mod	"guis/assets/mainmenu/mars_icon.tga"
+			mtr_PB			"guis/assets/mainmenu/pb_icon.tga"
 			
 			onAction {
 				set	"cmd"	"play guisounds_menuclickup ; serverList" ;
