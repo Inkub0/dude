@@ -108,7 +108,9 @@ idCVar r_vrr( "r_vrr", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "variable 
 // needs r_swapInterval + r_vrr). The menu writes 0..3; R_CheckCvars translates that into the real cvars
 // and mirrors their live state back here. Not archived -- it's derived from r_swapInterval/r_vrr each
 // frame (default -1 = uninitialized, so it can never clobber saved settings on first boot).
-idCVar dude_vsync( "dude_vsync", "-1", CVAR_RENDERER | CVAR_INTEGER, "VSync mode for the in-game menu: 0 = off, 1 = on, 2 = adaptive, 3 = VRR", -1, 3 );
+// DUDE: NOCHEAT on code-written bridge cvars -- unflagged cvars count as cheats, which multiplayer refuses
+// to set (and logs "cannot be changed in multiplayer" on every write).
+idCVar dude_vsync( "dude_vsync", "-1", CVAR_RENDERER | CVAR_INTEGER | CVAR_NOCHEAT,"VSync mode for the in-game menu: 0 = off, 1 = on, 2 = adaptive, 3 = VRR", -1, 3 );
 
 idCVar r_gamma( "r_gamma", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "changes gamma tables", 0.5f, 3.0f );
 idCVar r_brightness( "r_brightness", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "changes gamma tables", 0.5f, 2.0f );
@@ -773,7 +775,7 @@ idCVar r_dofFocusStart( "r_dofFocusStart", "0.35", CVAR_RENDERER | CVAR_ARCHIVE 
 idCVar r_dofFocusEnd( "r_dofFocusEnd", "0.72", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "weapon-reload DoF: scene raw-depth where the blur reaches full strength", 0.0f, 1.0f );
 // game->renderer bridge, written by idPlayerView every frame (not a user knob):
 // the 0..1 reload focus envelope the DoF pass scales its blur by.
-idCVar r_weaponReloadFocus( "r_weaponReloadFocus", "0", CVAR_RENDERER | CVAR_FLOAT, "weapon-reload DoF strength (set by the game: eases 0->1->0 across the reload animation)" );
+idCVar r_weaponReloadFocus( "r_weaponReloadFocus", "0", CVAR_RENDERER | CVAR_FLOAT | CVAR_NOCHEAT,"weapon-reload DoF strength (set by the game: eases 0->1->0 across the reload animation)" );
 idCVar r_parallax( "r_parallax", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "parallax occlusion mapping: per-pixel surface relief on materials that carry height data (auto-captured from `heightmap(...)` in the bump program, or an explicit `parallaxmap` stage). Non-vanilla; opengl3/Vulkan. Takes effect on the next reloadDecls/map load" );
 idCVar r_parallaxScale( "r_parallaxScale", "0.12", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "global multiplier on per-material parallax height scale, 0..4 (0 = flat, higher exaggerates the relief; 0.12 = tuned default)", 0.0f, 4.0f );
 idCVar r_parallaxMinSteps( "r_parallaxMinSteps", "6", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "parallax occlusion mapping: height-field march steps when viewing head-on (cheaper). Ramps up to r_parallaxMaxSteps at grazing angles", 1, 32 );

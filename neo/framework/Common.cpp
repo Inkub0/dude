@@ -122,7 +122,9 @@ idCVar dude_cfgSchema( "dude_cfgSchema", "0", CVAR_INTEGER | CVAR_ARCHIVE | CVAR
 // this on the opengl3/Vulkan backends; legacy keeps the MSAA r_multisamples row). NOT
 // archived — the truth lives in r_rhiAA + r_fsr (both archived); this is synced from them
 // when the menu opens and applied to them by the "dudeAA" command (Dhewm3SettingsMenu.cpp).
-idCVar dude_aa( "dude_aa", "0", CVAR_INTEGER | CVAR_SYSTEM, "DUDE menu antialiasing selection: 0 = off, 1 = FXAA, 2 = SMAA, 3 = FSR2 (Vulkan only)", 0, 3 );
+// DUDE: NOCHEAT on code-written bridge cvars -- unflagged cvars count as cheats, which multiplayer refuses
+// to set (and logs "cannot be changed in multiplayer" on every write).
+idCVar dude_aa( "dude_aa", "0", CVAR_INTEGER | CVAR_SYSTEM | CVAR_NOCHEAT,"DUDE menu antialiasing selection: 0 = off, 1 = FXAA, 2 = SMAA, 3 = FSR2 (Vulkan only)", 0, 3 );
 idCVar com_purgeAll( "com_purgeAll", "0", CVAR_BOOL | CVAR_ARCHIVE | CVAR_SYSTEM, "purge everything between level loads" );
 idCVar com_memoryMarker( "com_memoryMarker", "-1", CVAR_INTEGER | CVAR_SYSTEM | CVAR_INIT, "used as a marker for memory stats" );
 idCVar com_preciseTic( "com_preciseTic", "1", CVAR_BOOL|CVAR_SYSTEM, "run one game tick every async thread update" );
