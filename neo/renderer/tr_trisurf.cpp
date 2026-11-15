@@ -368,6 +368,41 @@ void R_FreeStaticTriSurfVertexCaches( srfTriangles_t *tri ) {
 // DUDE: the mark R_ReallyFreeStaticTriSurf leaves in a released struct's deferred link (see there)
 #define R_TRISURF_RELEASED ( (srfTriangles_t *)(uintptr_t)0xDEADDEADDEADDEADULL )
 
+// DUDE: within one R_FreeDeferredTriSurfs pass, guard against two surfaces that each OWN
+// ( referencedVerts == false ) the same verts block. This happens when a smoke-particle ambient
+// surface's verts get aliased onto a recycled srfTriangles struct across a com_interpolate sub-frame
+// ( GitHub #10 family ): both land on the same frame's deferred-free list, so the block is freed, then
+// freed a second time. We cannot inspect the freed block to detect this -- under
+// ID_DYNAMIC_BLOCK_ALLOC_SYSTEM ( the ASAN build ) idDynamicBlockAlloc hands the block back to the OS,
+// so CheckMemory() would read freed memory and fault -- so track the freed verts pointers for the pass
+// and compare addresses only. Two owning surfaces that share an address are the same block, so
+// skipping the second free is correct, not a leak.
+static bool					deferredFreeBatchActive = false;
+static idList<const void *>	deferredFreedVerts;
+static idHashIndex			deferredFreedVertsHash;
+
+static ID_INLINE int R_DeferredVertsKey( const void *verts ) {
+	uintptr_t p = (uintptr_t)verts;
+	return (int)( ( p >> 4 ) ^ ( p >> 20 ) );
+}
+
+// returns true if these verts were already freed earlier in the current deferred-free pass (so the
+// caller must skip the redundant free); otherwise records them and returns false.
+static bool R_DeferredVertsAlreadyFreed( const void *verts ) {
+	if ( !deferredFreeBatchActive || verts == NULL ) {
+		return false;
+	}
+	const int key = R_DeferredVertsKey( verts );
+	for ( int i = deferredFreedVertsHash.First( key ); i != -1; i = deferredFreedVertsHash.Next( i ) ) {
+		if ( deferredFreedVerts[i] == verts ) {
+			return true;
+		}
+	}
+	const int idx = deferredFreedVerts.Append( verts );
+	deferredFreedVertsHash.Add( key, idx );
+	return false;
+}
+
 /*
 ==============
 R_ReallyFreeStaticTriSurf
@@ -435,6 +470,23 @@ void R_ReallyFreeStaticTriSurf( srfTriangles_t *tri ) {
 		// R_CreateLightTris points tri->verts at the verts of the ambient surface (referencedVerts, set
 		// when it does - not a comparison with ambientSurface, which may already be freed: GitHub #10)
 		if ( !tri->referencedVerts ) {
+			if ( R_DeferredVertsAlreadyFreed( tri->verts ) ) {
+				// A second surface on this frame's deferred-free list owns the same verts block
+				// (e.g. smoke-particle ambient verts aliased onto a recycled struct across a
+				// com_interpolate sub-frame). The block is already gone; skip the redundant free
+				// instead of touching freed memory. Safe pointer compare, so it also covers the
+				// ASAN allocator (ID_DYNAMIC_BLOCK_ALLOC_SYSTEM) where CheckMemory() would fault.
+				static bool reportedVertBatchDoubleFree = false;
+				if ( !reportedVertBatchDoubleFree ) {
+					reportedVertBatchDoubleFree = true;
+					common->Printf( "R_ReallyFreeStaticTriSurf: skipped a redundant verts free "
+						"(two owning surfaces shared one block in a deferred pass, harmless; prints once). "
+						"surf numVerts=%d numIndexes=%d deformed=%d ambientSurf=%s silIdx=%s\n",
+						tri->numVerts, tri->numIndexes, tri->deformedSurface ? 1 : 0,
+						tri->ambientSurface ? "yes" : "no", tri->silIndexes ? "yes" : "no" );
+				}
+			} else
+#ifndef ID_DYNAMIC_BLOCK_ALLOC_SYSTEM
 			// dhewm-rt hardening for a latent, backend-agnostic stock-Doom3 double-free
 			// (still present through dhewm3 1.5.5): an idRenderModelOverlay decal surface
 			// baked onto an animated model can have its verts block freed twice when the
@@ -443,7 +495,9 @@ void R_ReallyFreeStaticTriSurf( srfTriangles_t *tri ) {
 			// already back in the free-tree (that is exactly the Heap.h:839
 			// "block->node == NULL" abort). Skip the redundant free instead of aborting.
 			// One-shot event at the actor's death, so the skipped block is a single
-			// harmless leak. See docs/known-bugs.md.
+			// harmless leak. See docs/known-bugs.md. Only safe while idDynamicBlockAlloc keeps
+			// its pool; under ID_DYNAMIC_BLOCK_ALLOC_SYSTEM the block is handed back to the OS,
+			// so reading it would fault -- the per-pass guard above covers that build instead.
 			if ( triVertexAllocator.CheckMemory( tri->verts ) != NULL ) {
 				static bool reportedVertDoubleFree = false;
 				if ( !reportedVertDoubleFree ) {
@@ -454,7 +508,9 @@ void R_ReallyFreeStaticTriSurf( srfTriangles_t *tri ) {
 						tri->numVerts, tri->numIndexes, tri->deformedSurface ? 1 : 0,
 						tri->ambientSurface ? "yes" : "no", tri->silIndexes ? "yes" : "no" );
 				}
-			} else {
+			} else
+#endif
+			{
 				triVertexAllocator.Free( tri->verts );
 			}
 		}
@@ -552,10 +608,19 @@ void R_FreeDeferredTriSurfs( frameData_t *frame ) {
 		return;
 	}
 
+	// DUDE: begin a deferred-free pass so R_ReallyFreeStaticTriSurf can drop a verts block that two
+	// owning surfaces on this list happen to share (see R_DeferredVertsAlreadyFreed).
+	deferredFreeBatchActive = true;
+	deferredFreedVerts.SetNum( 0, false );
+	deferredFreedVertsHash.Clear();
+
 	for ( tri = frame->firstDeferredFreeTriSurf; tri; tri = next ) {
 		next = tri->nextDeferredFree;
 		R_ReallyFreeStaticTriSurf( tri );
 	}
+
+	deferredFreeBatchActive = false;
+	deferredFreedVerts.SetNum( 0, false );
 
 	frame->firstDeferredFreeTriSurf = NULL;
 	frame->lastDeferredFreeTriSurf = NULL;
