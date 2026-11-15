@@ -372,6 +372,9 @@ bool Init(void* _sdlWindow, void* sdlGlContext)
 	}
 
 	imgui_initialized = true;
+	// a freshly (re)created context has no frame in progress; clear any stale flag
+	// left over from a previous context (e.g. across a reloadEngine render reinit)
+	haveNewFrame = false;
 
 	// the input layer may have registered gamepads before we existed (Vulkan path)
 	ApplyGamepadSelection();
@@ -396,6 +399,7 @@ void Shutdown()
 		ImGui_ImplSDLx_Shutdown();
 		ImGui::DestroyContext( imguiCtx );
 		imgui_initialized = false;
+		haveNewFrame = false;	// the destroyed context's in-progress frame (if any) is gone
 	}
 }
 
@@ -649,6 +653,15 @@ void EndFrame()
 	// I think this can happen if we're not coming from idCommon::Frame() but screenshot or sth
 	if ( !haveNewFrame ) {
 		NewFrame();
+	}
+	if ( !haveNewFrame ) {
+		// NewFrame() bailed without starting an ImGui frame (ImGui not initialized,
+		// or all windows closed for a couple of frames). This happens e.g. during a
+		// reloadEngine on an MP server connect, where PrintLoadingMessage renders a
+		// loading frame while the render system (and ImGui) is mid-reinitialisation.
+		// There is no live frame to render, and calling ImGui::Render() without a
+		// frame scope aborts via assert, so bail out here instead.
+		return;
 	}
 	haveNewFrame = false;
 	ImGui::Render();
