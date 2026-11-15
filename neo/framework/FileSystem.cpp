@@ -432,6 +432,10 @@ private:
 	static idCVar			fs_searchAddons;
 	// DG: additional directory to search for game DLLs
 	static idCVar			fs_gameDllPath;
+	// DUDE: when connecting to a pure server, force a pure restart if this DUDE
+	// install has client-only enhancement content loaded, so the decl checksum is
+	// recomputed to the server's vanilla value. See SetPureServerChecksums.
+	static idCVar			fs_mpVanillaData;
 
 	backgroundDownload_t *	backgroundDownloads;
 	backgroundDownload_t	defaultBackgroundDownload;
@@ -484,6 +488,9 @@ private:
 	idFile_InZip *			ReadFileFromZip( pack_t *pak, fileInPack_t *pakFile, const char *relativePath );
 	int						GetFileChecksum( idFile *file );
 	pureStatus_t			GetPackStatus( pack_t *pak );
+							// DUDE: true if the current search path holds client-only (non-vanilla)
+							// content whose decls would skew declManager->GetChecksum() vs a pure server
+	bool					HasClientOnlyContent( void );
 	addonInfo_t *			ParseAddonDef( const char *buf, const int len );
 	void					FollowAddonDependencies( pack_t *pak );
 
@@ -508,6 +515,7 @@ idCVar	idFileSystemLocal::fs_caseSensitiveOS( "fs_caseSensitiveOS", "0", CVAR_SY
 idCVar	idFileSystemLocal::fs_caseSensitiveOS( "fs_caseSensitiveOS", "1", CVAR_SYSTEM | CVAR_BOOL, "" );
 #endif
 idCVar	idFileSystemLocal::fs_searchAddons( "fs_searchAddons", "0", CVAR_SYSTEM | CVAR_BOOL, "search all addon pk4s ( disables addon functionality )" );
+idCVar	idFileSystemLocal::fs_mpVanillaData( "fs_mpVanillaData", "1", CVAR_SYSTEM | CVAR_BOOL | CVAR_ARCHIVE, "present vanilla/stock data to pure multiplayer servers: force a pure restart that drops this build's client-only content so the decl checksum matches a stock server" );
 // DUDE: mirror loose base/<game>/guis/*.gui overrides into fs_savepath at startup so
 // they win regardless of launch method (fs_savepath outranks fs_basepath).
 idCVar	fs_installGuiOverrides( "fs_installGuiOverrides", "1", CVAR_SYSTEM | CVAR_BOOL | CVAR_ARCHIVE, "mirror loose guis/ overrides (*.gui, *.pd) from fs_basepath into fs_savepath when their content differs, so they always take effect (fs_savepath outranks fs_basepath)" );
@@ -1642,6 +1650,24 @@ int idFileSystemLocal::GetFileList( const char *relativePath, const idStrList &e
 				}
 
 				for( j = 0; j < sysFiles.Num(); j++ ) {
+					// DUDE: in restricted/pure mode a loose directory file can't be
+					// opened ( OpenFileReadFlags gates dir reads by FileAllowedFromDir ),
+					// so it must not be listed either. Without this a DUDE build's loose
+					// def/fx/gui overrides would appear in the decl folder scan on a pure
+					// server even though every read of them is redirected to the vanilla
+					// pak, and a loose file with no pak counterpart would list then fail
+					// to load. Mirror the read-side gate here so listing == reading.
+					if ( fs_restrict.GetBool() || serverPaks.Num() ) {
+						idStr checkPath = relativePath;
+						if ( checkPath.Length() ) {
+							checkPath += "/";
+						}
+						checkPath += sysFiles[j];
+						if ( !FileAllowedFromDir( checkPath ) ) {
+							continue;
+						}
+					}
+
 					// unique the match
 					if ( fullRelativePath ) {
 						work = relativePath;
@@ -2779,6 +2805,11 @@ fsPureReply_t idFileSystemLocal::SetPureServerChecksums( const int pureChecksums
 		return PURE_OK;
 	}
 
+	// DUDE: true before we lock pure for this connection. After a pure restart the
+	// filesystem comes back up with serverPaks already populated, so this is false on
+	// the second pass and the forced-restart below can't loop.
+	const bool wasPureLocked = ( serverPaks.Num() > 0 );
+
 	if ( !serverPaks.Num() ) {
 		// there was no pure lockdown yet - lock to what we already have
 		UpdatePureServerChecksums();
@@ -2858,6 +2889,23 @@ fsPureReply_t idFileSystemLocal::SetPureServerChecksums( const int pureChecksums
 			common->Printf( "SetPureServerChecksums: there are files loaded from dir\n" );
 		}
 	}
+
+	// DUDE: present vanilla/stock data to pure servers. A DUDE build ships client-only
+	// enhancement content ( loose def/fx overrides and non-vanilla enhancement paks ) that
+	// is parsed into the decl set at startup and changes declManager->GetChecksum() versus
+	// a stock server. The server rejects that mismatch with "data not in sync" even after
+	// the pak checksums line up ( AsyncServer.cpp, si_pure decl check ). The stock
+	// restart heuristics above ( loadedFileFromDir / referenced neutral paks ) do not
+	// reliably fire in every launch path, so when we are about to lock pure for the first
+	// time and client-only content is present, force exactly one pure restart. After it the
+	// pure gate hides that content, the decl checksum recomputes to the server's vanilla
+	// value, and the second pure negotiation returns PURE_OK. Only affects pure/MP mode;
+	// single-player is untouched. Disable with fs_mpVanillaData 0.
+	if ( success && !wasPureLocked && fs_mpVanillaData.GetBool() && HasClientOnlyContent() ) {
+		common->Printf( "pure: client-only content present - forcing a pure restart to present vanilla data to the server\n" );
+		success = false;
+	}
+
 	return ( success ? PURE_OK : PURE_RESTART );
 }
 
@@ -3238,6 +3286,36 @@ pureStatus_t idFileSystemLocal::GetPackStatus( pack_t *pak ) {
 
 	pak->pureStatus = PURE_NEUTRAL;
 	return PURE_NEUTRAL;
+}
+
+/*
+===========
+idFileSystemLocal::HasClientOnlyContent
+
+DUDE: a stock dhewm3/Doom 3 install run against a pure server only has pak*.pk4
+( PURE_ALWAYS ) plus harmless PURE_NEVER paks ( localized guis/sounds ), and never
+loads decl files from loose directories. A DUDE build additionally ships client-only
+enhancement content - loose base/def and base/fx overrides and non-vanilla PURE_NEUTRAL
+enhancement paks ( PBR, baked AO, ... ) - which is parsed into the decl set at startup
+and changes declManager->GetChecksum(). Report whether any such content is currently in
+the search path so a pure connect can force a restart and present the vanilla checksum.
+===========
+*/
+bool idFileSystemLocal::HasClientOnlyContent( void ) {
+	// a non-pure-allowed file was loaded from a directory ( e.g. loose def/fx/gui overrides )
+	if ( loadedFileFromDir ) {
+		return true;
+	}
+	// any non-vanilla ( PURE_NEUTRAL ) pak in the search path
+	for ( searchpath_t *search = searchPaths; search; search = search->next ) {
+		if ( !search->pack ) {
+			continue;
+		}
+		if ( GetPackStatus( search->pack ) == PURE_NEUTRAL ) {
+			return true;
+		}
+	}
+	return false;
 }
 
 /*
