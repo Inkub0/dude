@@ -190,7 +190,14 @@ struct RenderParams {
 	float	ormAdjust[3][4];	// DUDE in-game PBR editor: live edit of the sidecar being edited, applied when ormParms.z
 								// is set. [0] = brightness, [1] = contrast, [2] = gamma; xyz = AO, roughness, metalness.
 								// v' = pow( clamp( ( v - 0.5 ) * contrast + 0.5 + brightness, 0, 1 ), 1 / gamma ),
-								// the same formula "Save to texture" writes (R_PbrSidecarAdjustValue). Appended LAST.
+								// the same formula "Save to texture" writes (R_PbrSidecarAdjustValue).
+
+	float	ormGlobal[3][4];	// DUDE: the global sidecar adjust (r_pbrSidecarAO / Rough / Metal), the same three steps as
+								// ormAdjust, applied to EVERY sidecar draw (ormParms.x >= 1) before ormAdjust: a live preview
+								// of the extractor's --ao-adjust / --rough-adjust / --metal-adjust. Filled identity when off.
+	float	ormBaked[3][4];		// DUDE: what the sidecars were baked with (pbr/pbr_sidecar_baked.cfg, same layout as
+								// ormGlobal): undone before ormGlobal applies, so sliders equal to the bake = the textures
+								// as baked. Identity (0, 1, 1) when none recorded. Appended LAST.
 };
 
 // window depth -> view z for a view, from its projection matrix (column-major GL layout):
@@ -204,8 +211,8 @@ inline void FillDepthParms( RenderParams &p, const float *proj ) {
 	}
 }
 
-// 4 mat4 (256) + 57 vec4 (912) = 1168 bytes, zero padding
-static_assert( sizeof( RenderParams ) == 1168, "RenderParams must match the std140 layout of renderparms.glsl" );
+// 4 mat4 (256) + 63 vec4 (1008) = 1264 bytes, zero padding
+static_assert( sizeof( RenderParams ) == 1264, "RenderParams must match the std140 layout of renderparms.glsl" );
 
 } // namespace rhi
 

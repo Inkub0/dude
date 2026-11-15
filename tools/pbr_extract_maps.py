@@ -892,6 +892,54 @@ def horizon_ao(h, radius, bias=0.1, directions=16):
     return vis / directions
 
 
+def parse_adjust_cfg(data):
+    """pbr/pbr_sidecar_adjust.cfg / _baked.cfg: '<ao|rough|metal> <brightness> <contrast> <gamma>' lines."""
+    out = {}
+    if data is None:
+        return out
+    for line in data.decode("latin-1").splitlines():
+        tok = line.split("//", 1)[0].split()
+        if len(tok) == 4 and tok[0].lower() in ("ao", "rough", "metal") and all(_isnum(t) for t in tok[1:]):
+            out[tok[0].lower()] = tuple(float(t) for t in tok[1:])
+    return out
+
+
+def write_adjust_cfg(path, args):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = ["// DUDE PBR sidecars in this pack were baked with this channel adjust (tools/pbr_extract_maps.py);",
+             "// the engine previews the All sidecars sliders relative to it: <channel> <brightness> <contrast> <gamma>"]
+    for ch in ("ao", "rough", "metal"):
+        b, c, g = getattr(args, f"{ch}_adjust")
+        lines.append(f"{ch} {b:.3f} {c:.3f} {g:.3f}")
+    path.write_text("\n".join(lines) + "\n")
+
+
+def channel_adjust(a, bcg):
+    """brightness / contrast / gamma, the engine's dudeOrmAdjust (renderparms.glsl):
+    v' = clip((v - 0.5) * contrast + 0.5 + brightness, 0, 1) ** (1 / gamma). (0, 1, 1) = unchanged."""
+    b, c, g = bcg
+    if b == 0.0 and c == 1.0 and g == 1.0:
+        return a
+    return np.clip((a - 0.5) * c + 0.5 + b, 0.0, 1.0) ** (1.0 / max(g, 0.05))
+
+
+def anchor_mean(a, target, ceiling):
+    """`a` scaled so its average is `target`, values clipped to [0, ceiling]; the scale is refined so the
+    clipping does not pull the average below the target. A map with (almost) nothing in it becomes flat."""
+    target = min(max(target, 0.0), ceiling)
+    mean = float(a.mean())
+    if mean < 0.01:
+        return np.full(a.shape, target)
+    k = target / mean
+    for _ in range(6):
+        m = np.clip(a * k, 0.0, ceiling)
+        got = float(m.mean())
+        if got <= 0.0 or abs(got - target) < 0.002:
+            break
+        k *= target / got
+    return np.clip(a * k, 0.0, ceiling)
+
+
 def derive(diffuse, spec, args, table, name_says_nonmetal=False):
     """table = the material's current (metalness, roughness) from the PBR table, None = unknown."""
     metal_allowed = ( table is None or table[0] > 0.0 ) and not name_says_nonmetal
@@ -915,6 +963,11 @@ def derive(diffuse, spec, args, table, name_says_nonmetal=False):
         # the specular map's grey copied as is: id painted bare steel bright and paint darker, and in a
         # game that is mostly metal and painted metal that grey works as a continuous metalness
         metal = spec_raw.copy()
+        if args.metal_anchor == "table":
+            # keep the tuned level: scale the grey so its average is the material's PBR table metalness
+            # (hollowmetal 0.38, solidmetal 0.50...); the specular map supplies the variation (bare steel
+            # above, paint and grime below), as with roughness
+            metal = anchor_mean(metal, table[0] if table else args.default_metal, args.metal_cap)
     elif spec is not None and metal_allowed:
         spec_u8 = Image.fromarray(np.clip(spec * 255.0 + 0.5, 0, 255).astype(np.uint8))
         spec_med = as_float(spec_u8.filter(ImageFilter.MedianFilter(args.metal_median)))
@@ -1025,9 +1078,22 @@ def main():
                          "(default ceramic=2.4, picked in game on mars_city1: glazed tile reads too dull at "
                          "its class roughness once the specular map adds its variation). Repeat for more "
                          "classes; 'ceramic=1' turns the default off")
-    ap.add_argument("--metal-cap", type=float, default=0.2,
-                    help="highest metalness written (default 0.2, picked in game on mars_city1: raw "
-                         "specular grey reads far too metallic above it; 1 = no cap)")
+    for ch, what in (("ao", "ambient occlusion"), ("rough", "roughness"), ("metal", "metalness")):
+        ap.add_argument(f"--{ch}-adjust", type=float, nargs=3, default=None,
+                        metavar=("BRIGHTNESS", "CONTRAST", "GAMMA"),
+                        help=f"final brightness / contrast / gamma on the {what} channel of every texture, as the "
+                             f"engine's r_pbrSidecar{ {'ao': 'AO', 'rough': 'Rough', 'metal': 'Metal'}[ch]} previews it. "
+                             "Default: the '" + ch + "' line of pbr/pbr_sidecar_adjust.cfg (the PBR editor's All "
+                             "sidecars tab, 'Save for next bake'), else 0 1 1 = unchanged")
+    ap.add_argument("--metal-anchor", choices=("table", "none"), default="table",
+                    help="table (default): scale each metalness map so its average is the material's PBR table "
+                         "metalness (the look tuned in game); none: the specular grey as is (then --metal-cap "
+                         "0.2 gives the earlier capped look)")
+    ap.add_argument("--default-metal", type=float, default=0.2,
+                    help="average metalness for a material the PBR table does not list (default 0.2)")
+    ap.add_argument("--metal-cap", type=float, default=1.0,
+                    help="highest metalness written (default 1 = no cap). 0.2 was the earlier global cap, "
+                         "before metalness was anchored to the table")
     ap.add_argument("--metal-spec", type=float, nargs=2, default=(0.28, 0.40), metavar=("LO", "HI"),
                     help="specular ramp that turns metal on (default 0.28 0.40)")
     ap.add_argument("--metal-sat", type=float, nargs=2, default=(0.08, 0.20), metavar=("LO", "HI"),
@@ -1070,6 +1136,15 @@ def main():
     folders = args.search or [Path("base")]
     nonmetal_words = [w.strip().lower() for w in args.nonmetal_words.split(",") if w.strip()]
     fs = GameFS(folders)
+    # channel adjust: the flags, else the saved next-bake settings, else unchanged; what is used is written to
+    # pbr/pbr_sidecar_baked.cfg in the output, so the engine can show the textures relative to it
+    saved = parse_adjust_cfg(fs.read("pbr/pbr_sidecar_adjust.cfg"))
+    for ch in ("ao", "rough", "metal"):
+        if getattr(args, f"{ch}_adjust") is None:
+            setattr(args, f"{ch}_adjust", tuple(saved.get(ch, (0.0, 1.0, 1.0))))
+    print("channel adjust (brightness contrast gamma): " + ", ".join(
+        f"{ch} {' '.join(f'{v:g}' for v in getattr(args, f'{ch}_adjust'))}" for ch in ("ao", "rough", "metal"))
+        + ("  [from pbr/pbr_sidecar_adjust.cfg]" if saved else ""))
     class_shine = {}
     for item in args.class_shine:
         k, _, v = item.partition("=")
@@ -1262,6 +1337,12 @@ def main():
                 ao = stage_warp(ao, tms["bump"], tms["diffuse"], size) if warp_bump else resample(ao, size)
         normal, height = normal_img, height_img
 
+        # global channel adjust (--ao-adjust / --rough-adjust / --metal-adjust), the engine's
+        # r_pbrSidecarAO / Rough / Metal preview (PBR editor, All sidecars tab) baked in
+        ao = channel_adjust(ao, args.ao_adjust)
+        rough = np.maximum(channel_adjust(rough, args.rough_adjust), 0.03)
+        metal = channel_adjust(metal, args.metal_adjust)
+
         out = args.output / f"{stem}_{args.layout}.tga"
         out.parent.mkdir(parents=True, exist_ok=True)
         pack(*(np.clip(c * 255.0 + 0.5, 0, 255).astype(np.uint8) for c in (rough, metal, ao)),
@@ -1297,6 +1378,7 @@ def main():
         print(f"{reason}: {len(what)}")
         for w in what:
             print(f"    {w}")
+    write_adjust_cfg(args.output / "pbr" / "pbr_sidecar_baked.cfg", args)
     print(f"wrote {done} sidecar(s) to {args.output}")
     return 0 if done else 1
 

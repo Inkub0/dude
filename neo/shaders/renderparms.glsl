@@ -156,22 +156,45 @@ UBO_BINDING(0) uniform RenderParams {
 	                            // u_pbrParms.yx. z = 1: the PBR editor's live channel edit applies (u_ormAdj*). w = 1: write the AO to the material attachment for r_pbrDebugView. Read through dudeUnit10Ao / dudeUnit10RoughMetal below.
 	vec4 u_ormAdjB;              // in-game PBR editor live channel edit (u_ormParms.z): brightness, contrast, gamma;
 	vec4 u_ormAdjC;              // xyz = AO, roughness, metalness. Same formula as "Save to texture"
-	vec4 u_ormAdjG;              // (R_PbrSidecarAdjustValue). Appended LAST.
+	vec4 u_ormAdjG;              // (R_PbrSidecarAdjustValue).
+	vec4 u_ormGlobB;             // global sidecar adjust (r_pbrSidecarAO / Rough / Metal), applied to every sidecar
+	vec4 u_ormGlobC;             // (u_ormParms.x >= 1) BEFORE the per-texture edit; preview of the extractor's
+	vec4 u_ormGlobG;             // --*-adjust flags. Identity (0, 1, 1) when off.
+	vec4 u_ormBakedB;            // what the sidecars were baked with (pbr/pbr_sidecar_baked.cfg), undone before the
+	vec4 u_ormBakedC;            // global adjust applies: sliders equal to the bake show the textures as baked.
+	vec4 u_ormBakedG;            // Identity (0, 1, 1) when none recorded. Appended LAST.
 };
 
 float dudeOrmAdjust( float v, float b, float c, float g ) {
 	return pow( clamp( ( v - 0.5 ) * c + 0.5 + b, 0.0, 1.0 ), 1.0 / max( g, 0.05 ) );
 }
 
+// dudeOrmAdjust undone (exact where the bake did not clip; a clipped value stays at its end)
+float dudeOrmUnadjust( float v, float b, float c, float g ) {
+	float x = pow( clamp( v, 0.0, 1.0 ), max( g, 0.05 ) );
+	return ( c > 0.001 ) ? clamp( ( x - 0.5 - b ) / c + 0.5, 0.0, 1.0 ) : 0.5;
+}
+
+// the global step on channel ch (0 AO, 1 rough, 2 metal): back to the un-adjusted bake, then the sliders
+float dudeOrmGlobal( float v, int ch ) {
+	v = dudeOrmUnadjust( v, u_ormBakedB[ch], u_ormBakedC[ch], u_ormBakedG[ch] );
+	return dudeOrmAdjust( v, u_ormGlobB[ch], u_ormGlobC[ch], u_ormGlobG[ch] );
+}
+
 // Unit 10's AO channel: R for a plain AO map and an ORM sidecar, B for an RMAO one.
 float dudeUnit10Ao( vec4 t ) {
 	float a = ( u_ormParms.x > 1.5 ) ? t.b : t.r;
+	if ( u_ormParms.x > 0.5 ) {		// a sidecar (not a plain AO map): the global adjust
+		a = dudeOrmGlobal( a, 0 );
+	}
 	return ( u_ormParms.z > 0.5 ) ? dudeOrmAdjust( a, u_ormAdjB.x, u_ormAdjC.x, u_ormAdjG.x ) : a;
 }
 
 // A unit-10 PBR sidecar's ( roughness, metalness ).
 vec2 dudeUnit10RoughMetal( vec4 t ) {
 	vec2 rm = ( u_ormParms.x > 1.5 ) ? t.rg : t.gb;
+	rm.x = dudeOrmGlobal( rm.x, 1 );		// global adjust (identity when the sliders equal the bake)
+	rm.y = dudeOrmGlobal( rm.y, 2 );
 	if ( u_ormParms.z > 0.5 ) {
 		rm.x = dudeOrmAdjust( rm.x, u_ormAdjB.y, u_ormAdjC.y, u_ormAdjG.y );
 		rm.y = dudeOrmAdjust( rm.y, u_ormAdjB.z, u_ormAdjC.z, u_ormAdjG.z );

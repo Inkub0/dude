@@ -981,6 +981,14 @@ struct pbrSidecarAdjust_t {
 	float		brightness[3], contrast[3], gamma[3];
 };
 extern pbrSidecarAdjust_t rPbrSidecarAdjust;
+// TEMPORARY global sidecar adjust ("brightness contrast gamma" per channel, every sidecar), a preview of the extractor's
+// --ao-adjust / --rough-adjust / --metal-adjust; parsed values via R_PbrSidecarGlobal (channel 0 AO, 1 rough, 2 metal)
+extern idCVar r_pbrSidecarAO, r_pbrSidecarRough, r_pbrSidecarMetal;
+void  R_PbrSidecarGlobal( int channel, float &brightness, float &contrast, float &gamma );
+void  R_PbrSidecarBaked( int channel, float &brightness, float &contrast, float &gamma );	// pbr/pbr_sidecar_baked.cfg
+bool  R_PbrSidecarGlobalIsIdentity( void );		// true = the sliders equal the bake (preview = textures as baked)
+void  R_PbrSidecarGlobalLoad( void );			// re-read the baked + next-bake files, sliders from the latter
+bool  R_PbrSidecarSaveBakeSettings( idStr &written );	// sliders -> pbr/pbr_sidecar_adjust.cfg (fs_savepath)
 void  R_PbrSidecarAdjustReset( void );
 bool  R_PbrSidecarAdjustIsIdentity( void );
 float R_PbrSidecarAdjustValue( float v, int channel );

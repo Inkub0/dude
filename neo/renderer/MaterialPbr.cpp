@@ -344,6 +344,7 @@ void R_PbrTableInvalidate( void ) {
 int R_PbrTableReloadApply( void ) {
 	R_PbrTableInvalidate();
 	R_ResetPbrTextureMapCache();	// re-probe the <diffuse>_orm / _rmao sidecars too, so a dropped-in file shows up
+	R_PbrSidecarGlobalLoad();		// and what they were baked with / the next bake's settings
 	int applied = 0;
 	const int n = declManager->GetNumDecls( DECL_MATERIAL );
 	for ( int i = 0; i < n; i++ ) {

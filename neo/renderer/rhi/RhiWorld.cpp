@@ -1133,9 +1133,136 @@ float R_PbrSidecarAdjustValue( float v, int c ) {
 	return idMath::Pow( x, 1.0f / Max( rPbrSidecarAdjust.gamma[c], 0.05f ) );
 }
 
-// set the edit on this draw when it uses the sidecar under edit
+// The global adjust: the sliders (cvars r_pbrSidecarAO / Rough / Metal, "brightness contrast gamma") against what the
+// sidecars were baked with (pbr/pbr_sidecar_baked.cfg, written into the pack by tools/pbr_extract_maps.py). The cvars
+// start from the saved next-bake settings (pbr/pbr_sidecar_adjust.cfg, which the baker reads as its defaults), else
+// from the bake, so a re-bake never sends the sliders back to neutral.
+static float rbPbrGlobal[3][3] = { { 0, 1, 1 }, { 0, 1, 1 }, { 0, 1, 1 } };
+static float rbPbrBaked[3][3]  = { { 0, 1, 1 }, { 0, 1, 1 }, { 0, 1, 1 } };
+static bool  rbPbrGlobalLoaded = false;
+static const char *rbPbrChanKeys[3] = { "ao", "rough", "metal" };
+
+// "ao b c g" / "rough ..." / "metal ..." lines; false when the file is missing
+static bool RB_RHI_ReadPbrAdjustFile( const char *path, float out[3][3] ) {
+	char *buf = NULL;
+	if ( fileSystem->ReadFile( path, (void **)&buf, NULL ) < 0 || buf == NULL ) {
+		return false;
+	}
+	idStr text( buf );
+	fileSystem->FreeFile( buf );
+	idStrList lines;
+	for ( int start = 0, i = 0; i <= text.Length(); i++ ) {
+		if ( i == text.Length() || text[i] == '\n' ) {
+			idStr line = text.Mid( start, i - start );
+			start = i + 1;
+			char key[16];
+			float b, k, g;
+			if ( sscanf( line.c_str(), "%15s %f %f %f", key, &b, &k, &g ) == 4 ) {
+				for ( int c = 0; c < 3; c++ ) {
+					if ( idStr::Icmp( key, rbPbrChanKeys[c] ) == 0 ) {
+						out[c][0] = idMath::ClampFloat( -1.0f, 1.0f, b );
+						out[c][1] = idMath::ClampFloat( 0.0f, 8.0f, k );
+						out[c][2] = idMath::ClampFloat( 0.05f, 10.0f, g );
+					}
+				}
+			}
+		}
+	}
+	return true;
+}
+
+// (re)read both files and start the sliders from the next-bake settings, else from the bake
+void R_PbrSidecarGlobalLoad( void ) {
+	static const float ident[3][3] = { { 0, 1, 1 }, { 0, 1, 1 }, { 0, 1, 1 } };
+	memcpy( rbPbrBaked, ident, sizeof( rbPbrBaked ) );
+	RB_RHI_ReadPbrAdjustFile( "pbr/pbr_sidecar_baked.cfg", rbPbrBaked );
+	float start[3][3];
+	memcpy( start, rbPbrBaked, sizeof( start ) );
+	RB_RHI_ReadPbrAdjustFile( "pbr/pbr_sidecar_adjust.cfg", start );
+	idCVar *cvars[3] = { &r_pbrSidecarAO, &r_pbrSidecarRough, &r_pbrSidecarMetal };
+	for ( int c = 0; c < 3; c++ ) {
+		cvars[c]->SetString( va( "%.3f %.3f %.3f", start[c][0], start[c][1], start[c][2] ) );
+	}
+	rbPbrGlobalLoaded = true;
+}
+
+static void RB_RHI_ParsePbrGlobal() {
+	if ( !rbPbrGlobalLoaded ) {
+		R_PbrSidecarGlobalLoad();
+	}
+	idCVar *cvars[3] = { &r_pbrSidecarAO, &r_pbrSidecarRough, &r_pbrSidecarMetal };
+	for ( int c = 0; c < 3; c++ ) {
+		if ( !cvars[c]->IsModified() ) {
+			continue;
+		}
+		cvars[c]->ClearModified();
+		float b = 0.0f, k = 1.0f, g = 1.0f;
+		if ( sscanf( cvars[c]->GetString(), "%f %f %f", &b, &k, &g ) != 3 ) {
+			b = 0.0f; k = 1.0f; g = 1.0f;
+		}
+		rbPbrGlobal[c][0] = idMath::ClampFloat( -1.0f, 1.0f, b );
+		rbPbrGlobal[c][1] = idMath::ClampFloat( 0.0f, 8.0f, k );
+		rbPbrGlobal[c][2] = idMath::ClampFloat( 0.05f, 10.0f, g );
+	}
+}
+
+void R_PbrSidecarGlobal( int c, float &b, float &k, float &g ) {
+	RB_RHI_ParsePbrGlobal();
+	b = rbPbrGlobal[c][0];
+	k = rbPbrGlobal[c][1];
+	g = rbPbrGlobal[c][2];
+}
+
+void R_PbrSidecarBaked( int c, float &b, float &k, float &g ) {
+	RB_RHI_ParsePbrGlobal();
+	b = rbPbrBaked[c][0];
+	k = rbPbrBaked[c][1];
+	g = rbPbrBaked[c][2];
+}
+
+static bool RB_RHI_PbrNear( float a, float b ) {
+	return idMath::Fabs( a - b ) < 0.0005f;
+}
+
+// true = the sliders equal what the textures were baked with: the preview shows the textures as they are
+bool R_PbrSidecarGlobalIsIdentity( void ) {
+	RB_RHI_ParsePbrGlobal();
+	for ( int c = 0; c < 3; c++ ) {
+		for ( int i = 0; i < 3; i++ ) {
+			if ( !RB_RHI_PbrNear( rbPbrGlobal[c][i], rbPbrBaked[c][i] ) ) {
+				return false;
+			}
+		}
+	}
+	return true;
+}
+
+// the sliders as the next bake's settings: pbr/pbr_sidecar_adjust.cfg in fs_savepath, which
+// tools/pbr_extract_maps.py reads as the defaults of --ao-adjust / --rough-adjust / --metal-adjust
+bool R_PbrSidecarSaveBakeSettings( idStr &written ) {
+	RB_RHI_ParsePbrGlobal();
+	idStr text = "// DUDE PBR sidecar channel adjust for the next bake (tools/pbr_extract_maps.py defaults), written by\n"
+	             "// the PBR editor's All sidecars tab: <channel> <brightness> <contrast> <gamma>\n";
+	for ( int c = 0; c < 3; c++ ) {
+		text += va( "%s %.3f %.3f %.3f\n", rbPbrChanKeys[c], rbPbrGlobal[c][0], rbPbrGlobal[c][1], rbPbrGlobal[c][2] );
+	}
+	written = "pbr/pbr_sidecar_adjust.cfg";
+	return fileSystem->WriteFile( written.c_str(), text.c_str(), text.Length() ) >= 0;
+}
+
+// every sidecar draw: the global adjust (identity when off); plus the editor's edit when it uses the sidecar under edit
 static void RB_RHI_FillOrmAdjust( rhi::RenderParams &parms, const idImage *pbrMap ) {
-	if ( pbrMap == NULL || pbrMap != rPbrSidecarAdjust.img ) {
+	if ( pbrMap == NULL ) {
+		return;
+	}
+	RB_RHI_ParsePbrGlobal();
+	for ( int c = 0; c < 3; c++ ) {
+		for ( int i = 0; i < 3; i++ ) {
+			parms.ormGlobal[i][c] = rbPbrGlobal[c][i];
+			parms.ormBaked[i][c] = rbPbrBaked[c][i];
+		}
+	}
+	if ( pbrMap != rPbrSidecarAdjust.img ) {
 		return;
 	}
 	parms.ormParms[2] = 1.0f;

@@ -89,11 +89,12 @@ so every channel is an estimate:
 | channel | made from | how far to trust it |
 |---|---|---|
 | Roughness | the specular map, inverted (brighter specular = smoother) | a fair start |
-| Metalness | the specular map's grey, copied as is (`--metal-source spec`) and capped at 0.2 (`--metal-cap`; full specular grey looks far too metallic in game). Doom 3 is mostly metal and painted metal, and id painted bare steel bright, paint darker. Raise single textures by hand where the surface really is bare metal. `--metal-source mask` makes a near-binary mask instead (bright specular on a colourless diffuse) | fine for Doom 3's metal and painted-metal surfaces; glossy non-metals still need the class or name checks below |
+| Metalness | the specular map's grey (`--metal-source spec`), scaled so its average is the material's PBR table metalness (`--metal-anchor table`: hollowmetal 0.38, solidmetal 0.50...), so the class level tuned in game stays and the specular map supplies the variation: bare steel above, paint and grime below. Doom 3 is mostly metal and painted metal, and id painted bare steel bright, paint darker. `--metal-anchor none --metal-cap 0.2` gives the earlier look (raw grey, capped). `--metal-source mask` makes a near-binary mask instead (bright specular on a colourless diffuse) | fine for Doom 3's metal and painted-metal surfaces; glossy non-metals still need the class or name checks below |
 | AO | horizon-based AO of the surface (normal map turned into heights, plus the material's height map), wrapping around as if the tile sat among its 3x3 neighbours | good on tiling world textures; model atlases and non-tiling textures (doors) can shade their borders |
 
-Roughness is re-centred on the material's current table value (`--rough-anchor table`), so
-the look tuned in game stays and the specular map only adds variation around it. Ceramic-class
+Roughness and metalness both keep the material's current table value as their average
+(`--rough-anchor table`, `--metal-anchor table`), so the look tuned in game stays and the
+specular map only adds variation around it. Ceramic-class
 materials are then made 2.4 times smoother (`--class-shine ceramic=2.4`, picked in game:
 glazed tile reads too dull otherwise); repeat the flag for other classes, `ceramic=1` turns it
 off. Materials that share a diffuse share a sidecar, so the class of the first one baked wins.
@@ -160,7 +161,17 @@ What you get in `pbr_out`:
   review a batch quickly.
 
 After fixing a map, repack it with `tools/pbr_pack_orm.py` (single mode, `--rough`, `--metal`,
-`--ao`). Materials whose diffuse image is missing from the game data (leftovers in id's own
+`--ao`). Final per-channel corrections for every texture: brightness, contrast and gamma for AO,
+roughness and metalness. Tune them in game in the PBR editor's **All sidecars** tab, which shows
+every sidecar live with the sliders applied *relative to what the textures were baked with*:
+sliders equal to the last bake show the textures as they are. **Save for next bake** writes the
+sliders to `pbr/pbr_sidecar_adjust.cfg`; the extractor uses that file as its defaults, and the
+bake records what it used in the pack as `pbr/pbr_sidecar_baked.cfg`. After the re-bake the
+sliders start where you left them, now matching the textures. `--ao-adjust`, `--rough-adjust`
+and `--metal-adjust` (BRIGHTNESS CONTRAST GAMMA) override the file. Re-bake every pack with the
+same settings: the game reads the record from the last-loaded pack.
+
+Materials whose diffuse image is missing from the game data (leftovers in id's own
 material files) or shared with another material are skipped and counted at the end; `-v`
 lists them. The derivation thresholds are all flags; `--help` lists them.
 
@@ -180,6 +191,15 @@ sidecars win: a loose `_orm` or `_rmao` file already in a game folder's `texture
 and PBR table versions, so you can tell what made it. The work folder
 (`build/pbr-sidecars/<name>`, or `-o`) keeps the editable `_maps/` and the log. Options after
 `--` go to the extractor; `-h` lists the rest.
+
+### The ready-made packs
+
+DUDE's own sidecar packs, the optional downloads, are made with `tools/pack_pbr_sidecars_d3.sh vN`.
+It bakes every level and md5 model of each game with the settings in `pbr/pbr_sidecar_adjust.cfg`
+and writes one pack per game to `dist/d3-pbr-sidecars/`: `z_pbr_sidecars.pk4` for `base/`,
+`z_pbr_sidecars_roe.pk4` for `d3xp/` and `z_pbr_sidecars_lm.pk4` for `d3le/`. Each game gets its
+own pack in its own folder because Resurrection of Evil and The Lost Mission redefine some of
+Doom 3's materials. Give it the games to re-bake (`base`, `roe`, `lm`); it packs all three either way.
 
 ## Installing and checking
 
