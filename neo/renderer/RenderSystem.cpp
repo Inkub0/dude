@@ -1205,6 +1205,12 @@ bool idRenderSystemLocal::UploadImage( const char *imageName, const byte *data, 
 		return false;
 	}
 	image->UploadScratch( data, width, height );
-	image->SetImageFilterAndRepeat();
+	// DUDE: on Vulkan, UploadScratch builds the texture through the RHI with its sampler state already
+	// set and returns. SetImageFilterAndRepeat is raw GL (qglTexParameterf), whose pointers are NULL on
+	// that backend. MP clients reach this on every snapshot through the lagometer (net_clientLagOMeter,
+	// default 1, idGameLocal::ClientReadSnapshot), so it called through NULL on the first snapshot.
+	if ( !( glConfig.rhiBackend && rhi::GetActiveBackendType() == rhi::BT_VULKAN ) ) {
+		image->SetImageFilterAndRepeat();
+	}
 	return true;
 }
