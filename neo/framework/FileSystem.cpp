@@ -2901,8 +2901,15 @@ fsPureReply_t idFileSystemLocal::SetPureServerChecksums( const int pureChecksums
 	// pure gate hides that content, the decl checksum recomputes to the server's vanilla
 	// value, and the second pure negotiation returns PURE_OK. Only affects pure/MP mode;
 	// single-player is untouched. Disable with fs_mpVanillaData 0.
-	if ( success && !wasPureLocked && fs_mpVanillaData.GetBool() && HasClientOnlyContent() ) {
-		common->Printf( "pure: client-only content present - forcing a pure restart to present vanilla data to the server\n" );
+	common->Printf( "pure gate: success=%d wasPureLocked=%d fs_mpVanillaData=%d hasClientOnly=%d loadedFileFromDir=%d serverPaks=%d\n",
+		(int)success, (int)wasPureLocked, (int)fs_mpVanillaData.GetBool(), (int)HasClientOnlyContent(), (int)loadedFileFromDir, serverPaks.Num() );
+	// A DUDE build always carries client-only enhancement content, and the
+	// HasClientOnlyContent() heuristic proved unreliable (it did not fire on a real
+	// connect), so force the restart on the first pure lock whenever the feature is on.
+	// wasPureLocked ( serverPaks already populated after the restart ) still limits this
+	// to exactly one restart, so it cannot loop.
+	if ( success && !wasPureLocked && fs_mpVanillaData.GetBool() ) {
+		common->Printf( "pure: forcing a pure restart to present vanilla data to the server\n" );
 		success = false;
 	}
 
