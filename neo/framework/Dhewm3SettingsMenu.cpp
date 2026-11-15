@@ -7574,6 +7574,82 @@ static float pbrEditMetal = 0.0f, pbrEditRough = 0.58f, pbrEditWet = 1.0f, pbrEd
 static idStr pbrEditTexFile;					// Phase D sidecar texture found for it ("" = none), probed at pick
 static int   pbrEditTexLayout = PBR_MAP_NONE;
 
+// "All sidecars" tab: brightness / contrast / gamma per channel for every sidecar (r_pbrSidecarAO / Rough / Metal),
+// previewed live RELATIVE to what the textures were baked with (pbr/pbr_sidecar_baked.cfg); "Save for next bake"
+// writes them to pbr/pbr_sidecar_adjust.cfg, the baker's defaults, so they are the starting point after a re-bake
+static void PbrEditor_DrawGlobalTab()
+{
+	static idStr status;
+	ImGui::TextWrapped( "Brightness, contrast and gamma for every sidecar texture at once, live (a per-texture edit in "
+		"the Material tab applies on top). The sliders are the baker's settings: equal to the last bake, you see the "
+		"textures as baked; moved, you see what a re-bake with them would give. Save them for the next bake, then "
+		"re-bake (tools/bake_pbr_sidecars.sh, with the game closed)." );
+	static const char *chanNames[3] = { "Ambient occlusion", "Roughness", "Metalness" };
+	idCVar *cvars[3] = { &r_pbrSidecarAO, &r_pbrSidecarRough, &r_pbrSidecarMetal };
+	for ( int c = 0; c < 3; c++ ) {
+		float b, k, g, bb, bk, bg;
+		R_PbrSidecarGlobal( c, b, k, g );
+		R_PbrSidecarBaked( c, bb, bk, bg );
+		ImGui::PushID( 100 + c );
+		ImGui::SeparatorText( chanNames[c] );
+		bool changed = ImGui::SliderFloat( "Brightness", &b, -1.0f, 1.0f, "%+.2f" );
+		ImGui::SetItemTooltip( "Adds to every texel (after contrast). 0 = unchanged." );
+		changed |= ImGui::SliderFloat( "Contrast", &k, 0.0f, 4.0f, "%.2f" );
+		ImGui::SetItemTooltip( "Spreads values away from (above 1) or towards (below 1) mid grey. 1 = unchanged." );
+		changed |= ImGui::SliderFloat( "Gamma", &g, 0.2f, 5.0f, "%.2f", ImGuiSliderFlags_Logarithmic );
+		ImGui::SetItemTooltip( "Above 1 lifts the darker values, below 1 pushes them down; black and white stay. 1 = unchanged." );
+		ImGui::TextDisabled( "last bake: %+.2f / %.2f / %.2f", bb, bk, bg );
+		if ( changed ) {
+			cvars[c]->SetString( va( "%.3f %.3f %.3f", b, k, g ) );
+			status.Clear();
+		}
+		ImGui::PopID();
+	}
+	ImGui::Separator();
+	if ( ImGui::Button( "Back to last bake" ) ) {
+		for ( int c = 0; c < 3; c++ ) {
+			float bb, bk, bg;
+			R_PbrSidecarBaked( c, bb, bk, bg );
+			cvars[c]->SetString( va( "%.3f %.3f %.3f", bb, bk, bg ) );
+		}
+		status.Clear();
+	}
+	ImGui::SetItemTooltip( "The sliders back to what the textures were baked with: the textures as they are." );
+	ImGui::SameLine();
+	if ( ImGui::Button( "Neutral" ) ) {
+		for ( int c = 0; c < 3; c++ ) {
+			cvars[c]->SetString( "0 1 1" );
+		}
+		status.Clear();
+	}
+	ImGui::SetItemTooltip( "0 / 1 / 1 on every channel: the baker's own output, without any channel adjust." );
+	ImGui::SameLine();
+	if ( ImGui::Button( "Save for next bake" ) ) {
+		idStr written;
+		status = R_PbrSidecarSaveBakeSettings( written )
+			? va( "Saved %s: the next bake uses these values.", written.c_str() )
+			: idStr( "Could not write pbr/pbr_sidecar_adjust.cfg." );
+	}
+	ImGui::SetItemTooltip( "Writes these values to pbr/pbr_sidecar_adjust.cfg in your save folder. The baker "
+		"(tools/pbr_extract_maps.py) reads it as its defaults, and the sliders start from it next time." );
+	if ( status.Length() ) {
+		ImGui::TextColored( ImVec4( 0.45f, 1.0f, 0.55f, 1.0f ), "%s", status.c_str() );
+	}
+	// the same values as command-line flags (override the file)
+	static const char *flags[3] = { "--ao-adjust", "--rough-adjust", "--metal-adjust" };
+	idStr line;
+	for ( int c = 0; c < 3; c++ ) {
+		float b, k, g;
+		R_PbrSidecarGlobal( c, b, k, g );
+		line += va( "%s%s %.3f %.3f %.3f", line.Length() ? " " : "", flags[c], b, k, g );
+	}
+	if ( ImGui::SmallButton( "Copy as baker flags" ) ) {
+		ImGui::SetClipboardText( line.c_str() );
+		common->Printf( "PBR sidecar baker flags: %s\n", line.c_str() );
+	}
+	ImGui::SetItemTooltip( "%s", line.c_str() );
+}
+
 static idStr pbrEditTexStatus;					// last "Save to texture" result line
 static bool  pbrEditTexStatusOk = false;
 
@@ -7610,6 +7686,10 @@ static void PbrEditor_DrawChannelEdit()
 		R_PbrSidecarAdjustReset();
 	}
 	ImGui::SameLine();
+	// the saved texture holds only this edit; with the global adjust also on, the preview shows both, so what is
+	// written would not match what is seen (and would be adjusted twice once the global values are baked)
+	const bool globalOn = !R_PbrSidecarGlobalIsIdentity();
+	ImGui::BeginDisabled( globalOn );
 	if ( ImGui::Button( "Save to texture" ) ) {
 		idStr written, error;
 		pbrEditTexStatusOk = R_PbrSaveSidecarEdit( pbrEditMat, written, error );
@@ -7618,6 +7698,11 @@ static void PbrEditor_DrawChannelEdit()
 		if ( pbrEditTexStatusOk ) {
 			R_PbrTextureMapInfo( pbrEditMat, pbrEditTexFile, pbrEditTexLayout );	// now the loose .tga
 		}
+	}
+	ImGui::EndDisabled();
+	if ( globalOn ) {
+		ImGui::SetItemTooltip( "Set the All sidecars tab back to the last bake first: what you see includes its change, the "
+			"saved texture would not." );
 	}
 	ImGui::EndDisabled();
 	ImGui::SetItemTooltip( "Writes the edited channels into <name>.tga in your save folder (fs_savepath), next to "
@@ -7849,6 +7934,10 @@ void Com_DrawPbrMaterialEditor()
 			}
 			if ( ImGui::BeginTabItem( "Categories" ) ) {
 				PbrEditor_DrawCategoriesTab();
+				ImGui::EndTabItem();
+			}
+			if ( ImGui::BeginTabItem( "All sidecars" ) ) {
+				PbrEditor_DrawGlobalTab();
 				ImGui::EndTabItem();
 			}
 			ImGui::EndTabBar();

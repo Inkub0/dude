@@ -104,6 +104,16 @@ the packs are not rebuilt or re-uploaded per version.
 and the website's download buttons (`releases/latest/download/...`, section 4) would then
 point at the AO release, which has no DUDE archives.
 
+**PBR sidecar packs (optional):** the same model as the baked AO, on their own `vN`
+axis, re-published when the baker or its channel adjust changes. Built by
+`tools/pack_pbr_sidecars_d3.sh vN` into `dist/d3-pbr-sidecars/`, one drop-in `.pk4` per game with a
+`BUILDINFO.txt` inside and a `.sha256` next to it: `z_pbr_sidecars.pk4` into `base/`,
+`z_pbr_sidecars_roe.pk4` into `d3xp/`, `z_pbr_sidecars_lm.pk4` into `d3le/`. Unlike the AO they are
+not merged into `base/`: RoE and LM redefine some Doom 3 materials, and a sidecar is named after its
+diffuse. The LM pack is the only thing that creates `d3le/`, and only players with The Lost
+Mission download it. Never in the repo or the platform archives; create the release with
+`--latest=false` too.
+
 ### zz_dude_menu.pk4 — rebuild from the repo every release
 
 The DUDE main menu + high-res logo. Users get it merged into their `base/`:

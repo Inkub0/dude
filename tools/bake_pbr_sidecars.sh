@@ -3,13 +3,17 @@
 # into one .pk4, reproducibly: same game data + same tools = same pack.
 #
 #   1. tools/pbr_extract_maps.py derives a <diffuse>_orm.tga for every material the levels draw,
-#      with its current defaults (stock maps only, metal = specular grey capped at 0.2, roughness
-#      anchored to the PBR table, ceramic x2.4 shinier). md5 models take their AO from the engine's
+#      with its current defaults (stock maps only, roughness and metalness anchored to the PBR
+#      table's values with the specular map's variation, ceramic x2.4 shinier). md5 models take their AO from the engine's
 #      own AO baker (generated/aomaps/, bakeAO) where it exists; other characters get none.
 #   2. Hand-made sidecars win: any loose <name>_orm.* / <name>_rmao.* already under a --search
 #      folder's textures/ or models/ is left out of the pack, so the hand-made file is the one used.
 #   3. Everything goes into <name>.pk4 with a bake-info.txt (the command, tool versions, git
-#      revision) and is copied to every --install folder.
+#      revision) and pbr/pbr_sidecar_baked.cfg (the channel adjust used: the PBR editor's All sidecars
+#      settings saved in pbr/pbr_sidecar_adjust.cfg, or --*-adjust), and is copied to every -i folder - but not while the game runs: it indexes every
+#      .pk4 at startup, and a pack replaced under it makes its next read of that pack fail
+#      (Sys_Error "Couldn't get file info"). Quit the game first, or install later with the
+#      printed commands; --force installs anyway.
 #
 # Usage:  tools/bake_pbr_sidecars.sh [options] [-- extra pbr_extract_maps.py options]
 #   -m MAP        level to bake (e.g. game/mars_city1); repeat for more
@@ -21,6 +25,7 @@
 #   -n NAME       pack name without .pk4. Default: z_pbr_<level> for one level, else z_pbr_sidecars
 #   -o DIR        work folder (wiped first). Default: build/pbr-sidecars/<NAME>
 #   -i DIR        copy the pack into DIR; repeat (e.g. -i base -i ~/.local/share/dude/base)
+#   --force       install even though the game is running (it must be restarted afterwards)
 #   --keep-character-ao   derive AO from the normal maps for models/characters/* that have no
 #                 baked AO (by default they get none: atlas borders shade badly)
 #   -h            this help
@@ -32,14 +37,14 @@
 #   tools/bake_pbr_sidecars.sh -s /path/to/quake4/q4base -m game/airdefense1 -- --layout rmao
 #
 # The work folder keeps _maps/ (editable greyscale maps + previews) and bake.log. Remove an
-# installed pack to undo it; a running game needs a map reload (or reloadPbrTable) to see changes.
+# installed pack to undo it (with the game closed). Start the game after installing.
 set -euo pipefail
 DUDE="$(cd "$(dirname "$0")/.." && pwd)"
 TOOL="$DUDE/tools/pbr_extract_maps.py"
 
 usage() { sed -n '2,/^set -euo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
-MAPS=() MD5=() MATCH=() SEARCH=() INSTALL=() NAME="" WORK="" CHAR_AO=0
+MAPS=() MD5=() MATCH=() SEARCH=() INSTALL=() NAME="" WORK="" CHAR_AO=0 FORCE=0
 while [ $# -gt 0 ]; do
 	case "$1" in
 		-m) MAPS+=("$2"); shift 2 ;;
@@ -50,6 +55,7 @@ while [ $# -gt 0 ]; do
 		-o) WORK="$2"; shift 2 ;;
 		-i) INSTALL+=("$2"); shift 2 ;;
 		--keep-character-ao) CHAR_AO=1; shift ;;
+		--force) FORCE=1; shift ;;
 		-h|--help) usage 0 ;;
 		--) shift; break ;;
 		*) echo "unknown option: $1 (-h for help)" >&2; exit 2 ;;
@@ -121,12 +127,23 @@ LIST="$WORK/pack-files.txt"
 	echo "files:    $(wc -l < "$LIST") sidecars ($(wc -l < "$HAND") hand-made stems excluded)"
 } > "$WORK/out/bake-info.txt"
 echo "bake-info.txt" >> "$LIST"
+# what the channel adjust was (pbr/pbr_sidecar_adjust.cfg or --*-adjust): the engine's All sidecars sliders preview
+# relative to it. Re-bake every pack with the same settings: the game reads this file from the last-loaded pack.
+[ -f "$WORK/out/pbr/pbr_sidecar_baked.cfg" ] && echo "pbr/pbr_sidecar_baked.cfg" >> "$LIST"
 
 PK4="$WORK/$NAME.pk4"
 rm -f "$PK4"
 ( cd "$WORK/out" && zip -q -9 -X "$PK4" -@ < "$LIST" )
 echo "packed $(($(wc -l < "$LIST") - 1)) sidecars: $PK4 ($(du -h "$PK4" | cut -f1))"
 
+[ ${#INSTALL[@]} -gt 0 ] || exit 0
+# a running game has every .pk4 indexed; replacing one under it crashes its next read of the pack
+if [ "$FORCE" = 0 ] && pgrep -x dude >/dev/null 2>&1; then
+	echo "NOT installed: the game is running (pid $(pgrep -x dude | tr '\n' ' ' | sed 's/ $//')); a pack replaced under it" >&2
+	echo "crashes its next read of that pack. Quit the game, then run:" >&2
+	for d in "${INSTALL[@]}"; do printf '  cp %q %q/\n' "$PK4" "$d" >&2; done
+	exit 3
+fi
 for d in "${INSTALL[@]}"; do
 	mkdir -p "$d"
 	cp "$PK4" "$d/" && echo "installed: $d/$NAME.pk4"
