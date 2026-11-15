@@ -113,7 +113,7 @@ extern idCVar r_brightness;
 // game-driven strength: 1 while berserk is active, ramps 1->0 over the 2s wind-down after it
 // ends (PlayerView.cpp writes it, this backend reads it as both the intercept trigger and the
 // wind-down fade). Not a user knob — the game<->renderer bridge that drives the effect.
-idCVar r_berserkFade( "r_berserkFade", "0", CVAR_RENDERER | CVAR_FLOAT,
+idCVar r_berserkFade( "r_berserkFade", "0", CVAR_RENDERER | CVAR_FLOAT | CVAR_NOCHEAT,	// NOCHEAT: game-written; MP refuses cheat cvars
 	"berserk vision effect strength (set by the game: 1 active, fading to 0 as berserk ends)" );
 
 // DUDE: brightness scale for cube-map ("sheen") reflections on glass etc.
