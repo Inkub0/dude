@@ -1642,15 +1642,24 @@ void idAsyncClient::SetupConnection( void ) {
 		return;
 	}
 
+	// only log once per state transition, not on every resend - avoids spamming
+	// the console while the client waits for the server to accept the connect
+	static int lastConnectLogState = -1;
+	const bool firstSendInState = ( lastConnectLogState != clientState );
+
 	if ( clientState == CS_CHALLENGING ) {
-		common->Printf( "sending challenge to %s\n", Sys_NetAdrToString( serverAddress ) );
+		if ( firstSendInState ) {
+			common->Printf( "sending challenge to %s\n", Sys_NetAdrToString( serverAddress ) );
+		}
 		msg.Init( msgBuf, sizeof( msgBuf ) );
 		msg.WriteShort( CONNECTIONLESS_MESSAGE_ID );
 		msg.WriteString( "challenge" );
 		msg.WriteInt( clientId );
 		clientPort.SendPacket( serverAddress, msg.GetData(), msg.GetSize() );
 	} else if ( clientState == CS_CONNECTING ) {
-		common->Printf( "sending connect to %s with challenge 0x%x\n", Sys_NetAdrToString( serverAddress ), serverChallenge );
+		if ( firstSendInState ) {
+			common->Printf( "sending connect to %s with challenge 0x%x\n", Sys_NetAdrToString( serverAddress ), serverChallenge );
+		}
 		msg.Init( msgBuf, sizeof( msgBuf ) );
 		msg.WriteShort( CONNECTIONLESS_MESSAGE_ID );
 		msg.WriteString( "connect" );
@@ -1687,15 +1696,15 @@ void idAsyncClient::SetupConnection( void ) {
 			clientPort.SendPacket( idAsyncNetwork::GetMasterAddress(), msg.GetData(), msg.GetSize() );
 		}
 #else
-		if (! Sys_IsLANAddress( serverAddress ) ) {
-			common->Printf( "Build Does not have CD Key Enforcement enabled. The Server ( %s ) is not within the lan addresses. Attemting to connect.\n", Sys_NetAdrToString( serverAddress ) );
-		}
-		common->Printf( "Not Testing key.\n" );
+		// no CD-key enforcement in this build, so there is no auth packet to send.
+		// (The old per-resend "CD Key Enforcement" / "Not Testing key" notices were
+		// pure console spam while connecting.)
 #endif
 	} else {
 		return;
 	}
 
+	lastConnectLogState = clientState;
 	lastConnectTime = clientTime;
 }
 
