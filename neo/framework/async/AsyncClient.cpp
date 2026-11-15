@@ -91,6 +91,8 @@ void idAsyncClient::Clear( void ) {
 	memset( dlChecksums, 0, sizeof( int ) * MAX_PURE_PAKS );
 	currentDlSize = 0;
 	totalDlSize = 0;
+
+	pureWaitBoxShown = false;
 }
 
 /*
@@ -206,6 +208,12 @@ void idAsyncClient::ConnectToServer( const netadr_t adr ) {
 
 	// calculate a checksum on some of the essential data used
 	clientDataChecksum = declManager->GetChecksum();
+
+	// DUDE: log the decl checksum we will present. On a pure server this must match the
+	// server's stock value or we are rejected with "data not in sync". If the client holds
+	// non-vanilla content, the first value seen here is non-vanilla; after the pure restart
+	// ( fs_mpVanillaData ) a second line shows the recomputed vanilla value.
+	common->Printf( "client: presenting decl checksum 0x%x\n", clientDataChecksum );
 
 	// start challenging the server
 	clientState = CS_CHALLENGING;
@@ -778,10 +786,18 @@ void idAsyncClient::ProcessUnreliableServerMessage( const idBitMsg &msg ) {
 			//cvarSystem->SetCVarBool( "ui_chat", false );
 
 			if ( pureWait ) {
-				guiNetMenu = uiManager->FindGui( "guis/netmenu.gui", true, false, true );
-				session->SetGUI( guiNetMenu, HandleGuiCommand );
-				session->MessageBox( MSG_ABORT, common->GetLanguageDict()->GetString ( "#str_04317" ), common->GetLanguageDict()->GetString ( "#str_04318" ), false, "pure_abort" );
+				// DUDE: GAMEINIT is unreliable and resent every network frame while the
+				// server waits on pure verification. Only raise the abort dialog on the
+				// first one - re-creating the modal box each frame swallows the Cancel
+				// click and makes it look like Cancel does nothing.
+				if ( !pureWaitBoxShown ) {
+					pureWaitBoxShown = true;
+					guiNetMenu = uiManager->FindGui( "guis/netmenu.gui", true, false, true );
+					session->SetGUI( guiNetMenu, HandleGuiCommand );
+					session->MessageBox( MSG_ABORT, common->GetLanguageDict()->GetString ( "#str_04317" ), common->GetLanguageDict()->GetString ( "#str_04318" ), false, "pure_abort" );
+				}
 			} else {
+				pureWaitBoxShown = false;
 				// load map
 				session->SetGUI( NULL, NULL );
 				sessLocal.ExecuteMapChange();
@@ -1402,6 +1418,7 @@ bool idAsyncClient::ValidatePureServerChecksums( const netadr_t from, const idBi
 	switch ( reply ) {
 		case PURE_RESTART:
 			// need to restart the filesystem with a different pure configuration
+			common->Printf( "client: pure restart requested, reloading with the server's pak set\n" );
 			cmdSystem->BufferCommandText( CMD_EXEC_NOW, "disconnect" );
 			// restart with the right FS configuration and get back to the server
 			clientState = CS_PURERESTART;

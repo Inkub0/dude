@@ -162,6 +162,11 @@ private:
 
 	idUserInterface *	guiNetMenu;
 
+	// DUDE: the pure-wait abort dialog is driven from the unreliable GAMEINIT message,
+	// which the server resends every network frame; re-running SetGUI + MessageBox each
+	// time re-creates the modal box and swallows the user's Cancel click. Show it once.
+	bool				pureWaitBoxShown;
+
 	clientUpdateState_t updateState;
 	int					updateSentTime;
 	idStr				updateMSG;
