@@ -31,7 +31,7 @@ static idCVar com_modRegistryUrl( "com_modRegistryUrl",
 	CVAR_SYSTEM,
 	"HTTPS URL of the mod auto-download registry; empty uses only the engine's baked-in copy" );
 
-bool ModDownload_Confirm( const modRegistryMod_t &mod, const modRegistryAsset_t &asset ) {
+bool ModDownload_Confirm( const modRegistryMod_t &mod, const modRegistryAsset_t &asset, bool replacing ) {
 	// no display (e.g. dedicated server): cannot ask, so treat as declined
 	if ( !SDL_WasInit( SDL_INIT_VIDEO ) ) {
 		return false;
@@ -43,14 +43,17 @@ bool ModDownload_Confirm( const modRegistryMod_t &mod, const modRegistryAsset_t 
 		dataNote = va( "You still need the mod's own game data:\n%s\n\n", mod.needsData.c_str() );
 	}
 
-	const idStr caption = va( "Download %s?", mod.name.c_str() );
+	const idStr caption = va( replacing ? "Update %s?" : "Download %s?", mod.name.c_str() );
 	const idStr text = va(
-		"The game library for this mod is not installed.\n\n"
+		"%s\n\n"
 		"Source: github.com/%s (%s)\n"
 		"File: %s\n"
 		"Licence: %s\n\n"
 		"%s"
 		"Download it now from the official release? It will be verified against a known checksum before use.",
+		replacing ? "The installed game library for this mod is not the one DUDE's mod registry pins "
+			"(an older release, or a build DUDE cannot load: dhewm3's Windows mod DLLs are 32-bit)."
+			: "The game library for this mod is not installed.",
 		mod.repo.c_str(), mod.release.c_str(),
 		asset.url.c_str(),
 		licence,
@@ -58,7 +61,7 @@ bool ModDownload_Confirm( const modRegistryMod_t &mod, const modRegistryAsset_t 
 
 	enum { CHOICE_CANCEL, CHOICE_DOWNLOAD };
 	SDL_MessageBoxButtonData buttons[2];
-	const SDL_MessageBoxButtonData dl = { SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT, CHOICE_DOWNLOAD, "Download" };
+	const SDL_MessageBoxButtonData dl = { SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT, CHOICE_DOWNLOAD, replacing ? "Update" : "Download" };
 	const SDL_MessageBoxButtonData cancel = { SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT, CHOICE_CANCEL, "Cancel" };
 	buttons[0] = dl;
 	buttons[1] = cancel;
@@ -130,7 +133,7 @@ static bool MD_ReadTextFile( const char *path, idStr &out ) {
 // with the engine's baked-in one: a mod listed in both takes the hosted entry
 // (a newer release), and a mod only the baked-in list has is still offered, so
 // a hosted copy older than this build cannot hide it.
-static void MD_ResolveRegistry( idModRegistry &reg ) {
+static void MD_ResolveRegistryUncached( idModRegistry &reg ) {
 	idModRegistry baked;
 	idStr err;
 	if ( !baked.ParseString( idModRegistry::DefaultRegistryText(), "mod-registry(baked)", &err ) ) {
@@ -158,45 +161,32 @@ static void MD_ResolveRegistry( idModRegistry &reg ) {
 	reg = baked;
 }
 
-bool ModDownload_EnsureLibrary( const char *fsGame ) {
-	if ( fsGame == NULL || fsGame[0] == '\0' ) {
-		return false;
+// The registry resolved once per session: the loader asks again on every
+// reloadEngine / mod switch, and the hosted copy is an HTTPS fetch.
+static const idModRegistry &MD_Registry( void ) {
+	static idModRegistry reg;
+	static bool resolved = false;
+	if ( !resolved ) {
+		MD_ResolveRegistryUncached( reg );
+		resolved = true;
 	}
-	if ( com_allowModDownload.GetInteger() == 0 ) {
-		return false;	// feature disabled by the user
-	}
+	return reg;
+}
 
-	idModRegistry reg;
-	MD_ResolveRegistry( reg );
-
-	const modRegistryMod_t *mod = reg.FindMod( fsGame );
-	if ( mod == NULL ) {
-		// not a known downloadable mod; leave it to the caller (it falls back to
-		// fs_game_base's or the base game's library)
-		common->Printf( "mod registry: no downloadable library listed for '%s'\n", fsGame );
-		return false;
-	}
-
-	const char *platform = idModRegistry::CurrentPlatformKey();
-	const modRegistryAsset_t *asset = mod->FindAsset( platform );
-	if ( asset == NULL ) {
-		common->Warning( "%s has no downloadable library for this platform (%s); get it from github.com/%s",
-			mod->name.c_str(), platform, mod->repo.c_str() );
-		return false;
-	}
-
-	if ( !ModDownload_Confirm( *mod, *asset ) ) {
-		common->Printf( "%s library download declined\n", mod->name.c_str() );
-		return false;
-	}
-
-	// place it where the loader looks: <fs_savepath>/<fsGame>/<fsGame><libsuffix>
-	const idStr dir = idStr( cvarSystem->GetCVarString( "fs_savepath" ) ) + "/" + fsGame;
-	Sys_Mkdir( dir.c_str() );
-
+// Where the downloader keeps a mod's library: <fs_savepath>/<fsGame>/<lib>,
+// which the loader searches before fs_basepath.
+static idStr MD_LibraryPath( const char *fsGame ) {
 	char libName[MAX_OSPATH];
 	sys->DLL_GetFileName( fsGame, libName, sizeof( libName ) );
-	const idStr finalPath = dir + "/" + libName;
+	return idStr( cvarSystem->GetCVarString( "fs_savepath" ) ) + "/" + fsGame + "/" + libName;
+}
+
+// Download asset, verify it against its pinned SHA-256 and move it to
+// MD_LibraryPath( fsGame ) (replacing what is there), with a licence note.
+static bool MD_Install( const char *fsGame, const modRegistryMod_t *mod, const modRegistryAsset_t *asset ) {
+	const idStr dir = idStr( cvarSystem->GetCVarString( "fs_savepath" ) ) + "/" + fsGame;
+	Sys_Mkdir( dir.c_str() );
+	const idStr finalPath = MD_LibraryPath( fsGame );
 	const idStr partPath = finalPath + ".part";
 
 	common->Printf( "downloading %s from %s ...\n", mod->name.c_str(), asset->url.c_str() );
@@ -233,4 +223,82 @@ bool ModDownload_EnsureLibrary( const char *fsGame ) {
 
 	common->Printf( "%s library installed and verified at %s\n", mod->name.c_str(), finalPath.c_str() );
 	return true;
+}
+
+// The registry entry and this platform's asset for fsGame, or false (logged)
+// when the mod is not listed or has no library for this platform.
+static bool MD_FindAsset( const char *fsGame, const modRegistryMod_t *&mod, const modRegistryAsset_t *&asset ) {
+	mod = MD_Registry().FindMod( fsGame );
+	if ( mod == NULL ) {
+		// not a known downloadable mod; leave it to the caller (it falls back to
+		// fs_game_base's or the base game's library)
+		common->Printf( "mod registry: no downloadable library listed for '%s'\n", fsGame );
+		return false;
+	}
+	const char *platform = idModRegistry::CurrentPlatformKey();
+	asset = mod->FindAsset( platform );
+	if ( asset == NULL ) {
+		common->Warning( "%s has no downloadable library for this platform (%s); get it from github.com/%s",
+			mod->name.c_str(), platform, mod->repo.c_str() );
+		return false;
+	}
+	return true;
+}
+
+bool ModDownload_IsRegistryMod( const char *fsGame ) {
+	return fsGame != NULL && fsGame[0] != '\0' && com_allowModDownload.GetInteger() != 0
+		&& MD_Registry().FindMod( fsGame ) != NULL;
+}
+
+bool ModDownload_RegistryLibrary( const char *fsGame, idStr &pathOut ) {
+	if ( fsGame == NULL || fsGame[0] == '\0' || com_allowModDownload.GetInteger() == 0 ) {
+		return false;
+	}
+	// a mod the registry does not list keeps the normal search, without a log line
+	if ( MD_Registry().FindMod( fsGame ) == NULL ) {
+		return false;
+	}
+	const modRegistryMod_t *mod;
+	const modRegistryAsset_t *asset;
+	if ( !MD_FindAsset( fsGame, mod, asset ) ) {
+		return false;
+	}
+
+	const idStr path = MD_LibraryPath( fsGame );
+	idStr hash;
+	const bool present = MD_HashFile( path.c_str(), hash );
+	if ( present && hash.Icmp( asset->sha256.c_str() ) == 0 ) {
+		pathOut = path;		// already the pinned library
+		return true;
+	}
+
+	if ( !ModDownload_Confirm( *mod, *asset, present ) ) {
+		common->Printf( "%s library %s declined\n", mod->name.c_str(), present ? "update" : "download" );
+		return false;
+	}
+	if ( !MD_Install( fsGame, mod, asset ) ) {
+		return false;
+	}
+	pathOut = path;
+	return true;
+}
+
+bool ModDownload_EnsureLibrary( const char *fsGame ) {
+	if ( fsGame == NULL || fsGame[0] == '\0' ) {
+		return false;
+	}
+	if ( com_allowModDownload.GetInteger() == 0 ) {
+		return false;	// feature disabled by the user
+	}
+
+	const modRegistryMod_t *mod;
+	const modRegistryAsset_t *asset;
+	if ( !MD_FindAsset( fsGame, mod, asset ) ) {
+		return false;
+	}
+	if ( !ModDownload_Confirm( *mod, *asset, false ) ) {
+		common->Printf( "%s library download declined\n", mod->name.c_str() );
+		return false;
+	}
+	return MD_Install( fsGame, mod, asset );
 }

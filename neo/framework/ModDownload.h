@@ -27,7 +27,9 @@ extern idCVar com_allowModDownload;
 // naming the mod, its source release and licence, and the game data the user
 // must still supply. Returns true only on an explicit yes; false if declined or
 // if no display is available to ask on.
-bool ModDownload_Confirm( const modRegistryMod_t &mod, const modRegistryAsset_t &asset );
+// replacing: an installed library is not the pinned one and would be replaced
+// (the dialog then says "Update").
+bool ModDownload_Confirm( const modRegistryMod_t &mod, const modRegistryAsset_t &asset, bool replacing );
 
 // If fsGame is a registry mod whose library is missing and the user consents,
 // download the library from its pinned release, verify it against the pinned
@@ -35,5 +37,17 @@ bool ModDownload_Confirm( const modRegistryMod_t &mod, const modRegistryAsset_t 
 // Returns true only when a verified library is now present. Safe (returns
 // false) for unknown mods, when disabled, or when there is no display to ask on.
 bool ModDownload_EnsureLibrary( const char *fsGame );
+
+// For a registry mod, make sure the library DUDE keeps in fs_savepath/<fsGame>/
+// is exactly the pinned one: kept when its SHA-256 matches, otherwise (missing,
+// an older release, any other build) downloaded or replaced on the user's
+// consent. On success pathOut is that library and the caller loads it before
+// any other copy. Returns false for mods the registry does not list, when
+// disabled, declined or failed: the caller then searches as usual. The Windows
+// loader uses it first because no dhewm3 mod DLL is 64-bit.
+bool ModDownload_RegistryLibrary( const char *fsGame, idStr &pathOut );
+
+// True when downloads are enabled and the registry lists fsGame.
+bool ModDownload_IsRegistryMod( const char *fsGame );
 
 #endif /* !__MODDOWNLOAD_H__ */
