@@ -22,6 +22,7 @@ Doom 3 GPL Source Code (see ArbProgram.h for license header)
 #include "framework/async/NetworkSystem.h"
 #include "renderer/RenderSystem.h"
 #include "renderer/ModelManager.h"
+#include "renderer/RenderWorld.h"
 #include "ui/UserInterface.h"
 #include "tools/compilers/aas/AASFileManager.h"
 #include "renderer/bse/BseEffect.h"
@@ -34,6 +35,8 @@ Doom 3 GPL Source Code (see ArbProgram.h for license header)
 static idGameQ4 *		gameQ4 = NULL;
 static idGameEditQ4 *	gameEditQ4 = NULL;
 static bool				gameQ4MapActive = false;	// from the start of a map's load to its shutdown
+// the engine world the running map draws into (its debug lines/polygons are expired per game frame)
+static idRenderWorld *	gameQ4RenderWorld = NULL;
 
 /*
 ===============
@@ -106,20 +109,35 @@ public:
 	// the game's sounds go to the session's game sound world by id (SoundSystemQ4)
 	virtual void				InitFromNewMap( const char *mapName, idRenderWorld *renderWorld, idSoundWorld *soundWorld, bool isServer, bool isClient, int randseed ) {
 									gameQ4MapActive = true;
+									gameQ4RenderWorld = renderWorld;
 									BSE_ResetRateTimes();		// as retail's effect manager at a level load
 									gameQ4->InitFromNewMap( mapName, RenderWorldQ4( renderWorld ), isServer, isClient, randseed );
 								}
 	virtual bool				InitFromSaveGame( const char *mapName, idRenderWorld *renderWorld, idSoundWorld *soundWorld, idFile *saveGameFile ) {
 									gameQ4MapActive = true;
+									gameQ4RenderWorld = renderWorld;
 									BSE_ResetRateTimes();
 									return gameQ4->InitFromSaveGame( mapName, RenderWorldQ4( renderWorld ), saveGameFile );
 								}
 	virtual void				SaveGame( idFile *saveGameFile ) { gameQ4->SaveGame( saveGameFile, ST_REGULAR ); }
-	virtual void				MapShutdown( void ) { gameQ4->MapShutdown(); gameQ4MapActive = false; }
+	virtual void				MapShutdown( void ) { gameQ4->MapShutdown(); gameQ4MapActive = false; gameQ4RenderWorld = NULL; }
 	virtual void				CacheDictionaryMedia( const idDict *dict ) { gameQ4->CacheDictionaryMedia( dict ); }
 	virtual void				SpawnPlayer( int clientNum ) { gameQ4->SpawnPlayer( clientNum ); }
 
 	virtual gameReturn_t		RunFrame( const usercmd_t *clientCmds ) {
+									// Expire the last frame's debug lines/polygons/text (issue #26). Doom 3's
+									// game does this itself at the top of each tick (DebugClearLines( time ));
+									// Quake 4's only calls DebugClear on the network client, Raven's engine did
+									// it for single player. Without it a lifetime-1 line lived until the next map
+									// load: the collision manager's red "huge translation" arrows piled up into a
+									// fan at mcc_landing (a thrown barrel's trace to the player). Cleared with the
+									// game time BEFORE the tick advances it, so a line drawn this tick lives
+									// exactly until the next one, as in Doom 3.
+									if ( gameQ4RenderWorld != NULL ) {
+										const int time = gameEditQ4->GetGameTime( NULL );
+										gameQ4RenderWorld->DebugClearLines( time );
+										gameQ4RenderWorld->DebugClearPolygons( time );
+									}
 									return gameQ4->RunFrame( UsercmdsToQ4( clientCmds ), com_editors, true, 0 );
 								}
 	virtual bool				Draw( int clientNum ) { return gameQ4->Draw( clientNum ); }
@@ -312,6 +330,7 @@ void GameQ4_Unload( void ) {
 	gameQ4 = NULL;
 	gameEditQ4 = NULL;
 	gameQ4MapActive = false;
+	gameQ4RenderWorld = NULL;
 }
 
 idGameQ4 *GameQ4( void ) {
