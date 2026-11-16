@@ -53,6 +53,13 @@ public:
 
 	const modRegistryMod_t *	FindMod( const char *fsGame ) const;
 
+	// Adds every mod of other that this registry does not list (by fs_game);
+	// mods this registry already has are kept as they are. Returns how many
+	// were added. Lets a hosted registry win per mod while the baked-in one
+	// fills the gaps, so an older hosted copy cannot hide a mod this build
+	// knows.
+	int							AddMissing( const idModRegistry &other );
+
 	// Asset platform key for the running build, e.g. "win64" / "linux-x86_64".
 	static const char *			CurrentPlatformKey( void );
 

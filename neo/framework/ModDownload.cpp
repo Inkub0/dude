@@ -126,27 +126,36 @@ static bool MD_ReadTextFile( const char *path, idStr &out ) {
 	return ok;
 }
 
-// Fill reg from the hosted registry if it can be fetched and parsed, otherwise
-// from the engine's baked-in default.
+// Fill reg from the hosted registry (when it can be fetched and parsed) merged
+// with the engine's baked-in one: a mod listed in both takes the hosted entry
+// (a newer release), and a mod only the baked-in list has is still offered, so
+// a hosted copy older than this build cannot hide it.
 static void MD_ResolveRegistry( idModRegistry &reg ) {
+	idModRegistry baked;
+	idStr err;
+	if ( !baked.ParseString( idModRegistry::DefaultRegistryText(), "mod-registry(baked)", &err ) ) {
+		common->Warning( "mod registry: built-in list failed to parse: %s", err.c_str() );
+		baked.Clear();
+	}
+
 	const char *url = com_modRegistryUrl.GetString();
 	if ( url != NULL && url[0] != '\0' ) {
 		const idStr tmp = idStr( cvarSystem->GetCVarString( "fs_savepath" ) ) + "/mod-registry.download";
 		if ( Sys_DownloadURL( url, tmp.c_str() ) ) {
-			idStr text, err;
+			idStr text;
 			if ( MD_ReadTextFile( tmp.c_str(), text ) && reg.ParseString( text.c_str(), "mod-registry(remote)", &err ) ) {
 				remove( tmp.c_str() );
+				const int added = reg.AddMissing( baked );
+				if ( added > 0 ) {
+					common->Printf( "mod registry: %d mod(s) not in the hosted list taken from the built-in one\n", added );
+				}
 				return;
 			}
 			common->Printf( "mod registry: hosted copy unusable, using the built-in list\n" );
 			remove( tmp.c_str() );
 		}
 	}
-	idStr err;
-	if ( !reg.ParseString( idModRegistry::DefaultRegistryText(), "mod-registry(baked)", &err ) ) {
-		common->Warning( "mod registry: built-in list failed to parse: %s", err.c_str() );
-		reg.Clear();
-	}
+	reg = baked;
 }
 
 bool ModDownload_EnsureLibrary( const char *fsGame ) {
@@ -162,7 +171,10 @@ bool ModDownload_EnsureLibrary( const char *fsGame ) {
 
 	const modRegistryMod_t *mod = reg.FindMod( fsGame );
 	if ( mod == NULL ) {
-		return false;	// not a known downloadable mod; leave it to the caller
+		// not a known downloadable mod; leave it to the caller (it falls back to
+		// fs_game_base's or the base game's library)
+		common->Printf( "mod registry: no downloadable library listed for '%s'\n", fsGame );
+		return false;
 	}
 
 	const char *platform = idModRegistry::CurrentPlatformKey();

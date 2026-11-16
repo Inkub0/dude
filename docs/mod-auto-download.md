@@ -57,7 +57,10 @@ https://raw.githubusercontent.com/Inkub0/dude/master/mod-registry.json
 
 A copy ships with the engine as the baked-in default (and offline fallback). The engine
 fetches the remote copy when it needs to resolve a missing mod library; if the fetch fails,
-times out, or does not parse, it uses the baked default.
+times out, or does not parse, it uses the baked default. When the remote copy is used, it is
+merged with the baked one: a mod listed in both takes the remote entry (a newer release), and a
+mod only the baked list has is still offered, so a remote copy older than the running build
+(e.g. a build made before the repository was pushed) cannot hide mods that build knows.
 
 Format (illustrative):
 
@@ -133,8 +136,9 @@ In `idCommon::LoadGameDLL` (neo/framework/Common.cpp), after the existing local 
 
 1. If `fs_game` is not in the registry, or `com_allowModDownload` is 0, keep the current
    behaviour (fallback / error). No change for unknown mods.
-2. Resolve the registry (remote fetch over HTTPS, else baked default) and look up `fs_game`
-   and the current platform. No asset for this platform -> clear message, stop.
+2. Resolve the registry (remote fetch over HTTPS merged with the baked default, else the baked
+   default alone) and look up `fs_game`; a mod in neither is logged and left to the fallback;
+   otherwise check the current platform. No asset for this platform -> clear message, stop.
 3. Consent dialog via `SDL_ShowMessageBox` (the game menu does not exist this early):
    name the mod, the source (`repo` + `release`), the size, the license, and that the user
    still needs the mod's own game data. Yes / No.
