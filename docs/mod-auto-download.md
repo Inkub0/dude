@@ -99,9 +99,9 @@ Notes:
 
 Each platform asset is the **bare library file** (`tfphobos-win64.dll`,
 `tfphobos-linux-x86_64.so`) published on the mod's release, and the registry pins that file's
-SHA-256. One file, verify, place, no extraction step. The human-facing archives
-(`<mod>-<ver>-<platform>.zip` / `.tar.gz`, which also carry COPYING and BUILDINFO) stay
-as they are for manual installs. Alongside the downloaded library the engine writes a short
+SHA-256. One file, verify, place, no extraction step. Releases carry nothing else (no zip /
+tar.gz archives): a manual install is the same file, renamed to `<mod>.dll` / `<mod>.so`, and the
+licence and source are the release's branch. Alongside the downloaded library the engine writes a short
 `LICENSE-<mod>.txt` pointing at the mod's repository and license, so the GPL notice travels
 with the binary.
 
