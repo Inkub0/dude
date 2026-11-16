@@ -197,6 +197,17 @@ const modRegistryMod_t *idModRegistry::FindMod( const char *fsGame ) const {
 	return NULL;
 }
 
+int idModRegistry::AddMissing( const idModRegistry &other ) {
+	int added = 0;
+	for ( int i = 0; i < other.mods.Num(); i++ ) {
+		if ( FindMod( other.mods[i].key.c_str() ) == NULL ) {
+			mods.Append( other.mods[i] );
+			added++;
+		}
+	}
+	return added;
+}
+
 const modRegistryAsset_t *modRegistryMod_t::FindAsset( const char *platform ) const {
 	if ( platform == NULL || platform[0] == '\0' ) {
 		return NULL;
