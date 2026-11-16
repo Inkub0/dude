@@ -3635,13 +3635,37 @@ void idCommonLocal::LoadGameDLL( void ) {
 	const bool nullGame = idStr::Icmp( fs_game, GAME_NULL_LIBRARY ) == 0;
 
 	sys->DLL_GetFileName(fs_game, dll, sizeof(dll));
-	LoadGameDLLbyName(dll, fs_game, s);
+
+	bool registryAsked = false;	// the registry library was offered already (Windows)
+#if defined(_WIN32)
+	// DUDE: on Windows a mod listed in the auto-download registry always runs the
+	// library its pinned release ships (checked by SHA-256, downloaded or updated
+	// on consent), before any other copy is searched: dhewm3's Windows mod DLLs are
+	// all 32-bit, so whatever else is installed (next to the exe, in the mod
+	// folder) is either unloadable or an older build. fs_gameDllPath, a modder's
+	// own build, still wins. See framework/ModDownload.
+	{
+		const char *dllPath = cvarSystem->GetCVarString( "fs_gameDllPath" );
+		idStr registryLib;
+		registryAsked = ( dllPath == NULL || dllPath[0] == '\0' ) && ModDownload_IsRegistryMod( fs_game );
+		if ( registryAsked && ModDownload_RegistryLibrary( fs_game, registryLib ) ) {
+			gameDLL = sys->DLL_Load( registryLib );
+			if ( gameDLL ) {
+				s = registryLib;
+			}
+		}
+	}
+#endif
+
+	if ( !gameDLL ) {
+		LoadGameDLLbyName(dll, fs_game, s);
+	}
 
 	// DUDE: a mod listed in the auto-download registry can fetch its missing
 	// library from its pinned release (with user consent) and we retry, before
 	// falling back to another library. See framework/ModDownload and
 	// docs/mod-auto-download.md.
-	if ( !gameDLL && ModDownload_EnsureLibrary( fs_game ) ) {
+	if ( !gameDLL && !registryAsked && ModDownload_EnsureLibrary( fs_game ) ) {
 		sys->DLL_GetFileName(fs_game, dll, sizeof(dll));
 		LoadGameDLLbyName(dll, fs_game, s);
 	}

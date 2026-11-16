@@ -149,6 +149,23 @@ In `idCommon::LoadGameDLL` (neo/framework/Common.cpp), after the existing local 
 7. Retry the normal load. It now finds the library through the ordinary search path, so the
    download path and the load path stay decoupled.
 
+### Windows: the registry library always wins
+
+dhewm3 ships every Windows mod DLL as 32-bit, which 64-bit `dude.exe` cannot load, so on
+Windows a registry mod does not wait for the search to fail. Before searching, the loader checks
+the library the downloader keeps in `fs_savepath/<fs_game>/` against the pinned SHA-256:
+
+- it matches: that library is loaded, before any other copy (next to the exe, in the mod folder);
+- it is missing or different (an older release, any other build): the consent dialog offers to
+  download it, or to **Update** the installed one; the verified download replaces it and is loaded;
+- declined or failed: the normal search runs as before (a 64-bit build found elsewhere still
+  loads), without asking a second time.
+
+`fs_gameDllPath` set (a modder testing their own build) skips this, as does
+`com_allowModDownload 0`. The resolved registry is cached for the session, so a reloadEngine or
+mod switch does not fetch it again. On Linux, dhewm3's own 64-bit mod libraries load as they are,
+so there the registry is consulted only when no library is found.
+
 ## Consent and cvars
 
 - `com_allowModDownload` (CVAR_ARCHIVE, default ask): `0` disables auto-download entirely
