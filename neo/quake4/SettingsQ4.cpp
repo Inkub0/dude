@@ -37,6 +37,7 @@ Doom 3 GPL Source Code (see ArbProgram.h for license header)
 #include "renderer/RenderSystem.h"
 #include "ui/UserInterface.h"
 
+#include "quake4/GuiPatchesQ4.h"
 #include "quake4/SettingsQ4.h"
 
 #ifndef ID_DEDICATED
@@ -383,13 +384,8 @@ void Q4Settings_SetMenuGuiVars( idUserInterface *gui ) {
 		}
 	}
 
-	// DUDE's widescreen additions to the menu (quake4/GuiPatchesQ4.cpp): 1 when the menu is drawn
-	// 4:3 with room beside it (r_scaleMenusTo43 on a screen wider than idDeviceContext's 1.4
-	// threshold), 0 when it fills the screen as vanilla (a 4:3 screen, or stretched)
-	const int screenWidth = renderSystem->GetScreenWidth(), screenHeight = renderSystem->GetScreenHeight();
-	const bool sideBars = screenHeight > 0 && (float)screenWidth / (float)screenHeight > 1.4f
-		&& idUserInterface::IsUserInterfaceScaledTo43( gui );
-	gui->SetStateInt( "dude_sideBars", sideBars ? 1 : 0 );
+	// DUDE's widescreen additions to the menu (quake4/GuiPatchesQ4.cpp)
+	Q4Gui_SetWidescreenVars( gui, idUserInterface::IsUserInterfaceScaledTo43( gui ) );
 }
 
 /*

@@ -23,6 +23,8 @@ Doom 3 GPL Source Code (see ArbProgram.h for license header)
 #include "framework/DeclManager.h"
 #include "framework/GameTitle.h"
 #include "idlib/containers/StrList.h"
+#include "renderer/RenderSystem.h"
+#include "ui/UserInterface.h"
 
 #include "quake4/GuiPatchesQ4.h"
 
@@ -47,13 +49,13 @@ which holds them, no longer clip their children to 0..640 (the screens' panels i
 clip their own, as before), and each layer goes on 1000 units past both edges (to about 32:9):
   - screen, screen2: a gradient exactly the same across its width - widened
   - grad: a gradient whose columns differ a little (lighter edges) - kept as it is, carried on
-    by its edge columns (materials dude/q4menu/darkgrad_*), as the bars below
+    by its edge columns (materials dude/q4menu/darkgrad_...), as the bars below
   - static: the scrolling noise, a repeating texture - widened with its texture repeated at the
     same scale (matscalex -3 over three widths, as -1 over one)
   - grid1, grid2: the grid of crosses - more tiles of it, never stretched
   - topbar, btmbar: the black masks that cut the frame's top and bottom edges; both ends of
     their texture are one column repeated, so the mask carries on as that column (materials
-    dude/q4menu/*: the texture with s pinned to 0 or 1). Children, so they slide with the bars
+    dude/q4menu/...: the texture with s pinned to 0 or 1). Children, so they slide with the bars
     between the main screen's place and the other screens'.
   - grad4..grad7: masks that darken the upper left during screen changes, drawn mirrored; they
     reach the left edge, so they are widened leftwards with the texture's scale grown to match
@@ -314,6 +316,102 @@ insert p_video {
 }
 )DUDE";
 
+/*
+The map loading screens (guis/loading/generic.gui - every campaign map, its picture from the
+mapDef's loadimage - and intro.gui). On a wide screen with the screen fitted to 4:3
+(gui::dude_horPad > 0, the room beside the 4:3 area in GUI units, Q4Gui_SetWidescreenVars) the
+level's picture fills the width instead: scaled up evenly, centred, its top and bottom cropped,
+never stretched. The frame carries on into the sides as on the main menu: the desktop stops
+clipping to 0..640, the dark masks along the top and bottom (load_*_edge, and their green tint
+load_*_edgeadd) carry on their end columns (materials dude/q4load/...), and the grid is tiled. The
+row of dots moves to the screen's left edge, the level name and the loading bar (with its
+"Loading" / "click to continue" text, right-aligned over it) to the right edge; the corner
+marks stay where they are. With dude_horPad 0 (a 4:3 screen, or stretched) every rect is the retail one:
+the loading screen as vanilla. guis/loading/mplevel.gui (multiplayer, not implemented) is left
+as it is.
+*/
+#define LOADING_EDGE_MATERIAL( name, image, blendMode, translate ) \
+	"material dude/q4load/" name " {\n\t{\n\t\tblend " blendMode "\n\t\tcolored\n\t\tmap \"gfx/guis/mainmenu/" image "\"\n\t\tclamp\n" translate "\t\tscale 0, 1\n\t}\n}\n"
+#define LOADING_EDGE_MATERIALS( image, blendMode ) \
+	LOADING_EDGE_MATERIAL( image "_l", image, blendMode, "" ) \
+	LOADING_EDGE_MATERIAL( image "_r", image, blendMode, "\t\ttranslate 1, 0\n" )
+#define LOADING_EDGE_EXTEND( window, image, height, color ) \
+	"insert " window " {\n\tnoclip 1\n" \
+	"\twindowDef dude_" window "_l {\n\t\trect -1000,0,1000," height "\n\t\tbackground \"dude/q4load/" image "_l\"\n\t\tmatcolor " color "\n\t}\n" \
+	"\twindowDef dude_" window "_r {\n\t\trect 640,0,1000," height "\n\t\tbackground \"dude/q4load/" image "_r\"\n\t\tmatcolor " color "\n\t}\n}\n"
+
+#define LOADING_FRAME_PATCH \
+	LOADING_EDGE_MATERIALS( "load_top_edge", "blend" ) \
+	LOADING_EDGE_MATERIALS( "load_btm_edge", "blend" ) \
+	LOADING_EDGE_MATERIALS( "load_top_edgeadd", "add" ) \
+	LOADING_EDGE_MATERIALS( "load_btm_edgeadd", "add" ) \
+	LOADING_EDGE_EXTEND( "top_edge", "load_top_edge", "119", "0,0,0,0.8" ) \
+	LOADING_EDGE_EXTEND( "btm_edge", "load_btm_edge", "253", "0,0,0,0.8" ) \
+	LOADING_EDGE_EXTEND( "top_edgeadd", "load_top_edgeadd", "119", "0.0941,0.113,0.0392,1" ) \
+	LOADING_EDGE_EXTEND( "btm_edgeadd", "load_btm_edgeadd", "253", "0.0941,0.113,0.0392,1" ) \
+	R"DUDE(
+insert Desktop {
+	noclip	1
+}
+insert loadimg {
+	rect	(0 - "gui::dude_horPad"), (240 - (320 + "gui::dude_horPad") * 0.75), (640 + 2 * "gui::dude_horPad"), ((640 + 2 * "gui::dude_horPad") * 0.75)
+}
+insert load_dots {
+	rect	(3 - "gui::dude_horPad"), 2, 105, 25
+}
+insert button {
+	rect	-1000,0,2640,480
+}
+insert bar {
+	rect	(235 + "gui::dude_horPad"), 431, 405, 26
+}
+insert p_load_bar {
+	rect	(235 + "gui::dude_horPad"), 431, ("gui::map_loading" * 405), 26
+}
+insert bar_full {
+	rect	(235 + "gui::dude_horPad"), 431, 405, 26
+}
+insert load_text {
+	rect	(4 + "gui::dude_horPad"), 428, 624, 36
+}
+)DUDE"
+
+#define LOADING_NAME_PATCH R"DUDE(
+insert t_levelname_grad {
+	rect	(291 + "gui::dude_horPad"), 14, 349, 22
+}
+insert t_levelname {
+	rect	(290 + "gui::dude_horPad"), 11, 336, 20
+}
+)DUDE"
+
+#define LOADING_GRID_PATCH R"DUDE(
+insert grid1 {
+	noclip	1
+	windowDef dude_grid_l1
+	{
+		rect	-480,0,480,480
+		background	"gfx/guis/mainmenu/bg_grid"
+		matcolor	1,1,1,0.04
+	}
+	windowDef dude_grid_l2
+	{
+		rect	-960,0,480,480
+		background	"gfx/guis/mainmenu/bg_grid"
+		matcolor	1,1,1,0.04
+	}
+}
+insert grid2 {
+	noclip	1
+	windowDef dude_grid_r1
+	{
+		rect	480,0,480,480
+		background	"gfx/guis/mainmenu/bg_grid"
+		matcolor	1,1,1,0.04
+	}
+}
+)DUDE"
+
 struct guiPatch_t {
 	const char *	gui;
 	const char *	patch;
@@ -321,6 +419,8 @@ struct guiPatch_t {
 
 const guiPatch_t q4GuiPatches[] = {
 	{ "guis/mainmenu.gui", MAINMENU_PATCH },
+	{ "guis/loading/generic.gui", LOADING_FRAME_PATCH LOADING_GRID_PATCH LOADING_NAME_PATCH },
+	{ "guis/loading/intro.gui", LOADING_FRAME_PATCH },
 };
 
 /*
@@ -546,4 +646,22 @@ bool Q4Gui_PatchSource( const char *qpath, idStr &text ) {
 	}
 	text = patched;
 	return true;
+}
+
+/*
+================
+Q4Gui_SetWidescreenVars
+================
+*/
+void Q4Gui_SetWidescreenVars( idUserInterface *gui, bool scaledTo43 ) {
+	if ( gui == NULL ) {
+		return;
+	}
+	// idDeviceContext::SetMenuScaleFix fits to 4:3 only above this aspect (below it, stretched)
+	const int screenWidth = renderSystem->GetScreenWidth(), screenHeight = renderSystem->GetScreenHeight();
+	const float aspect = screenHeight > 0 ? (float)screenWidth / (float)screenHeight : 0.0f;
+	const bool sideBars = scaledTo43 && aspect > 1.4f;
+	gui->SetStateInt( "dude_sideBars", sideBars ? 1 : 0 );
+	// the screen is 480 GUI units high, so 480 * aspect wide: the room on each side of 0..640
+	gui->SetStateFloat( "dude_horPad", sideBars ? 240.0f * aspect - 320.0f : 0.0f );
 }
