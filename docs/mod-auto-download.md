@@ -3,7 +3,7 @@
 A way for DUDE to fetch a mod's game library (`<fs_game>.so` / `<fs_game>.dll`) on demand,
 from a pinned GitHub release, when the mod is selected but its library is not installed. The
 first mod it serves is Doom 3: Phobos (`tfphobos`, published at
-github.com/Inkub0/dude-phobos), but the mechanism is a general **mod registry**, not a
+github.com/Inkub0/dude-sdk, branch `tfphobos`), but the mechanism is a general **mod registry**, not a
 Phobos special case.
 
 It downloads mod *code* only. Game *data* (pak files) is never auto-downloaded: those assets
@@ -67,17 +67,17 @@ Format (illustrative):
   "mods": {
     "tfphobos": {
       "name": "Doom 3: Phobos game library",
-      "repo": "Inkub0/dude-phobos",
+      "repo": "Inkub0/dude-sdk",
       "release": "v1.0.0",
       "license": "GPLv3",
       "needsGameData": "Doom 3: Phobos (Team Future) - not downloadable",
       "assets": {
         "win64": {
-          "url": "https://github.com/Inkub0/dude-phobos/releases/download/v1.0.0/tfphobos-win64.dll",
+          "url": "https://github.com/Inkub0/dude-sdk/releases/download/tfphobos-v1.0.0/tfphobos-win64.dll",
           "sha256": "<hash>"
         },
         "linux-x86_64": {
-          "url": "https://github.com/Inkub0/dude-phobos/releases/download/v1.0.0/tfphobos-linux-x86_64.so",
+          "url": "https://github.com/Inkub0/dude-sdk/releases/download/tfphobos-v1.0.0/tfphobos-linux-x86_64.so",
           "sha256": "<hash>"
         }
       }
@@ -100,7 +100,7 @@ Notes:
 Each platform asset is the **bare library file** (`tfphobos-win64.dll`,
 `tfphobos-linux-x86_64.so`) published on the mod's release, and the registry pins that file's
 SHA-256. One file, verify, place, no extraction step. The human-facing archives
-(`dude-phobos-<ver>-<platform>.zip` / `.tar.gz`, which also carry COPYING and BUILDINFO) stay
+(`<mod>-<ver>-<platform>.zip` / `.tar.gz`, which also carry COPYING and BUILDINFO) stay
 as they are for manual installs. Alongside the downloaded library the engine writes a short
 `LICENSE-<mod>.txt` pointing at the mod's repository and license, so the GPL notice travels
 with the binary.
@@ -174,16 +174,26 @@ Every failure path leaves the user informed and installs nothing unverified:
 - User declines -> report the missing library and the manual URL, then fall back / error as
   today.
 
-## First registry entry
+## Registry entries
 
-`tfphobos` -> Inkub0/dude-phobos, release `v1.0.0`, assets `win64` and `linux-x86_64`, GPLv3,
+Mod libraries are built and released from the DUDE Mod SDK (github.com/Inkub0/dude-sdk), which mirrors
+dhewm3-sdk: one branch per mod, releases tagged `<branch>-vX.Y.Z`. Current entries (21 libraries, 16
+branches, all `<branch>-v1.0.0`): every mod dhewm3 has ported plus Doom 3: Phobos, Resurrection of
+Evil variants included (`bloodmod_roe`, `doom3ccXP`, `librecoopd3xp`, `perfected_roe`,
+`sikkmodd3xp`, which `FS_KnownModBase` loads on top of `d3xp`). `mod-registry.cfg` and the baked
+copy in `ModRegistry.cpp` must stay identical; the Linux libraries are built in DUDE's Ubuntu 22.04
+sandbox (glibc 2.27+), the Windows ones with mingw-w64 (they import `libwinpthread-1.dll`, which
+DUDE's Windows package ships).
+
+
+`tfphobos` -> Inkub0/dude-sdk, release `tfphobos-v1.0.0`, assets `win64` and `linux-x86_64`, GPLv3,
 game data from Team Future. This requires adding bare-library assets
-(`tfphobos-win64.dll`, `tfphobos-linux-x86_64.so`) to the dude-phobos release and recording
+(`tfphobos-win64.dll`, `tfphobos-linux-x86_64.so`) to the tfphobos release and recording
 their SHA-256 in the registry.
 
 ## Open items / future
 
-- macOS and other arches: add assets and platform keys as dude-phobos builds them.
+- macOS and other arches: add assets and platform keys as the DUDE Mod SDK branches build them.
 - "Allowed, do not ask again" consent state once there is UI for it.
 - Optional: verify the registry's own signature (not just HTTPS) if the trust boundary ever
   needs to be tighter than "whoever controls the DUDE repo".

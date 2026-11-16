@@ -2464,6 +2464,7 @@ const char *FS_KnownModBase( const char *modName ) {
 		// (and that are supported by DUDE), add them here
 		"bloodmod_roe",
 		"d3le", // The Lost Mission
+		"doom3ccXP", // Doom3[CC] for Resurrection of Evil
 		"librecoopd3xp",
 		"perfected_roe",
 		"sikkmodd3xp",
