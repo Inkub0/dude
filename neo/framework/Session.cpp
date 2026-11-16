@@ -38,6 +38,7 @@ If you have questions concerning this license or the applicable additional terms
 
 #include "framework/Licensee.h"
 #include "framework/GameTitle.h"
+#include "quake4/GuiPatchesQ4.h"
 #include "framework/LoadTiming.h"
 #include "framework/Session_local.h"
 
@@ -2030,6 +2031,8 @@ void idSessionLocal::LoadLoadingGui( const char *mapName ) {
 	// the "scaleto43" state switch; this runs after uiManager->Reload, which resets the flags.
 	if ( GameTitle::Get().title == GAME_TITLE_QUAKE4 ) {
 		guiLoading->SetStateBool( "scaleto43", r_scaleMenusTo43.GetBool() );
+		// DUDE's widescreen fill of the loading screens (quake4/GuiPatchesQ4.cpp)
+		Q4Gui_SetWidescreenVars( guiLoading, r_scaleMenusTo43.GetBool() );
 		guiLoading->StateChanged( com_frameTime );
 	}
 }
