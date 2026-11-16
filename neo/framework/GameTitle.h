@@ -79,6 +79,11 @@ typedef struct gameTitleProfile_s {
 	// (read from the player's own install, so DUDE ships none of the title's artwork).
 	// NULL, or no such file / icon: DUDE's built-in Doom 3 icon.
 	const char *	iconExe;
+
+	// The startup splash on a screen of another shape (r_scaleMenusTo43): the bars beside it carry
+	// on its edge columns (Quake 4's splash is one flat colour at its edges), else black (Doom 3's
+	// edges vary from top to bottom: carried on, they would streak)
+	bool			splashEdgeFill;
 } gameTitleProfile_t;
 
 // Stem of the null game library (nullgame.so / nullgame.dll): a spectator-only idGame

@@ -36,6 +36,7 @@ If you have questions concerning this license or the applicable additional terms
 
 #include "ui/UserInterfaceLocal.h"
 #include "framework/GameTitle.h"
+#include "quake4/GuiPatchesQ4.h"
 
 #include "renderer/tr_local.h" // glConfig for winWidth/winHeight
 
@@ -420,6 +421,22 @@ static void AnchorHud( idWindow *desktop, const char *qpath, int kind ) {
 // how GUI files are parsed (InitFromFile, and a shadowed copy for a savegame's state)
 static const int GUI_PARSER_FLAGS = LEXFL_NOFATALERRORS | LEXFL_NOSTRINGCONCAT | LEXFL_ALLOWMULTICHARLITERALS | LEXFL_ALLOWBACKSLASHSTRINGCONCAT;
 
+// DUDE: the GUI file qpath with DUDE's additions for it (quake4/GuiPatchesQ4.h); false when there
+// are none, or the file cannot be read
+static bool LoadPatchedGuiText( const char *qpath, idStr &text ) {
+	if ( !Q4Gui_HasPatch( qpath ) ) {
+		return false;
+	}
+	void *buffer = NULL;
+	const int length = fileSystem->ReadFile( qpath, &buffer );
+	if ( length < 0 || buffer == NULL ) {
+		return false;
+	}
+	text = idStr( (const char *)buffer, 0, length );
+	fileSystem->FreeFile( buffer );
+	return Q4Gui_PatchSource( qpath, text );
+}
+
 bool idUserInterfaceLocal::InitFromFile( const char *qpath, bool rebuild, bool cache ) {
 
 	if ( !( qpath && *qpath ) ) {
@@ -434,7 +451,13 @@ bool idUserInterfaceLocal::InitFromFile( const char *qpath, bool rebuild, bool c
 	//Load the timestamp so reload guis will work correctly
 	fileSystem->ReadFile(qpath, NULL, &timeStamp);
 
-	src.LoadFile( qpath );
+	// DUDE: a Quake 4 GUI DUDE adds windows to (quake4/GuiPatchesQ4.h) is parsed from its patched text
+	idStr patched;
+	if ( LoadPatchedGuiText( qpath, patched ) ) {
+		src.LoadMemory( patched.c_str(), patched.Length(), qpath );
+	} else {
+		src.LoadFile( qpath );
+	}
 
 	if ( !ParseDesktop( src, qpath, rebuild ) ) {
 		loading = false;
@@ -1259,6 +1282,7 @@ bool idUserInterfaceLocal::RestoreWithCopies( idFile *savefile, const char *qpat
 
 	FS_ReadFileVersions( qpath, texts, origins );
 	for ( int i = 0; i < texts.Num(); i++ ) {
+		Q4Gui_PatchSource( qpath, texts[i] );	// DUDE: as InitFromFile parses it
 		for ( int j = 0; j < 2; j++ ) {
 			const int trialPointerSize = ( j == 0 ) ? nativePointerSize : 12 - nativePointerSize;	// 4 <-> 8
 			idUserInterfaceLocal *trial = new idUserInterfaceLocal();
