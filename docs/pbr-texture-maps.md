@@ -221,8 +221,10 @@ Doom 3's materials. Give it the games to re-bake (`base`, `roe`, `lm`); it packs
    run `reloadPbrTable`) so DUDE looks for it again. Changed the pixels of a texture it already
    loaded? Run `reloadImages`.
 
-`r_pbrTextureMaps 0` switches all sidecar textures off for comparison; the editor then says
-the texture is ignored and the sliders apply again.
+`r_pbrTextureMaps 0` switches all sidecar textures off for comparison, live: every material
+falls back to its PBR table values, and the editor says the texture is ignored and the sliders
+apply again. In the menus it is **Graphics > Lighting > Per-Pixel PBR Textures (ORM)**, and the
+**Per-pixel textures (ORM sidecars)** checkbox at the top of the PBR Material Editor.
 
 To see the channels on their own, use **PBR Material View** in the settings menu (Debug Views),
 or `r_pbrDebugView`: 1 = ambient occlusion, 2 = roughness, 3 = metalness, 4 = the ORM texture
