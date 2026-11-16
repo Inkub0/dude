@@ -5889,6 +5889,15 @@ static void DrawDbgGroup_ContactShadows()
 			"shadow edge widens with distance from its occluder like a real penumbra. 0 = hard edge. No extra cost. "
 			"Default 8." );
 
+		CvarSliderF( "Max Distance", r_contactShadowMaxDist, 0.0f, 4096.0f, "%.0f", "distance fade (world units), shared with RT contact "
+			"shadows: contact shadows are a near-field grounding effect, but on distant terrain they only crawl as the view moves (issue #25). "
+			"Fades the term out from 0.7x this to this, so far mountains get none while near objects keep their grounding. 0 = no fade. "
+			"Default 512; raise if near objects lose their contact shadow too soon." );
+
+		CvarSliderF( "Grazing Bias", r_contactShadowGrazeBias, 0.0f, 16.0f, "%.1f", "optional: pushes the march start off the surface the "
+			"more the light grazes it (quadratic in 1-NdotL). Removes grazing self-shadow on near flat ground, but a high value drops the "
+			"start into a partial-occlusion zone that shimmers, so the terrain flicker is handled by Max Distance instead. 0 = off. Default 0." );
+
 		ImGui::EndDisabled();	// backendOk
 		EndSettingsGroup();
 	}
@@ -5918,6 +5927,10 @@ static void DrawDbgGroup_RtContactShadows()
 		CvarSliderF( "Softness", r_rtContactShadowSoftness, 0.0f, 45.0f, "%.0f", "how soft the edge is: the half-angle in degrees "
 			"of the cone the rays spread over toward the light (each 2x2 pixel block traces four directions and averages "
 			"them). 0 = hard edge. Default 12." );
+
+		CvarSliderF( "Max Distance", r_contactShadowMaxDist, 0.0f, 4096.0f, "%.0f", "distance fade (world units), shared with the "
+			"screen-space contact shadows: the rays' screen-locked directions make far terrain crawl as the view moves (issue #25). "
+			"Fades the term out from 0.7x this to this. 0 = no fade. Default 512." );
 
 		ImGui::EndDisabled();	// rtCapable
 		EndSettingsGroup();

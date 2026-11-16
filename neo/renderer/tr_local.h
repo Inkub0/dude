@@ -1037,6 +1037,8 @@ extern idCVar r_contactShadowLength;	// march length toward the light (world uni
 extern idCVar r_contactShadowThickness;	// occluder thickness band (world units)
 extern idCVar r_contactShadowSteps;		// march steps per lit pixel (2..32)
 extern idCVar r_contactShadowSoftness;	// penumbra cone half-angle, degrees (0..45)
+extern idCVar r_contactShadowGrazeBias;	// grazing-angle start push to stop terrain self-shadowing (0 = off)
+extern idCVar r_contactShadowMaxDist;	// distance fade: contact shadows gone past this (near-field only; 0 = off)
 extern idCVar r_rtContactShadows;			// RT contact shadows: one short ray query toward each light (VK + RT, while RTX builds the scene)
 extern idCVar r_rtContactShadowStrength;	// darkening at the contact (0..1)
 extern idCVar r_rtContactShadowLength;		// ray length, world units
@@ -1307,6 +1309,7 @@ extern idCVar r_rtShadowBlurCurve;			// exponent on the gap ratio: how the blur 
 extern idCVar r_rtShadowBlurMinPenumbra;	// skip the per-light blur when its estimated screen penumbra is below this many pixels (distant/small lights)
 extern idCVar r_rtTlasDirty;				// skip the per-frame TLAS rebuild when no mover/monster changed this frame
 extern idCVar r_rtSunShadowOffset;			// RT sun shadows: ray-origin normal offset (world units)
+extern idCVar r_rtShadowOriginDistScale;	// depth-rebuilt RT shadow rays: extra origin offset per unit of view distance
 extern idCVar r_rtMonsterShadows;			// RT sun shadows: include animated characters as per-frame casters
 
 // DUDE: emissive fill lights for interactive GUI screens (enhancement backends only)

@@ -352,8 +352,11 @@ float shadowVisibility( bool canReceive ) {
 #endif
 
 // The march's occlusion, 0 = none .. 1 = a contact occluder right at the start. jitter = the
-// start offset in steps, 0..1.
-float contactOcclusion( float jitter, int qi ) {
+// start offset in steps, 0..1. NdotL = the light's grazing cosine on this surface: when the light
+// skims the surface (NdotL -> 0, e.g. flat terrain under a low sun) the ray marches nearly parallel
+// to the ground and the surface shadows itself, which flickers as the view moves. The start offset
+// is pushed off the surface the more the light grazes so that self-contact drops out (issue #25).
+float contactOcclusion( float jitter, int qi, float NdotL ) {
 	int steps = int( u_contactParms.x + 0.5 );
 	// fragment + light in view space (negative Z is forward, matching ssr.frag)
 	vec3 Pv = ( u_modelViewMatrix * vec4( var_ModelPos, 1.0 ) ).xyz;
@@ -379,8 +382,15 @@ float contactOcclusion( float jitter, int qi ) {
 	float stepLen = marchLen / float( steps );
 	vec2 dc = DUDE_DEPTH_CONSTS();
 	float thick = u_contactParms.z;
+	// grazing bias (r_contactShadowGrazeBias = u_contactParms2.y, 0 = off -> bit-identical): the rise of
+	// the ray off the surface after one step is ~ stepLen * NdotL, so at a grazing light it barely clears
+	// the surface and the first samples read the receiver itself. Push the start out the more the light
+	// grazes (quadratic so steep angles are untouched) so flat terrain stops shadowing itself.
+	float grazeBias = u_contactParms2.y;
+	float g = clamp( 1.0 - NdotL, 0.0, 1.0 );
+	float startScale = 1.0 + grazeBias * g * g;
 	// the start sits half to one-and-a-half steps off the surface (the self-shadow guard)
-	float t = stepLen * ( 0.5 + jitter );
+	float t = stepLen * ( 0.5 + jitter ) * startScale;
 	// ramp width of the soft hit: a sample this far in front of the ray scores fully
 	float ramp = max( 0.5 * stepLen, 0.25 );
 	float eps = 0.05 * stepLen;
@@ -493,7 +503,7 @@ float rtContactOcclusion( int qi ) {
 // Light visibility from the contact term: 1 = lit, down to (1 - strength) at a contact occluder. The screen-space
 // march (u_contactParms.x = steps) or, in the ray-query variant, the RT ray (u_contactParms.x = -1); both soften
 // through the same 2x2 quad average. Call from uniform control flow (the quad average takes derivatives).
-float contactShadowTerm( bool canReceive ) {
+float contactShadowTerm( bool canReceive, float NdotL ) {
 	bool rtContact = u_contactParms.x < -0.5;
 #if !( defined(VULKAN) && defined(DUDE_RT_SUN) )
 	if ( rtContact ) {
@@ -517,7 +527,7 @@ float contactShadowTerm( bool canReceive ) {
 		} else
 #endif
 		{
-			occ = contactOcclusion( ( float( qi ) + 0.5 ) * 0.25, qi );
+			occ = contactOcclusion( ( float( qi ) + 0.5 ) * 0.25, qi, NdotL );
 		}
 	}
 	// per-pixel derivatives give this pixel's horizontal / vertical / diagonal quad neighbours:
@@ -529,6 +539,19 @@ float contactShadowTerm( bool canReceive ) {
 	vec2 vd = vh + DUDE_DFDY_FINE( vh ) * sgn.y;
 	vec2 sum = v + vh + vv + vd;
 	occ = ( sum.y > 0.5 ) ? sum.x / sum.y : 0.0;
+	// Distance fade (r_contactShadowMaxDist = u_contactParms2.z, 0 = off), for BOTH the screen-space
+	// march and the RT ray. Contact shadows are a near-field grounding effect (pickups, feet, props);
+	// on distant terrain they only yield a self-shadow that CRAWLS as the view moves - the march dither
+	// and the quad's four ray directions are locked to screen pixels, so the world slides under a fixed
+	// pattern (issue #25). Fade the term out with distance so far mountains get none while near objects
+	// keep their grounding. Full in to 0.7*max, gone by max. Radial distance from the eye in model space
+	// (u_localViewOrigin is filled on every interaction; u_modelViewMatrix is not on the RT path), so the
+	// fade boundary stays put on the terrain as the view turns.
+	float maxDist = u_contactParms2.z;
+	if ( maxDist > 0.0 ) {
+		float viewDist = length( var_ModelPos - u_localViewOrigin.xyz );
+		occ *= clamp( ( maxDist - viewDist ) / ( 0.3 * maxDist ), 0.0, 1.0 );
+	}
 	return canReceive ? clamp( 1.0 - u_contactParms.w * occ, 0.0, 1.0 ) : 1.0;
 }
 
@@ -831,7 +854,7 @@ void main() {
 		// DUDE contact shadows: fold the short screen-space march into this light's visibility so it
 		// stacks with the shadow map and rides the same shadowVis the skin scatter reuses. Skipped on
 		// the wet-blood film draw (a decal glint, not a shadow receiver).
-		shadowVis *= contactShadowTerm( lightReaches && NdotL > 0.0 && filmMode < 0.5 );
+		shadowVis *= contactShadowTerm( lightReaches && NdotL > 0.0 && filmMode < 0.5, NdotL );
 		lightScale = NdotL * shadowVis;
 		sssExcess = skinScatterExcess( NdotLsigned );	// 0 unless this is a skin/flesh draw
 	} else {
@@ -845,7 +868,7 @@ void main() {
 		float rawNdotL = dot( lightV, localNormal );
 		shadowVis = shadowVisibility( lightReaches && rawNdotL > 0.0 );
 		// DUDE contact shadows (see the PBR branch): fold the screen-space march into shadowVis.
-		shadowVis *= contactShadowTerm( lightReaches && rawNdotL > 0.0 && filmMode < 0.5 );
+		shadowVis *= contactShadowTerm( lightReaches && rawNdotL > 0.0 && filmMode < 0.5, rawNdotL );
 		lightScale = rawNdotL * shadowVis;
 		sssExcess = skinScatterExcess( rawNdotL );		// 0 unless this is a skin/flesh draw
 

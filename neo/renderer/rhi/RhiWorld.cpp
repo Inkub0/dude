@@ -2320,6 +2320,9 @@ static bool RB_RHI_FillContactShadowParms( rhi::RenderParams &parms, const drawI
 				// tan of the cone half-angle the quad's four rays spread over (the soft edge)
 				parms.contactParms[2] = idMath::Tan( DEG2RAD( idMath::ClampFloat( 0.0f, 45.0f, r_rtContactShadowSoftness.GetFloat() ) ) );
 				parms.contactParms[3] = idMath::ClampFloat( 0.0f, 1.0f, r_rtContactShadowStrength.GetFloat() );
+				// the same distance fade as the screen-space march (issue #25): the quad's four ray directions are
+				// screen-locked too, so far terrain crawls under them as the view moves
+				parms.contactParms2[2] = idMath::ClampFloat( 0.0f, 8192.0f, r_contactShadowMaxDist.GetFloat() );
 				if ( !rtSun ) {
 					// a shadow-map / mask / unshadowed draw: hand it the TLAS and the ray-origin normal offset (the
 					// RT shadow modes fill the same lanes), and bind the ray-query variant, whose map paths are unchanged
@@ -2357,6 +2360,8 @@ static bool RB_RHI_FillContactShadowParms( rhi::RenderParams &parms, const drawI
 			parms.contactParms[2] = r_contactShadowThickness.GetFloat();
 			parms.contactParms[3] = idMath::ClampFloat( 0.0f, 1.0f, r_contactShadowStrength.GetFloat() );
 			parms.contactParms2[0] = idMath::Tan( DEG2RAD( idMath::ClampFloat( 0.0f, 45.0f, r_contactShadowSoftness.GetFloat() ) ) );
+			parms.contactParms2[1] = idMath::ClampFloat( 0.0f, 16.0f, r_contactShadowGrazeBias.GetFloat() );	// grazing-angle start push (issue #25)
+			parms.contactParms2[2] = idMath::ClampFloat( 0.0f, 8192.0f, r_contactShadowMaxDist.GetFloat() );	// distance fade for far terrain (issue #25)
 			// view-space march transforms: this surface's model->view and the view's view->clip
 			memcpy( parms.modelViewMatrix, din->surf->space->modelViewMatrix, sizeof( parms.modelViewMatrix ) );
 			memcpy( parms.projectionMatrix, ictx.viewDef->projectionMatrix, sizeof( parms.projectionMatrix ) );
@@ -9477,6 +9482,14 @@ static void RB_RHI_ReStirDIGatherParms( const diPassCtx_t &c, rhi::RenderParams 
 		parms.rtParms[2] = r_rtSunShadowOffset.GetFloat();				// ray-origin normal offset (shared with mode 4)
 		parms.rtParms[3] = 100000.0f;									// max shadow-ray length
 	}
+	// the projection's shear terms = this frame's FSR2 jitter: diSurfacePw unprojects the ray origin with them, like
+	// rtshadow_ray.frag (u_contactParms2 is the contact-shadow lane, unused by the DI shaders). Without the jitter the
+	// rebuilt origin swims under the depth texel each frame and far terrain self-shadows in a crawl (issue #25).
+	if ( c.viewDef != NULL ) {
+		parms.contactParms2[0] = c.viewDef->projectionMatrix[8];
+		parms.contactParms2[1] = c.viewDef->projectionMatrix[9];
+	}
+	parms.contactParms2[3] = idMath::ClampFloat( 0.0f, 0.02f, r_rtShadowOriginDistScale.GetFloat() );	// origin offset per unit of view distance
 	// NRD ReblurHitDistanceParameters for direct lighting: the "hit distance" is the distance to the chosen
 	// light, so A sets the world-space blur scale (ReBLUR divides by A+|viewZ|*B). Shader and denoise MUST use
 	// the same A/B. A = 0.5*diHitScale, B = 0.1 (as rtgi_ray.frag). diHitScale ~ a room so typical light
@@ -10530,6 +10543,7 @@ static void RB_RHI_RtShadowBlurRayParms( rhi::RHI *r, const viewDef_t *viewDef, 
 	memcpy( &parms.rtParms[0], &tlasLo, sizeof( tlasLo ) );		// bit-cast, NOT a value cast
 	memcpy( &parms.rtParms[1], &tlasHi, sizeof( tlasHi ) );
 	parms.rtParms[2] = r_rtSunShadowOffset.GetFloat();			// ray-origin normal offset, shared with mode 4
+	parms.contactParms2[3] = idMath::ClampFloat( 0.0f, 0.02f, r_rtShadowOriginDistScale.GetFloat() );	// + this * view distance (issue #25)
 	parms.localLightOrigin[0] = lorg.x;		// WORLD space here (fullscreen pass, no model)
 	parms.localLightOrigin[1] = lorg.y;
 	parms.localLightOrigin[2] = lorg.z;
