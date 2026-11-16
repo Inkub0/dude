@@ -887,7 +887,11 @@ void idCollisionModelManagerLocal::Translation( trace_t *results, const idVec3 &
 		results->c.normal = vec3_origin;
 		results->c.material = NULL;
 		results->c.point = start;
-		if ( session->rw ) {
+		// DUDE: the red arrow is a developer aid, so only with `developer 1` (the print stays). Issue
+		// #26: a gameplay trace can hit this every frame (Quake 4's mcc_landing barrel tosser aims a
+		// thrown barrel's clip model at the player from > 4096 units), and under FSR2 the debug
+		// lines draw into the display-size composite, which has no scene depth to hide them.
+		if ( session->rw && com_developer.GetBool() ) {
 			session->rw->DebugArrow( colorRed, start, end, 1 );
 		}
 		common->Printf( "idCollisionModelManagerLocal::Translation: huge translation from (%.2f %.2f %.2f) to (%.2f %.2f %.2f)\n",
