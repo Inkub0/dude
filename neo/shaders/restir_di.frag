@@ -30,8 +30,10 @@
 //   u_color.xy            = scene-light buffer device address (bit-cast lo/hi)
 //   u_color.z             = light count
 //   u_rtParms.xy          = scene TLAS device address (bit-cast lo/hi; 0 = no RT scene -> unshadowed)
-//   u_rtParms.z           = shadow-ray origin offset along the surface normal (world units)
+//   u_rtParms.z           = shadow-ray origin offset along the surface normal (world units; + 5e-4 * view distance)
 //   u_rtParms.w           = max shadow-ray length
+//   u_contactParms2.xy    = the projection's shear terms (proj[8], proj[9]) = this frame's FSR2 jitter, for the
+//                           jitter-exact unprojection of the ray origin (diSurfacePw)
 //   u_localParam0         = ( 1/proj00, 1/proj11, candidate count M (0 = EVERY light: exhaustive RIS), hit-distance scale (NRD A = 0.5*this) )
 //   u_localParam1.x       = frame index (RNG decorrelation)
 //   u_localParam1.y       = r_pbr (apply mode: 1 = GGX metalness workflow as interaction.frag, 0 = Lambert only)

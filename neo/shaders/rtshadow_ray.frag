@@ -26,6 +26,7 @@
 // Uniform packing (RB_RHI_RtShadowBlurLight):
 //   u_rtParms.xy          = TLAS device address (bit-cast lo/hi)
 //   u_rtParms.z           = ray-origin normal offset (r_rtSunShadowOffset, shared with mode 4)
+//   u_contactParms2.w     = r_rtShadowOriginDistScale: extra origin offset per unit of view distance
 //   u_rtParms.w           = 1: units 2/3 hold this light's falloff / projection images and the lookup
 //                           is the plain one (single stage, no texture matrix) - skip the ray where
 //                           they are black
@@ -76,6 +77,23 @@ void main() {
 	fragColor = vec4( 1.0, 0.0, 0.0, 0.0 );		// every early-out = lit
 	out_summary = vec2( 1.0, 1.0 );				// until proven traced: lit, G = untraced sentinel
 	vec2  frag = gl_FragCoord.xy;
+	// The surface point and its GEOMETRIC normal first, for every pixel of the quad: the normal comes from
+	// screen-space derivatives of the point, which are undefined once a quad neighbour has returned - and the
+	// checkerboard below returns two of every four (issue #25: the ray origin is pushed along this normal now).
+	float raw  = texture( u_currentDepth, frag * u_depthTexRecip.xy ).x;
+	float vz  = 1.0 / ( min( raw, 0.9994 ) * DUDE_DEPTH_CONSTS().x + DUDE_DEPTH_CONSTS().y );   // negative
+	float d   = -vz;
+	vec2  ndc = frag * ( u_screenCorrection.xy * 2.0 ) - 1.0;
+	// jitter-exact unprojection (VK: top-down window y, hence the sign): ndc.x = P00*x/d - P8
+	vec3  P   = vec3( ( ndc.x + u_localParam1.y ) * d * u_localParam0.x,
+	                  ( -ndc.y + u_localParam1.z ) * d * u_localParam0.y, vz );
+	// depth quantization: ~2e-8 * d^2 world units along the view ray, doubled by the float32
+	// cancellation in the linearization - err in FRONT of the surface, never behind it
+	// (the 6e-8 is for the play-time near plane; depth resolution scales with 1 / zNear)
+	P *= max( 1.0 - 6e-8 * ( DUDE_DEPTH_CONSTS().x * 3.0 ) * d * d / max( length( P ), 1.0 ), 0.5 );
+	// geometric normal from the depth derivatives, taken before ANY branching (uniform control flow)
+	vec3  gN   = cross( dFdx( P ), dFdy( P ) );
+
 	// r_rtShadowBlurCheckerboard (u_color.x): trace a STATIC screen checkerboard - skip half the pixels,
 	// the reconstruct pass (rtshadow_fill) fills them from their traced neighbours (always the opposite
 	// parity). Static (no per-frame flip) so the deterministic "same camera -> same mask" holds. A skipped
@@ -84,7 +102,6 @@ void main() {
 		fragColor.b = -1.0;						// "skipped, reconstruct me"
 		return;
 	}
-	float raw  = texture( u_currentDepth, frag * u_depthTexRecip.xy ).x;
 	if ( raw >= 0.9994 ) {						// sky / no geometry
 		return;
 	}
@@ -95,20 +112,8 @@ void main() {
 		return;
 	}
 
-	float vz  = 1.0 / ( min( raw, 0.9994 ) * DUDE_DEPTH_CONSTS().x + DUDE_DEPTH_CONSTS().y );   // negative
-	float d   = -vz;
 	fragColor.b = min( d, 65000.0 );			// lit or not, this pixel has a surface the blur can weigh
 	out_summary.y = 0.0;						// traced from here on (G < 1); lit until a width is found
-	vec2  ndc = frag * ( u_screenCorrection.xy * 2.0 ) - 1.0;
-	// jitter-exact unprojection (VK: top-down window y, hence the sign): ndc.x = P00*x/d - P8
-	vec3  P   = vec3( ( ndc.x + u_localParam1.y ) * d * u_localParam0.x,
-	                  ( -ndc.y + u_localParam1.z ) * d * u_localParam0.y, vz );
-	// depth quantization: ~2e-8 * d^2 world units along the view ray, doubled by the float32
-	// cancellation in the linearization - err in FRONT of the surface, never behind it
-	// (the 6e-8 is for the play-time near plane; depth resolution scales with 1 / zNear)
-	P *= max( 1.0 - 6e-8 * ( DUDE_DEPTH_CONSTS().x * 3.0 ) * d * d / max( length( P ), 1.0 ), 0.5 );
-	// geometric normal from the depth derivatives, taken before any further branching
-	vec3  gN   = cross( dFdx( P ), dFdy( P ) );
 	vec3  Nraw = nt.xyz * 2.0 - 1.0;
 	float nl2  = dot( Nraw, Nraw );
 	if ( !( nl2 > 1e-4 ) ) {
@@ -143,7 +148,20 @@ void main() {
 		}
 	}
 
-	vec3  O    = Pw + Nw * ( u_rtParms.z + 5e-4 * d );
+	// The geometric normal in world space, turned toward the camera (the visible side of the surface).
+	float gLen = length( gN );
+	vec3  gn   = ( gLen > 1e-6 ) ? gN / gLen : vec3( 0.0, 0.0, 1.0 );		// view space
+	if ( dot( gn, -P ) < 0.0 ) { gn = -gn; }
+	vec3  gNw  = mat3( u_modelViewMatrix ) * gn;
+	// Push the ray origin off the surface along the GEOMETRIC normal, not the G-buffer's BUMP-MAPPED one (issue #25).
+	// A strong bump (Quake 4's rock terrain: heightmap scale 10) tilts the shading normal far off the real surface, so
+	// a push along it runs partly sideways or into the slope - by a different amount every texel - and far terrain
+	// shadowed itself in a crawl: a small r_rtSunShadowOffset couldn't clear it, a big one lifted real shadows too.
+	// The mode-4 ray (interaction.frag) pushes along the interpolated VERTEX normal and never had it. The derivative
+	// normal is unreliable where its 2x2 quad straddles a depth edge; there it disagrees with the shading normal, and
+	// the bump normal is kept as before.
+	vec3  Noff = ( gLen > 1e-6 && dot( gNw, Nw ) > 0.25 ) ? gNw : Nw;
+	vec3  O    = Pw + Noff * ( u_rtParms.z + u_contactParms2.w * d );	// .w = r_rtShadowOriginDistScale
 	vec3  toL  = u_localLightOrigin.xyz - O;
 	float dL2  = dot( toL, toL );
 	if ( !( dL2 > 1.0 ) ) {						// on top of the light (also catches NaN)
@@ -154,12 +172,9 @@ void main() {
 
 	// surfaces facing away from the light receive exactly zero from it (the interaction multiplies
 	// by N.L): no ray. Bump normal AND geometric normal must agree, so only whole faces are skipped.
-	float gLen = length( gN );
-	vec3  gn   = ( gLen > 1e-6 ) ? gN / gLen : vec3( 0.0, 0.0, 1.0 );		// view space
 	if ( dot( Nw, Ldir ) < -0.05 ) {
-		vec3 gNw = mat3( u_modelViewMatrix ) * gn;
-		if ( dot( gNw, Nw ) < 0.0 ) { gNw = -gNw; }
-		if ( gLen > 1e-6 && dot( gNw, Ldir ) < -0.15 ) {
+		vec3 gNs = ( dot( gNw, Nw ) < 0.0 ) ? -gNw : gNw;
+		if ( gLen > 1e-6 && dot( gNs, Ldir ) < -0.15 ) {
 			return;
 		}
 	}

@@ -42,9 +42,25 @@ vec4 diNormalTexel( vec2 sfrag ) {
 // diSurfaceAt's world point of SCREEN pixel sfrag at positive linear view depth d (view z = -d exactly), and its world normal
 // from the normal-buffer texel (the caller has checked the texel's length) - shared, so a late re-derivation (the gather after
 // its bounce) compiles to the same numbers.
+// Far-terrain self-shadow flicker (issue #25 under ReSTIR DI): this point is the visibility ray's ORIGIN, so it must sit
+// on the surface the depth texel actually holds, or a 1-unit normal offset can't clear it on a glancing slope thousands
+// of units away. Three precautions, the ones rtshadow_ray.frag already takes for the hybrid tier:
+//   1. unproject at the CENTRE of the nearest depth texel diSurfaceAt read, not at sfrag (the gather runs at a reduced
+//      res: up to ~2/3 of a texel apart, which on a grazing slope is several world units of depth),
+//   2. with this frame's FSR2 jitter (the projection's shear terms, u_contactParms2.xy; 0 = none, the old unprojection),
+//   3. pulled toward the camera by the depth buffer's quantization error (~d^2), so the error lies IN FRONT of the
+//      surface, never behind it.
+// Without them the point lands inside the hill by a jitter-dependent amount and the shadow ray hits the terrain it
+// starts on in a per-pixel, per-frame pattern - the stipple that crawls over far mountains.
 vec3 diSurfacePw( vec2 sfrag, float d ) {
-	vec2  ndc = sfrag * ( u_screenCorrection.xy * 2.0 ) - 1.0;
-	vec3  P   = vec3( ndc.x * d * u_localParam0.x, ndc.y * u_windowCoord.z * d * u_localParam0.y, -d );
+	ivec2 dsz = textureSize( u_currentDepth, 0 );
+	ivec2 dt  = clamp( ivec2( floor( sfrag * u_depthTexRecip.xy * vec2( dsz ) ) ), ivec2( 0 ), dsz - 1 );
+	// that texel's centre: depth tc -> screen pixels (sfrag * u_depthTexRecip = tc) -> view [0,1]
+	vec2  uv  = ( ( vec2( dt ) + 0.5 ) / vec2( dsz ) ) / u_depthTexRecip.xy * u_screenCorrection.xy;
+	vec2  ndc = uv * 2.0 - 1.0;
+	vec3  P   = vec3( ( ndc.x + u_contactParms2.x ) * d * u_localParam0.x,
+	                  ( ndc.y * u_windowCoord.z + u_contactParms2.y ) * d * u_localParam0.y, -d );
+	P *= max( 1.0 - 6e-8 * ( depth_consts.x * 3.0 ) * d * d / max( length( P ), 1.0 ), 0.5 );
 	return ( u_modelViewMatrix * vec4( P, 1.0 ) ).xyz;							// u_modelViewMatrix = inverse view
 }
 vec3 diSurfaceNw( vec4 nt ) {
@@ -254,10 +270,14 @@ float traceVisibility( vec3 Pw, vec3 Nw, vec3 ldir, float dl, float blurScale, o
 	// surface (a ceiling panel), so every flat floor pixel under it hit that surface and went black while the tile grooves
 	// and the walls (tilted normals: the ray ended short) lit - "the bumpiness responds the opposite way" (2026-10-31).
 	// Stop a margin short of the point from where the ray really starts (1 unit, growing with distance for float precision).
-	float dO   = dl - u_rtParms.z * dot( Nw, ldir );
+	// The normal offset grows with the view distance (r_rtShadowOriginDistScale, as rtshadow_ray.frag): Pw comes from the depth buffer, whose
+	// error and pixel footprint grow with distance, so a fixed r_rtSunShadowOffset that keeps near contact tight is far too
+	// small on far terrain (issue #25). Default 0.002: ~6 units at 3000, ~1.2 at arm's length.
+	float zOfs = u_rtParms.z + u_contactParms2.w * length( Pw - u_modelViewMatrix[3].xyz );	// .w = r_rtShadowOriginDistScale
+	float dO   = dl - zOfs * dot( Nw, ldir );
 	float tMax = min( dO - max( 1.0, 0.002 * dl ), u_rtParms.w );
 	if ( !( tMax > 0.0 ) ) { return 1.0; }
-	vec3  O = Pw + Nw * u_rtParms.z;
+	vec3  O = Pw + Nw * zOfs;
 	uvec2 geoAddr = uvec2( floatBitsToUint( u_particleRadius.x ), floatBitsToUint( u_particleRadius.y ) );
 	bool  perfOn  = u_windowCoord.x > 0.5 && u_windowCoord.y > 0.0 && ( geoAddr.x | geoAddr.y ) != 0u;
 	if ( !perfOn ) {
