@@ -57,6 +57,7 @@ static const gameTitleProfile_t titleProfiles[GAME_TITLE_COUNT] = {
 		false,							// runByDefault: Doom 3 walks; always-run is MP only (in_allowAlwaysRunInSP)
 		1.0f,							// defaultBrightness
 		NULL,							// iconExe: the built-in Doom 3 icon
+		false,							// splashEdgeFill: black bars beside the splash
 	},
 	{
 		GAME_TITLE_QUAKE4, "quake4", "Quake 4",
@@ -89,6 +90,7 @@ static const gameTitleProfile_t titleProfiles[GAME_TITLE_COUNT] = {
 		true,							// runByDefault: retail in_alwaysRun "1", honoured in single player
 		1.2f,							// defaultBrightness: retail Quake4.exe r_brightness "1.2"
 		"Quake4.exe",					// iconExe: Steam and GOG installs ship it next to q4base/ (GitHub #19)
+		true,							// splashEdgeFill: the splash's dark olive edges fill the bars
 	},
 };
 

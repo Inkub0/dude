@@ -3240,13 +3240,30 @@ void idCommonLocal::PrintLoadingMessage( const char *msg ) {
 			h = SCREEN_HEIGHT * ( aspect / virtualAspect );
 			y = ( SCREEN_HEIGHT - h ) * 0.5f;
 		}
-		if ( x != 0.0f || y != 0.0f ) {
+	}
+	const gameTitleProfile_t &title = GameTitle::Get();
+	const idMaterial *splash = declManager->FindMaterial( title.splashMaterial );
+	if ( x != 0.0f || y != 0.0f ) {
+		const int imageWidth = splash->GetImageWidth();
+		const int imageHeight = splash->GetImageHeight();
+		if ( title.splashEdgeFill && imageWidth > 0 && imageHeight > 0 ) {
+			// the bars carry on the splash's edge columns (rows): its outermost texels' centres,
+			// so filtering takes nothing from the texels beside them
+			const float s0 = 0.5f / imageWidth, s1 = 1.0f - s0;
+			const float t0 = 0.5f / imageHeight, t1 = 1.0f - t0;
+			if ( x != 0.0f ) {
+				renderSystem->DrawStretchPic( 0, 0, x, SCREEN_HEIGHT, s0, 0, s0, 1, splash );
+				renderSystem->DrawStretchPic( x + w, 0, SCREEN_WIDTH - ( x + w ), SCREEN_HEIGHT, s1, 0, s1, 1, splash );
+			} else {
+				renderSystem->DrawStretchPic( 0, 0, SCREEN_WIDTH, y, 0, t0, 1, t0, splash );
+				renderSystem->DrawStretchPic( 0, y + h, SCREEN_WIDTH, SCREEN_HEIGHT - ( y + h ), 0, t1, 1, t1, splash );
+			}
+		} else {
 			// black out the bars
 			renderSystem->DrawStretchPic( 0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, 0, 0, 1, 1, declManager->FindMaterial( "_black" ) );
 		}
 	}
-	const gameTitleProfile_t &title = GameTitle::Get();
-	renderSystem->DrawStretchPic( x, y, w, h, 0, 0, 1, 1, declManager->FindMaterial( title.splashMaterial ) );
+	renderSystem->DrawStretchPic( x, y, w, h, 0, 0, 1, 1, splash );
 	int len = strlen( msg );
 	renderSystem->DrawSmallStringExt( ( 640 - len * SMALLCHAR_WIDTH ) / 2, 410, msg, idVec4( 0.0f, 0.81f, 0.94f, 1.0f ), true, declManager->FindMaterial( title.charsetMaterial ) );
 	renderSystem->EndFrame( NULL, NULL );
