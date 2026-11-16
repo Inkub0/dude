@@ -2224,6 +2224,21 @@ static CVarOption lightingOptions[] = {
 			"The strongest deviation from the vanilla look in this tab.";
 		AddCVarOptionTooltips( cvar, descr );
 	} ),
+	// PBR sidecars (<diffuse>_orm / _rmao, e.g. the Baked PBR packs): per-pixel roughness / metalness / AO.
+	// Off falls back to the PBR table's one value per material, live, for A/B.
+	CVarOption( "r_pbrTextureMaps", []( idCVar& cvar ) {
+		bool enable = cvar.GetBool();
+		if ( ImGui::Checkbox( "Per-Pixel PBR Textures (ORM)", &enable ) ) {
+			cvar.SetBool( enable );
+		}
+		const char* descr = "Use PBR sidecar textures (<diffuse>_orm / _rmao, such as the optional\n"
+			"Baked PBR packs) for per-pixel roughness, metalness and ambient occlusion.\n"
+			"Off: every material falls back to the one roughness / metalness value the PBR\n"
+			"material table gives it (pbr/pbr_materials.cfg), live, to compare the two.\n"
+			"Roughness and metalness need PBR Materials on; the AO channel works either way.\n"
+			"Inert without sidecar textures.";
+		AddCVarOptionTooltips( cvar, descr );
+	} ),
 	// the three specular-model controls below are superseded by the PBR path, so
 	// they grey out while r_pbr is on; their values are preserved untouched so
 	// toggling PBR back off restores the exact previous look.
@@ -7925,6 +7940,16 @@ void Com_DrawPbrMaterialEditor()
 			if ( view > 0 ) {
 				ImGui::TextDisabled( "%s", legend[view] );
 			}
+		}
+		// A/B the sidecars against the table: off = every material shows its table values (r_pbrTextureMaps)
+		{
+			bool texMaps = r_pbrTextureMaps.GetBool();
+			if ( ImGui::Checkbox( "Per-pixel textures (ORM sidecars)", &texMaps ) ) {
+				r_pbrTextureMaps.SetBool( texMaps );
+			}
+			ImGui::SetItemTooltip( "Use the <diffuse>_orm / _rmao sidecar textures for per-pixel roughness, metalness "
+				"and AO. Off: every material falls back to its PBR table values, live, to compare the two. Same as "
+				"Graphics > Lighting > Per-Pixel PBR Textures. (r_pbrTextureMaps)" );
 		}
 		ImGui::Separator();
 		if ( ImGui::BeginTabBar( "PbrEditorTabs" ) ) {
