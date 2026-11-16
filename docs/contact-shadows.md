@@ -67,6 +67,21 @@ between lit and fully darkened: salt-and-pepper dots. Two changes remove the noi
   `GL_FRAGMENT_SHADER_DERIVATIVE_HINT = GL_NICEST` at init. `contactShadowTerm` must therefore be
   called from uniform control flow (it is: only per-draw branches enclose it).
 
+### Smooth falloff and penumbra
+
+Two more changes stop the shadow reading as hard-edged grey layers (user report, 2026-11-16):
+
+- **Hit between steps.** The darkness comes from how far along the ray the occluder sits. Scoring it
+  at the step that found the occluder let it change only once per step - with 2 to 8 steps a handful
+  of flat grey terraces. The march now places the hit where the depth gap crossed the epsilon,
+  interpolated linearly between the previous step and this one, so the fade follows the true distance.
+  No extra samples.
+- **Penumbra cone (`r_contactShadowSoftness`).** The four pixels of each quad also march four
+  directions spread over a cone toward the light (a ring at 0.7 of its radius, a quarter turn apart,
+  as RT contact shadows do). The quad average then blends them, so the shadow's edge widens with
+  distance from its occluder like a real penumbra. 0 = one direction, hard edge. No extra samples;
+  the half-angle rides `u_contactParms2.x` (its tangent), a vec4 appended to `RenderParams`.
+
 `_currentDepth` is a completed, shader-readable copy captured at the top of `RB_RHI_DrawWorld`
 (before the light loop; SSAO already consumes it that frame), *not* the live depth-test attachment —
 so there is no feedback with the depth buffer bound for the interactions' depth-EQUAL test.
@@ -78,8 +93,9 @@ so there is no feedback with the depth buffer bound for the interactions' depth-
 | `r_contactShadows` | 0 | master toggle. **Set by the quality preset:** off on Potato and Low, on from Medium up (matched in preset detection) |
 | `r_contactShadowStrength` | 0.5 | darkening on a found occluder (0..1) |
 | `r_contactShadowLength` | 4 | march length toward the light, world units |
-| `r_contactShadowThickness` | 25 | occluder thickness band, world units (a sample nearer than the ray by more than this is background, not an occluder) |
+| `r_contactShadowThickness` | 23 | occluder thickness band, world units (a sample nearer than the ray by more than this is background, not an occluder) |
 | `r_contactShadowSteps` | 8 | march steps per lit pixel (2..32; runs per light, so keep low). **Set by the quality preset:** Medium 2, High 4, Ultra 6, Nightmare 8 (applied, not matched in preset detection, so tuning it never reads "Custom") |
+| `r_contactShadowSoftness` | 8 | edge softness: half-angle in degrees of the cone the march spreads over toward the light (0..45; 0 = hard edge). Free |
 
 All are `CVAR_ARCHIVE`. Preset-wired since 2026-11-10 (user decision, after the dots fix and the retune):
 the toggle and the march steps come from the quality tier; strength, length and thickness stay free

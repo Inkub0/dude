@@ -162,7 +162,9 @@ UBO_BINDING(0) uniform RenderParams {
 	vec4 u_ormGlobG;             // --*-adjust flags. Identity (0, 1, 1) when off.
 	vec4 u_ormBakedB;            // what the sidecars were baked with (pbr/pbr_sidecar_baked.cfg), undone before the
 	vec4 u_ormBakedC;            // global adjust applies: sliders equal to the bake show the textures as baked.
-	vec4 u_ormBakedG;            // Identity (0, 1, 1) when none recorded. Appended LAST.
+	vec4 u_ormBakedG;            // Identity (0, 1, 1) when none recorded.
+	vec4 u_contactParms2;        // DUDE contact shadows: x = tan(penumbra cone half-angle) (r_contactShadowSoftness),
+	                             // yzw spare. Appended LAST.
 };
 
 float dudeOrmAdjust( float v, float b, float c, float g ) {

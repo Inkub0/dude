@@ -1554,6 +1554,15 @@ void idCommonLocal::CheckConfigSchema( void ) {
 	}
 
 	if ( from >= 3 ) {
+		// 10 -> 11: screen-space contact shadows retuned with the between-steps hit and the new penumbra cone
+		// (r_contactShadowSoftness, user, 2026-11-16): occluder thickness 25 -> 23. A config still on the old
+		// default moves; a deliberate other value stays.
+		if ( from < 11 ) {
+			static const comOldDefault_t contactRetune2[] = {
+				{ "r_contactShadowThickness", 25.0f },
+			};
+			Com_MoveOldDefaults( contactRetune2, (int)( sizeof( contactRetune2 ) / sizeof( contactRetune2[0] ) ) );
+		}
 		// 9 -> 10: RT shadow look retuned (user, 2026-11-10): blur intensity 0.13 -> 1.0, blur falloff curve 0.5 -> 0.47,
 		// RT contact shadows strength 0.5 -> 0.4, ray length 4 -> 14, softness 15 -> 12. A config still on an old default
 		// moves; a deliberate other value stays. (The skip-below-penumbra default moved 1.0 -> 2.0 too, but the presets

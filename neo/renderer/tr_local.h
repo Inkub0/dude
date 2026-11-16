@@ -1036,6 +1036,7 @@ extern idCVar r_contactShadowStrength;	// darkening on a found occluder (0..1)
 extern idCVar r_contactShadowLength;	// march length toward the light (world units)
 extern idCVar r_contactShadowThickness;	// occluder thickness band (world units)
 extern idCVar r_contactShadowSteps;		// march steps per lit pixel (2..32)
+extern idCVar r_contactShadowSoftness;	// penumbra cone half-angle, degrees (0..45)
 extern idCVar r_rtContactShadows;			// RT contact shadows: one short ray query toward each light (VK + RT, while RTX builds the scene)
 extern idCVar r_rtContactShadowStrength;	// darkening at the contact (0..1)
 extern idCVar r_rtContactShadowLength;		// ray length, world units

@@ -353,7 +353,7 @@ float shadowVisibility( bool canReceive ) {
 
 // The march's occlusion, 0 = none .. 1 = a contact occluder right at the start. jitter = the
 // start offset in steps, 0..1.
-float contactOcclusion( float jitter ) {
+float contactOcclusion( float jitter, int qi ) {
 	int steps = int( u_contactParms.x + 0.5 );
 	// fragment + light in view space (negative Z is forward, matching ssr.frag)
 	vec3 Pv = ( u_modelViewMatrix * vec4( var_ModelPos, 1.0 ) ).xyz;
@@ -364,6 +364,17 @@ float contactOcclusion( float jitter ) {
 		return 0.0;
 	}
 	vec3 dir = toL / distL;
+	// penumbra (r_contactShadowSoftness): this pixel's direction in the quad's cone, four points on a ring at 0.7 of
+	// the cone radius a quarter turn apart, as rtContactOcclusion does - the quad average below then spreads the
+	// shadow's edge wider the farther it is from its occluder, like a real penumbra. 0 = one direction, hard edge.
+	float coneTan = u_contactParms2.x;
+	if ( coneTan > 0.0 ) {
+		vec3 up = ( abs( dir.y ) < 0.9 ) ? vec3( 0.0, 1.0, 0.0 ) : vec3( 1.0, 0.0, 0.0 );
+		vec3 tx = normalize( cross( up, dir ) );
+		vec3 ty = cross( dir, tx );
+		float ang = 1.5707963 * float( qi ) + 0.7853982;
+		dir = normalize( dir + ( tx * cos( ang ) + ty * sin( ang ) ) * ( 0.7 * coneTan ) );
+	}
 	float marchLen = min( u_contactParms.y, distL );	// never march past the light itself
 	float stepLen = marchLen / float( steps );
 	vec2 dc = DUDE_DEPTH_CONSTS();
@@ -372,18 +383,24 @@ float contactOcclusion( float jitter ) {
 	float t = stepLen * ( 0.5 + jitter );
 	// ramp width of the soft hit: a sample this far in front of the ray scores fully
 	float ramp = max( 0.5 * stepLen, 0.25 );
+	float eps = 0.05 * stepLen;
 	float occ = 0.0;
+	// the previous step's depth gap (scene minus ray; > eps = an occluder in front of the ray), to place the hit
+	// between two steps instead of on one: the fade then varies smoothly with the true crossing distance instead
+	// of jumping once per step, which read as hard-edged grey terraces
+	float prevD = -1e9;
 	// constant loop bound (steps <= 32 by the cvar clamp) keeps the loop uniform across drivers
 	for ( int i = 0; i < 32; i++ ) {
 		if ( i >= steps ) {
 			break;
 		}
-		float fade = 1.0 - t / marchLen;		// nearer occluder -> darker
-		if ( fade <= occ ) {
-			break;								// no later step can score higher
+		// the crossing lies after the previous step, so no hit from here on can fade less than this
+		if ( 1.0 - ( t - stepLen ) / marchLen <= occ ) {
+			break;
 		}
 		vec3 rayPos = Pv + dir * t;
 		vec4 clip = u_projectionMatrix * vec4( rayPos, 1.0 );
+		float d = -1e9;
 		if ( clip.w > 0.0 ) {
 			vec2 uv01 = ( clip.xy / clip.w ) * 0.5 + 0.5;
 			if ( uv01.x > 0.0 && uv01.x < 1.0 && uv01.y > 0.0 && uv01.y < 1.0 ) {
@@ -394,12 +411,20 @@ float contactOcclusion( float jitter ) {
 				// both negative; a surface NEARER the camera than the ray point (sceneZ less
 				// negative -> sceneZ > rayPos.z) that sits within the thickness band occludes:
 				// ramps in past a small epsilon, ramps out over the far half of the band
-				float d = sceneZ - rayPos.z;
-				float eps = 0.05 * stepLen;
+				d = sceneZ - rayPos.z;
 				float w = smoothstep( eps, eps + ramp, d ) * ( 1.0 - smoothstep( 0.5 * thick, thick, d ) );
-				occ = max( occ, w * fade );
+				if ( w > 0.0 ) {
+					// where the gap crossed eps between the last step and this one (linear in t)
+					float tHit = t;
+					if ( prevD > -1e8 && prevD < eps && d > prevD ) {
+						tHit = t - stepLen * clamp( ( d - eps ) / ( d - prevD ), 0.0, 1.0 );
+					}
+					float fade = clamp( 1.0 - tHit / marchLen, 0.0, 1.0 );	// nearer occluder -> darker
+					occ = max( occ, w * fade );
+				}
 			}
 		}
+		prevD = d;
 		t += stepLen;
 	}
 	return occ;
@@ -492,7 +517,7 @@ float contactShadowTerm( bool canReceive ) {
 		} else
 #endif
 		{
-			occ = contactOcclusion( ( float( qi ) + 0.5 ) * 0.25 );
+			occ = contactOcclusion( ( float( qi ) + 0.5 ) * 0.25, qi );
 		}
 	}
 	// per-pixel derivatives give this pixel's horizontal / vertical / diagonal quad neighbours:

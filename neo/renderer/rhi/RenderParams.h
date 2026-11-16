@@ -197,7 +197,12 @@ struct RenderParams {
 								// of the extractor's --ao-adjust / --rough-adjust / --metal-adjust. Filled identity when off.
 	float	ormBaked[3][4];		// DUDE: what the sidecars were baked with (pbr/pbr_sidecar_baked.cfg, same layout as
 								// ormGlobal): undone before ormGlobal applies, so sliders equal to the bake = the textures
-								// as baked. Identity (0, 1, 1) when none recorded. Appended LAST.
+								// as baked. Identity (0, 1, 1) when none recorded.
+	float	contactParms2[4];	// DUDE screen-space contact shadows, second vec4 (docs/contact-shadows.md):
+								// x = tan of the penumbra cone half-angle (r_contactShadowSoftness): each pixel of a
+								// 2x2 quad marches one of four directions spread over that cone toward the light and
+								// the quad averages them, so the shadow edge widens with distance from the occluder.
+								// yzw spare. Filled with contactParms. Appended LAST.
 };
 
 // window depth -> view z for a view, from its projection matrix (column-major GL layout):
@@ -211,8 +216,8 @@ inline void FillDepthParms( RenderParams &p, const float *proj ) {
 	}
 }
 
-// 4 mat4 (256) + 63 vec4 (1008) = 1264 bytes, zero padding
-static_assert( sizeof( RenderParams ) == 1264, "RenderParams must match the std140 layout of renderparms.glsl" );
+// 4 mat4 (256) + 64 vec4 (1024) = 1280 bytes, zero padding
+static_assert( sizeof( RenderParams ) == 1280, "RenderParams must match the std140 layout of renderparms.glsl" );
 
 } // namespace rhi
 
