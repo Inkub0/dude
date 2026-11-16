@@ -31,6 +31,8 @@ windowDef Desktop {
 		if ("desktop::doomme" == 0) { 
 			showcursor "1" ;
 			set "idlogo::rect" "0 0 0 0" ;			
+			set "IntroBarLeft::visible" "0" ;
+			set "IntroBarRight::visible" "0" ;
 			resetTime "SoundrunMenu" "0" ;					
 			set "desktop::doomme" "1" ;
 			set "cmd" "play """ ;
@@ -129,11 +131,15 @@ windowDef Desktop {
 		onTime 0 {
 			set	"cmd"	"play guisounds_idlogo" ;
 			set "idlogo::rect" "0 0 640 480" ;
+			set "IntroBarLeft::visible" "1" ;
+			set "IntroBarRight::visible" "1" ;
 			resetCinematics ;
 			set "desktop::doomme" "0" ;
 		}
 		onTime 12400 {
 			set "idlogo::rect" "0 0 0 0" ;
+			set "IntroBarLeft::visible" "0" ;
+			set "IntroBarRight::visible" "0" ;
 		}
 		onTime 13000 {
 			if ("desktop::doomme" == 0) { 
@@ -21764,6 +21770,24 @@ windowDef MultiplayerLANParent {
 		noevents   1
 	}
 	
+	// DUDE: black beside the id logo intro video on a wide screen: the video keeps 4:3 at the
+	// centre (CST_ANCHOR_CENTER_CENTER) while the menu around it fills the screen, so without
+	// these the menu showed beside it. Shown with the video (Squishy, onESC); zero wide on 4:3.
+	windowDef IntroBarLeft {
+		cstAnchor  CST_ANCHOR_LEFT
+		rect       0, 0, "gui::cstHorPad", 480
+		backcolor  0, 0, 0, 1
+		visible    0
+		noevents   1
+	}
+	windowDef IntroBarRight {
+		cstAnchor  CST_ANCHOR_RIGHT
+		rect       640 - "gui::cstHorPad", 0, "gui::cstHorPad", 480
+		backcolor  0, 0, 0, 1
+		visible    0
+		noevents   1
+	}
+
 	// DG: this ensures that the cursor is scaled correctly
 	windowDef FakeDesktop {
 		rect 0, 0, 640, 480
