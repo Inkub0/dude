@@ -65,7 +65,9 @@ If you have questions concerning this license or the applicable additional terms
 // such a tier with its ray tracing applied gets them on, once.
 // 10 (2026-11-10): TARGETED step - RT shadow blur intensity / curve and RT contact shadow strength / length / softness
 // retuned: configs on the old defaults move, once.
-#define DUDE_CONFIG_SCHEMA				10
+// 11 (2026-11-16): TARGETED step - screen-space contact shadow occluder thickness retuned 25 -> 23 alongside the new
+// r_contactShadowSoftness (8 deg) and the between-steps hit: configs on the old default move, once.
+#define DUDE_CONFIG_SCHEMA				11
 
 #ifdef ID_REPRODUCIBLE_BUILD
 	// for reproducible builds we hardcode values that would otherwise come from __DATE__ and __TIME__

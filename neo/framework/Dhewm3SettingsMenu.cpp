@@ -5863,11 +5863,16 @@ static void DrawDbgGroup_ContactShadows()
 
 		CvarSliderF( "Occluder Thickness", r_contactShadowThickness, 0.5f, 128.0f, "%.0f", "a depth sample nearer than the ray by more than this is treated as "
 			"background, not an occluder. Too low = shadows drop out behind thin geometry; too high = haloing / "
-			"over-occlusion. Default 25." );
+			"over-occlusion. Default 23." );
 
 		CvarSliderI( "March Steps", r_contactShadowSteps, 2, 32, "depth-march samples per lit pixel. More = smoother/further-reaching, "
 			"dearer. Runs per light, so keep it low (watch r_gl3GpuTime / r_vkGpuTime). Set by the quality preset: "
 			"Medium 2, High 4, Ultra 6, Nightmare 8 (Potato and Low have contact shadows off)." );
+
+		CvarSliderF( "Softness", r_contactShadowSoftness, 0.0f, 45.0f, "%.0f deg", "edge softness: half-angle of the cone the march "
+			"spreads over toward the light (each 2x2 pixel block marches four directions and averages them), so the "
+			"shadow edge widens with distance from its occluder like a real penumbra. 0 = hard edge. No extra cost. "
+			"Default 8." );
 
 		ImGui::EndDisabled();	// backendOk
 		EndSettingsGroup();

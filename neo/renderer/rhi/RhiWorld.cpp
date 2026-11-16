@@ -2356,6 +2356,7 @@ static bool RB_RHI_FillContactShadowParms( rhi::RenderParams &parms, const drawI
 			parms.contactParms[1] = r_contactShadowLength.GetFloat();
 			parms.contactParms[2] = r_contactShadowThickness.GetFloat();
 			parms.contactParms[3] = idMath::ClampFloat( 0.0f, 1.0f, r_contactShadowStrength.GetFloat() );
+			parms.contactParms2[0] = idMath::Tan( DEG2RAD( idMath::ClampFloat( 0.0f, 45.0f, r_contactShadowSoftness.GetFloat() ) ) );
 			// view-space march transforms: this surface's model->view and the view's view->clip
 			memcpy( parms.modelViewMatrix, din->surf->space->modelViewMatrix, sizeof( parms.modelViewMatrix ) );
 			memcpy( parms.projectionMatrix, ictx.viewDef->projectionMatrix, sizeof( parms.projectionMatrix ) );
