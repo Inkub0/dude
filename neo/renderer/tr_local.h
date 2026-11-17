@@ -1737,6 +1737,9 @@ void GLimp_UpdateWindowSize();
 
 glimpParms_t GLimp_GetCurState();
 float GLimp_GetDisplayRefresh();
+// DUDE: the pixel sizes the window's display can show (fullscreen modes + its desktop size), as
+// width/height pairs in sizes[2*i], sizes[2*i+1]; returns the count, 0 = unknown (no window, SDL1.2)
+int GLimp_GetDisplayModeSizes( int *sizes, int maxSizes );
 
 /*
 ====================================================================

@@ -1493,6 +1493,74 @@ float GLimp_GetDisplayRefresh()
 	return 0.0f;
 }
 
+/*
+===================
+GLimp_GetDisplayModeSizes
+
+DUDE: the resolutions the menus offer are filtered to these, so a monitor is never offered a mode
+it cannot show (Doom 3's list goes up to 7680x2160). Every refresh rate of a size counts once.
+===================
+*/
+static int GLimp_AddModeSize( int *sizes, int count, int maxSizes, int w, int h ) {
+	if ( w <= 0 || h <= 0 || count >= maxSizes ) {
+		return count;
+	}
+	for ( int i = 0; i < count; i++ ) {
+		if ( sizes[2*i] == w && sizes[2*i+1] == h ) {
+			return count;
+		}
+	}
+	sizes[2*count] = w;
+	sizes[2*count+1] = h;
+	return count + 1;
+}
+
+int GLimp_GetDisplayModeSizes( int *sizes, int maxSizes )
+{
+	int count = 0;
+#if SDL_VERSION_ATLEAST(3, 0, 0)
+	SDL_DisplayID display = ( window != NULL ) ? SDL_GetDisplayForWindow( window ) : 0;
+	if ( display == 0 ) {
+		display = SDL_GetPrimaryDisplay();
+	}
+	if ( display == 0 ) {
+		return 0;
+	}
+	// SDL3 modes are in points; pixel_density turns them into the pixels r_mode means
+	int numModes = 0;
+	SDL_DisplayMode **modes = SDL_GetFullscreenDisplayModes( display, &numModes );
+	if ( modes != NULL ) {
+		for ( int i = 0; i < numModes; i++ ) {
+			const float density = modes[i]->pixel_density > 0.0f ? modes[i]->pixel_density : 1.0f;
+			count = GLimp_AddModeSize( sizes, count, maxSizes, idMath::Ftoi( modes[i]->w * density ), idMath::Ftoi( modes[i]->h * density ) );
+		}
+		SDL_free( modes );
+	}
+	const SDL_DisplayMode *desktop = SDL_GetDesktopDisplayMode( display );
+	if ( desktop != NULL ) {
+		const float density = desktop->pixel_density > 0.0f ? desktop->pixel_density : 1.0f;
+		count = GLimp_AddModeSize( sizes, count, maxSizes, idMath::Ftoi( desktop->w * density ), idMath::Ftoi( desktop->h * density ) );
+	}
+#elif SDL_VERSION_ATLEAST(2, 0, 0)
+	int displayIndex = ( window != NULL ) ? SDL_GetWindowDisplayIndex( window ) : 0;
+	if ( displayIndex < 0 ) {
+		displayIndex = 0;
+	}
+	const int numModes = SDL_GetNumDisplayModes( displayIndex );
+	for ( int i = 0; i < numModes; i++ ) {
+		SDL_DisplayMode mode = {};
+		if ( SDL_GetDisplayMode( displayIndex, i, &mode ) == 0 ) {
+			count = GLimp_AddModeSize( sizes, count, maxSizes, mode.w, mode.h );
+		}
+	}
+	SDL_DisplayMode desktop = {};
+	if ( SDL_GetDesktopDisplayMode( displayIndex, &desktop ) == 0 ) {
+		count = GLimp_AddModeSize( sizes, count, maxSizes, desktop.w, desktop.h );
+	}
+#endif
+	return count;
+}
+
 // sets a glimpParms_t based on the current true state (according to SDL)
 // Note: here, ret.fullScreenDesktop is only true if currently in fullscreen desktop mode
 //       (and ret.fullScreen is true as well)

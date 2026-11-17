@@ -1393,6 +1393,37 @@ static void initSortedVidModes()
 	qsort(sortedVidModes, s_numVidModes, sizeof(vidModePtr), vidModeCmp);
 }
 
+/*
+====================
+R_IsVidModeOnDisplay
+
+DUDE: whether the menus offer this r_mode: the window's display can show its size (any refresh
+rate). The mode in use is always offered, so the menu still names it if the display changed. If
+SDL cannot list the display's modes, every mode is offered, as before.
+====================
+*/
+bool R_IsVidModeOnDisplay( int mode ) {
+	int width, height;
+	if ( !R_GetModeInfo( &width, &height, mode ) ) {
+		return false;
+	}
+	if ( mode == -1 || mode == r_mode.GetInteger() ) {
+		return true;
+	}
+	static const int MAX_SIZES = 256;
+	int sizes[2 * MAX_SIZES];
+	const int count = GLimp_GetDisplayModeSizes( sizes, MAX_SIZES );
+	if ( count == 0 ) {
+		return true;
+	}
+	for ( int i = 0; i < count; i++ ) {
+		if ( sizes[2*i] == width && sizes[2*i+1] == height ) {
+			return true;
+		}
+	}
+	return false;
+}
+
 // DG: the following two functions are part of a horrible hack in ChoiceWindow.cpp
 //     to overwrite the default resolution list in the system options menu
 
@@ -1404,7 +1435,9 @@ idStr R_GetVidModeListString(bool addCustom)
 	for(int i=0; i<s_numVidModes; ++i)
 	{
 		// for some reason, modes 0-2 are not used. maybe too small for GUI?
-		if(sortedVidModes[i].modeIndex >= 3 && sortedVidModes[i].vidMode != NULL)
+		// DUDE: and only the sizes the display can show
+		if(sortedVidModes[i].modeIndex >= 3 && sortedVidModes[i].vidMode != NULL
+		   && R_IsVidModeOnDisplay(sortedVidModes[i].modeIndex))
 		{
 			idStr modeStr;
 			sprintf(modeStr, ";%dx%d", sortedVidModes[i].vidMode->width, sortedVidModes[i].vidMode->height);
@@ -1421,7 +1454,9 @@ idStr R_GetVidModeValsString(bool addCustom)
 	for(int i=0; i<s_numVidModes; ++i)
 	{
 		// for some reason, modes 0-2 are not used. maybe too small for GUI?
-		if(sortedVidModes[i].modeIndex >= 3 && sortedVidModes[i].vidMode != NULL)
+		// DUDE: the same filter as R_GetVidModeListString, so names and values stay paired
+		if(sortedVidModes[i].modeIndex >= 3 && sortedVidModes[i].vidMode != NULL
+		   && R_IsVidModeOnDisplay(sortedVidModes[i].modeIndex))
 		{
 			ret += ";";
 			ret += sortedVidModes[i].modeIndex;

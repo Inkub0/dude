@@ -33,6 +33,7 @@ extern idCVar com_maxFPS;
 extern idCVar com_interpolate;
 
 extern bool R_GetModeInfo( int *width, int *height, int mode );
+extern bool R_IsVidModeOnDisplay( int mode );	// DUDE: RenderSystem_init.cpp
 
 namespace {
 
@@ -2843,6 +2844,9 @@ static void InitGraphicsMenu()
 		int w=0, h=0;
 		if( ! R_GetModeInfo(&w, &h, m) )
 			break;
+		// DUDE: only the sizes the display can show (and the one in use), as the classic menu does
+		if( ! R_IsVidModeOnDisplay(m) )
+			continue;
 		vidModes.Append( VidMode(w, h, m) );
 	}
 
