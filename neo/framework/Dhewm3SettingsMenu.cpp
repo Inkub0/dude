@@ -7164,6 +7164,21 @@ static void DrawAudioOptionsMenu()
 	}
 }
 
+// DUDE: a first-person-only Game -> Camera toggle: greyed out (value kept) while Third-Person View is on
+static void DrawFirstPersonOnlyCheckbox( idCVar& cvar, const char* label, const char* descr )
+{
+	const bool thirdPerson = NamedCvar( "pm_thirdPerson" ).GetBool();
+	ImGui::BeginDisabled( thirdPerson );
+	bool enable = cvar.GetBool();
+	if ( ImGui::Checkbox( label, &enable ) ) {
+		cvar.SetBool( enable );
+	}
+	ImGui::EndDisabled();
+	AddCVarOptionTooltips( cvar, thirdPerson
+		? "First person only: in third person the whole body shows and casts its shadow. Turn Third-Person View off to change this."
+		: descr );
+}
+
 static CVarOption gameOptions[] = {
 	CVarOption( "Movement and Weapons" ),
 	CVarOption( "in_alwaysRun", "Always Run (Multiplayer-only by default)", OT_BOOL ),
@@ -7176,10 +7191,19 @@ static CVarOption gameOptions[] = {
 	// DUDE: the playable third-person view (Configuration.md "Third-person view"): the HUD stays up,
 	// the crosshair follows the aim and the body is shadowed; the knobs frame the camera
 	CVarOption( "Camera" ),
-	// DUDE: first-person body awareness (Player.cpp UpdateFirstPersonBody) and the stock player shadow
-	CVarOption( "g_showPlayerBody", "Show Player Body (legs and torso when you look down)", OT_BOOL ),
-	CVarOption( "g_showPlayerShadow", "Show Player Shadow", OT_BOOL ),
 	CVarOption( "pm_thirdPerson", "Third-Person View (over the shoulder)", OT_BOOL ),
+	// DUDE: first-person body awareness (Player.cpp UpdateFirstPersonBody) and the stock player shadow. Both are
+	// first-person-only (third person shows the whole body and always casts its shadow), so Third-Person View greys
+	// them out; their saved values stay for the way back to first person.
+	CVarOption( "g_showPlayerBody", []( idCVar& cvar ) {
+		DrawFirstPersonOnlyCheckbox( cvar, "Show Player Body (legs and torso when you look down)",
+			"See your own legs and torso when you look down; the camera rides the body's head. "
+			"Single player only. Head camera tuning: Debugging -> Post & Temporal -> First-Person Body." );
+	} ),
+	CVarOption( "g_showPlayerShadow", []( idCVar& cvar ) {
+		DrawFirstPersonOnlyCheckbox( cvar, "Show Player Shadow",
+			"Your body casts its shadow in first person (raster, RT and Path Tracing)." );
+	} ),
 	// (the third-person camera framing lives in Debugging -> Post & Temporal -> Third-Person Camera)
 	CVarOption( "Timing" ),
 	// DUDE: Doom 3's original 16 msec game tic; also on the main menu's Options > Game page
