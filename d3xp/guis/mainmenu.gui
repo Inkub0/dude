@@ -3916,7 +3916,7 @@ windowDef OptionsMenuParent {
 
 	//SHOW DECALS
 		windowDef OG1 {
-			rect		20, 197, 300, 16
+			rect		20, 187, 300, 16
 			windowDef OG1L {
 				rect		0, 0, 8, 16
 				background	"gui/mainmenu/select_edge"
@@ -4006,7 +4006,7 @@ windowDef OptionsMenuParent {
 */		
 	//AUTO WEAPON RELOAD
 		windowDef OG3 {
-			rect		20, 97, 300, 16
+			rect		20, 95, 300, 16
 			windowDef OG3L {
 				rect		0, 0, 8, 16
 				background	"gui/mainmenu/select_edge"
@@ -4048,7 +4048,7 @@ windowDef OptionsMenuParent {
 		}
 	//AUTO WEAPON SWITCH
 		windowDef OG4 {
-			rect		20, 122, 300, 16
+			rect		20, 118, 300, 16
 			windowDef OG4L {
 				rect		0, 0, 8, 16
 				background	"gui/mainmenu/select_edge"
@@ -4090,7 +4090,7 @@ windowDef OptionsMenuParent {
 		}
 	//SHOW HUD
 		windowDef OG5 {
-			rect		20, 147, 300, 16
+			rect		20, 141, 300, 16
 			windowDef OG5L {
 				rect		0, 0, 8, 16
 				background	"gui/mainmenu/select_edge"
@@ -4132,7 +4132,7 @@ windowDef OptionsMenuParent {
 		}
 	//SHOW GUN MODEL
 		windowDef OG6 {
-			rect		20, 172, 300, 16
+			rect		20, 164, 300, 16
 			windowDef OG6L {
 				rect		0, 0, 8, 16
 				background	"gui/mainmenu/select_edge"
@@ -4217,7 +4217,7 @@ windowDef OptionsMenuParent {
 		}
 	//SMOOTH MOUSE
 		windowDef OG8 {
-			rect		20, 222, 300, 16
+			rect		20, 210, 300, 16
 			windowDef OG8L {
 				rect		0, 0, 8, 16
 				background	"gui/mainmenu/select_edge"
@@ -4265,7 +4265,7 @@ windowDef OptionsMenuParent {
 		}
 	//MOUSE SENSITIVITY
 		windowDef OG9 {
-			rect		20, 247, 300, 16
+			rect		20, 233, 300, 16
 			windowDef OG9L {
 				rect		0, 0, 8, 16
 				background	"gui/mainmenu/select_edge"
@@ -4311,11 +4311,61 @@ windowDef OptionsMenuParent {
 			}
 		}
 
+	//PDA MOUSE SPEED
+		// DUDE (issue #9): m_pdaSensitivity - the PDA cursor moves by raw mouse counts, so it is slow
+		// on high resolutions; 1 = original speed.
+		windowDef OG11 {
+			rect		20, 256, 300, 16
+			windowDef OG11L {
+				rect		0, 0, 8, 16
+				background	"gui/mainmenu/select_edge"
+				matcolor	0, 0, 0, 1
+				noevents	1
+			}
+			windowDef OG11M {
+				rect		8, 0, 284, 16
+				background	"gui/mainmenu/select_border"
+				matcolor	0, 0, 0, 1
+				noevents	1
+			}
+			windowDef OG11R {
+				rect		292, 0, 8, 16
+				background	"gui/mainmenu/select_angle"
+				matcolor	0, 0, 0, 1
+				noevents	1
+			}
+			windowDef OG11Title {
+				rect		1, 1, 180, 14
+				text		"PDA Mouse Speed"
+				font		"fonts/bank"
+				textscale	0.25
+				textalign	2
+				textaligny	-6
+				forecolor	1, 1, 1, 1
+			}
+			windowDef OG11SliderBG {
+				rect		210, 4, 128, 16
+				background	"guis/assets/mainmenu/slider_bg"
+				matcolor	0.6, 0.8, 0.8, 0.5
+				noevents	1
+			}
+			sliderDef OG11Primary {
+				rect		210, 5, 71, 8
+				forecolor	0.8, 1, 1, 1
+				matcolor	1, 1, 1, 1
+				low			0.25
+				high		4
+				step		0.25
+				thumbShader	"guis/assets/mainmenu/slider_bar"
+				cvar		"m_pdaSensitivity"
+			}
+		}
+
 	//CLASSIC 62.5 HZ TICS
 		// DUDE: com_classicTics - Doom 3's original 16 msec (62.5 Hz) game tic instead of 60 Hz,
 		// for DUDE's own Doom 3 game libraries; applies at the next map load.
 		windowDef OG10 {
-			rect		20, 272, 300, 16
+			rect		20, 279, 300, 16
 			windowDef OG10L {
 				rect		0, 0, 8, 16
 				background	"gui/mainmenu/select_edge"
