@@ -6755,6 +6755,24 @@ static void DrawDbgGroup_RTScene()
 	}
 }
 
+// DUDE: the playable third-person view's camera framing (Configuration.md "Third-person view"), moved here from
+// Game -> Camera, which keeps the on/off. Game cvars, so the menu reaches them by name.
+static void DrawDbgGroup_ThirdPersonCamera()
+{
+	if ( BeginSettingsGroup( "Third-Person Camera", &NamedCvar( "pm_thirdPerson" ) ) ) {
+	CvarSliderF( "Shoulder Offset", NamedCvar( "pm_thirdPersonSide" ), -64.0f, 64.0f, "%.0f",
+		"Slides the camera this far to the right of the player (negative: left shoulder), so the body no longer "
+		"covers what is ahead. 0 = stock, centred." );
+	CvarSliderF( "Camera Distance", NamedCvar( "pm_thirdPersonRange" ), 32.0f, 200.0f, "%.0f",
+		"Distance from the player." );
+	CvarSliderF( "Camera Height", NamedCvar( "pm_thirdPersonHeight" ), -32.0f, 64.0f, "%.0f",
+		"Height above the normal eye height." );
+	CvarCheckbox( "Keep the Camera Out of Walls", NamedCvar( "pm_thirdPersonClip" ),
+		"Pull the camera in front of walls between it and the player." );
+	EndSettingsGroup();
+	}
+}
+
 // DUDE g_showPlayerBody (Player.cpp UpdateFirstPersonBody / ApplyFirstPersonHeadCamera): the head-mounted camera's
 // tuning. Game cvars, so the menu reaches them by name; the on/off is also on Game -> Camera.
 static void DrawDbgGroup_FirstPersonBody()
@@ -6831,6 +6849,7 @@ static void DrawDbgTab_PostTemporal()
 	DrawDbgGroup_MotionVectors();
 	DrawDbgGroup_FrameInterpolation();
 	DrawDbgGroup_FirstPersonBody();
+	DrawDbgGroup_ThirdPersonCamera();
 }
 
 static void DrawShadowDebugMenu()
@@ -7161,10 +7180,7 @@ static CVarOption gameOptions[] = {
 	CVarOption( "g_showPlayerBody", "Show Player Body (legs and torso when you look down)", OT_BOOL ),
 	CVarOption( "g_showPlayerShadow", "Show Player Shadow", OT_BOOL ),
 	CVarOption( "pm_thirdPerson", "Third-Person View (over the shoulder)", OT_BOOL ),
-	CVarOption( "pm_thirdPersonSide", "Shoulder Offset (0 = centred, negative = left shoulder)", OT_FLOAT, -64.0f, 64.0f ),
-	CVarOption( "pm_thirdPersonRange", "Camera Distance", OT_FLOAT, 32.0f, 200.0f ),
-	CVarOption( "pm_thirdPersonHeight", "Camera Height (above the eye)", OT_FLOAT, -32.0f, 64.0f ),
-	CVarOption( "pm_thirdPersonClip", "Keep the Camera Out of Walls", OT_BOOL ),
+	// (the third-person camera framing lives in Debugging -> Post & Temporal -> Third-Person Camera)
 	CVarOption( "Timing" ),
 	// DUDE: Doom 3's original 16 msec game tic; also on the main menu's Options > Game page
 	CVarOption( "com_classicTics", "Classic 62.5 Hz Game Tics (applies at the next map load)", OT_BOOL ),
