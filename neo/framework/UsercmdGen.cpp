@@ -395,6 +395,7 @@ private:
 	usercmd_t		buffered[MAX_BUFFERED_USERCMD];
 
 	int				continuousMouseX, continuousMouseY;	// for gui event generatioin, never zerod
+	float			guiMouseFracX, guiMouseFracY;		// DUDE: m_pdaSensitivity remainders
 	int				mouseButton;						// for gui event generatioin
 	bool			mouseDown;
 
@@ -423,6 +424,9 @@ private:
 	static idCVar	m_smooth;
 	static idCVar	m_strafeSmooth;
 	static idCVar	m_showMouseRate;
+	static idCVar	m_pdaSensitivity;
+
+	int				ScaleGuiMouse( int value, float &frac );
 	static idCVar	m_invertLook; // DG: added this
 };
 
@@ -440,6 +444,12 @@ idCVar idUsercmdGenLocal::m_yaw( "m_yaw", "0.022", CVAR_SYSTEM | CVAR_ARCHIVE | 
 idCVar idUsercmdGenLocal::m_strafeScale( "m_strafeScale", "6.25", CVAR_SYSTEM | CVAR_ARCHIVE | CVAR_FLOAT, "mouse strafe movement scale" );
 idCVar idUsercmdGenLocal::m_smooth( "m_smooth", "1", CVAR_SYSTEM | CVAR_ARCHIVE | CVAR_INTEGER, "number of samples blended for mouse viewing", 1, 8, idCmdSystem::ArgCompletion_Integer<1,8> );
 idCVar idUsercmdGenLocal::m_strafeSmooth( "m_strafeSmooth", "4", CVAR_SYSTEM | CVAR_ARCHIVE | CVAR_INTEGER, "number of samples blended for mouse moving", 1, 8, idCmdSystem::ArgCompletion_Integer<1,8> );
+// DUDE (issue #9): the PDA cursor moves by raw mouse counts, one count per screen pixel, so it
+// crosses a 4K screen at half the speed of a 1080p one (the menus follow the desktop cursor instead).
+// Scales the counts fed to the in-game GUI cursor (continuousMouseX/Y -> usercmd mx/my ->
+// idPlayer::RouteGuiMouse) in every game library, mods and Quake 4 included; view turning is untouched.
+idCVar idUsercmdGenLocal::m_pdaSensitivity( "m_pdaSensitivity", "1", CVAR_SYSTEM | CVAR_ARCHIVE | CVAR_FLOAT,
+	"mouse cursor speed in the PDA and other in-game GUIs driven by the mouse (1 = original; raise it on high resolutions)", 0.25f, 4.0f );
 idCVar idUsercmdGenLocal::m_showMouseRate( "m_showMouseRate", "0", CVAR_SYSTEM | CVAR_BOOL, "shows mouse movement" );
 idCVar idUsercmdGenLocal::m_invertLook( "m_invertLook", "0", CVAR_SYSTEM | CVAR_ARCHIVE | CVAR_INTEGER, "invert mouse look 0: don't invert, 1: invert up/down (flight controls), 2: invert left/right, 3: invert both", 0, 3, idCmdSystem::ArgCompletion_Integer<0,3>  );
 
@@ -480,6 +490,7 @@ idUsercmdGenLocal::idUsercmdGenLocal( void ) {
 	toggled_run.on = in_alwaysRun.GetBool();
 
 	lastLookValuePitch = lastLookValueYaw = 0.0f;
+	guiMouseFracX = guiMouseFracY = 0.0f;
 
 	ClearAngles();
 	Clear();
@@ -1252,11 +1263,11 @@ void idUsercmdGenLocal::Mouse( void ) {
 					switch ( action ) {
 						case M_DELTAX:
 							mouseDx += value;
-							continuousMouseX += value;
+							continuousMouseX += ScaleGuiMouse( value, guiMouseFracX );
 							break;
 						case M_DELTAY:
 							mouseDy += value;
-							continuousMouseY += value;
+							continuousMouseY += ScaleGuiMouse( value, guiMouseFracY );
 							break;
 						case M_DELTAZ:
 							int key = value < 0 ? K_MWHEELDOWN : K_MWHEELUP;
@@ -1363,6 +1374,26 @@ void idUsercmdGenLocal::UsercmdInterrupt( void ) {
 	cmd.sequence = com_ticNumber+1;
 
 	buffered[(com_ticNumber+1) & (MAX_BUFFERED_USERCMD-1)] = cmd;
+}
+
+/*
+================
+idUsercmdGenLocal::ScaleGuiMouse
+
+DUDE: a mouse delta for the in-game GUI cursor, times m_pdaSensitivity; the fraction carries over
+so slow movement is not lost to rounding. 1 = the original counts, bit for bit.
+================
+*/
+int idUsercmdGenLocal::ScaleGuiMouse( int value, float &frac ) {
+	const float scale = m_pdaSensitivity.GetFloat();
+	if ( scale == 1.0f ) {
+		frac = 0.0f;
+		return value;
+	}
+	const float scaled = value * scale + frac;
+	const int whole = (int)scaled;		// toward zero; the remainder keeps its sign
+	frac = scaled - whole;
+	return whole;
 }
 
 /*
