@@ -46,6 +46,7 @@ Doom 3 GPL Source Code (see ArbProgram.h for license header)
 #endif
 
 bool R_GetModeInfo( int *width, int *height, int mode );
+bool R_IsVidModeOnDisplay( int mode );	// DUDE: the display can show it (RenderSystem_init.cpp)
 
 static idCVar *				q4_volume = NULL;
 static idCVar *				q4_speakerFraction = NULL;
@@ -238,7 +239,7 @@ static void Q4_ModesOfAspect( int aspect, idList<int> &modes ) {
 	modes.Clear();
 	int width, height;
 	for ( int mode = 3; R_GetModeInfo( &width, &height, mode ); mode++ ) {
-		if ( Q4_AspectOf( width, height ) != aspect ) {
+		if ( Q4_AspectOf( width, height ) != aspect || !R_IsVidModeOnDisplay( mode ) ) {
 			continue;
 		}
 		int at = modes.Num();
