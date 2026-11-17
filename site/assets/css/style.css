@@ -60,6 +60,11 @@ kbd { border-bottom-width: 3px; }
 }
 .topbar nav a:hover { color: var(--fire-1); background: var(--panel); text-decoration: none; }
 .topbar nav a[aria-current="page"] { color: var(--fire-2); }
+.topbar nav a.donate {
+  background: linear-gradient(180deg, var(--fire-2), var(--fire-3)); color: #1a0b03;
+  border-radius: 999px; margin-left: 6px;
+}
+.topbar nav a.donate:hover { color: #1a0b03; background: linear-gradient(180deg, var(--fire-1), var(--fire-2)); }
 
 /* ---------- banner ---------- */
 .banner {
