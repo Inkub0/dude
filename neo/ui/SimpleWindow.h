@@ -80,6 +80,8 @@ protected:
 	float			textAlignx;
 	float			textAligny;
 	int				textShadow;
+	float			forceAspectWidth;	// DUDE: Quake 4 (see idWindow); Q4 sign text windowDefs
+	float			forceAspectHeight;	// carry their own forceaspect and must honour it, not the parent's
 
 	idWinStr		text;
 	idWinBool		visible;

@@ -49,6 +49,8 @@ idSimpleWindow::idSimpleWindow(idWindow *win) {
 	textAlign = win->textAlign;
 	textAlignx = win->textAlignx;
 	textAligny = win->textAligny;
+	forceAspectWidth = win->forceAspectWidth;	// DUDE: Quake 4; keep the window's own forceaspect
+	forceAspectHeight = win->forceAspectHeight;
 	background = win->background;
 	flags = win->flags;
 	textShadow = win->textShadow;
@@ -256,11 +258,12 @@ void idSimpleWindow::Redraw(float x, float y) {
 	}
 	extern idCVar cst_hudAdjustAspect;
 	if (!cst_hudAdjustAspect.GetBool() || cstAnchor == idDeviceContext::CST_ANCHOR_NONE) {
-		if (mParent) {
-			dc->SetSize(mParent->forceAspectWidth, mParent->forceAspectHeight);
-		} else {
-			dc->SetSize(VIRTUAL_WIDTH, VIRTUAL_HEIGHT);
-		}
+		// DUDE: honour this window's own forceaspect, exactly as idWindow::Redraw does for
+		// full windows. Quake 4 sign/monitor GUIs set forceaspectheight on the leaf text
+		// windowDef itself (which simplifies to an idSimpleWindow); using the parent's value
+		// dropped that compensation, so the text came out vertically crushed when the world
+		// GUI was mapped onto a wide sign surface (e.g. the Hannibal room signs, issue #29).
+		dc->SetSize(forceAspectWidth, forceAspectHeight);
 	} else {
 		dc->CstSetSize(cstAnchor, cstAnchorTo, cstAnchorFactor);
 	}
