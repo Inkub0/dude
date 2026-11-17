@@ -30,6 +30,7 @@ If you have questions concerning this license or the applicable additional terms
 #include "idlib/LangDict.h"
 #include "framework/async/NetworkSystem.h"
 #include "framework/DeclEntityDef.h"
+#include "idlib/geometry/JointTransform.h"
 #include "renderer/RenderSystem.h"
 
 #include "gamesys/SysCvar.h"
@@ -1284,6 +1285,16 @@ idPlayer::idPlayer() {
 	gravityViewAxis.Identity();
 	gravityViewAxisPrev.Identity();
 	renderViewInterpolatable	= false;
+	fpBodyDefHandle				= -1;
+	memset( &fpBodyEnt, 0, sizeof( fpBodyEnt ) );
+	fpBodyJoints				= NULL;
+	fpBodyNumJoints				= 0;
+	fpBodyArmModel				= NULL;
+	fpBodyJointsTime			= -1;
+	fpBodyJointsFrac			= -1.0f;
+	fpBodyJointsSrc				= NULL;
+	fpHeadCamOffset.Zero();
+	fpHeadCamValid				= false;
 	renderViewCameraOrigin		= vec3_zero;
 	renderViewCameraOriginPrev	= vec3_zero;
 	renderViewCameraAxis.Identity();
@@ -2030,6 +2041,11 @@ Release any resources used by the player.
 ==============
 */
 idPlayer::~idPlayer() {
+	FreeFirstPersonBody();
+	if ( fpBodyJoints != NULL ) {
+		Mem_Free16( fpBodyJoints );
+		fpBodyJoints = NULL;
+	}
 	delete weapon.GetEntity();
 	weapon = NULL;
 #ifdef CTF
@@ -7392,6 +7408,250 @@ void idPlayer::UpdateBodySelfShadow( renderEntity_t *headRenderEnt ) {
 
 /*
 ==============
+idPlayer::FirstPersonBodyWanted
+
+DUDE g_showPlayerBody: whether this tic shows the body copy (and mounts the camera on its head).
+==============
+*/
+bool idPlayer::FirstPersonBodyWanted( void ) const {
+	return g_showPlayerBody.GetBool() && !gameLocal.isMultiplayer && !pm_thirdPerson.GetBool() && pm_modelView.GetInteger() == 0
+		&& !spectating && health > 0 && !IsHidden() && renderEntity.hModel != NULL && !privateCameraView;
+}
+
+/*
+==============
+idPlayer::UpdateFirstPersonBody
+
+DUDE g_showPlayerBody: look down in first person and see your own body. The stock body is hidden in
+the player's own view (suppressSurfaceInViewID) - one flag for the whole model, and it has to stay:
+its arms hold a third-person gun pose that would float under the view weapon. So the visible body is
+a second render def on the same model, skin (the third-person look: tshirt_mp, marine_mp, a power-up
+skin...) and pose, drawn only in the player's view (allowSurfaceInViewID) and casting nothing
+(noShadow: the stock body keeps casting under g_showPlayerShadow, arms included, in raster and RT).
+The arms go by joint, not by skin: whatever mesh carries them (the tshirt marine's are part of its
+body mesh), FirstPersonBodyCallback collapses both arm chains onto the shoulders in the copy's own
+joint buffer. The head is its own entity and stays hidden; the camera sits on its joint
+(ApplyFirstPersonHeadCamera). origin/axis: the interpolated transform (com_interpolate,
+PresentInterpolated) or NULL for the tic's own.
+==============
+*/
+void idPlayer::UpdateFirstPersonBody( const idVec3 *origin, const idMat3 *axis ) {
+	if ( !FirstPersonBodyWanted() || modelDefHandle == -1 ) {
+		FreeFirstPersonBody();
+		return;
+	}
+
+	fpBodyEnt = renderEntity;		// same model, skin, joints and shader parms as the third-person body
+	if ( origin != NULL && axis != NULL ) {
+		fpBodyEnt.origin = *origin;
+		fpBodyEnt.axis = *axis;
+	}
+	fpBodyEnt.callback = idPlayer::FirstPersonBodyCallback;	// the body's pose, arms collapsed
+	fpBodyEnt.suppressSurfaceInViewID = 0;
+	fpBodyEnt.allowSurfaceInViewID = entityNumber + 1;	// the player's own view only: mirrors keep the stock body
+	fpBodyEnt.suppressShadowInViewID = 0;
+	fpBodyEnt.noShadow = true;
+	fpBodyEnt.noSelfShadow = false;			// lit and shadowed like any character
+	fpBodyEnt.remoteRenderView = NULL;
+	fpBodyEnt.gui[0] = fpBodyEnt.gui[1] = fpBodyEnt.gui[2] = NULL;
+	if ( fpBodyDefHandle == -1 ) {
+		fpBodyDefHandle = gameRenderWorld->AddEntityDef( &fpBodyEnt );
+	} else {
+		gameRenderWorld->UpdateEntityDef( fpBodyDefHandle, &fpBodyEnt );
+	}
+}
+
+/*
+==============
+idPlayer::FirstPersonBodyCallback / UpdateFirstPersonBodyJoints
+
+The copy's render callback. The stock callback (idEntity::UpdateRenderEntity) poses the def -
+pointing it at the animator's tic joints or, under com_interpolateAnim, its interpolated ones - and
+that pose is copied into fpBodyJoints with every joint below Luparm_orbit / Ruparm_orbit (upper arm
+to fingertips, weapon attachers included) collapsed onto its arm root: the arm's vertices shrink to
+the shoulder and its triangles degenerate. Rebuilt once per rendered pose (time, sub-tic alpha,
+source buffer); a model without those joints keeps its arms.
+==============
+*/
+bool idPlayer::FirstPersonBodyCallback( renderEntity_s *renderEntity, const renderView_t *renderView ) {
+	idEntity *ent = gameLocal.entities[ renderEntity->entityNum ];
+	if ( ent == NULL || !ent->IsType( idPlayer::Type ) ) {
+		return false;
+	}
+	return static_cast<idPlayer *>( ent )->UpdateFirstPersonBodyJoints( renderEntity, renderView );
+}
+
+bool idPlayer::UpdateFirstPersonBodyJoints( renderEntity_s *re, const renderView_t *renderView ) {
+	int numJoints = 0;
+	idJointMat *ticJoints = NULL;
+	animator.GetJoints( &numJoints, &ticJoints );
+	const idDeclModelDef *modelDef = animator.ModelDef();
+	if ( ticJoints == NULL || numJoints <= 0 || modelDef == NULL || re->numJoints != numJoints ) {
+		return UpdateRenderEntity( re, renderView );
+	}
+
+	// pose it exactly as the stock body's callback does (it only recognises the animator's own buffers)
+	re->joints = ticJoints;
+	bool changed = UpdateRenderEntity( re, renderView );
+	const idJointMat *src = re->joints;
+
+	// which joints collapse, per model: the subtrees of the two arm roots (parents precede children)
+	if ( fpBodyArmModel != modelDef || fpBodyArmRoot.Num() != numJoints ) {
+		fpBodyArmModel = modelDef;
+		fpBodyArmRoot.SetNum( numJoints );
+		const int *parents = modelDef->JointParents();
+		const jointHandle_t lRoot = animator.GetJointHandle( "Luparm_orbit" );
+		const jointHandle_t rRoot = animator.GetJointHandle( "Ruparm_orbit" );
+		for ( int i = 0; i < numJoints; i++ ) {
+			if ( i == lRoot || i == rRoot ) {
+				fpBodyArmRoot[i] = i;
+			} else if ( parents != NULL && parents[i] >= 0 && parents[i] < i ) {
+				fpBodyArmRoot[i] = fpBodyArmRoot[ parents[i] ];
+			} else {
+				fpBodyArmRoot[i] = -1;
+			}
+		}
+		fpBodyJointsSrc = NULL;		// force a rebuild
+	}
+	if ( fpBodyJoints == NULL || fpBodyNumJoints != numJoints ) {
+		if ( fpBodyJoints != NULL ) {
+			Mem_Free16( fpBodyJoints );
+		}
+		fpBodyJoints = (idJointMat *)Mem_Alloc16( numJoints * sizeof( idJointMat ) );
+		fpBodyNumJoints = numJoints;
+		fpBodyJointsSrc = NULL;
+	}
+
+	const float frac = gameLocal.renderInterpAnim ? gameLocal.renderInterpolateFrac : 1.0f;
+	if ( changed || src != fpBodyJointsSrc || gameLocal.time != fpBodyJointsTime || frac != fpBodyJointsFrac ) {
+		fpBodyJointsSrc = src;
+		fpBodyJointsTime = gameLocal.time;
+		fpBodyJointsFrac = frac;
+		idMat3 collapsed;
+		collapsed.Zero();
+		collapsed[0][0] = collapsed[1][1] = collapsed[2][2] = 0.001f;	// not exactly zero: keeps skinned normals finite
+		for ( int i = 0; i < numJoints; i++ ) {
+			fpBodyJoints[i] = src[i];
+			const int root = fpBodyArmRoot[i];
+			if ( root >= 0 ) {
+				fpBodyJoints[i].SetRotation( collapsed );
+				fpBodyJoints[i].SetTranslation( src[root].ToVec3() );
+			}
+		}
+		changed = true;
+	}
+	re->joints = fpBodyJoints;
+	return changed;
+}
+
+/*
+==============
+idPlayer::ApplyFirstPersonHeadCamera
+
+DUDE g_showPlayerBody: the camera rides the body's head instead of the fixed eye height, so it
+crouches, lands, leans and bends (looking down bends the spine) with the animation, and sits on the
+face rather than inside the neck. Replaces the synthetic positional view bob (the angular bob and
+kicks stay); like that bob it moves the gameplay eye too, so the weapon, the shots and the crosshair
+stay together. g_showPlayerBodyCamFollow blends from the stock eye (0) to the head (1); the offset
+is smoothed per tic and kept out of walls by a short trace from the stock eye.
+==============
+*/
+void idPlayer::ApplyFirstPersonHeadCamera( void ) {
+	const float follow = idMath::ClampFloat( 0.0f, 1.0f, g_showPlayerBodyCamFollow.GetFloat() );
+	const jointHandle_t head = FirstPersonBodyWanted() && follow > 0.0f ? animator.GetJointHandle( "Head" ) : INVALID_JOINT;
+	idVec3 jointOrigin;
+	idMat3 jointAxis;
+	if ( head == INVALID_JOINT || !animator.GetJointTransform( head, gameLocal.time, jointOrigin, jointAxis ) ) {
+		fpHeadCamValid = false;
+		return;
+	}
+
+	const idMat3 modelAxis = viewAxis * physicsObj.GetGravityAxis();
+	const idVec3 eye = GetEyePosition();
+	idVec3 headEye = ( jointOrigin + modelOffset ) * modelAxis + physicsObj.GetOrigin();
+	headEye += modelAxis[0] * g_showPlayerBodyCamForward.GetFloat() - physicsObj.GetGravityNormal() * g_showPlayerBodyCamUp.GetFloat();
+
+	// forward floor (g_showPlayerBodyCamMinForward): torso anims such as the weapon lower/raise pull the
+	// head back toward the neck line; the camera may move ahead of this distance from the body's centre
+	// (looking down bends the spine forward) but never behind it. Up/down and sideways are untouched.
+	const idVec3 &bodyForward = modelAxis[0];
+	idVec3 rel = headEye - eye;
+	const float ahead = rel * bodyForward;
+	const float minAhead = g_showPlayerBodyCamMinForward.GetFloat();
+	if ( ahead < minAhead ) {
+		rel += bodyForward * ( minAhead - ahead );
+	}
+	idVec3 offset = rel * follow;
+	const float smooth = idMath::ClampFloat( 0.0f, 0.95f, g_showPlayerBodyCamSmooth.GetFloat() );
+	if ( fpHeadCamValid && smooth > 0.0f ) {
+		offset = fpHeadCamOffset + ( offset - fpHeadCamOffset ) * ( 1.0f - smooth );
+	}
+	fpHeadCamOffset = offset;
+	fpHeadCamValid = true;
+
+	// the head sits ahead of the collision box and leans further: never into a wall or ceiling
+	trace_t tr;
+	const idBounds camBounds( idVec3( -4.0f, -4.0f, -4.0f ), idVec3( 4.0f, 4.0f, 4.0f ) );
+	gameLocal.clip.TraceBounds( tr, eye, eye + offset, camBounds, MASK_SOLID, this );
+	offset = tr.endpos - eye;
+
+	// GetViewPos put the eye at eye + viewBob (+ nodal offsets): swap the followed share of the bob for the head
+	firstPersonViewOrigin += offset - viewBob * follow;
+}
+
+/*
+==============
+idPlayer::FreeFirstPersonBody
+==============
+*/
+void idPlayer::FreeFirstPersonBody( void ) {
+	if ( fpBodyDefHandle != -1 ) {
+		gameRenderWorld->FreeEntityDef( fpBodyDefHandle );
+		fpBodyDefHandle = -1;
+	}
+}
+
+/*
+==============
+idPlayer::PresentInterpolated / RestoreRenderTransform
+
+com_interpolate: the body copy takes the same sub-tic transform as the stock body, or it would
+step at 60 Hz under the gliding camera. And while the copy exists BOTH defs re-commit every
+rendered frame, moving or not: they share one animator, whose render callback builds the frame's
+interpolated pose once and reports it as changed only to the first def that asks - the other
+would keep last frame's skinned model (the copy's limbs, or the shadow-casting stock body).
+A re-committed def re-instantiates its model whatever the callback says.
+==============
+*/
+void idPlayer::PresentInterpolated( float frac ) {
+	if ( fpBodyDefHandle == -1 ) {
+		idActor::PresentInterpolated( frac );
+		return;
+	}
+	idVec3 origin;
+	idMat3 axis;
+	if ( !InterpolatedRenderTransform( frac, origin, axis ) ) {
+		origin = renderEntity.origin;
+		axis = renderEntity.axis;
+	}
+	if ( modelDefHandle != -1 ) {
+		renderEntity_t lerped = renderEntity;
+		lerped.origin = origin;
+		lerped.axis = axis;
+		gameRenderWorld->UpdateEntityDef( modelDefHandle, &lerped );
+	}
+	UpdateFirstPersonBody( &origin, &axis );
+}
+
+void idPlayer::RestoreRenderTransform( void ) {
+	idActor::RestoreRenderTransform();
+	if ( fpBodyDefHandle != -1 ) {
+		UpdateFirstPersonBody( NULL, NULL );
+	}
+}
+
+/*
+==============
 idPlayer::Think
 
 Called every tic for each player
@@ -7633,6 +7893,8 @@ void idPlayer::Think( void ) {
 		UpdateAnimation();
 
 		Present();
+
+		UpdateFirstPersonBody( NULL, NULL );	// DUDE g_showPlayerBody: follows the body committed just above
 
 		UpdateDamageEffects();
 
@@ -8828,6 +9090,8 @@ void idPlayer::CalculateFirstPersonView( void ) {
 	} else {
 		// offset for local bobbing and kicks
 		GetViewPos( firstPersonViewOrigin, firstPersonViewAxis );
+		// DUDE g_showPlayerBody: the eye rides the body's head (replaces the positional bob)
+		ApplyFirstPersonHeadCamera();
 #if 0
 		// shakefrom sound stuff only happens in first person
 		firstPersonViewAxis = firstPersonViewAxis * playerView.ShakeAxis();
@@ -10323,6 +10587,7 @@ idPlayer::Hide
 void idPlayer::Hide( void ) {
 	idWeapon *weap;
 
+	FreeFirstPersonBody();
 	idActor::Hide();
 	weap = weapon.GetEntity();
 	if ( weap ) {

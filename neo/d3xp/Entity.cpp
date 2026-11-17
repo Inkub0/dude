@@ -1613,18 +1613,36 @@ authoritative renderEntity keeps the exact tic state (restored by RestoreRenderT
 ================
 */
 void idEntity::PresentInterpolated( float frac ) {
+	idVec3 origin;
+	idMat3 axis;
+	if ( !InterpolatedRenderTransform( frac, origin, axis ) ) {
+		return;
+	}
+	renderEntity_t lerped = renderEntity;
+	lerped.origin = origin;
+	lerped.axis = axis;
+	gameRenderWorld->UpdateEntityDef( modelDefHandle, &lerped );
+}
+
+/*
+================
+idEntity::InterpolatedRenderTransform
+
+The sub-tic blend PresentInterpolated commits (DUDE: split out so the first-person body copy,
+idPlayer::UpdateFirstPersonBody, follows the body exactly). False when there is nothing to blend.
+================
+*/
+bool idEntity::InterpolatedRenderTransform( float frac, idVec3 &origin, idMat3 &axis ) const {
 	// only entities whose transform was committed during the current tic have a valid pair to
 	// blend; stale entries (entity stopped presenting) keep their authoritative transform
 	if ( modelDefHandle == -1 || renderInterpSnapshotTime != gameLocal.time ) {
-		return;
+		return false;
 	}
 
 	// didn't move this tic
 	if ( renderInterpOriginCur.Compare( renderInterpOriginPrev ) && renderInterpAxisCur.Compare( renderInterpAxisPrev ) ) {
-		return;
+		return false;
 	}
-
-	renderEntity_t lerped = renderEntity;
 
 	// position: cubic Hermite (Catmull-Rom) when we have two tics of history, so motion stays
 	// smoother through accelerations than a plain lerp that kinks at each tic; falls back to linear
@@ -1640,18 +1658,18 @@ void idEntity::PresentInterpolated( float frac ) {
 		RenderInterpMonotoneTangents( renderInterpOriginPrev, renderInterpOriginCur, m0, m1 );
 		const float t2 = frac * frac;
 		const float t3 = t2 * frac;
-		lerped.origin = renderInterpOriginPrev * ( 2.0f * t3 - 3.0f * t2 + 1.0f )
+		origin = renderInterpOriginPrev * ( 2.0f * t3 - 3.0f * t2 + 1.0f )
 			+ m0 * ( t3 - 2.0f * t2 + frac )
 			+ renderInterpOriginCur * ( -2.0f * t3 + 3.0f * t2 )
 			+ m1 * ( t3 - t2 );
 	} else {
-		lerped.origin = renderInterpOriginPrev + frac * ( renderInterpOriginCur - renderInterpOriginPrev );
+		origin = renderInterpOriginPrev + frac * ( renderInterpOriginCur - renderInterpOriginPrev );
 	}
 
 	idQuat q;
 	q.Slerp( renderInterpAxisPrev.ToQuat(), renderInterpAxisCur.ToQuat(), frac );
-	lerped.axis = q.ToMat3();
-	gameRenderWorld->UpdateEntityDef( modelDefHandle, &lerped );
+	axis = q.ToMat3();
+	return true;
 }
 
 /*
