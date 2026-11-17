@@ -2473,6 +2473,31 @@ static idImage *RB_RHI_FillOcclusionParms( rhi::RenderParams &parms, const drawI
 	return occlusionImage;
 }
 
+// DUDE parallax in the G-buffer (docs/parallax.md): the same eligibility + parms as the interaction path, keyed by a
+// surface (material + space) instead of a drawInteraction, so the normal/albedo prepass the PT tier reads can march the
+// height map too. Fills parms.parallaxParms and returns the height image to bind on unit 11 (NULL = none: the shader
+// gates on parallaxParms.x). Opaque static-world surfaces only, exactly like the interaction path.
+static idImage *RB_RHI_FillParallaxParmsSurf( rhi::RenderParams &parms, const idMaterial *material, const viewEntity_t *space ) {
+	parms.parallaxParms[0] = 0.0f;
+	if ( !r_parallax.GetBool() || !R_BackendSupportsEnhancements() || material == NULL || material->Coverage() != MC_OPAQUE ) {
+		return NULL;
+	}
+	const idRenderEntityLocal *redef = space ? space->entityDef : NULL;
+	const bool worldSurf = redef && redef->parms.hModel && redef->parms.hModel->IsStaticWorldModel();
+	const shaderStage_t *px = worldSurf ? material->GetParallaxStage() : NULL;
+	const shaderStageExtra_t &pxExtra = material->GetStageExtra( px );
+	if ( px == NULL || pxExtra.parallaxImage == NULL ) {
+		return NULL;
+	}
+	const float depth = pxExtra.parallaxScale * r_parallaxScale.GetFloat() * 0.015f;
+	parms.parallaxParms[0] = 1.0f;
+	parms.parallaxParms[1] = idMath::ClampFloat( 0.0f, 0.3f, depth );
+	parms.parallaxParms[2] = (float)r_parallaxMinSteps.GetInteger();
+	parms.parallaxParms[3] = (float)r_parallaxMaxSteps.GetInteger();
+	// no self-shadow term in the G-buffer (parallaxParms2.x unused here): that is a forward-lighting effect
+	return pxExtra.parallaxImage;
+}
+
 static idImage *RB_RHI_FillParallaxParms( rhi::RenderParams &parms, const drawInteraction_t *din ) {
 	// DUDE parallax occlusion mapping (docs/parallax.md). The interaction pass marches the
 	// bump stage's captured height map to offset the surface UVs, faking per-pixel relief on
@@ -6305,6 +6330,15 @@ static bool RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef, int pha
 		}
 
 		RB_RHI_BindUnit( 0, bumpImg );
+		// DUDE parallax in the G-buffer: the eye in this surface's local space (the vertex builds the tangent-space view
+		// vector from it) + the height map on unit 11, for opaque static-world surfaces. NULL -> parallaxParms.x 0 -> off.
+		{
+			idVec3 localView;
+			R_GlobalPointToLocal( surf->space->modelMatrix, viewDef->renderView.vieworg, localView );
+			memcpy( parms.localViewOrigin, localView.ToFloatPtr(), sizeof( float ) * 3 );	parms.localViewOrigin[3] = 1.0f;
+		}
+		idImage *gbParallax = RB_RHI_FillParallaxParmsSurf( parms, shader, surf->space );
+		RB_RHI_BindUnit( 11, gbParallax ? gbParallax : globalImages->blackImage );	// always bound (VK descriptor); the shader gates on parallaxParms.x
 		RB_RHI_BindUnit( 2, rtgiDiffuseImg );	// RTGI H6c: receiver-albedo source (gbuffer.frag samples it only when u_localParam0.y>0.5)
 		RB_RHI_BindUnit( 4, rtgiDiffuseImg2 );	// ReSTIR DI: 2nd diffuse stage of a crossfade (summed via u_specularParms.rgb; black * 0 otherwise)
 		RB_RHI_BindUnit( 3, diSpecImg );		// ReSTIR DI Stage D: specular map (gbuffer.frag samples it only when u_localParam0.y>0.5)
