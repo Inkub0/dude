@@ -31,6 +31,7 @@ Doom 3 GPL Source Code (see ArbProgram.cpp for license header)
 #include "framework/DeclSkin.h"					// idDeclSkin (entity skin -> AO name for lazy bake)
 #include "tools/compilers/aobake/aobake.h"		// AO_BakeModelToCache (lazy occlusion-map baking)
 #include "framework/DeclManager.h"					// DECL_MATERIAL enumeration (decal image precache)
+#include "sys/sys_imgui.h"							// GitHub #4 VRAM watch: skip frames with a DUDE Settings window open
 
 extern idCVar r_useCarmacksReverse;		// defined in RenderSystem_init.cpp, no tr_local decl
 
@@ -4154,6 +4155,18 @@ struct shadowCubeCache_t {
 };
 static shadowCubeCache_t rhiCubeCache[MAX_SHADOW_CUBE_CACHE];
 static size_t rhiCubeCacheBytes = 0;		// sum of live entries' bytes
+// The 2D (projected/spot) map cache's bytes. Both caches share ONE VRAM budget (RB_RHI_CacheBudgetBytes,
+// RB_RHI_MakeShadowRoom): at high preset sizes a 2D map is no longer small (3600^2 = ~52 MB, 32 slots =
+// ~1.6 GB), and left outside the budget it grew all session and squeezed the cube cache (GitHub #4, #30).
+static size_t rhiMapCacheBytes = 0;
+static int rhiMapEvictions = 0;				// budget evictions of 2D maps, cumulative (VRAM watch)
+static int rhiCubeEvictionsTotal = 0;		// cube budget + slot evictions, cumulative (VRAM watch)
+static int rhiVramWatchGen = 0;				// bumped on world teardown: the VRAM watch restarts its baseline
+static size_t RB_RHI_ShadowCacheBytes() {
+	return rhiCubeCacheBytes + rhiMapCacheBytes;
+}
+// forward decl: frees least-recently-used cubes / 2D maps until 'need' more bytes fit the shared budget
+static bool RB_RHI_MakeShadowRoom( rhi::RHI *r, size_t need );
 static int rhiCubeCacheFrameNo = 0;			// bumped once per view
 // r_shadowMapDebug: cache hits (render skipped) vs misses (rendered) this view.
 static int rhiCubeCacheHits = 0;
@@ -4189,7 +4202,7 @@ static size_t RB_RHI_CubeBytes( int size ) {
 //   r_shadowMapCacheMB > 0 : that many MB (explicit).
 //   r_shadowMapCacheMB == 0 : unlimited.
 //   r_shadowMapCacheMB  < 0 : AUTO -- give the cache the VRAM actually free, minus a safety
-//                             reserve of 20% of the card's VRAM (at least 768 MB), so static cubes
+//                             reserve of 25% of the card's VRAM (at least 768 MB), so static cubes
 //                             rarely evict yet VRAM never fills to the brim (eviction + re-render is
 //                             the frame-time cost we want to avoid). "Free" is measured live via VMA
 //                             (VK_EXT_memory_budget): budget - (usage - ourCacheBytes) is the space
@@ -4218,13 +4231,16 @@ static size_t RB_RHI_CacheBudgetBytes() {
 		rhi::RHI *r = rhi::GetRHI();
 		uint64_t usage = 0, budget = 0;
 		if ( r != NULL && r->GetDeviceLocalMemory( usage, budget ) && budget > 0 ) {
-			// what everything NON-shadow currently holds (our cache's own bytes don't count against it)
-			const uint64_t nonShadow = ( usage > rhiCubeCacheBytes ) ? ( usage - rhiCubeCacheBytes ) : 0;
-			// safety reserve: 20% of the card's VRAM, at least 768 MB. ~8% let a 3600^2 cube cache
-			// (~311 MB a light) fill a 12 GB card to the brim; the reserve leaves the driver, other
-			// apps and transient growth (streaming, RT scene) their room.
+			// what everything NON-shadow currently holds (both shadow caches' own bytes don't count against it)
+			const size_t shadowBytes = RB_RHI_ShadowCacheBytes();
+			const uint64_t nonShadow = ( usage > shadowBytes ) ? ( usage - shadowBytes ) : 0;
+			// safety reserve: 25% of the card's VRAM, at least 768 MB. ~8% let a 3600^2 cube cache
+			// (~311 MB a light) fill a 12 GB card to the brim, and 20% still left long sessions near
+			// the limit (GitHub #4: on Windows an over-budget app is paged to system RAM - the GPU
+			// idles and the frame rate collapses). The reserve leaves the driver, other apps and
+			// transient growth (streaming, RT scene) their room.
 			const uint64_t totalVram = glConfig.vidMemMB > 0 ? (uint64_t)glConfig.vidMemMB * 1024 * 1024 : budget;
-			uint64_t reserve = totalVram / 5;
+			uint64_t reserve = totalVram / 4;
 			const uint64_t minReserve = (uint64_t)768 * 1024 * 1024;
 			if ( reserve < minReserve ) { reserve = minReserve; }
 			int64_t target = (int64_t)budget - (int64_t)nonShadow - (int64_t)reserve;
@@ -4456,42 +4472,18 @@ static rhi::RenderTargetHandle RB_RHI_AcquireCubeTarget( rhi::RHI *r, int lightI
 		}
 	}
 
-	// need a new target: enforce the VRAM budget by evicting LRU entries (never one
-	// touched this frame) until the newcomer fits.
+	// need a new target: enforce the shared VRAM budget by evicting the least-recently-used cubes
+	// or 2D maps (never one in the working set) until the newcomer fits
 	const size_t need = RB_RHI_CubeBytes( size );
-	const size_t budget = RB_RHI_CacheBudgetBytes();
-	if ( rhiCubeCacheBytes + need > budget ) {
-		// evict only if that makes room: when the working set alone overflows the budget, freeing
-		// a few cubes first and then falling back to scratch anyway was pure churn
-		size_t evictable = 0;
-		for ( int i = 0; i < MAX_SHADOW_CUBE_CACHE; i++ ) {
-			if ( RB_RHI_CubeSlotEvictable( rhiCubeCache[i] ) ) {
-				evictable += rhiCubeCache[i].bytes;
-			}
-		}
-		if ( rhiCubeCacheBytes - evictable + need > budget ) {
-			return 0;			// the lights in view don't fit -> scratch, nothing evicted
-		}
+	if ( !RB_RHI_MakeShadowRoom( r, need ) ) {
+		return 0;				// the lights in view don't fit -> scratch, nothing evicted
 	}
-	while ( rhiCubeCacheBytes + need > budget ) {
-		int victim = -1;
+	if ( firstFree < 0 ) {		// the room may have come from cube slots
 		for ( int i = 0; i < MAX_SHADOW_CUBE_CACHE; i++ ) {
-			if ( RB_RHI_CubeSlotEvictable( rhiCubeCache[i] )
-			     && ( victim < 0 || rhiCubeCache[i].lastFrame < rhiCubeCache[victim].lastFrame ) ) {
-				victim = i;
+			if ( rhiCubeCache[i].rt == 0 ) {
+				firstFree = i;
+				break;
 			}
-		}
-		if ( victim < 0 ) {
-			return 0;			// nothing evictable this frame -> use scratch, no caching
-		}
-		r->DestroyRenderTarget( rhiCubeCache[victim].rt );
-		rhiCubeCacheBytes -= rhiCubeCache[victim].bytes;
-		rhiCubeCache[victim].lightIndex = -1;
-		rhiCubeCache[victim].rt = 0;
-		rhiCubeCache[victim].bytes = 0;
-		rhiCubeEvictions++;			// r_shadowMapCacheDebug: VRAM-pressure churn signal
-		if ( firstFree < 0 ) {
-			firstFree = victim;
 		}
 	}
 	// slot table full while under budget: every point light met since the map loaded
@@ -4515,6 +4507,7 @@ static rhi::RenderTargetHandle RB_RHI_AcquireCubeTarget( rhi::RHI *r, int lightI
 		rhiCubeCache[victim].rt = 0;
 		rhiCubeCache[victim].bytes = 0;
 		rhiCubeSlotEvictions++;		// r_shadowMapCacheDebug: "evict N+M slot"
+		rhiCubeEvictionsTotal++;
 		firstFree = victim;
 	}
 
@@ -4756,8 +4749,93 @@ struct shadow2DCache_t {
 	unsigned long long		token;			// invalidation hash of light + casters
 	int						lastFrame;		// LRU key; shares rhiCubeCacheFrameNo
 	int						lastUseFrame;	// tr.frameCount of the last use: the cube cache's thrash guard
+	size_t					bytes;			// VRAM cost estimate (counted in rhiMapCacheBytes)
 };
 static shadow2DCache_t rhiMapCache[MAX_SHADOW_2D_CACHE];
+
+// depth24 2D map cost: 4 bytes/texel, as RB_RHI_CubeBytes
+static size_t RB_RHI_MapBytes( int size ) {
+	return (size_t)size * (size_t)size * 4;
+}
+
+static bool RB_RHI_MapSlotEvictable( const shadow2DCache_t &s ) {
+	return s.rt != 0 && s.lastFrame != rhiCubeCacheFrameNo && tr.frameCount - s.lastUseFrame >= 2;
+}
+
+static void RB_RHI_FreeMapSlot( rhi::RHI *r, shadow2DCache_t &s ) {
+	if ( s.rt && r->GetRenderTargetImage( s.rt ) != 0 ) {
+		r->DestroyRenderTarget( s.rt );
+	}
+	rhiMapCacheBytes -= Min( rhiMapCacheBytes, s.bytes );
+	s.lightIndex = -1;
+	s.rt = 0;
+	s.bytes = 0;
+	s.token = 0;
+}
+
+/*
+===================
+RB_RHI_MakeShadowRoom
+
+Frees cached shadow maps until 'need' more bytes fit RB_RHI_CacheBudgetBytes, the one budget the cube
+and 2D caches share. The victim is the least-recently-used evictable entry of either kind (both stamp
+rhiCubeCacheFrameNo; the thrash guard keeps the working set - anything used this or last frame). When
+even evicting everything evictable would not make room, nothing is freed and it returns false: the
+caller renders into scratch, as freeing a few maps and then falling back anyway was pure churn.
+===================
+*/
+static bool RB_RHI_MakeShadowRoom( rhi::RHI *r, size_t need ) {
+	const size_t budget = RB_RHI_CacheBudgetBytes();
+	if ( RB_RHI_ShadowCacheBytes() + need <= budget ) {
+		return true;
+	}
+	size_t evictable = 0;
+	for ( int i = 0; i < MAX_SHADOW_CUBE_CACHE; i++ ) {
+		if ( RB_RHI_CubeSlotEvictable( rhiCubeCache[i] ) ) {
+			evictable += rhiCubeCache[i].bytes;
+		}
+	}
+	for ( int i = 0; i < MAX_SHADOW_2D_CACHE; i++ ) {
+		if ( RB_RHI_MapSlotEvictable( rhiMapCache[i] ) ) {
+			evictable += rhiMapCache[i].bytes;
+		}
+	}
+	if ( RB_RHI_ShadowCacheBytes() - Min( RB_RHI_ShadowCacheBytes(), evictable ) + need > budget ) {
+		return false;
+	}
+	while ( RB_RHI_ShadowCacheBytes() + need > budget ) {
+		int cube = -1, map = -1;
+		for ( int i = 0; i < MAX_SHADOW_CUBE_CACHE; i++ ) {
+			if ( RB_RHI_CubeSlotEvictable( rhiCubeCache[i] )
+			     && ( cube < 0 || rhiCubeCache[i].lastFrame < rhiCubeCache[cube].lastFrame ) ) {
+				cube = i;
+			}
+		}
+		for ( int i = 0; i < MAX_SHADOW_2D_CACHE; i++ ) {
+			if ( RB_RHI_MapSlotEvictable( rhiMapCache[i] )
+			     && ( map < 0 || rhiMapCache[i].lastFrame < rhiMapCache[map].lastFrame ) ) {
+				map = i;
+			}
+		}
+		if ( cube < 0 && map < 0 ) {
+			return false;
+		}
+		if ( map < 0 || ( cube >= 0 && rhiCubeCache[cube].lastFrame <= rhiMapCache[map].lastFrame ) ) {
+			shadowCubeCache_t &v = rhiCubeCache[cube];
+			r->DestroyRenderTarget( v.rt );
+			rhiCubeCacheBytes -= Min( rhiCubeCacheBytes, v.bytes );
+			v.lightIndex = -1;
+			v.rt = 0;
+			v.bytes = 0;
+			rhiCubeEvictions++;			// r_shadowMapCacheDebug: VRAM-pressure churn signal
+			rhiCubeEvictionsTotal++;
+		} else {
+			RB_RHI_FreeMapSlot( r, rhiMapCache[map] );
+			rhiMapEvictions++;
+		}
+	}
+	return true;
+}
 
 // Pick the 2D target for this projected light. On a hit returns the stored map and sets
 // hit=true so the caller skips the render; on a miss returns a persistent target to
@@ -4786,7 +4864,8 @@ static rhi::RenderTargetHandle RB_RHI_Acquire2DTarget( rhi::RHI *r, int lightInd
 			if ( firstFree < 0 ) {
 				firstFree = (int)( e - rhiMapCache );
 			}
-			e->lightIndex = -1; e->rt = 0; e->token = 0;
+			rhiMapCacheBytes -= Min( rhiMapCacheBytes, e->bytes );
+			e->lightIndex = -1; e->rt = 0; e->token = 0; e->bytes = 0;
 			e = NULL;
 		} else if ( e->size == size ) {
 			e->lastFrame = rhiCubeCacheFrameNo;
@@ -4798,12 +4877,24 @@ static rhi::RenderTargetHandle RB_RHI_Acquire2DTarget( rhi::RHI *r, int lightInd
 			e->token = token;					// moved: re-render into the same target
 			return e->rt;
 		} else {
-			r->DestroyRenderTarget( e->rt );	// tier/resolution changed: reallocate
-			e->lightIndex = -1; e->rt = 0;
+			RB_RHI_FreeMapSlot( r, *e );		// tier/resolution changed: reallocate
 			if ( firstFree < 0 ) {
 				firstFree = (int)( e - rhiMapCache );
 			}
 			e = NULL;
+		}
+	}
+	// the shared shadow budget: evict least-recently-used cubes / maps until this map fits
+	const size_t need = RB_RHI_MapBytes( size );
+	if ( !RB_RHI_MakeShadowRoom( r, need ) ) {
+		return 0;							// the maps in view don't fit -> scratch
+	}
+	if ( firstFree < 0 ) {					// the room may have come from 2D slots
+		for ( int i = 0; i < MAX_SHADOW_2D_CACHE; i++ ) {
+			if ( rhiMapCache[i].rt == 0 ) {
+				firstFree = i;
+				break;
+			}
 		}
 	}
 	// need a slot: evict the least-recently-used entry not touched this frame
@@ -4819,9 +4910,8 @@ static rhi::RenderTargetHandle RB_RHI_Acquire2DTarget( rhi::RHI *r, int lightInd
 		if ( victim < 0 ) {
 			return 0;						// every slot used this or last frame -> scratch
 		}
-		r->DestroyRenderTarget( rhiMapCache[victim].rt );
-		rhiMapCache[victim].lightIndex = -1;
-		rhiMapCache[victim].rt = 0;
+		RB_RHI_FreeMapSlot( r, rhiMapCache[victim] );
+		rhiMapEvictions++;
 		firstFree = victim;
 	}
 	rhi::RenderTargetHandle rt = r->CreateRenderTarget( rhi::IF_DEPTH24, size, size );
@@ -4836,6 +4926,8 @@ static rhi::RenderTargetHandle RB_RHI_Acquire2DTarget( rhi::RHI *r, int lightInd
 	slot.token = token;
 	slot.lastFrame = rhiCubeCacheFrameNo;
 	slot.lastUseFrame = tr.frameCount;
+	slot.bytes = need;
+	rhiMapCacheBytes += need;
 	return rt;							// hit stays false -> caller renders
 }
 
@@ -4848,7 +4940,9 @@ static void RB_RHI_Reset2DCache( rhi::RHI *r ) {
 		rhiMapCache[i].lightIndex = -1;
 		rhiMapCache[i].rt = 0;
 		rhiMapCache[i].token = 0;
+		rhiMapCache[i].bytes = 0;
 	}
+	rhiMapCacheBytes = 0;
 }
 
 /*
@@ -4981,6 +5075,7 @@ void RB_RHI_FreeShadowCubeCache() {
 	RB_RHI_ResetLightBudgetHyst();
 	RB_RHI_ResetRtMovingTrack();	// same reuse hazard: stale pose baselines would misread as movement
 	RB_RHI_FreeCubeDownscale( rhi::GetRHI() );	// same: downscale decisions are keyed by light index
+	rhiVramWatchGen++;							// a new map: the VRAM watch measures a fresh frame-time baseline
 }
 
 // Render a point light's occluder depth into `cubeTarget`, one 90-degree face at a time.
@@ -12943,6 +13038,103 @@ static void RB_RHI_LogShadowMapSummary( int dbgLit, int dbgProjected, int dbgSha
 
 /*
 ===================
+RB_RHI_VramWatch
+
+Always-on, normally silent dudelog line for slowdowns that build up over a session (GitHub #4: the
+frame rate collapses after 10-20 minutes with the GPU idle, and a reload cures it; #30: VRAM keeps
+growing). It averages the primary view's frame time over 10 seconds of play; the best such average
+since the map loaded is the baseline. Only frame-to-frame gaps under 250 ms with the window focused
+count, with no DUDE Settings window open: menus, the console, loads, preset switches and alt-tab
+stop the world view or stall it, and would otherwise read as a slowdown. When device-local VRAM is above 80% of the budget, or the frame
+time has more than doubled against the baseline (and grown by 4 ms or more), it prints one line with
+VRAM usage against the budget, both shadow caches and their churn since the previous line. While the
+condition persists the repeats back off (1, 2, 4, 8, then every 16 minutes); a healthy window resets
+that. Nothing prints in a healthy session.
+===================
+*/
+static void RB_RHI_VramWatch( rhi::RHI *r, const viewDef_t *viewDef ) {
+	static int accCubeMiss = 0;
+	accCubeMiss += rhiCubeCacheMiss;			// cube re-renders, every view
+	if ( r == NULL || viewDef == NULL || !viewDef->isWindowView || viewDef->isSubview ) {
+		return;									// frame timing on the primary view only
+	}
+	static int lastFrame = -1, seenGen = -1, prevMs = 0, winActiveMs = 0, winFrames = 0, nextLogMs = 0, repeatMs = 0;
+	static int lastCubeEvictions = 0, lastMapEvictions = 0;
+	static float bestAvgMs = 0.0f;
+	if ( tr.frameCount == lastFrame ) {
+		return;
+	}
+	lastFrame = tr.frameCount;
+	const int now = Sys_Milliseconds();
+	const int delta = now - prevMs;
+	prevMs = now;
+	if ( seenGen != rhiVramWatchGen ) {			// new map (or first frame): restart the baseline
+		seenGen = rhiVramWatchGen;
+		bestAvgMs = 0.0f;
+		winActiveMs = 0;
+		winFrames = 0;
+		return;
+	}
+	if ( delta <= 0 || delta >= 250 || !Sys_HasInputFocus() || D3::ImGuiHooks::GetOpenWindowsMask() != 0 ) {
+		return;									// not playing: menu, console, settings, load, preset switch, alt-tab
+	}
+	winActiveMs += delta;
+	winFrames++;
+	if ( winActiveMs < 10000 ) {
+		return;
+	}
+	const float avgMs = (float)winActiveMs / (float)winFrames;
+	winActiveMs = 0;
+	winFrames = 0;
+	if ( bestAvgMs <= 0.0f || avgMs < bestAvgMs ) {
+		bestAvgMs = avgMs;
+	}
+
+	uint64_t usage = 0, budget = 0;
+	const bool haveMem = r->GetDeviceLocalMemory( usage, budget ) && budget > 0;
+	const bool vramHigh = haveMem && usage * 5 > budget * 4;
+	const bool slow = avgMs > 2.0f * bestAvgMs && avgMs - bestAvgMs >= 4.0f;
+	if ( !vramHigh && !slow ) {
+		repeatMs = 0;							// healthy again: the next problem prints at once
+		return;
+	}
+	if ( repeatMs != 0 && now < nextLogMs ) {
+		return;
+	}
+	repeatMs = ( repeatMs == 0 ) ? 60000 : Min( repeatMs * 2, 16 * 60000 );
+	nextLogMs = now + repeatMs;
+
+	int cubes = 0, maps = 0;
+	for ( int i = 0; i < MAX_SHADOW_CUBE_CACHE; i++ ) {
+		if ( rhiCubeCache[i].rt ) {
+			cubes++;
+		}
+	}
+	for ( int i = 0; i < MAX_SHADOW_2D_CACHE; i++ ) {
+		if ( rhiMapCache[i].rt ) {
+			maps++;
+		}
+	}
+	const size_t shadowBudget = RB_RHI_CacheBudgetBytes();
+	const unsigned long long MB = 1024ULL * 1024ULL;
+	common->Printf( "VRAM watch (%s%s%s): device-local %llu / %llu MB (%d%%) | shadow cache %llu MB of %s: "
+		"%d cubes %llu MB, %d 2D maps %llu MB | since last: %d cube + %d 2D evictions, %d cube renders | "
+		"frame %.1f ms (map best %.1f ms)\n",
+		vramHigh ? "VRAM above 80%" : "", ( vramHigh && slow ) ? ", " : "", slow ? "frame time doubled" : "",
+		(unsigned long long)( usage / MB ), (unsigned long long)( budget / MB ),
+		haveMem ? (int)( usage * 100 / budget ) : 0,
+		(unsigned long long)( RB_RHI_ShadowCacheBytes() / MB ),
+		shadowBudget == (size_t)-1 ? "unlimited" : va( "%llu MB budget", (unsigned long long)( shadowBudget / MB ) ),
+		cubes, (unsigned long long)( rhiCubeCacheBytes / MB ), maps, (unsigned long long)( rhiMapCacheBytes / MB ),
+		rhiCubeEvictionsTotal - lastCubeEvictions, rhiMapEvictions - lastMapEvictions, accCubeMiss,
+		avgMs, bestAvgMs );
+	lastCubeEvictions = rhiCubeEvictionsTotal;
+	lastMapEvictions = rhiMapEvictions;
+	accCubeMiss = 0;
+}
+
+/*
+===================
 RB_RHI_LogShadowCacheSummary
 
 r_shadowMapCacheDebug: accumulates the per-view cube-cache tallies over ~1s
@@ -13154,7 +13346,10 @@ static void RB_RHI_PlanCubeDownscale( rhi::RHI *r, const viewDef_t *viewDef ) {
 		rhiCubeDownscaleBudgetNum = 0;
 		return;
 	}
-	const size_t budget = RB_RHI_CacheBudgetBytes();
+	size_t budget = RB_RHI_CacheBudgetBytes();
+	if ( budget != (size_t)-1 ) {
+		budget -= Min( budget, rhiMapCacheBytes );	// the 2D maps share the budget: the cubes get the rest
+	}
 	if ( budget == (size_t)-1 ) {
 		memset( rhiCubeDownscale, 0, sizeof( rhiCubeDownscale ) );
 		rhiCubeDownscaleBudgetNum = 0;
@@ -13731,6 +13926,7 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 	RB_RHI_LogShadowMapSummary( dbgLit, dbgProjected, dbgShadowMapped, dbgNoShadow,
 	                            dbgPoint, dbgParallel, dbgNoLightDef, dbgStencilBig );
 	RB_RHI_LogShadowCacheSummary();
+	RB_RHI_VramWatch( r, viewDef );		// GitHub #4 / #30: one dudelog line when VRAM or the frame time runs away
 
 	// shader passes run with stencil satisfied everywhere
 	if ( qglStencilFunc != NULL ) {

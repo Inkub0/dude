@@ -1314,6 +1314,10 @@ Note: Usually grabbing is handled in idCommonLocal::Frame() -> Sys_GenerateEvent
       common->Frame() won't be called for a while
 ===============
 */
+bool Sys_HasInputFocus() {
+	return in_hasFocus;
+}
+
 void Sys_GrabMouseCursor(bool grabIt) {
 	int flags = grabIt ? (GRAB_GRABMOUSE | GRAB_HIDECURSOR | GRAB_RELATIVEMOUSE) : 0;
 

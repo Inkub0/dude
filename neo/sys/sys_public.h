@@ -273,6 +273,7 @@ void			Sys_EndJoystickInputEvents();
 // operation like map loading, the system can release the mouse cursor
 // when in windowed mode
 void			Sys_GrabMouseCursor( bool grabIt );
+bool			Sys_HasInputFocus();		// false while the game window has lost focus
 
 // DG: added this for an ungodly hack for gamepad support
 // active = true means "currently a GUI with a cursor is active/focused"
