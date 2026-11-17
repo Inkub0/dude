@@ -136,7 +136,7 @@ void main() {
 	rayQueryEXT rq;
 	dudeRayQueryInit( rq,
 		accelerationStructureEXT( uvec2( floatBitsToUint( u_rtParms.x ), floatBitsToUint( u_rtParms.y ) ) ),
-		gl_RayFlagsOpaqueEXT, 0xFDu /* solid rays: skip perforated-caster instances (mask 0x02), only an alpha-testing ray may hit those */, wp + wN * 2.0, 0.0, wr, 8192.0 );
+		gl_RayFlagsOpaqueEXT, 0xF9u /* solid rays: skip perforated-caster (0x02) and view-hidden (0x04, issue #27) instances, only an alpha-testing ray may hit those */, wp + wN * 2.0, 0.0, wr, 8192.0 );
 	while ( rayQueryProceedEXT( rq ) ) { }
 	if ( rayQueryGetIntersectionTypeEXT( rq, true ) != gl_RayQueryCommittedIntersectionTriangleEXT ) {
 		fragColor = vec4( 0.0 ); return;								// reflection ray hit nothing

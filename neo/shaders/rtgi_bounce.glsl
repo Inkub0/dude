@@ -132,7 +132,7 @@ int rtgiTraceBounce( RtgiBounceParms bp, vec3 Pw, vec3 Nw, vec3 eyeW, float d, v
 	rayQueryEXT rq;
 	dudeRayQueryInit( rq,
 		accelerationStructureEXT( bp.tlas ),
-		gl_RayFlagsOpaqueEXT, 0xFDu /* solid rays: skip perforated-caster instances (mask 0x02) */, rayOrg, 0.0, dir, radius );
+		gl_RayFlagsOpaqueEXT, 0xF9u /* solid rays: skip perforated-caster (0x02) and view-hidden (0x04, issue #27) instances */, rayOrg, 0.0, dir, radius );
 	while ( rayQueryProceedEXT( rq ) ) { }
 	if ( rayQueryGetIntersectionTypeEXT( rq, true ) != gl_RayQueryCommittedIntersectionTriangleEXT ) {
 		return 0;						// miss inside the gather radius: open space contributes no bounce here
@@ -330,7 +330,7 @@ int rtgiTraceBounce( RtgiBounceParms bp, vec3 Pw, vec3 Nw, vec3 eyeW, float d, v
 		rayQueryEXT srq;
 		dudeRayQueryInit( srq,
 			accelerationStructureEXT( bp.tlas ),
-			gl_RayFlagsOpaqueEXT | gl_RayFlagsTerminateOnFirstHitEXT, 0xFDu, sOrg, 0.0, domDir, max( domDist - 1.0, 0.1 ) );
+			gl_RayFlagsOpaqueEXT | gl_RayFlagsTerminateOnFirstHitEXT, 0xF9u, sOrg, 0.0, domDir, max( domDist - 1.0, 0.1 ) );
 		while ( rayQueryProceedEXT( srq ) ) { }
 		if ( rayQueryGetIntersectionTypeEXT( srq, true ) == gl_RayQueryCommittedIntersectionTriangleEXT ) {
 			Li = max( Li - domContrib, vec3( 0.0 ) );				// dominant light occluded: drop its leaked contribution

@@ -697,6 +697,14 @@ public:
 	// hard shadow ray / RTAO / reflections exactly as before they entered the scene.
 	static const unsigned int RT_MASK_PERFORATED = 0x02;
 	static const unsigned int RT_MASK_SOLID_RAYS = 0xFD;
+	// View-hidden casters (issue #27): an entity whose SURFACE is suppressed in the view but whose
+	// SHADOW is not - the first-person player body under g_showPlayerShadow 1. It enters the ray
+	// scene with this bit alone, so only light-shadow rays leaving a WORLD surface see it (the
+	// raster paths' shadow volume / shadow map); every other ray (reflections, AO, GI, volumetrics,
+	// RT contact shadows) and a shadow ray leaving the view weapon trace without it - the gun sits
+	// inside the body and would black out (2026-10-12). Shaders: 0xF9 = solid rays minus it, 0xFB =
+	// all rays minus it; 0xFD / 0xFF stay the shadow-ray masks that include it.
+	static const unsigned int RT_MASK_VIEW_HIDDEN = 0x04;
 	// Build ONE multi-geometry BLAS straight from GPU device buffers (no CPU staging), one geometry
 	// per surface. allowUpdate builds it refit-capable (ALLOW_UPDATE) and allocates the persistent
 	// update-scratch RefitBlas reuses. SYNCHRONOUS (load-time / first-sight / topology change; the

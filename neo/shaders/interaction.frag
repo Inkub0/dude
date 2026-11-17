@@ -211,7 +211,11 @@ float shadowVisibility( bool canReceive ) {
 		// occluder. One closer to the light than DUDE_RT_PERF_NEAR is clipped, as the caster pass clips it.
 		uvec2 geoAddr  = uvec2( floatBitsToUint( u_shadowFalloffS.x ), floatBitsToUint( u_shadowFalloffS.y ) );
 		bool  perfOn   = u_shadowFalloffS.z > 0.0 && ( geoAddr.x | geoAddr.y ) != 0u;
-		float tMax     = min( distLight - 1.0, u_rtParms.w );
+		// u_rtParms.w = ray length; NEGATIVE marks a view-weapon draw (issue #27): its rays skip the
+		// first-person body (RT_MASK_VIEW_HIDDEN 0x04), which surrounds the gun. Dynamically uniform
+		// per draw, so the traversal still sees one mask per draw.
+		float tMax     = min( distLight - 1.0, abs( u_rtParms.w ) );
+		uint  hideBody = ( u_rtParms.w < 0.0 ) ? 0x04u : 0u;
 		float perfVis  = 1.0;
 		// per pixel: u_shadowFalloffS.w boxes of this light's grates at u_shadowProjectionQ.xy - a
 		// segment that passes through none of them can't meet a grate ( w < 0: no list, all pixels )
@@ -228,7 +232,7 @@ float shadowVisibility( bool canReceive ) {
 			rayQueryEXT rqo;
 			dudeRayQueryInit( rqo,
 				accelerationStructureEXT( uvec2( floatBitsToUint( u_rtParms.x ), floatBitsToUint( u_rtParms.y ) ) ),
-				gl_RayFlagsOpaqueEXT | gl_RayFlagsTerminateOnFirstHitEXT, 0xFDu,
+				gl_RayFlagsOpaqueEXT | gl_RayFlagsTerminateOnFirstHitEXT, 0xFDu & ~hideBody,
 				wp + wn * u_rtParms.z, 0.0, toLight / distLight, tMax );
 			while ( rayQueryProceedEXT( rqo ) ) { }
 			return ( rayQueryGetIntersectionTypeEXT( rqo, true ) == gl_RayQueryCommittedIntersectionNoneEXT ) ? 1.0 : 0.0;
@@ -236,7 +240,7 @@ float shadowVisibility( bool canReceive ) {
 		rayQueryEXT rq;
 		dudeRayQueryInit( rq,
 			accelerationStructureEXT( uvec2( floatBitsToUint( u_rtParms.x ), floatBitsToUint( u_rtParms.y ) ) ),
-			gl_RayFlagsTerminateOnFirstHitEXT, 0xFFu,
+			gl_RayFlagsTerminateOnFirstHitEXT, 0xFFu & ~hideBody,
 			wp + wn * u_rtParms.z, 0.0, toLight / distLight, tMax );
 		while ( rayQueryProceedEXT( rq ) ) {
 			// perfVis < 1: a solid grate texel was already found - further grates can't dim it more
@@ -484,7 +488,7 @@ float rtContactOcclusion( int qi ) {
 	rayQueryEXT rq;
 	dudeRayQueryInit( rq,
 		accelerationStructureEXT( uvec2( floatBitsToUint( u_rtParms.x ), floatBitsToUint( u_rtParms.y ) ) ),
-		gl_RayFlagsNoOpaqueEXT, 0xFDu,
+		gl_RayFlagsNoOpaqueEXT, 0xF9u,	// RT contact shadows: not the view-hidden body (0x04, issue #27)
 		wp + wn * 0.05, 0.0, dir, len );
 	while ( rayQueryProceedEXT( rq ) ) {
 		// keep only hits on the outside of a mesh (Vulkan back face, see above); traversal goes on toward closer ones

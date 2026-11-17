@@ -148,7 +148,7 @@ void main() {
 	rayQueryEXT rq;
 	dudeRayQueryInit( rq,
 		accelerationStructureEXT( uvec2( floatBitsToUint( u_rtParms.x ), floatBitsToUint( u_rtParms.y ) ) ),
-		gl_RayFlagsOpaqueEXT, 0xFDu /* solid rays: skip perforated-caster instances (mask 0x02), only an alpha-testing ray may hit those */, rayOrg, 0.0, dir, radius );
+		gl_RayFlagsOpaqueEXT, 0xF9u /* solid rays: skip perforated-caster (0x02) and view-hidden (0x04, issue #27) instances, only an alpha-testing ray may hit those */, rayOrg, 0.0, dir, radius );
 	while ( rayQueryProceedEXT( rq ) ) { }
 
 	// NRD REBLUR normalized hit distance: saturate(hitT / (A + |viewZ|*B)) — MUST match the
