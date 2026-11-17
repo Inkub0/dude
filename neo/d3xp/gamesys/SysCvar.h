@@ -212,6 +212,11 @@ extern idCVar	pm_airTics;
 
 extern idCVar	g_showPlayerShadow;
 extern idCVar	g_showPlayerBody;
+extern idCVar	g_showPlayerBodyCamFollow;
+extern idCVar	g_showPlayerBodyCamForward;
+extern idCVar	g_showPlayerBodyCamUp;
+extern idCVar	g_showPlayerBodyCamSmooth;
+extern idCVar	g_showPlayerBodyCamMinForward;
 extern idCVar	g_showHud;
 extern idCVar	g_showProjectilePct;
 extern idCVar	g_showBrass;

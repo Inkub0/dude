@@ -337,6 +337,11 @@ idCVar pm_airTics(					"pm_air",					"1800",			CVAR_GAME | CVAR_NETWORKSYNC | CV
 
 idCVar g_showPlayerShadow(			"g_showPlayerShadow",		"0",			CVAR_GAME | CVAR_ARCHIVE | CVAR_BOOL, "enables shadow of player model" );
 idCVar g_showPlayerBody(			"g_showPlayerBody",			"0",			CVAR_GAME | CVAR_ARCHIVE | CVAR_BOOL, "DUDE: first person, show your own legs and torso when you look down (single player; no head, no arms - the view weapon is your arms). Shadows follow g_showPlayerShadow" );
+idCVar g_showPlayerBodyCamFollow(	"g_showPlayerBodyCamFollow",	"0.8",			CVAR_GAME | CVAR_ARCHIVE | CVAR_FLOAT, "DUDE: first-person body: how far the camera follows the body's head, 0 = the stock eye height, 1 = on the head" );
+idCVar g_showPlayerBodyCamForward(	"g_showPlayerBodyCamForward",	"4",			CVAR_GAME | CVAR_ARCHIVE | CVAR_FLOAT, "DUDE: first-person body: camera ahead of the body's Head joint, units" );
+idCVar g_showPlayerBodyCamUp(	"g_showPlayerBodyCamUp",	"2",			CVAR_GAME | CVAR_ARCHIVE | CVAR_FLOAT, "DUDE: first-person body: camera above the body's Head joint, units" );
+idCVar g_showPlayerBodyCamSmooth(	"g_showPlayerBodyCamSmooth",	"0.75",			CVAR_GAME | CVAR_ARCHIVE | CVAR_FLOAT, "DUDE: first-person body: per-tic smoothing of the head motion, 0 = none, 0.95 = heavy" );
+idCVar g_showPlayerBodyCamMinForward(	"g_showPlayerBodyCamMinForward",	"12",			CVAR_GAME | CVAR_ARCHIVE | CVAR_FLOAT, "DUDE: first-person body: the head camera never sits closer than this ahead of the body's centre, so torso anims (the weapon swap) can't pull it back into the neck, units" );
 idCVar g_showHud(					"g_showHud",				"1",			CVAR_GAME | CVAR_ARCHIVE | CVAR_BOOL, "" );
 idCVar g_showProjectilePct(			"g_showProjectilePct",		"0",			CVAR_GAME | CVAR_ARCHIVE | CVAR_BOOL, "enables display of player hit percentage" );
 idCVar g_showBrass(					"g_showBrass",				"1",			CVAR_GAME | CVAR_ARCHIVE | CVAR_BOOL, "enables ejected shells from weapon" );

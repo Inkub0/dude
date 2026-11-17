@@ -6755,6 +6755,27 @@ static void DrawDbgGroup_RTScene()
 	}
 }
 
+// DUDE g_showPlayerBody (Player.cpp UpdateFirstPersonBody / ApplyFirstPersonHeadCamera): the head-mounted camera's
+// tuning. Game cvars, so the menu reaches them by name; the on/off is also on Game -> Camera.
+static void DrawDbgGroup_FirstPersonBody()
+{
+	if ( BeginSettingsGroup( "First-Person Body", &NamedCvar( "g_showPlayerBody" ) ) ) {
+	CvarSliderF( "Head Camera Follow", NamedCvar( "g_showPlayerBodyCamFollow" ), 0.0f, 1.0f, "%.2f",
+		"How far the camera follows the body's head: 0 = the stock fixed eye height, 1 = on the head. "
+		"Replaces the stock up/down view bob by the same share." );
+	CvarSliderF( "Head Camera Forward", NamedCvar( "g_showPlayerBodyCamForward" ), -8.0f, 16.0f, "%.1f",
+		"Units ahead of the Head joint: puts the eye on the face instead of inside the head." );
+	CvarSliderF( "Head Camera Up", NamedCvar( "g_showPlayerBodyCamUp" ), -8.0f, 12.0f, "%.1f",
+		"Units above the Head joint." );
+	CvarSliderF( "Head Camera Smoothing", NamedCvar( "g_showPlayerBodyCamSmooth" ), 0.0f, 0.95f, "%.2f",
+		"Per-tic smoothing of the head motion: 0 = raw, higher = softer." );
+	CvarSliderF( "Head Camera Min Forward", NamedCvar( "g_showPlayerBodyCamMinForward" ), -4.0f, 16.0f, "%.1f",
+		"The camera never sits closer than this ahead of the body's centre, so torso animations such as the "
+		"weapon swap can't pull it back into the neck. Looking down still moves it further forward." );
+	EndSettingsGroup();
+	}
+}
+
 static void DrawDbgGroup_FrameInterpolation()
 {
 	// render interpolation (docs/render-interpolation.md): the on/off is also on Graphics -> Display ("Smooth motion")
@@ -6809,6 +6830,7 @@ static void DrawDbgTab_PostTemporal()
 	DrawDbgGroup_DepthOfField();
 	DrawDbgGroup_MotionVectors();
 	DrawDbgGroup_FrameInterpolation();
+	DrawDbgGroup_FirstPersonBody();
 }
 
 static void DrawShadowDebugMenu()
