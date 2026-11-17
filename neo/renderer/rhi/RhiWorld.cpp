@@ -8800,9 +8800,15 @@ static void RB_RHI_SSAOPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	// that follow re-issue instead of skipping a needed unit-0 rebind
 	RB_RHI_ForgetTexBinds();
 
-	// EndPass restored the pre-pass viewport/scissor; keep the CPU scissor cache
-	// in step for the per-light passes that follow
+	// EndPass restored the PRE-PASS scissor - the last depth-prepass surface's rect, not the
+	// view's. Reset cache AND hardware to the view rect: a cache-only write left the cache
+	// saying "full view" while the GPU kept that surface's rect, so the next draw whose rect
+	// equalled the view skipped SetScissor and was clipped (see RB_RHI_ApplyViewScissor)
 	backEnd.currentScissor = viewDef->scissor;
+	r->SetScissor( viewDef->viewport.x1 + backEnd.currentScissor.x1,
+	               viewDef->viewport.y1 + backEnd.currentScissor.y1,
+	               backEnd.currentScissor.x2 + 1 - backEnd.currentScissor.x1,
+	               backEnd.currentScissor.y2 + 1 - backEnd.currentScissor.y1 );
 }
 
 // R6: fwd decl - RtaoPass / RtgiPass (below) end their target-pass chain with it, but it is defined later.
@@ -13527,7 +13533,10 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 	if ( qglEnable != NULL ) {
 		qglEnable( GL_STENCIL_TEST );
 	}
-	backEnd.currentScissor = viewDef->scissor;
+	// cache AND hardware: whatever drew last (a previous view, a 2D pass) left its own rect on
+	// the GPU, and a cache-only reset would let the first prepass surface whose rect equals the
+	// view skip SetScissor and draw clipped to it
+	RB_RHI_ApplyViewScissor( r, viewDef );
 
 	// Phase 4 M4 (docs/vulkan-backend.md): the light loop now runs under
 	// Vulkan — stencil shadow volumes + interactions. The render-target
@@ -13637,17 +13646,22 @@ void RB_RHI_DrawWorld( rhi::RHI *r, viewDef_s *viewDef ) {
 				dbgStencilBig++;
 			}
 
-			// scissor + stencil-clear setup: needed for either shadow technique.
-			// Clear stencil only for the stencil path — the shadow-map path never
-			// tests stencil.
+			// the light's scissor, for EVERY light (cache + hardware). The classic loop set it only for
+			// shadowed lights and left the rest to the per-surface compare in RB_CreateSingleDrawInteractions;
+			// that compare trusts backEnd.currentScissor, which a target pass (shadow maps restore the
+			// pre-pass rect on EndPass) or any cache-only reset can leave out of step with the GPU. An
+			// unshadowed light whose first surface rect "equals" the stale cache then drew clipped to an
+			// unrelated rect: straight-edged dark cuts in its light (issue #24 class).
+			backEnd.currentScissor = vLight->scissorRect;
+			if ( r_useScissor.GetBool() ) {
+				r->SetScissor( viewDef->viewport.x1 + backEnd.currentScissor.x1,
+				               viewDef->viewport.y1 + backEnd.currentScissor.y1,
+				               backEnd.currentScissor.x2 + 1 - backEnd.currentScissor.x1,
+				               backEnd.currentScissor.y2 + 1 - backEnd.currentScissor.y1 );
+			}
+			// stencil-clear setup: clear stencil only for the stencil path — the shadow-map
+			// path never tests stencil.
 			if ( castsShadows || shadowMapped || smEnabled ) {
-				backEnd.currentScissor = vLight->scissorRect;
-				if ( r_useScissor.GetBool() ) {
-					r->SetScissor( viewDef->viewport.x1 + backEnd.currentScissor.x1,
-					               viewDef->viewport.y1 + backEnd.currentScissor.y1,
-					               backEnd.currentScissor.x2 + 1 - backEnd.currentScissor.x1,
-					               backEnd.currentScissor.y2 + 1 - backEnd.currentScissor.y1 );
-				}
 				if ( useStencil ) {
 					if ( qglClear != NULL ) {
 						qglClear( GL_STENCIL_BUFFER_BIT );
