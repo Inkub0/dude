@@ -635,7 +635,8 @@ static const idDeclMaterialType *MaterialTypeQ4( const idMaterial *material ) {
 }
 
 guiPoint_t idRenderWorldQ4Local::GuiTrace( qhandle_t entityHandle, const idVec3 start, const idVec3 end ) const {
-	return renderWorld->GuiTrace( entityHandle, start, end );
+	// Quake 4 screens can sit on animated md5 entities (the Strogg healing station)
+	return static_cast<idRenderWorldLocal *>( renderWorld )->GuiTraceAnyModel( entityHandle, start, end );
 }
 
 // the engine's trace as the game reads it; `entity` = the game entity hit (NULL for the world's own surfaces)
