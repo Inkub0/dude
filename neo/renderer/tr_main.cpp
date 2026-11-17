@@ -1217,6 +1217,21 @@ static bool R_RtEntitySuppressedInView( const idRenderEntityLocal *def ) {
 	    || ( def->parms.suppressShadowInViewID  != 0 && def->parms.suppressShadowInViewID  == viewID );
 }
 
+// Issue #27: hidden in the view but still allowed to shadow it - the first-person player body under
+// g_showPlayerShadow 1 (Player.cpp clears suppressShadowInViewID, the surface stays suppressed). The
+// raster paths cast it (shadow volumes / maps only test suppressShadowInViewID); the ray scene can
+// carry it too, but only as its own instance under RT_MASK_VIEW_HIDDEN so the view weapon's rays and
+// every non-shadow ray skip it. Only the per-entity animated-BLAS path can give an entity its own
+// mask; the merged gathers keep excluding it via R_RtEntitySuppressedInView.
+static bool R_RtEntityViewHiddenCaster( const idRenderEntityLocal *def ) {
+	if ( tr.viewDef == NULL ) {
+		return false;
+	}
+	const int viewID = tr.viewDef->renderView.viewID;
+	return def->parms.suppressSurfaceInViewID != 0 && def->parms.suppressSurfaceInViewID == viewID
+	    && !( def->parms.suppressShadowInViewID != 0 && def->parms.suppressShadowInViewID == viewID );
+}
+
 // R3.5 S4: a GPU-skinned casting surface the animated per-entity BLAS path owns (r_rtAnimBlas on,
 // device-addressable gpuSkinVB + static index buffer). The CPU-soup monster gather must SKIP these
 // (else a caster shows a duplicate shadow), and R_RtStageAnimCasters must gather exactly these — so
@@ -2014,7 +2029,7 @@ static void R_RtStageAnimCasters( void ) {
 	int nCaster = 0, nGeom = 0;
 	for ( const viewEntity_t *vEnt = tr.viewDef->viewEntitys; vEnt; vEnt = vEnt->next ) {
 		const idRenderEntityLocal *def = vEnt->entityDef;
-		if ( def == NULL || def->parms.hModel == NULL || def->parms.noShadow || R_RtEntitySuppressedInView( def ) || def->parms.weaponDepthHack
+		if ( def == NULL || def->parms.hModel == NULL || def->parms.noShadow || ( R_RtEntitySuppressedInView( def ) && !R_RtEntityViewHiddenCaster( def ) ) || def->parms.weaponDepthHack
 			|| def->parms.hModel->IsDynamicModel() != DM_CACHED || def->dynamicModel == NULL ) {
 			continue;
 		}
@@ -2041,7 +2056,7 @@ static void R_RtStageAnimCasters( void ) {
 	int ci = 0, gi = 0;
 	for ( const viewEntity_t *vEnt = tr.viewDef->viewEntitys; vEnt; vEnt = vEnt->next ) {
 		const idRenderEntityLocal *def = vEnt->entityDef;
-		if ( def == NULL || def->parms.hModel == NULL || def->parms.noShadow || R_RtEntitySuppressedInView( def ) || def->parms.weaponDepthHack
+		if ( def == NULL || def->parms.hModel == NULL || def->parms.noShadow || ( R_RtEntitySuppressedInView( def ) && !R_RtEntityViewHiddenCaster( def ) ) || def->parms.weaponDepthHack
 			|| def->parms.hModel->IsDynamicModel() != DM_CACHED || def->dynamicModel == NULL ) {
 			continue;
 		}
@@ -2102,7 +2117,8 @@ static void R_RtStageAnimCasters( void ) {
 			c.transform[row * 4 + 2] = mm[row + 8];
 			c.transform[row * 4 + 3] = mm[row + 12];
 		}
-		c.mask = 0xFF;
+		// the first-person body under g_showPlayerShadow 1: shadow rays from the world only (issue #27)
+		c.mask = R_RtEntityViewHiddenCaster( def ) ? rhi::RHI::RT_MASK_VIEW_HIDDEN : 0xFF;
 	}
 	r->UpdateAnimCasters( casters, ci );
 	s_rtStagedAnimCasters = ( ci > 0 );		// forces the TLAS rebuild in R_RtRefreshInstances

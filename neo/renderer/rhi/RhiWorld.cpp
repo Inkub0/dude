@@ -2715,6 +2715,13 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 		RB_RHI_SetTessParms( parms );
 	}
 
+	// issue #27: a ray from the view weapon must not see the first-person body (RT_MASK_VIEW_HIDDEN) -
+	// the gun sits inside it. Signalled by the sign of the ray length (rtParms.w, always 100000 on the
+	// ray branches above); interaction.frag traces abs() of it and drops the bit when it is negative.
+	if ( rtSun && din->surf->space->weaponDepthHack ) {
+		parms.rtParms[3] = -fabsf( parms.rtParms[3] );
+	}
+
 	rhi::BufferHandle ub;
 	int uniOfs = ictx.r->AllocUniforms( &parms, sizeof( parms ), &ub );
 
