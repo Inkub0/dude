@@ -341,6 +341,11 @@ public:
 	idMat3					gravityViewAxisPrev;	// previous tic
 	bool					renderViewInterpolatable;
 
+	// DUDE g_showPlayerBody: render def of the view-only body copy (-1 = none) and its last-committed
+	// parms. Pure render state, never saved: Restore resets the handle and the next tic re-adds it.
+	int						fpBodyDefHandle;
+	renderEntity_t			fpBodyEnt;
+
 	// render interpolation (com_interpolate): the cinematic / camera renderView from the previous and
 	// current tic. A camera pan is committed once per 60Hz tic like any mover, so with the actors gliding
 	// sub-tic (stage 3) a stepped camera made moving actors judder during pans -- worst on vertical motion
@@ -397,6 +402,11 @@ public:
 	void					Spawn( void );
 	void					Think( void );
 	void					UpdateBodySelfShadow( renderEntity_t *headRenderEnt );	// DUDE: third person: the body shadows like any character
+	// DUDE g_showPlayerBody: a view-only copy of the body in first person (legs + torso; see UpdateFirstPersonBody)
+	void					UpdateFirstPersonBody( const idVec3 *origin, const idMat3 *axis );
+	void					FreeFirstPersonBody( void );
+	virtual void			PresentInterpolated( float frac );
+	virtual void			RestoreRenderTransform( void );
 
 	// save games
 	void					Save( idSaveGame *savefile ) const;					// archives object for save game file

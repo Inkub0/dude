@@ -404,6 +404,8 @@ protected:
 	int						renderInterpHistCount;		// consecutive committed tics of history (capped at 2); < 2 falls back to linear
 	int						renderInterpSnapshotTime;	// gameLocal.time renderInterp*Cur belongs to, -1 = no snapshot yet
 	void					SnapshotRenderTransform( void );
+	// the sub-tic blend PresentInterpolated commits; false when there is none (stale or didn't move this tic)
+	bool					InterpolatedRenderTransform( float frac, idVec3 &origin, idMat3 &axis ) const;
 
 private:
 	idPhysics_Static		defaultPhysicsObj;					// default physics object

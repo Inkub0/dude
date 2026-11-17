@@ -1284,6 +1284,8 @@ idPlayer::idPlayer() {
 	gravityViewAxis.Identity();
 	gravityViewAxisPrev.Identity();
 	renderViewInterpolatable	= false;
+	fpBodyDefHandle				= -1;
+	memset( &fpBodyEnt, 0, sizeof( fpBodyEnt ) );
 	renderViewCameraOrigin		= vec3_zero;
 	renderViewCameraOriginPrev	= vec3_zero;
 	renderViewCameraAxis.Identity();
@@ -2030,6 +2032,7 @@ Release any resources used by the player.
 ==============
 */
 idPlayer::~idPlayer() {
+	FreeFirstPersonBody();
 	delete weapon.GetEntity();
 	weapon = NULL;
 #ifdef CTF
@@ -7392,6 +7395,130 @@ void idPlayer::UpdateBodySelfShadow( renderEntity_t *headRenderEnt ) {
 
 /*
 ==============
+Player_FirstPersonBodySkin
+
+DUDE g_showPlayerBody: the skin of the view-only body copy - the stock player skin's hidden
+soldier mesh plus the arms (npcplayerarmmesh), which hold a third-person gun pose and would float
+under the view weapon. Built at runtime so no data file has to ship (and mods get it too); the
+decl keeps its text across level-load purges, so it is created once per session.
+==============
+*/
+static const char *FPBODY_SKIN_NAME = "_dude/firstPersonBody";
+
+static const idDeclSkin *Player_FirstPersonBodySkin( void ) {
+	if ( declManager->FindType( DECL_SKIN, FPBODY_SKIN_NAME, false ) == NULL ) {
+		idDecl *decl = declManager->CreateNewDecl( DECL_SKIN, FPBODY_SKIN_NAME, "skins/_dude_runtime.skin" );
+		if ( decl == NULL ) {
+			return NULL;
+		}
+		decl->SetText( va( "skin %s {\n"
+			"\tmodels/characters/male_npc/soldier/soldier\ttextures/common/nodraw\n"
+			"\tmodels/characters/male_npc/marine/marine2\ttextures/common/nodraw\n"
+			"}\n", FPBODY_SKIN_NAME ) );
+		decl->Invalidate();		// re-parsed from the new text on the FindSkin below
+	}
+	return declManager->FindSkin( FPBODY_SKIN_NAME, false );
+}
+
+/*
+==============
+idPlayer::UpdateFirstPersonBody
+
+DUDE g_showPlayerBody: look down in first person and see your legs and torso. The stock body is
+hidden in the player's own view (suppressSurfaceInViewID) - a single flag for the whole model, and
+it must stay: it carries the head (where the camera sits) and the arms. So the visible body is a
+second render def on the same model and pose (same joints, same callback) that is drawn only in
+the player's view (allowSurfaceInViewID), casts nothing (noShadow: the stock body keeps casting
+under g_showPlayerShadow, arms included, in raster and RT alike) and drops the arms with
+Player_FirstPersonBodySkin. The head is its own entity and stays hidden. origin/axis: the
+interpolated transform (com_interpolate, PresentInterpolated) or NULL for the tic's own.
+Off with a power-up skin (berserk, invisibility), a hidden or dead player, in multiplayer, in
+third person (the real body shows) and while the stock body isn't presented.
+==============
+*/
+void idPlayer::UpdateFirstPersonBody( const idVec3 *origin, const idMat3 *axis ) {
+	const bool wanted = g_showPlayerBody.GetBool() && !gameLocal.isMultiplayer && !pm_thirdPerson.GetBool()
+		&& !spectating && health > 0 && !IsHidden() && renderEntity.hModel != NULL && modelDefHandle != -1
+		&& renderEntity.customSkin == skin;
+	const idDeclSkin *bodySkin = wanted ? Player_FirstPersonBodySkin() : NULL;
+	if ( bodySkin == NULL ) {
+		FreeFirstPersonBody();
+		return;
+	}
+
+	fpBodyEnt = renderEntity;		// same model, joints, callback (keeps the pose current), shader parms
+	if ( origin != NULL && axis != NULL ) {
+		fpBodyEnt.origin = *origin;
+		fpBodyEnt.axis = *axis;
+	}
+	fpBodyEnt.customSkin = bodySkin;
+	fpBodyEnt.suppressSurfaceInViewID = 0;
+	fpBodyEnt.allowSurfaceInViewID = entityNumber + 1;	// the player's own view only: mirrors keep the stock body
+	fpBodyEnt.suppressShadowInViewID = 0;
+	fpBodyEnt.noShadow = true;
+	fpBodyEnt.noSelfShadow = false;			// lit and shadowed like any character
+	fpBodyEnt.remoteRenderView = NULL;
+	fpBodyEnt.gui[0] = fpBodyEnt.gui[1] = fpBodyEnt.gui[2] = NULL;
+	if ( fpBodyDefHandle == -1 ) {
+		fpBodyDefHandle = gameRenderWorld->AddEntityDef( &fpBodyEnt );
+	} else {
+		gameRenderWorld->UpdateEntityDef( fpBodyDefHandle, &fpBodyEnt );
+	}
+}
+
+/*
+==============
+idPlayer::FreeFirstPersonBody
+==============
+*/
+void idPlayer::FreeFirstPersonBody( void ) {
+	if ( fpBodyDefHandle != -1 ) {
+		gameRenderWorld->FreeEntityDef( fpBodyDefHandle );
+		fpBodyDefHandle = -1;
+	}
+}
+
+/*
+==============
+idPlayer::PresentInterpolated / RestoreRenderTransform
+
+com_interpolate: the body copy takes the same sub-tic transform as the stock body, or it would
+step at 60 Hz under the gliding camera. And while the copy exists BOTH defs re-commit every
+rendered frame, moving or not: they share one animator, whose render callback builds the frame's
+interpolated pose once and reports it as changed only to the first def that asks - the other
+would keep last frame's skinned model (the copy's limbs, or the shadow-casting stock body).
+A re-committed def re-instantiates its model whatever the callback says.
+==============
+*/
+void idPlayer::PresentInterpolated( float frac ) {
+	if ( fpBodyDefHandle == -1 ) {
+		idActor::PresentInterpolated( frac );
+		return;
+	}
+	idVec3 origin;
+	idMat3 axis;
+	if ( !InterpolatedRenderTransform( frac, origin, axis ) ) {
+		origin = renderEntity.origin;
+		axis = renderEntity.axis;
+	}
+	if ( modelDefHandle != -1 ) {
+		renderEntity_t lerped = renderEntity;
+		lerped.origin = origin;
+		lerped.axis = axis;
+		gameRenderWorld->UpdateEntityDef( modelDefHandle, &lerped );
+	}
+	UpdateFirstPersonBody( &origin, &axis );
+}
+
+void idPlayer::RestoreRenderTransform( void ) {
+	idActor::RestoreRenderTransform();
+	if ( fpBodyDefHandle != -1 ) {
+		UpdateFirstPersonBody( NULL, NULL );
+	}
+}
+
+/*
+==============
 idPlayer::Think
 
 Called every tic for each player
@@ -7633,6 +7760,8 @@ void idPlayer::Think( void ) {
 		UpdateAnimation();
 
 		Present();
+
+		UpdateFirstPersonBody( NULL, NULL );	// DUDE g_showPlayerBody: follows the body committed just above
 
 		UpdateDamageEffects();
 
@@ -10323,6 +10452,7 @@ idPlayer::Hide
 void idPlayer::Hide( void ) {
 	idWeapon *weap;
 
+	FreeFirstPersonBody();
 	idActor::Hide();
 	weap = weapon.GetEntity();
 	if ( weap ) {

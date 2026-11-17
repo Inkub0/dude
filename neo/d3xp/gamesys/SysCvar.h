@@ -211,6 +211,7 @@ extern idCVar	pm_modelView;
 extern idCVar	pm_airTics;
 
 extern idCVar	g_showPlayerShadow;
+extern idCVar	g_showPlayerBody;
 extern idCVar	g_showHud;
 extern idCVar	g_showProjectilePct;
 extern idCVar	g_showBrass;

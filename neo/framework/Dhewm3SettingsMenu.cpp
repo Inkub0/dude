@@ -7135,6 +7135,9 @@ static CVarOption gameOptions[] = {
 	// DUDE: the playable third-person view (Configuration.md "Third-person view"): the HUD stays up,
 	// the crosshair follows the aim and the body is shadowed; the knobs frame the camera
 	CVarOption( "Camera" ),
+	// DUDE: first-person body awareness (Player.cpp UpdateFirstPersonBody) and the stock player shadow
+	CVarOption( "g_showPlayerBody", "Show Player Body (legs and torso when you look down)", OT_BOOL ),
+	CVarOption( "g_showPlayerShadow", "Show Player Shadow", OT_BOOL ),
 	CVarOption( "pm_thirdPerson", "Third-Person View (over the shoulder)", OT_BOOL ),
 	CVarOption( "pm_thirdPersonSide", "Shoulder Offset (0 = centred, negative = left shoulder)", OT_FLOAT, -64.0f, 64.0f ),
 	CVarOption( "pm_thirdPersonRange", "Camera Distance", OT_FLOAT, 32.0f, 200.0f ),
