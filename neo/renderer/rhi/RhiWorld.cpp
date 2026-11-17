@@ -31,6 +31,7 @@ Doom 3 GPL Source Code (see ArbProgram.cpp for license header)
 #include "framework/DeclSkin.h"					// idDeclSkin (entity skin -> AO name for lazy bake)
 #include "tools/compilers/aobake/aobake.h"		// AO_BakeModelToCache (lazy occlusion-map baking)
 #include "framework/DeclManager.h"					// DECL_MATERIAL enumeration (decal image precache)
+#include "sys/sys_imgui.h"							// GitHub #4 VRAM watch: skip frames with a DUDE Settings window open
 
 extern idCVar r_useCarmacksReverse;		// defined in RenderSystem_init.cpp, no tr_local decl
 
@@ -13041,11 +13042,14 @@ RB_RHI_VramWatch
 
 Always-on, normally silent dudelog line for slowdowns that build up over a session (GitHub #4: the
 frame rate collapses after 10-20 minutes with the GPU idle, and a reload cures it; #30: VRAM keeps
-growing). Every 10 seconds of the primary view it takes the average frame time; the best 10-second
-average since the map loaded is the baseline. When device-local VRAM is above 80% of the budget, or
-the frame time has more than doubled against the baseline (and grown by 4 ms or more), it prints one
-line - at most once a minute - with VRAM usage against the budget, both shadow caches and their churn
-since the previous line. Nothing prints in a healthy session.
+growing). It averages the primary view's frame time over 10 seconds of play; the best such average
+since the map loaded is the baseline. Only frame-to-frame gaps under 250 ms with the window focused
+count, with no DUDE Settings window open: menus, the console, loads, preset switches and alt-tab
+stop the world view or stall it, and would otherwise read as a slowdown. When device-local VRAM is above 80% of the budget, or the frame
+time has more than doubled against the baseline (and grown by 4 ms or more), it prints one line with
+VRAM usage against the budget, both shadow caches and their churn since the previous line. While the
+condition persists the repeats back off (1, 2, 4, 8, then every 16 minutes); a healthy window resets
+that. Nothing prints in a healthy session.
 ===================
 */
 static void RB_RHI_VramWatch( rhi::RHI *r, const viewDef_t *viewDef ) {
@@ -13054,7 +13058,7 @@ static void RB_RHI_VramWatch( rhi::RHI *r, const viewDef_t *viewDef ) {
 	if ( r == NULL || viewDef == NULL || !viewDef->isWindowView || viewDef->isSubview ) {
 		return;									// frame timing on the primary view only
 	}
-	static int lastFrame = -1, seenGen = -1, winStartMs = 0, winFrames = 0, lastLogMs = 0;
+	static int lastFrame = -1, seenGen = -1, prevMs = 0, winActiveMs = 0, winFrames = 0, nextLogMs = 0, repeatMs = 0;
 	static int lastCubeEvictions = 0, lastMapEvictions = 0;
 	static float bestAvgMs = 0.0f;
 	if ( tr.frameCount == lastFrame ) {
@@ -13062,19 +13066,25 @@ static void RB_RHI_VramWatch( rhi::RHI *r, const viewDef_t *viewDef ) {
 	}
 	lastFrame = tr.frameCount;
 	const int now = Sys_Milliseconds();
+	const int delta = now - prevMs;
+	prevMs = now;
 	if ( seenGen != rhiVramWatchGen ) {			// new map (or first frame): restart the baseline
 		seenGen = rhiVramWatchGen;
 		bestAvgMs = 0.0f;
-		winStartMs = now;
+		winActiveMs = 0;
 		winFrames = 0;
 		return;
 	}
+	if ( delta <= 0 || delta >= 250 || !Sys_HasInputFocus() || D3::ImGuiHooks::GetOpenWindowsMask() != 0 ) {
+		return;									// not playing: menu, console, settings, load, preset switch, alt-tab
+	}
+	winActiveMs += delta;
 	winFrames++;
-	if ( now - winStartMs < 10000 ) {
+	if ( winActiveMs < 10000 ) {
 		return;
 	}
-	const float avgMs = (float)( now - winStartMs ) / (float)winFrames;
-	winStartMs = now;
+	const float avgMs = (float)winActiveMs / (float)winFrames;
+	winActiveMs = 0;
 	winFrames = 0;
 	if ( bestAvgMs <= 0.0f || avgMs < bestAvgMs ) {
 		bestAvgMs = avgMs;
@@ -13084,9 +13094,15 @@ static void RB_RHI_VramWatch( rhi::RHI *r, const viewDef_t *viewDef ) {
 	const bool haveMem = r->GetDeviceLocalMemory( usage, budget ) && budget > 0;
 	const bool vramHigh = haveMem && usage * 5 > budget * 4;
 	const bool slow = avgMs > 2.0f * bestAvgMs && avgMs - bestAvgMs >= 4.0f;
-	if ( ( !vramHigh && !slow ) || ( lastLogMs != 0 && now - lastLogMs < 60000 ) ) {
+	if ( !vramHigh && !slow ) {
+		repeatMs = 0;							// healthy again: the next problem prints at once
 		return;
 	}
+	if ( repeatMs != 0 && now < nextLogMs ) {
+		return;
+	}
+	repeatMs = ( repeatMs == 0 ) ? 60000 : Min( repeatMs * 2, 16 * 60000 );
+	nextLogMs = now + repeatMs;
 
 	int cubes = 0, maps = 0;
 	for ( int i = 0; i < MAX_SHADOW_CUBE_CACHE; i++ ) {
@@ -13112,7 +13128,6 @@ static void RB_RHI_VramWatch( rhi::RHI *r, const viewDef_t *viewDef ) {
 		cubes, (unsigned long long)( rhiCubeCacheBytes / MB ), maps, (unsigned long long)( rhiMapCacheBytes / MB ),
 		rhiCubeEvictionsTotal - lastCubeEvictions, rhiMapEvictions - lastMapEvictions, accCubeMiss,
 		avgMs, bestAvgMs );
-	lastLogMs = now;
 	lastCubeEvictions = rhiCubeEvictionsTotal;
 	lastMapEvictions = rhiMapEvictions;
 	accCubeMiss = 0;
