@@ -1237,7 +1237,27 @@ this doesn't do any occlusion testing, simply ignoring non-gui surfaces.
 start / end are in global world coordinates.
 ================
 */
+static guiPoint_t R_GuiTrace( const idList<idRenderEntityLocal*> &entityDefs, qhandle_t entityHandle, const idVec3 &start, const idVec3 &end, bool animatedModels );
+
 guiPoint_t	idRenderWorldLocal::GuiTrace( qhandle_t entityHandle, const idVec3 start, const idVec3 end ) const {
+	return R_GuiTrace( entityDefs, entityHandle, start, end, false );
+}
+
+/*
+================
+idRenderWorldLocal::GuiTraceAnyModel
+
+DUDE: Quake 4's GuiTrace. Doom 3 only traces GUIs on static models, but Quake 4 puts interactive
+screens on animated md5 entities (the Strogg healing station, rvHealingStation), and Raven's
+engine traced the posed mesh. Without this the crosshair never focuses the station's screen,
+so it can never be used. The Doom 3 path (GuiTrace) keeps the stock rule.
+================
+*/
+guiPoint_t	idRenderWorldLocal::GuiTraceAnyModel( qhandle_t entityHandle, const idVec3 start, const idVec3 end ) const {
+	return R_GuiTrace( entityDefs, entityHandle, start, end, true );
+}
+
+static guiPoint_t R_GuiTrace( const idList<idRenderEntityLocal*> &entityDefs, qhandle_t entityHandle, const idVec3 &start, const idVec3 &end, bool animatedModels ) {
 	localTrace_t	local;
 	idVec3			localStart, localEnd, bestPoint;
 	int				j;
@@ -1261,7 +1281,13 @@ guiPoint_t	idRenderWorldLocal::GuiTrace( qhandle_t entityHandle, const idVec3 st
 	}
 
 	model = def->parms.hModel;
-	if ( def->parms.callback || !def->parms.hModel || def->parms.hModel->IsDynamicModel() != DM_STATIC ) {
+	if ( animatedModels && model && model->IsDynamicModel() != DM_STATIC ) {
+		// the posed mesh, the way ModelTrace instantiates it (CPU positions are skinned even with r_gpuSkinning)
+		model = R_EntityDefDynamicModel( def );
+		if ( !model ) {
+			return pt;
+		}
+	} else if ( def->parms.callback || !def->parms.hModel || def->parms.hModel->IsDynamicModel() != DM_STATIC ) {
 		return pt;
 	}
 
