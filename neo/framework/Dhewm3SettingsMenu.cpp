@@ -6605,10 +6605,10 @@ static void DrawDbgGroup_GTAO()
 		"AO, instead of AO darkening every direct light by the same amount. 0 = off, 0.5 = default, 1 = full. Screen-space AO uses "
 		"its bent normal (the open direction), baked / texture AO uses the parallax self-shadow march (needs Parallax and its "
 		"Self-Shadow), Path Tracing uses the dominant light direction. A groove lit from the side stays dark." );
-	CvarCheckbox( "AO Micro-Shadows", r_aoMicroShadows, "A/B alternative for baked / texture AO on direct light: the AO darkens "
-		"a light only where it comes in at a grazing angle (Uncharted 4's micro-shadows), using the surface's own normal - "
-		"no parallax or screen-space AO needed, and it also works in Path Tracing. Replaces Light-Aware AO's texture-AO "
-		"part (its screen-space part stays). Off by default." );
+	CvarCheckbox( "AO Micro-Shadows", r_aoMicroShadows, "Baked / texture AO shadows a direct light (its diffuse and its highlight) "
+		"only where the light comes in at a grazing angle (Uncharted 4's micro-shadows), using the surface's own normal - no "
+		"parallax or screen-space AO needed, and it also works in Path Tracing. Replaces Light-Aware AO's texture-AO part (its "
+		"screen-space part stays). On by default." );
 
 	// ---- Screen-space GTAO: the horizon-march producer. Inert while RTAO or RTGI replaces it. ----
 	SettingsHeading( "Screen-space (GTAO)" );

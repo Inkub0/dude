@@ -174,8 +174,9 @@ UBO_BINDING(0) uniform RenderParams {
 	                             // origin offset per unit of view distance on the RT passes (r_rtShadowOriginDistScale).
 	                             // (restir_di uses xy for the FSR2 jitter shear.)
 	vec4 u_aoParms;              // DUDE light-aware AO (r_aoLightAware): x = strength 0..1, 0 = off (the fixed AO share
-	                             // on direct light); y = 1: baked / sidecar AO on direct light as micro-shadows
-	                             // (r_aoMicroShadows). Interaction draws + restir_di_apply. zw spare. Appended LAST.
+	                             // on direct light); y = 1: baked / sidecar AO on direct light as
+	                             // micro-shadows (r_aoMicroShadows). Interaction draws + restir_di_apply. zw spare.
+	                             // Appended LAST.
 };
 
 // DUDE light-aware AO (r_aoLightAware, docs/ssao-gtao.md "Light-aware AO"): how far a light direction L lies inside the
@@ -183,6 +184,18 @@ UBO_BINDING(0) uniform RenderParams {
 // A cosine-weighted cone of half-angle a sees sin^2(a) of the hemisphere, so cos(a) = sqrt(1 - vis). 1 = the light
 // shines down the open cone (into the groove), 0 = it comes in over the occluders; soft over +-0.2 of the cosine.
 // B and L must share a space. RTAO stores the plain surface normal as B, which reduces this to a cone around N.
+// DUDE AO micro-shadows (r_aoMicroShadows, docs/ssao-gtao.md 7c): how much of a direct light reaches a texel whose baked
+// AO is `ao`, from its cosine on the normal-mapped normal - Naughty Dog's curve (Brinck & Maximov, "The Technical Art of
+// Uncharted 4", 2016; Unity HDRP's ComputeMicroShadowing): saturate( N.L + 2 ao^2 - 1 ), the AO read as a cone of open
+// directions. Picked in game over Call of Duty's cone curve ( N.L / sqrt( 1 - ao ) )^2 (2026-11-18, a minimal difference).
+// Light behind the surface (N.L <= 0) is unshadowed here, as HDRP gates it: N.L already zeroes that light.
+float dudeMicroShadow( float ao, float NdotL ) {
+	if ( NdotL <= 0.0 ) {
+		return 1.0;
+	}
+	return clamp( NdotL + 2.0 * ao * ao - 1.0, 0.0, 1.0 );
+}
+
 float dudeAoLightInCone( float vis, vec3 B, vec3 L ) {
 	float cosA = sqrt( clamp( 1.0 - vis, 0.0, 1.0 ) );
 	return smoothstep( cosA - 0.2, cosA + 0.2, dot( B, L ) );

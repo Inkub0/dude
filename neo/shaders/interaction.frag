@@ -881,14 +881,14 @@ void main() {
 		// that marched (a height and r_parallaxShadow on); elsewhere the fixed share stays.
 		float occlShare = u_occlusionParms.z;
 		if ( u_aoParms.y > 0.5 ) {
-			// AO micro-shadows (r_aoMicroShadows = u_aoParms.y; Brinck & Maximov, "The Technical Art of Uncharted 4",
-			// 2016): the baked AO read as a cone of open directions (aperture cos^2 ~ 2 * ao^2 - 1 here), shadowing
-			// this light only where it comes in outside that cone: saturate( |N.L| + 2 ao^2 - 1 ). A crease lit
-			// straight on (N.L -> 1) keeps its light; one lit at a grazing angle goes dark. Needs no height or
-			// screen-space AO, so it works on every surface with an occlusion map or sidecar AO. Replaces the
-			// fixed share and the parallax-march fade (the light-aware A/B partner) on this term.
-			float microShadow = clamp( abs( microNdotL ) + 2.0 * aoMap * aoMap - 1.0, 0.0, 1.0 );
-			diffuse.rgb *= mix( 1.0, microShadow, occlShare );
+			// AO micro-shadows (r_aoMicroShadows = u_aoParms.y, dudeMicroShadow - Naughty Dog's curve): the
+			// baked AO read as a cone of open directions, shadowing this light only where it comes in outside it. A
+			// SHADOW, as every reference applies it (HDRP, Filament / Call of Duty): it takes the specular too, so a
+			// crease lit at a grazing angle loses its glint as well as its diffuse. Needs no height or screen-space AO.
+			// Replaces the fixed share and the parallax-march fade (the light-aware A/B partner) on this term.
+			float microShadow = mix( 1.0, dudeMicroShadow( aoMap, microNdotL ), occlShare );
+			diffuse.rgb *= microShadow;
+			spec.rgb *= microShadow;
 		} else {
 			if ( u_aoParms.x > 0.0 && parallaxLightVis >= 0.0 ) {
 				occlShare *= 1.0 - u_aoParms.x * parallaxLightVis;
