@@ -191,20 +191,29 @@ occluded spot. `u_aoParms.x` (a vec4 appended to the uniform block: 1280 -> 1296
 - No effect while RT Global Illumination is on (`r_rtgi`, the Hybrid and Path Tracing tiers): RTGI replaces GTAO, so
   there is no screen-space AO on direct light to fade; only the baked / sidecar part acts, in the forward pass.
 
-### 7c. AO micro-shadows (`r_aoMicroShadows`, A/B, 2026-11-18)
+### 7c. AO micro-shadows (`r_aoMicroShadows`, default ON since 2026-11-18)
 
-An alternative for the **baked / sidecar AO** part of 7b, from Naughty Dog (Brinck & Maximov, "The Technical Art of
-Uncharted 4", SIGGRAPH 2016): read the material AO as a cone of open directions and shadow a light only where it comes
-in outside it, `saturate( |N.L| + 2 ao^2 - 1 )` with the bump-mapped normal. A crease lit straight on keeps its light,
-one lit at a grazing angle goes dark. Unlike 7b's parallax-march fade it needs no height field, no self-shadow and no
-screen-space AO, so it acts on every surface with an occlusion map or a sidecar's AO channel.
+For the **baked / sidecar AO** part of 7b: read the material AO as a cone of open directions above the texel and shadow
+a direct light only where it comes in outside it, using the normal-mapped N.L - Naughty Dog's curve
+`saturate( N.L + 2 ao^2 - 1 )` ("The Technical Art of Uncharted 4", Brinck & Maximov 2016, as Unity HDRP's
+`ComputeMicroShadowing`). `dudeMicroShadow( ao, N.L )` in renderparms.glsl; `u_aoParms.y` = 1. Unlike 7b's parallax-march
+fade it needs no height field, no self-shadow and no screen-space AO, so it acts on every surface with an occlusion map
+or a sidecar's AO channel.
 
-- Forward (`interaction.frag`): replaces both the fixed `r_occlusionMapDirect` share and 7b's march fade on the baked
-  term; still scaled by `r_occlusionMapScale * r_occlusionMapDirect`. 7b's screen-space (GTAO bent cone) part is
-  unchanged, so the two A/B on the texture AO only.
-- Path Tracing (`restir_di_apply.frag`): the SH light direction's cosine on the full-res normal, blended with the
+- **A shadow, diffuse and specular**, as every reference applies it (HDRP and Filament multiply the light's shadow term):
+  a crease lit at a grazing angle loses its glint too. N.L <= 0 is unshadowed (HDRP's gate; N.L already zeroes it).
+  Scaled by `r_occlusionMapScale * r_occlusionMapDirect` (HDRP's "opacity").
+- **Every light.** The references apply it to the sun only; Doom 3 is lit by point and projected lights, so here it is
+  per light. Material AO only, as HDRP and Filament (Call of Duty also takes the min with GTAO).
+- **Path Tracing** (`restir_di_apply.frag`): the SH light direction's cosine on the full-res normal, blended with the
   plain AO by the direction's concentration k (light from many directions keeps the plain AO). SH resolve only.
-- `u_aoParms.y`. Off by default (an A/B); diffuse only, like the term it replaces.
+- Replaces both the fixed share and 7b's march fade on the baked term (the fade still runs with `r_aoMicroShadows 0`);
+  7b's screen-space (GTAO bent cone) part is unchanged. Fidelity: on by default (the user's pick); 0 = the fixed share.
+- **Tested and dropped (2026-11-18): Call of Duty's cone curve** `saturate( N.L / sqrt( 1 - ao ) )^2` (Chan, "Material
+  Advances in Call of Duty: WWII", SIGGRAPH 2018 sec. 4.5-4.6, as Filament's `computeMicroShadowing`): cos t =
+  sqrt( 1 - ao ) is the half-angle of the cone a cosine-weighted visibility ao implies (Nusselt), full light inside it,
+  `( N.L / cos t )^2` outside. It keeps mid-AO creases lit under near head-on light where the Naughty Dog curve dims them
+  (ao 0.6, N.L 0.9: 100 % vs 62 %). In game the difference was minimal and the user preferred the Naughty Dog curve.
 
 ## 8. Performance levers (3.3 hardware)
 

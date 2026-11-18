@@ -257,11 +257,12 @@ void main() {
 	// mix( 1, map, scale*direct ) - applied to the combined term here (v1: diffuse + spec denoised together)
 	if ( u_occlusionParms.z > 0.0 ) {
 		float occl = mt.a;
-		// AO micro-shadows (r_aoMicroShadows, as interaction.frag): saturate( |N.L| + 2 ao^2 - 1 ) with the SH light
+		// AO micro-shadows (r_aoMicroShadows, as interaction.frag: dudeMicroShadow) with the SH light
 		// direction, weighted by its concentration k - light arriving from many directions at once is ambient-like and
-		// keeps the plain AO. SH mode only (the direction); otherwise the plain AO.
+		// keeps the plain AO. SH mode only (the direction); otherwise the plain AO. Diffuse and specular arrive summed
+		// here, so it shadows both, as in the forward pass.
 		if ( u_aoParms.y > 0.5 && aoMicroK > 0.0 ) {
-			float microShadow = clamp( abs( aoMicroCos ) + 2.0 * mt.a * mt.a - 1.0, 0.0, 1.0 );
+			float microShadow = dudeMicroShadow( mt.a, aoMicroCos );
 			occl = mix( mt.a, microShadow, aoMicroK );
 		}
 		lit *= mix( 1.0, occl, u_occlusionParms.z );

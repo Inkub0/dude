@@ -2881,7 +2881,7 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 	// (the same matrix the contact-shadow march fills).
 	if ( !din->ambientLight && R_BackendSupportsEnhancements() ) {
 		parms.aoParms[0] = idMath::ClampFloat( 0.0f, 1.0f, r_aoLightAware.GetFloat() );
-		parms.aoParms[1] = r_aoMicroShadows.GetBool() ? 1.0f : 0.0f;	// baked / sidecar AO as micro-shadows (A/B partner)
+		parms.aoParms[1] = r_aoMicroShadows.GetBool() ? 1.0f : 0.0f;	// baked / sidecar AO as micro-shadows
 		if ( parms.aoParms[0] > 0.0f && parms.localParam0[0] > 0.5f ) {
 			memcpy( parms.modelViewMatrix, din->surf->space->modelViewMatrix, sizeof( parms.modelViewMatrix ) );
 		}
