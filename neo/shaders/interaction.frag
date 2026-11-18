@@ -598,6 +598,7 @@ void main() {
 	vec2 uvDiffuse = var_TexDiffuse;
 	vec2 uvSpecular = var_TexSpecular;
 	float parallaxSelfShadow = 1.0;
+	float parallaxLightVis = -1.0;		// the self-shadow march's raw "this light reaches the hit point" (light-aware AO); < 0 = not marched
 	if ( u_parallaxParms.x > 0.5 ) {
 		// every stage's UV derivatives, taken once in uniform control flow: the height-map fetches inside the marches
 		// use them for a stable mip level (see parallaxUV) instead of banding, and dudeParallaxCarry maps the offset
@@ -619,6 +620,7 @@ void main() {
 			float hitDepth = 1.0 - dudeParallaxHeight( hitUV, hDx, hDy );
 			float vis = parallaxShadow( hitUV, normalize( var_TexLightVec ), hitDepth, hDx, hDy );
 			parallaxSelfShadow = mix( 1.0, vis, u_parallaxParms2.x );
+			parallaxLightVis = vis;
 		}
 	}
 
@@ -845,9 +847,20 @@ void main() {
 	// safer. u_localParam0 = (enable, floor, 1/viewW, 1/viewH); u_localParam1 = (direct
 	// strength, specular-occlusion toggle). The AO term is floored so it never blackens.
 	if ( u_localParam0.x > 0.5 ) {
-		float ao = texture( u_ssao, gl_FragCoord.xy * u_localParam0.zw ).r;
-		ao = mix( u_localParam0.y, 1.0, ao );
-		float aoDirect = mix( 1.0, ao, u_localParam1.x );
+		vec4 aoTex = texture( u_ssao, gl_FragCoord.xy * u_localParam0.zw );
+		float ao = mix( u_localParam0.y, 1.0, aoTex.r );
+		float aoShare = u_localParam1.x;
+		// light-aware AO (r_aoLightAware = u_aoParms.x, docs/ssao-gtao.md): AO is light that cannot get in, but THIS light
+		// can where it shines down the open cone GTAO measured (bent normal + visibility), so the share fades there - a
+		// groove lit straight on brightens, one lit from the side stays dark. The bent normal (view space) is brought into
+		// the surface's model space with the model-view rotation's transpose, where var_ModelPos and the light origin
+		// live (u_modelViewMatrix = this surface's model -> view, RB_RHI_DrawInteraction).
+		if ( u_aoParms.x > 0.0 ) {
+			vec3 bentModel = normalize( ( aoTex.gba * 2.0 - 1.0 ) * mat3( u_modelViewMatrix ) );
+			vec3 toLightM  = normalize( u_localLightOrigin.xyz - var_ModelPos );
+			aoShare *= 1.0 - u_aoParms.x * dudeAoLightInCone( aoTex.r, bentModel, toLightM );
+		}
+		float aoDirect = mix( 1.0, ao, aoShare );
 		diffuse.rgb *= aoDirect;
 		if ( u_localParam1.y > 0.5 ) {
 			spec.rgb *= aoDirect;
@@ -860,7 +873,14 @@ void main() {
 	// stays below full by default. Sampled with the diffuse UV; stacks with SSAO when both on.
 	if ( u_occlusionParms.x > 0.5 ) {
 		float aoMap = dudeUnit10Ao( texture( u_occlusionMap, uvDiffuse ) );	// R, or B of an RMAO sidecar
-		diffuse.rgb *= mix( 1.0, aoMap, u_occlusionParms.z );
+		// light-aware AO: where the parallax self-shadow march found this light reaching the relief's hit point (a groove
+		// it shines into), the baked darkening there is light this light does deliver, so its share fades. Only surfaces
+		// that marched (a height and r_parallaxShadow on); elsewhere the fixed share stays.
+		float occlShare = u_occlusionParms.z;
+		if ( u_aoParms.x > 0.0 && parallaxLightVis >= 0.0 ) {
+			occlShare *= 1.0 - u_aoParms.x * parallaxLightVis;
+		}
+		diffuse.rgb *= mix( 1.0, aoMap, occlShare );
 	}
 
 	vec4 color = spec * specMap + diffuse;

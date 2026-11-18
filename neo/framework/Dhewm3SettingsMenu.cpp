@@ -6555,6 +6555,11 @@ static void DrawDbgGroup_GTAO()
 
 	ImGui::EndDisabled();	// !ssao (common sub-knobs)
 
+	CvarSliderF( "Light-Aware AO", r_aoLightAware, 0.0f, 1.0f, "%.2f", "Lets a light that shines INTO a groove lift that groove's "
+		"AO, instead of AO darkening every direct light by the same amount. 0 = off, 0.5 = default, 1 = full. Screen-space AO uses "
+		"its bent normal (the open direction), baked / texture AO uses the parallax self-shadow march (needs Parallax and its "
+		"Self-Shadow), Path Tracing uses the dominant light direction. A groove lit from the side stays dark." );
+
 	// ---- Screen-space GTAO: the horizon-march producer. Inert while RTAO or RTGI replaces it. ----
 	SettingsHeading( "Screen-space (GTAO)" );
 	if ( r_ssao.GetBool() && ( r_rtao.GetBool() || r_rtgi.GetBool() ) ) {

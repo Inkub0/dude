@@ -164,6 +164,33 @@ application path** (multiply the ambient + scaled direct-diffuse by an occlusion
 sourced from a texture stage instead of the screen-space buffer. They stack with SSAO. See
 [occlusion-maps.md](occlusion-maps.md) (`r_occlusionMaps`, the `occlusionmap` material keyword).
 
+## 7b. Light-aware AO (`r_aoLightAware`, 2026-11-17)
+
+AO darkens direct light by a fixed share (`r_ssaoDirectLight` 0.75, `r_occlusionMapDirect` 0.9), whatever direction the
+light comes from, because Doom 3 has almost no ambient for AO to act on. So a light shining straight into a groove left
+it as dark as one coming from the side, and AO read as painted on under moving lights. `r_aoLightAware` (0..1, default
+0.5 after the user's in-game test; 0 = the fixed share; Debugging > Raster > Ambient Occlusion (GTAO) > Light-Aware AO) fades that share where the light reaches the
+occluded spot. `u_aoParms.x` (a vec4 appended to the uniform block: 1280 -> 1296 bytes).
+
+- **Screen-space AO (GTAO), forward per-light pass.** GTAO's bent normal (GBA) is the axis of the open cone and its
+  cosine-weighted visibility v gives the half-angle: a cone of half-angle a sees sin^2(a) of the hemisphere, so
+  cos(a) = sqrt(1 - v) (`dudeAoLightInCone`, renderparms.glsl, soft over +-0.2 of the cosine). `interaction.frag`
+  brings the view-space bent normal into model space (the transpose of the surface's model-view rotation, filled into
+  `u_modelViewMatrix` like the contact-shadow march does) and tests the direction to the light origin from
+  `var_ModelPos`. The AO share on this light is scaled by `1 - strength * inCone`; specular occlusion follows it. The
+  bent normal is computed whenever this is on, even with `r_ssaoBentNormal 0`. RTAO stores the plain surface normal,
+  so there it reduces to a cone around N.
+- **Baked / sidecar AO, forward per-light pass.** No bent normal per texel, but where the surface marches parallax
+  with self-shadow (a height and `r_parallaxShadow` > 0) the march already knows whether this light reaches the hit
+  point: the occlusion-map share is scaled by `1 - strength * lightVis`. Elsewhere the fixed share stays.
+- **Path Tracing (`restir_di_apply.frag`).** The direct light arrives summed, so the test uses the SH light direction
+  (SH resolve only) and weights it by its concentration k: light from many directions at once is ambient-like, and AO
+  is right to darken it. Baked AO there keeps the fixed share (no per-pixel height march in the apply).
+- The ambient pass is unchanged (AO is the right thing for ambient light). Fidelity: on at 0.5 by default (the user's
+  call), so AO under direct light is direction-dependent, a departure from the fixed darkening; 0 restores it.
+- No effect while RT Global Illumination is on (`r_rtgi`, the Hybrid and Path Tracing tiers): RTGI replaces GTAO, so
+  there is no screen-space AO on direct light to fade; only the baked / sidecar part acts, in the forward pass.
+
 ## 8. Performance levers (3.3 hardware)
 
 - `r_ssaoSlices` × `r_ssaoSteps` — directions × steps-per-direction; the primary

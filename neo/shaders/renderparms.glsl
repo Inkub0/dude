@@ -170,8 +170,22 @@ UBO_BINDING(0) uniform RenderParams {
 	vec4 u_ormBakedG;            // Identity (0, 1, 1) when none recorded.
 	vec4 u_contactParms2;        // DUDE contact shadows: x = tan(penumbra cone half-angle) (r_contactShadowSoftness),
 	                             // y = grazing-angle start bias (r_contactShadowGrazeBias, 0 = off),
-	                             // z = distance-fade max (r_contactShadowMaxDist, 0 = off), w spare. Appended LAST.
+	                             // z = distance-fade max (r_contactShadowMaxDist, 0 = off), w = the RT shadow-ray
+	                             // origin offset per unit of view distance on the RT passes (r_rtShadowOriginDistScale).
+	                             // (restir_di uses xy for the FSR2 jitter shear.)
+	vec4 u_aoParms;              // DUDE light-aware AO (r_aoLightAware): x = strength 0..1, 0 = off (the fixed AO share
+	                             // on direct light). Interaction draws + restir_di_apply. yzw spare. Appended LAST.
 };
+
+// DUDE light-aware AO (r_aoLightAware, docs/ssao-gtao.md "Light-aware AO"): how far a light direction L lies inside the
+// open cone GTAO measured at a pixel - B = the bent normal (the cone's axis, unit), vis = the cosine-weighted visibility.
+// A cosine-weighted cone of half-angle a sees sin^2(a) of the hemisphere, so cos(a) = sqrt(1 - vis). 1 = the light
+// shines down the open cone (into the groove), 0 = it comes in over the occluders; soft over +-0.2 of the cosine.
+// B and L must share a space. RTAO stores the plain surface normal as B, which reduces this to a cone around N.
+float dudeAoLightInCone( float vis, vec3 B, vec3 L ) {
+	float cosA = sqrt( clamp( 1.0 - vis, 0.0, 1.0 ) );
+	return smoothstep( cosA - 0.2, cosA + 0.2, dot( B, L ) );
+}
 
 float dudeOrmAdjust( float v, float b, float c, float g ) {
 	return pow( clamp( ( v - 0.5 ) * c + 0.5 + b, 0.0, 1.0 ), 1.0 / max( g, 0.05 ) );

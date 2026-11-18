@@ -2865,6 +2865,16 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 
 	idImage *parallaxImage = RB_RHI_FillParallaxParms( parms, din );
 
+	// light-aware AO (r_aoLightAware, docs/ssao-gtao.md "Light-aware AO"): the AO share on this light fades where the light
+	// reaches the occluded spot. The GTAO bent cone needs the bent normal in model space: the surface's model -> view
+	// (the same matrix the contact-shadow march fills).
+	if ( !din->ambientLight && R_BackendSupportsEnhancements() ) {
+		parms.aoParms[0] = idMath::ClampFloat( 0.0f, 1.0f, r_aoLightAware.GetFloat() );
+		if ( parms.aoParms[0] > 0.0f && parms.localParam0[0] > 0.5f ) {
+			memcpy( parms.modelViewMatrix, din->surf->space->modelViewMatrix, sizeof( parms.modelViewMatrix ) );
+		}
+	}
+
 	// texture units exactly as RB_ARB2_DrawInteraction / the README table
 	RB_RHI_BindUnit( 0, din->ambientLight ? globalImages->ambientNormalMap : globalImages->normalCubeMapImage );
 	RB_RHI_BindUnit( 1, din->bumpImage );
@@ -8935,7 +8945,7 @@ static void RB_RHI_SSAOPass( rhi::RHI *r, const viewDef_t *viewDef ) {
 	parms.localParam1[0] = radiusPixFactor;
 	parms.localParam1[1] = (float)steps;
 	parms.localParam1[2] = (float)slices;
-	parms.localParam1[3] = r_ssaoBentNormal.GetBool() ? 1.0f : 0.0f;
+	parms.localParam1[3] = ( r_ssaoBentNormal.GetBool() || r_aoLightAware.GetFloat() > 0.0f ) ? 1.0f : 0.0f;	// light-aware AO reads the bent cone too
 	// use the bump-mapped normal G-buffer (unit 1) if the normal prepass produced one this
 	// view; otherwise ssao.frag reconstructs the normal from depth (windowCoord.x = flag)
 	const bool useNormalBuf = rhiNormalReadyThisView && rhiNormalResultRT != 0 && r_ssaoNormalBuffer.GetBool();
@@ -11947,6 +11957,9 @@ void RB_RHI_ReStirDIApply( rhi::RHI *r, const viewDef_t *viewDef ) {
 	parms.localParam1[0] = aoOn ? 1.0f : 0.0f;
 	parms.localParam1[1] = idMath::ClampFloat( 0.0f, 1.0f, r_ssaoFloor.GetFloat() );
 	parms.localParam1[2] = aoDirect;
+	// light-aware AO (r_aoLightAware): the share fades where the SH light direction runs down GTAO's open cone, weighted
+	// by how concentrated that direction is (SH resolve only; restir_di_apply.frag)
+	parms.aoParms[0] = idMath::ClampFloat( 0.0f, 1.0f, r_aoLightAware.GetFloat() );
 	// SH resolve (u_sh1 on unit 6, inverse view below). 2 = + full-res specular re-shade (r_rtReStirDISpecReshade): the
 	// buffer is diffuse-only, so the apply rebuilds a sharp GGX highlight from the SH direction + the full-res normal.
 	const bool diSpecReshade = shResolve && r_rtReStirDISpecReshade.GetBool();
