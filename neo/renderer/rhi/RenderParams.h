@@ -208,7 +208,8 @@ struct RenderParams {
 	float	aoParms[4];			// DUDE light-aware AO (r_aoLightAware, docs/ssao-gtao.md "Light-aware AO"): x = strength 0..1.
 								// 0 (every other draw) = AO darkens direct light by the fixed r_ssaoDirectLight /
 								// r_occlusionMapDirect share; above 0 that share fades where this light reaches the occluded
-								// spot (GTAO bent cone, parallax self-shadow). Interaction draws + restir_di_apply. yzw spare.
+								// spot (GTAO bent cone, parallax self-shadow). y = 1: baked / sidecar AO on direct light as
+								// micro-shadows (r_aoMicroShadows). Interaction draws + restir_di_apply. zw spare.
 };
 
 // window depth -> view z for a view, from its projection matrix (column-major GL layout):

@@ -191,6 +191,21 @@ occluded spot. `u_aoParms.x` (a vec4 appended to the uniform block: 1280 -> 1296
 - No effect while RT Global Illumination is on (`r_rtgi`, the Hybrid and Path Tracing tiers): RTGI replaces GTAO, so
   there is no screen-space AO on direct light to fade; only the baked / sidecar part acts, in the forward pass.
 
+### 7c. AO micro-shadows (`r_aoMicroShadows`, A/B, 2026-11-18)
+
+An alternative for the **baked / sidecar AO** part of 7b, from Naughty Dog (Brinck & Maximov, "The Technical Art of
+Uncharted 4", SIGGRAPH 2016): read the material AO as a cone of open directions and shadow a light only where it comes
+in outside it, `saturate( |N.L| + 2 ao^2 - 1 )` with the bump-mapped normal. A crease lit straight on keeps its light,
+one lit at a grazing angle goes dark. Unlike 7b's parallax-march fade it needs no height field, no self-shadow and no
+screen-space AO, so it acts on every surface with an occlusion map or a sidecar's AO channel.
+
+- Forward (`interaction.frag`): replaces both the fixed `r_occlusionMapDirect` share and 7b's march fade on the baked
+  term; still scaled by `r_occlusionMapScale * r_occlusionMapDirect`. 7b's screen-space (GTAO bent cone) part is
+  unchanged, so the two A/B on the texture AO only.
+- Path Tracing (`restir_di_apply.frag`): the SH light direction's cosine on the full-res normal, blended with the
+  plain AO by the direction's concentration k (light from many directions keeps the plain AO). SH resolve only.
+- `u_aoParms.y`. Off by default (an A/B); diffuse only, like the term it replaces.
+
 ## 8. Performance levers (3.3 hardware)
 
 - `r_ssaoSlices` × `r_ssaoSteps` — directions × steps-per-direction; the primary
