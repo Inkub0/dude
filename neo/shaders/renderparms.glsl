@@ -192,10 +192,15 @@ float dudeOrmAdjust( float v, float b, float c, float g ) {
 	return pow( clamp( ( v - 0.5 ) * c + 0.5 + b, 0.0, 1.0 ), 1.0 / max( g, 0.05 ) );
 }
 
-// dudeOrmAdjust undone (exact where the bake did not clip; a clipped value stays at its end)
+// dudeOrmAdjust undone. NOT clamped to 0..1: a texel outside the range the bake adjust can produce did not come from
+// it - a per-class adjust the baker applies after it (--class-adjust, ceramic roughness -0.15) or an editor "Save to
+// texture" - and clamping pinned it to the bake's floor, so dudeOrmGlobal returned e.g. roughness 0.40 for every texel
+// below 0.40 (rough adjust 0.02 0.45 1.34), even with the sliders equal to the bake: saved edits and the ceramic bake
+// "reverted". Unclamped, adjust(unadjust(v)) == v exactly for every v when the sliders equal the bake, and a moved
+// slider extrapolates the same linear step; dudeOrmAdjust clamps the result.
 float dudeOrmUnadjust( float v, float b, float c, float g ) {
 	float x = pow( clamp( v, 0.0, 1.0 ), max( g, 0.05 ) );
-	return ( c > 0.001 ) ? clamp( ( x - 0.5 - b ) / c + 0.5, 0.0, 1.0 ) : 0.5;
+	return ( c > 0.001 ) ? ( x - 0.5 - b ) / c + 0.5 : 0.5;
 }
 
 // the global step on channel ch (0 AO, 1 rough, 2 metal): back to the un-adjusted bake, then the sliders
