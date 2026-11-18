@@ -3023,15 +3023,26 @@ static bool RB_RHI_RenderSoftParticleStage( rhi::RHI *r, const viewDef_t *viewDe
 	// ('blend add', e.g. the common textures/particles/smokepuff steam) are dimmed
 	// only when the material name reads as smoke, so additive flames/glares stay
 	// bright. The shader branches alpha vs additive on channelMask.a.
-	bool smokeDark = false;
-	if ( r_smokeDarkBlend.GetBool() ) {
-		if ( src_blend == GLS_SRCBLEND_SRC_ALPHA ) {
-			smokeDark = true;
-		} else if ( src_blend == GLS_SRCBLEND_ONE ) {
-			smokeDark = RB_RHI_ParticleLooksLikeSmoke( surf->material );
-		}
+	// DUDE lit smoke (r_smokeLit) rides the same classification and background capture: the smoke takes the colour
+	// and level of the light around it. Either feature on makes a smoke particle "smoke" here; the shader gates each
+	// on its own enable (localParam0.x dark blend, localParam0.w lit strength).
+	bool smokeParticle = false;
+	if ( src_blend == GLS_SRCBLEND_SRC_ALPHA ) {
+		smokeParticle = true;
+	} else if ( src_blend == GLS_SRCBLEND_ONE ) {
+		smokeParticle = RB_RHI_ParticleLooksLikeSmoke( surf->material );
 	}
+	// r_smokeDarkBlend is the MASTER switch of environment-aware smoke (the Graphics tab's one toggle): off = the stock
+	// smoke, every part below off; on = the darkness blend plus lit smoke and density at their own (debug-tab) levels.
+	const bool darkBlendOn = r_smokeDarkBlend.GetBool();
+	const float litStrength = darkBlendOn ? idMath::ClampFloat( 0.0f, 1.0f, r_smokeLit.GetFloat() ) : 0.0f;
+	// smoke density (r_smokeDensity): what is seen through smoke blurs. Additive smoke is drawn premultiplied so it can
+	// also hide what is behind it (smokeAbsorb); alpha smoke keeps its blend and blurs what shows through it.
+	const bool smokeDensityOn = smokeParticle && darkBlendOn && r_smokeDensity.GetFloat() > 0.0f;
+	const bool smokeAbsorb = smokeDensityOn && src_blend == GLS_SRCBLEND_ONE;
+	const bool smokeDark = smokeParticle && ( darkBlendOn || litStrength > 0.0f || smokeDensityOn );
 	const bool vkMode = rhi::GetActiveBackendType() == rhi::BT_VULKAN;
+	rhi::ImageHandle smokeLightImg = 0;
 	if ( smokeDark ) {
 		if ( !backEnd.smokeBackgroundCaptured ) {
 			if ( vkMode ) {
@@ -3045,9 +3056,29 @@ static bool RB_RHI_RenderSoftParticleStage( rhi::RHI *r, const viewDef_t *viewDe
 			}
 			backEnd.smokeBackgroundCaptured = true;
 		}
-		parms.localParam0[0] = 1.0f;								// enable
+		parms.localParam0[0] = darkBlendOn ? 1.0f : 0.0f;			// dark-blend enable
 		parms.localParam0[1] = r_smokeDarkBlendFloor.GetFloat();	// opacity on a black background
 		parms.localParam0[2] = idMath::ClampFloat( 0.05f, 1.0f, r_smokeDarkBlendKnee.GetFloat() );	// knee luma -> full
+		parms.localParam0[3] = litStrength;							// lit smoke strength (0 = off)
+		// windowCoord.x = the projection's focal length in pixels (the lit / density taps spread over the puff's size on
+		// screen); .y = the smoke-density gain (0 = off: the puff stays additive)
+		parms.windowCoord[0] = viewDef->projectionMatrix[0] * 0.5f * (float)( viewDef->viewport.x2 - viewDef->viewport.x1 + 1 );
+		parms.windowCoord[1] = smokeDensityOn ? 2.0f * idMath::ClampFloat( 0.0f, 1.0f, r_smokeDensity.GetFloat() ) : 0.0f;
+		if ( litStrength > 0.0f ) {
+			// the light: Path Tracing's albedo-free DI buffer (unit 3) when there is one, else the background capture.
+			// screenCorrection = ( 1 / view size for the DI buffer, its scale, the reference level ); windowCoord.x = the
+			// projection's focal length in pixels, so the shader spreads its taps over the puff's size on screen.
+			float lightScale = 1.0f;
+			bool lightLinear = false;
+			smokeLightImg = vkMode ? RB_RHI_SmokeLightSource( r, lightScale, lightLinear ) : 0;
+			const int vw = viewDef->viewport.x2 - viewDef->viewport.x1 + 1;
+			const int vh = viewDef->viewport.y2 - viewDef->viewport.y1 + 1;
+			parms.localParam1[2] = smokeLightImg == 0 ? 0.0f : ( lightLinear ? 2.0f : 1.0f );
+			parms.screenCorrection[0] = vw > 0 ? 1.0f / vw : 0.0f;
+			parms.screenCorrection[1] = vh > 0 ? 1.0f / vh : 0.0f;
+			parms.screenCorrection[2] = lightScale;
+			parms.screenCorrection[3] = idMath::ClampFloat( 0.05f, 2.0f, r_smokeLitRef.GetFloat() );
+		}
 		const float rw = (float)globalImages->currentRenderImage->uploadWidth;
 		const float rh = (float)globalImages->currentRenderImage->uploadHeight;
 		parms.localParam1[0] = rw > 0.0f ? 1.0f / rw : 0.0f;
@@ -3077,6 +3108,7 @@ static bool RB_RHI_RenderSoftParticleStage( rhi::RHI *r, const viewDef_t *viewDe
 		if ( smokeDark && globalImages->currentRenderImage->rhiCaptured ) {
 			vkTex[2] = globalImages->currentRenderImage->rhiHandle;
 		}
+		vkTex[3] = smokeLightImg;		// lit smoke: the DI buffer (0 = none; the shader reads it only when localParam1.z > 0)
 	} else {
 		rhi::gl3ActiveTexture( GL_TEXTURE0 );
 		backEnd.glState.currenttmu = 0;
@@ -3100,6 +3132,11 @@ static bool RB_RHI_RenderSoftParticleStage( rhi::RHI *r, const viewDef_t *viewDe
 	// shader doesn't implement
 	rhi::PipelineDesc pd;
 	pd.stateBits = pStage->drawStateBits & ~GLS_ATEST_BITS;
+	if ( smokeAbsorb ) {
+		// smoke density: premultiplied (ONE, ONE_MINUS_SRC_ALPHA) - the RGB still adds the puff's glow, alpha = its density
+		// takes that share of the scene behind (softparticle.frag returns most of it, blurred)
+		pd.stateBits = ( pd.stateBits & ~( GLS_SRCBLEND_BITS | GLS_DSTBLEND_BITS ) ) | GLS_SRCBLEND_ONE | GLS_DSTBLEND_ONE_MINUS_SRC_ALPHA;
+	}
 	pd.shader = prog;
 	pd.vertexLayout = rhi::VL_DRAWVERT;
 	pd.cullType = RB_RHI_CullFor( viewDef, surf->material->GetCullType() );
