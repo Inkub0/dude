@@ -8,10 +8,28 @@ SAMPLER_BINDING(0) uniform sampler2D u_map;
 VARY(0) in vec2 var_TexCoord;
 VARY(1) in vec4 var_Color;
 
+#ifdef DUDE_GENERIC_PARALLAX
+// generic_parallax.frag (docs/parallax.md "Pass parity"): an emissive / overlay stage of a surface whose lit passes
+// march its relief samples where they shifted it, so a glow stays on the panel it lights
+SAMPLER_BINDING(11) uniform sampler2D u_parallaxMap;
+VARY(4) in vec2 var_TexBump;		// the height's UV (generic.vert)
+VARY(5) in vec3 var_TexViewVec;
+// parallaxUV / dudeParallaxCarry (needs u_parallaxMap above)
+#include "parallax.glsl"
+#endif
+
 layout(location = 0) out vec4 fragColor;
 
 void main() {
-	vec4 c = texture( u_map, var_TexCoord ) * var_Color;
+	vec2 uv = var_TexCoord;
+#ifdef DUDE_GENERIC_PARALLAX
+	if ( u_parallaxParms.x > 0.5 ) {
+		vec2 hDx = dFdx( var_TexBump ), hDy = dFdy( var_TexBump );
+		vec2 off = parallaxUV( var_TexBump, normalize( var_TexViewVec ), hDx, hDy );
+		uv += dudeParallaxCarry( off, hDx, hDy, dFdx( var_TexCoord ), dFdy( var_TexCoord ) );
+	}
+#endif
+	vec4 c = texture( u_map, uv ) * var_Color;
 	if ( u_alphaTest.y != 0.0 && c.a < u_alphaTest.x ) {
 		discard;
 	}

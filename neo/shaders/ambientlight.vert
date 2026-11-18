@@ -23,6 +23,7 @@ VARY(7) out vec4 var_Color;
 // docs/tessellation.md); unconsumed by ambientlight.frag in the flat pipeline.
 VARY(8) out vec3 var_ModelPos;
 VARY(9) out vec4 var_ModelNormal;	// .w = UV-seam displacement mask
+VARY(10) out vec3 var_TexViewVec;	// DUDE parallax: the view vector in tangent space, as interaction.vert builds it
 
 void main() {
 	var_ModelPos = attr_Position.xyz;
@@ -43,13 +44,18 @@ void main() {
 	// tangent-space normal -> global space transform rows
 	// (v * M == transpose(M) * v, so no explicit transpose is needed). LIGHTING uses the UN-welded normal
 	// rebuilt from the tangents (no hard-edge "cut"); var_ModelNormal above keeps the welded one for PN.
-	mat3 tbn = mat3( attr_Tangent, attr_Bitangent,
-	                 dudeUnweldedLightNormal( attr_Normal, attr_Tangent, attr_Bitangent ) );
+	vec3 nLit = dudeUnweldedLightNormal( attr_Normal, attr_Tangent, attr_Bitangent );
+	mat3 tbn = mat3( attr_Tangent, attr_Bitangent, nLit );
 	var_ToGlobalRow0 = u_modelMatrixRow0.xyz * tbn;
 	var_ToGlobalRow1 = u_modelMatrixRow1.xyz * tbn;
 	var_ToGlobalRow2 = u_modelMatrixRow2.xyz * tbn;
 
 	var_Color = attr_Color * u_vertexColorModulate + u_vertexColorAdd;
+
+	// parallax: the same tangent-space view vector the per-light pass marches with, so the ambient light shifts the
+	// surface exactly as the direct lights do (docs/parallax.md)
+	vec3 toView = normalize( u_localViewOrigin.xyz - attr_Position.xyz );
+	var_TexViewVec = vec3( dot( attr_Tangent, toView ), dot( attr_Bitangent, toView ), dot( nLit, toView ) );
 
 	gl_Position = u_mvpMatrix * attr_Position;
 }

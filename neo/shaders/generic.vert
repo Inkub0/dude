@@ -12,6 +12,10 @@ layout(location = 2) in vec3 attr_Normal;
 // vertex colour for 2D / vertex-lit stages — the two never collide because a stage
 // that reads vertex colour isn't a tessellated body surface and vice-versa.
 layout(location = 5) in vec4 attr_Color;
+#ifdef DUDE_GENERIC_PARALLAX
+layout(location = 3) in vec3 attr_Tangent;
+layout(location = 4) in vec3 attr_Bitangent;
+#endif
 
 VARY(0) out vec2 var_TexCoord;
 VARY(1) out vec4 var_Color;
@@ -23,6 +27,11 @@ VARY(1) out vec4 var_Color;
 VARY(2) out vec3 var_ModelPos;
 VARY(3) out vec4 var_ModelNormal;	// .w = UV-seam displacement mask
 VARY(4) out vec2 var_TexBump;
+#ifdef DUDE_GENERIC_PARALLAX
+// generic_parallax.vert: var_TexBump is the parallax height's UV (u_bumpMatrix = that texture's stage matrix,
+// RB_RHI_StageParallax) and this the view vector in tangent space, built as interaction.vert builds it
+VARY(5) out vec3 var_TexViewVec;
+#endif
 
 void main() {
 	var_ModelPos = attr_Position.xyz;
@@ -33,6 +42,12 @@ void main() {
 	var_TexBump = vec2( dot( st, u_bumpMatrixS ), dot( st, u_bumpMatrixT ) );
 
 	var_Color = ( attr_Color * u_vertexColorModulate + u_vertexColorAdd ) * u_color;
+
+#ifdef DUDE_GENERIC_PARALLAX
+	vec3 nLit = dudeUnweldedLightNormal( attr_Normal, attr_Tangent, attr_Bitangent );
+	vec3 toView = normalize( u_localViewOrigin.xyz - attr_Position.xyz );
+	var_TexViewVec = vec3( dot( attr_Tangent, toView ), dot( attr_Bitangent, toView ), dot( nLit, toView ) );
+#endif
 
 	gl_Position = u_mvpMatrix * attr_Position;
 }

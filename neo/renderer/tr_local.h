@@ -1393,6 +1393,7 @@ extern idCVar r_parallax;				// DUDE: master toggle for parallax occlusion mappi
 extern idCVar r_parallaxScale;			// DUDE: global multiplier on per-material POM height scale
 extern idCVar r_parallaxMinSteps;		// DUDE: POM adaptive march, fewest steps
 extern idCVar r_parallaxMaxSteps;		// DUDE: POM adaptive march, most steps (loop cap 128)
+extern idCVar r_parallaxMinAngle;		// DUDE: POM grazing limit, degrees above the surface
 extern idCVar r_parallaxShadow;			// DUDE: POM self-shadow strength (0 = off)
 
 // clears the per-material generated-AO lookup cache (RhiWorld.cpp) so freshly baked maps

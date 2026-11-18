@@ -153,10 +153,11 @@ compiled in via a shader permutation / spec constant). When on:
 | cvar | default | meaning |
 |------|---------|---------|
 | `r_parallax` | `0` | master enable (bool) |
-| `r_parallaxScale` | `1.0` | global multiplier on per-material height scale |
+| `r_parallaxScale` | `1.0` (shipped: 0.10) | global multiplier on per-material height scale |
 | `r_parallaxMinSteps` | `8` | march steps head-on |
 | `r_parallaxMaxSteps` | `32` | march steps at grazing angle |
 | `r_parallaxShadow` | `0` | self-shadowing march (bool) |
+| `r_parallaxMinAngle` | `15` | grazing limit in degrees (built 2026-11-17, see "Pass parity") |
 | `r_parallaxMaxDist` | tuned | distance past which POM fades to flat |
 
 Preset-gated to the top tier (Ultra / "Ultra Nightmare", already reserved Vulkan-only —
@@ -342,7 +343,7 @@ the offline bake now stores a better height there:
   integration drift is not what bends them, and a high-pass of the bake (1/4 .. 1/16 width) only
   added halos. The remaining warping at grazing angles is POM's own: the march may shift up to
   10x the depth there (`max( z, 0.1 )`), and a recess wall has no texels of its own, so it shows
-  one texel stretched across it. Open: whether to limit the grazing offset.
+  one texel stretched across it. Now limited: see "Pass parity and the grazing limit" below.
 - **Height sign verified** ("the relief caves instead of bulging"): on paper,
   `R_HeightmapToNormalMap` stores nx = -dh/dx, ny = -dh/dy (rows), which the bake and the runtime
   field integrate with the same sign, and the view vector uses the tangent / bitangent the
@@ -360,6 +361,39 @@ the offline bake now stores a better height there:
 
 Still flat depth (no `gl_FragDepth`), no relief in RT shadow rays: the next steps in the
 relief plan.
+
+## Pass parity and the grazing limit (2026-11-17)
+
+Before the depth-correct step, two fixes for what the deeper baked heights made visible.
+
+- **Ambient pass.** Phase C left the ambient-light pass on flat UVs because the mismatch was ~1%
+  of a tile at the old runtime depth. The baked heights are several times deeper on grilles and
+  panels, so an ambient-lit surface showed the flat texture under the shifted one. Now
+  `ambientlight.frag` runs the same march (`parallax.glsl`) and shifts the bump, diffuse and
+  occlusion / sidecar reads like `interaction.frag`; `ambientlight.vert` builds the same
+  tangent-space view vector (location 10, threaded through the tess stages for linkage; world
+  surfaces never tessellate). No self-shadow there. `RB_RHI_FillParallaxParms` no longer
+  early-outs on ambient draws, except one the RT GI replaces (`r_rtgiAmbient`, draws nothing).
+- **Emissive and overlay stages.** A material's ambient stages (a light panel's glow, a screen's
+  add layer) are drawn by the generic stage pass on flat UVs, so a glow sat on the flat texture
+  and slid off the relief as the view moved, in every tier including Path Tracing. For a surface
+  whose lit passes march, `RB_RHI_RenderShaderPasses` now draws its `SK_GENERIC` stages with
+  `generic_parallax` (`generic.vert` / `.frag` under `DUDE_GENERIC_PARALLAX`; the plain `generic`
+  program also draws 2D with a vertex layout that has no tangents, so it is a separate program).
+  `RB_RHI_StageParallax` fills the same parms as the lit passes, puts the height's own stage
+  matrix (diffuse stage for a sidecar, bump stage for the runtime field) in `u_bumpMatrix`, and
+  binds the height on unit 11; the shader carries the offset into the stage's UV with
+  `dudeParallaxCarry`, so scrolling or scaled glow stages follow too. Custom-ARB, builtin and
+  texgen stages are left alone.
+- **Grazing limit** (`r_parallaxMinAngle`, default 15 degrees, 6..45; Advanced > Parallax >
+  Grazing Limit). The march's view height is floored at sin(limit) instead of 0.1 (~5.7
+  degrees): the shift grows as 1 / that height, so at the old floor it reached 10x the depth and
+  stretched recess walls over many texels. Flatter views now march as if seen from the limit;
+  the shift tops out near 3.9x the depth at 15 degrees and stays continuous at the limit. The
+  step count follows the shorter march, so grazing pixels also get cheaper. Fidelity: changes
+  how the (opt-in, non-vanilla) relief looks at grazing angles; 6 restores the old behaviour.
+- **Default depth** `r_parallaxScale` 0.12 -> **0.10** (the user's pick after testing the baked
+  heights with the fixes above). An archived cvar: an existing config keeps its value until reset.
 
 ## Non-goals (initial)
 

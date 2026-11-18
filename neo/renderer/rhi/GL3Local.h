@@ -202,6 +202,7 @@ unsigned int	GL3_ProgramObject( unsigned int handle );	// GL program object for 
 struct viewDef_s;
 struct drawSurf_s;
 struct srfTriangles_s;
+namespace rhi { struct RenderParams; }
 
 void RB_RHI_LogOnce( const char *what );
 
@@ -291,6 +292,13 @@ rhi::ImageHandle RB_RHI_BerserkAccum( rhi::RHI *r, const viewDef_s *viewDef,
 // per-level ping-pong trail one frame and return it (bound on unit 1) for the bloodorbN/cr_draw
 // display composite. level 0/1/2 = HELLTIME/BERSERK/INVULNERABILITY. Returns 0 if unbuildable.
 rhi::ImageHandle RB_RHI_HelltimeAccum( rhi::RHI *r, const viewDef_s *viewDef, int level, int timeMs );
+
+// DUDE parallax for a material's ambient / emissive stages (RB_RHI_StageParallax, RhiWorld.cpp): when this surface
+// marches its relief in the lit passes, fill parms for generic_parallax (the march parms, the eye in surface space and
+// the height's own texture matrix in u_bumpMatrix) and bind the height on unit 11; vkHeight = its handle for
+// DrawArgs::parallax on Vulkan (0 on GL3). False (parallaxParms.x = 0) when the surface does not march.
+bool RB_RHI_StageParallax( const drawSurf_s *surf, const viewDef_s *viewDef, rhi::RenderParams &parms,
+                           rhi::ImageHandle &vkHeight );
 
 // screenshot support: composited desktops return garbage for front-buffer
 // reads, so R_ReadTiledPixels registers a destination and the executor

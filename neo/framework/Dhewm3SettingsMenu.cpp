@@ -6132,6 +6132,8 @@ static void DrawDbgGroup_Geometry()
 		ImGui::BeginDisabled( !r_parallax.GetBool() );
 		CvarSliderI( "Fewest March Steps", r_parallaxMinSteps, 1, 32, nullptr );
 		CvarSliderI( "Most March Steps", r_parallaxMaxSteps, 1, 128, nullptr );
+		CvarSliderF( "Grazing Limit", r_parallaxMinAngle, 6.0f, 45.0f, "%.0f deg", "the flattest view angle the relief honours: "
+			"surfaces seen flatter than this shift as if seen from it, so floors and walls seen edge-on stop smearing. 6 = the old behaviour." );
 		ImGui::EndDisabled();	// r_parallax
 
 		SettingsHeading( "GPU Skinning & Offload (Vulkan)" );
