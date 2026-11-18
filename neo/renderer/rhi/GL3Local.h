@@ -292,6 +292,11 @@ rhi::ImageHandle RB_RHI_BerserkAccum( rhi::RHI *r, const viewDef_s *viewDef,
 // display composite. level 0/1/2 = HELLTIME/BERSERK/INVULNERABILITY. Returns 0 if unbuildable.
 rhi::ImageHandle RB_RHI_HelltimeAccum( rhi::RHI *r, const viewDef_s *viewDef, int level, int timeMs );
 
+// DUDE lit smoke (r_smokeLit, RB_RHI_SmokeLightSource, RhiWorld.cpp): the Path Tracing tier's albedo-free direct + bounce
+// light buffer (the ReSTIR DI buffer) for the soft-particle pass, sampled at gl_FragCoord * 1 / view size; scale = its
+// multiplier, linear = false for NRD-YCoCg. 0 = none this view (other tiers, GL3): the caller uses the background colour.
+rhi::ImageHandle RB_RHI_SmokeLightSource( rhi::RHI *r, float &scale, bool &linear );
+
 // screenshot support: composited desktops return garbage for front-buffer
 // reads, so R_ReadTiledPixels registers a destination and the executor
 // captures GL_BACK right before the next swap (GL_RGB, pack alignment 4)

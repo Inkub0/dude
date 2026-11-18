@@ -2569,6 +2569,17 @@ static rhi::ImageHandle RB_RHI_AmbientFloorSource( rhi::RHI *r, float &scale, bo
 	return 0;
 }
 
+// DUDE lit smoke: the DI buffer only - the RTGI-only buffer of the other RT tiers holds the bounce without the direct
+// light (that one is drawn forward there), so smoke would read as lit by the bounce alone
+rhi::ImageHandle RB_RHI_SmokeLightSource( rhi::RHI *r, float &scale, bool &linear ) {
+	scale = 1.0f;
+	linear = false;
+	if ( !( rhiReStirDIApplyThisView && rhiReStirDIRanThisView && rhiReStirDIRT != 0 ) ) {
+		return 0;
+	}
+	return RB_RHI_AmbientFloorSource( r, scale, linear );
+}
+
 static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 	// ReSTIR DI Stage D: an opaque WORLD surface under a DI-covered light is lit by the deferred DI apply, not here.
 	// Everything the G-buffer cannot describe stays forward: the depth-hacked view weapon / models, translucent

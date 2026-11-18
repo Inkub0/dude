@@ -1559,8 +1559,11 @@ extern idCVar r_debugRenderToTexture;
 extern idCVar r_glDebugContext; // DG: use debug context to call logging callbacks on GL errors
 extern idCVar r_enableDepthCapture; // DG: disable capturing depth buffer, used for soft particles
 extern idCVar r_useSoftParticles;
-extern idCVar r_smokeDarkBlend;			// DUDE: fade alpha-blended smoke into scene darkness (opengl3/Vulkan)
+extern idCVar r_smokeDarkBlend;			// DUDE: environment-aware smoke & steam, MASTER switch (darkness fade + lit smoke + density)
 extern idCVar r_smokeDarkBlendFloor;	// smoke opacity over a black background (0..1)
+extern idCVar r_smokeLit;				// DUDE: smoke takes the colour / level of the light around it (0 = off)
+extern idCVar r_smokeLitRef;			// light level at which lit smoke keeps its authored brightness
+extern idCVar r_smokeDensity;			// DUDE: smoke hides + blurs what is behind it (0 = off)
 extern idCVar r_smokeDarkBlendKnee;		// background luminance at which smoke reaches full opacity
 
 /*
