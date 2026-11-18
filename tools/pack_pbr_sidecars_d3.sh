@@ -23,7 +23,8 @@
 #   build/pbr-sidecars/<pack>/, then collects all three packs (baked now or earlier) into
 #   dist/d3-pbr-sidecars/ with a BUILDINFO.txt inside each and a .sha256 next to it.
 #   Nothing is installed: copy each pack into its folder with the game closed.
-#   Env: D3XP=<dir> D3LE=<dir> (default: d3xp/ and d3le/ next to base/), OUT_DIR=<dir>
+#   Env: D3XP=<dir> D3LE=<dir> (default: d3xp/ and d3le/ next to base/), OUT_DIR=<dir>,
+#   PACK_ONLY=1 (bake nothing: re-collect and re-stamp the packs already baked in build/)
 set -euo pipefail
 DUDE="$(cd "$(dirname "$0")/.." && pwd)"
 TAG="${1:-}"
@@ -38,6 +39,7 @@ dirs_of() { case "$1" in base) echo "$BASE" ;; roe) echo "$BASE $D3XP" ;; lm) ec
 folder_of() { case "$1" in base) echo base ;; roe) echo d3xp ;; lm) echo d3le ;; esac; }
 title_of() { case "$1" in base) echo "Doom 3" ;; roe) echo "Resurrection of Evil" ;; lm) echo "The Lost Mission" ;; esac; }
 
+[ "${PACK_ONLY:-0}" = 1 ] && GAMES=()
 for g in "${GAMES[@]}"; do
 	pack_of "$g" >/dev/null || { echo "unknown game '$g' (base, roe, lm)" >&2; exit 2; }
 	dirs=($(dirs_of "$g")); own="${dirs[-1]}"
@@ -62,7 +64,7 @@ for g in base roe lm; do
 	cp "$src" "$stage/$name.pk4"
 	adj="$(unzip -p "$src" pbr/pbr_sidecar_baked.cfg | grep -E '^(ao|rough|metal) ' | tr '\n' ';' | sed 's/;$//; s/;/; /g')"
 	cat > "$stage/BUILDINFO.txt" <<EOF
-DUDE PBR sidecar pack ($(title_of "$g")): generated roughness / metalness / AO maps, see docs/pbr-texture-maps.md
+DUDE PBR sidecar pack ($(title_of "$g")): generated roughness / metalness / AO maps + parallax height (alpha), see docs/pbr-texture-maps.md
 pack_version: $TAG
 packed: $(date -u '+%Y-%m-%d %H:%M UTC')
 packed_on_dude_commit: $commit

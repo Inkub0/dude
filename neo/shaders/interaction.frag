@@ -27,7 +27,7 @@ SAMPLER_BINDING(7) uniform sampler2DShadow u_shadowMap; // 2D depth map (project
 SAMPLER_BINDING(8) uniform samplerCubeShadow u_shadowCube; // cube depth map (point light)
 SAMPLER_BINDING(9) uniform sampler2D u_ssao;            // DUDE GTAO buffer (R = ambient visibility)
 SAMPLER_BINDING(10) uniform sampler2D u_occlusionMap;   // DUDE baked AO map (R = visibility)
-SAMPLER_BINDING(11) uniform sampler2D u_parallaxMap;   // DUDE parallax height map (R = height)
+SAMPLER_BINDING(11) uniform sampler2D u_parallaxMap;   // DUDE parallax height map: R = height, or a sidecar's ALPHA (parallax.glsl)
 SAMPLER_BINDING(12) uniform samplerCubeShadow u_shadowCubeDyn; // DUDE static/dynamic split (lever B): movers-only cube
 #if defined(VULKAN)
 // DUDE RT shadow blur (r_rtShadowBlur, docs/rtx-shadow-blur.md): this light's hard ray
@@ -559,80 +559,8 @@ float contactShadowTerm( bool canReceive, float NdotL ) {
 	return canReceive ? clamp( 1.0 - u_contactParms.w * occ, 0.0, 1.0 ) : 1.0;
 }
 
-// DUDE parallax occlusion mapping (docs/parallax.md). Marches the height field along the
-// tangent-space view ray and returns a UV offset that fakes per-pixel surface relief. The
-// height map's R channel is the surface height (1 = top, 0 = deepest); we march in "depth"
-// = 1 - height. Fragment-only: no depth is written, so the flat zfill prepass and
-// GLS_DEPTHFUNC_EQUAL are untouched -- the whole reason this needs no tessellation-style
-// two-pass matching. u_parallaxParms = (enable, depth, minSteps, maxSteps).
-// The height map is sampled with textureGrad using the base-UV derivatives (dPx, dPy)
-// computed once in uniform control flow: plain texture() inside the march loop derives its
-// mip level from the data-dependent per-step UV, which bands into false lines on surfaces
-// that recede from the view. Fixed gradients keep the LOD stable across the whole march.
-vec2 parallaxUV( vec2 uv, vec3 viewTS, vec2 dPx, vec2 dPy ) {
-	float depth = u_parallaxParms.y;
-	// step count ramps with view angle: cheap head-on, more taps at grazing where the
-	// swimming is worst. viewTS.z = cos(angle between view ray and surface normal).
-	float nSteps = mix( u_parallaxParms.w, u_parallaxParms.z, clamp( abs( viewTS.z ), 0.0, 1.0 ) );
-	float layerDepth = 1.0 / nSteps;
-	// max UV shift at full depth, along the view ray's tangent-plane projection
-	vec2 P = ( viewTS.xy / max( abs( viewTS.z ), 0.1 ) ) * depth;
-	vec2 deltaUV = P * layerDepth;
-
-	float curLayer = 0.0;
-	vec2 curUV = uv;
-	float curDepthVal = 1.0 - textureGrad( u_parallaxMap, curUV, dPx, dPy ).r;
-	// constant cap keeps the loop uniform-bounded across drivers; nSteps <= 32 (cvar clamp)
-	for ( int i = 0; i < 32; i++ ) {
-		if ( curLayer >= curDepthVal ) {
-			break;
-		}
-		curUV -= deltaUV;
-		curDepthVal = 1.0 - textureGrad( u_parallaxMap, curUV, dPx, dPy ).r;
-		curLayer += layerDepth;
-	}
-	// occlusion refinement: interpolate between the last two layers for a smooth hit point
-	vec2 prevUV = curUV + deltaUV;
-	float after = curDepthVal - curLayer;
-	float before = ( 1.0 - textureGrad( u_parallaxMap, prevUV, dPx, dPy ).r ) - ( curLayer - layerDepth );
-	float w = after / ( after - before );
-	// Re-centre the offset on the height field's mid-level (P * 0.5): the raw march recesses
-	// everything below the polygon (peak at the surface), which looks like the edge floats
-	// above sunken detail. Biasing to mid-height puts peaks proud of the average and troughs
-	// below it -- natural at silhouette edges. Still UV-only (no real protrusion, silhouettes
-	// stay flat); 0.5 is the calibrated sweet spot (in-engine A/B).
-	return ( mix( curUV, prevUV, w ) - uv ) + P * 0.5;
-}
-
-// DUDE parallax self-shadowing (docs/parallax.md). From the marched surface point, step
-// toward the light through the height field; where the field rises above the ray the point
-// is in its own shadow. Soft: keep the deepest distance-weighted penetration. lightTS = the
-// tangent-space light vector (toward the light); hitDepth = 1 - height at the surface point.
-// Returns light visibility, 1 = lit.
-float parallaxShadow( vec2 uv, vec3 lightTS, float hitDepth, vec2 dPx, vec2 dPy ) {
-	if ( lightTS.z <= 0.05 ) {
-		return 1.0;			// light at/below the surface horizon -- N.L already darkens it
-	}
-	// half the view march's step count: this is a second march per lit pixel and soft
-	// contact shadows tolerate coarser sampling far better than the silhouette does.
-	float nSteps = max( 0.5 * mix( u_parallaxParms.w, u_parallaxParms.z, clamp( lightTS.z, 0.0, 1.0 ) ), 4.0 );
-	float layerDepth = hitDepth / nSteps;					// divide the climb to the top into steps
-	vec2  deltaUV = ( lightTS.xy / lightTS.z ) * u_parallaxParms.y * layerDepth;
-	float d = hitDepth;
-	float shadow = 0.0;
-	for ( int i = 0; i < 32; i++ ) {
-		d -= layerDepth;
-		if ( d <= 0.0 ) {
-			break;
-		}
-		uv += deltaUV;
-		float dm = 1.0 - textureGrad( u_parallaxMap, uv, dPx, dPy ).r;
-		if ( dm < d ) {										// map surface rises above the ray -> occludes
-			shadow = max( shadow, ( d - dm ) * ( 1.0 - float( i ) / nSteps ) );
-		}
-	}
-	return clamp( 1.0 - shadow * 6.0, 0.0, 1.0 );			// gain to bring the soft shadow into range
-}
+// parallaxUV / parallaxShadow / dudeParallaxCarry (needs u_parallaxMap above)
+#include "parallax.glsl"
 
 // DUDE skin / flesh subsurface scattering (docs/skin-shading.md). Faces and Hell flesh read as
 // plastic under the tight GGX lobe because Lambert cuts the diffuse off HARD at the terminator
@@ -671,18 +599,25 @@ void main() {
 	vec2 uvSpecular = var_TexSpecular;
 	float parallaxSelfShadow = 1.0;
 	if ( u_parallaxParms.x > 0.5 ) {
-		// base-UV derivatives, taken once in uniform control flow so the height-map fetches
-		// inside the marches use a stable mip level (see parallaxUV) instead of banding.
-		vec2 dPx = dFdx( var_TexBump );
-		vec2 dPy = dFdy( var_TexBump );
-		vec2 off = parallaxUV( var_TexBump, normalize( var_TexViewVec ), dPx, dPy );
-		uvBump += off;
-		uvDiffuse += off;
-		uvSpecular += off;
+		// every stage's UV derivatives, taken once in uniform control flow: the height-map fetches inside the marches
+		// use them for a stable mip level (see parallaxUV) instead of banding, and dudeParallaxCarry maps the offset
+		// from the height's texture space (the bump's, or the diffuse's for a sidecar height) to the others'.
+		vec2 bDx = dFdx( var_TexBump ),     bDy = dFdy( var_TexBump );
+		vec2 dDx = dFdx( var_TexDiffuse ),  dDy = dFdy( var_TexDiffuse );
+		vec2 sDx = dFdx( var_TexSpecular ), sDy = dFdy( var_TexSpecular );
+		bool sidecarHeight = u_parallaxParms2.y > 0.5;
+		vec2 hUV = sidecarHeight ? var_TexDiffuse : var_TexBump;
+		vec2 hDx = sidecarHeight ? dDx : bDx;
+		vec2 hDy = sidecarHeight ? dDy : bDy;
+		vec2 off = parallaxUV( hUV, normalize( var_TexViewVec ), hDx, hDy );
+		uvBump     += dudeParallaxCarry( off, hDx, hDy, bDx, bDy );
+		uvDiffuse  += dudeParallaxCarry( off, hDx, hDy, dDx, dDy );
+		uvSpecular += dudeParallaxCarry( off, hDx, hDy, sDx, sDy );
 		// self-shadow the direct light: march from the hit point toward the light
 		if ( u_parallaxParms2.x > 0.0 ) {
-			float hitDepth = 1.0 - textureGrad( u_parallaxMap, uvBump, dPx, dPy ).r;
-			float vis = parallaxShadow( uvBump, normalize( var_TexLightVec ), hitDepth, dPx, dPy );
+			vec2 hitUV = hUV + off;
+			float hitDepth = 1.0 - dudeParallaxHeight( hitUV, hDx, hDy );
+			float vis = parallaxShadow( hitUV, normalize( var_TexLightVec ), hitDepth, hDx, hDy );
 			parallaxSelfShadow = mix( 1.0, vis, u_parallaxParms2.x );
 		}
 	}

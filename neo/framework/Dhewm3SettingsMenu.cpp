@@ -6130,8 +6130,8 @@ static void DrawDbgGroup_Geometry()
 
 		SettingsHeading( "Parallax" );
 		ImGui::BeginDisabled( !r_parallax.GetBool() );
-		CvarSliderI( "March Steps Head-On", r_parallaxMinSteps, 1, 32, nullptr );
-		CvarSliderI( "March Steps at Grazing Angles", r_parallaxMaxSteps, 1, 32, nullptr );
+		CvarSliderI( "Fewest March Steps", r_parallaxMinSteps, 1, 32, nullptr );
+		CvarSliderI( "Most March Steps", r_parallaxMaxSteps, 1, 128, nullptr );
 		ImGui::EndDisabled();	// r_parallax
 
 		SettingsHeading( "GPU Skinning & Offload (Vulkan)" );
@@ -7890,6 +7890,20 @@ static void PbrEditor_DrawMaterialTab()
 		if ( texMapLive ) {
 			ImGui::TextWrapped( "The texture sets metalness and roughness per texel, so those two sliders do nothing here. "
 				"Wetness and env glow still apply, and its AO channel replaces this surface's occlusion map (with Material AO on)." );
+			// the sidecar's alpha height (docs/pbr-texture-maps.md): parallax marches it in place of the runtime field
+			float heightDepth = 0.0f, heightPlane = 0.5f;
+			const int heightInfo = R_PbrTextureMapHeightInfo( pbrEditMat, heightDepth, heightPlane );
+			if ( heightInfo > 0 ) {
+				if ( heightDepth > 0.0f ) {
+					ImGui::TextDisabled( "A = height (baked depth %.4f, face at %.2f): parallax uses it on world surfaces",
+						heightDepth, heightPlane );
+				} else {
+					ImGui::TextDisabled( "A = height (hand-made, no baked depth, face at %.2f): parallax uses it on world surfaces",
+						heightPlane );
+				}
+			} else if ( heightInfo == 0 ) {
+				ImGui::TextDisabled( "No height in the alpha: parallax uses the runtime height field" );
+			}
 			PbrEditor_DrawChannelEdit();
 		} else {
 			ImGui::TextColored( ImVec4( 1.0f, 0.7f, 0.3f, 1.0f ),

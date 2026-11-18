@@ -16,13 +16,19 @@ instead of skipping the set: --default-metal (0), --default-rough (0.6), AO alwa
 Accepted spellings per channel: _roughness/_rough, _metallic/_metalness/_metal,
 _ao/_occlusion. Inputs may be any format Pillow reads; the first channel (or luminance) is used.
 
-Single mode: --base NAME --rough FILE [--metal FILE] [--ao FILE] -o OUT_DIR.
+Optional height (the ALPHA channel): a <base>_height / _heightmap / _displacement / _disp image (or --height in single
+mode), white = top, becomes the sidecar's alpha. DUDE's parallax marches it on world surfaces in place of the height
+it integrates from the normal map at load (docs/pbr-texture-maps.md). Without one the sidecar stays 24-bit (no height).
+A hand-packed height has no baked depth, so the engine uses the material's usual parallax depth for it; list it in
+a pbr/height/<name>.cfg ("<sidecar image name> <depth>") to set its own.
+
+Single mode: --base NAME --rough FILE [--metal FILE] [--ao FILE] [--height FILE] -o OUT_DIR.
 
 --rough-from-spec FILE derives a STARTING roughness from a Doom 3 specular map (1 - luminance,
 remapped to --spec-range). It is a first pass for hand editing, not a conversion: the specular
 map has no unique PBR meaning.
 
-Writes uncompressed 24-bit TGA. The engine loads sidecars uncompressed (no DXT), so keep them
+Writes uncompressed 24-bit TGA (32-bit with a height). The engine loads sidecars uncompressed (no DXT), so keep them
 at the diffuse's resolution or below.
 """
 
@@ -37,6 +43,7 @@ CHANNEL_SUFFIXES = {
     "rough": ("_roughness", "_rough"),
     "metal": ("_metallic", "_metalness", "_metal"),
     "ao": ("_ao", "_occlusion"),
+    "height": ("_height", "_heightmap", "_displacement", "_disp"),
 }
 IMAGE_EXTS = {".tga", ".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".dds", ".webp"}
 
@@ -93,8 +100,11 @@ def build_one(name, files, args, out_dir):
     ao = load_channel(files["ao"], size) if files.get("ao") else constant(size, 1.0)
     out = out_dir / f"{name}_{args.layout}.tga"
     out.parent.mkdir(parents=True, exist_ok=True)
-    pack(rough, metal, ao, args.layout).save(out, compression=None)
-    have = ", ".join(k for k in ("rough", "metal", "ao") if files.get(k)) or "none"
+    img = pack(rough, metal, ao, args.layout)
+    if files.get("height"):
+        img.putalpha(Image.fromarray(load_channel(files["height"], size), "L"))
+    img.save(out, compression=None)
+    have = ", ".join(k for k in ("rough", "metal", "ao", "height") if files.get(k)) or "none"
     print(f"{out}  ({size[0]}x{size[1]}, from: {have})")
     return True
 
@@ -118,6 +128,7 @@ def main():
     ap.add_argument("--rough", type=Path, help="single mode: roughness map")
     ap.add_argument("--metal", type=Path, help="single mode: metalness map")
     ap.add_argument("--ao", type=Path, help="single mode: ambient occlusion map")
+    ap.add_argument("--height", type=Path, help="single mode: parallax height map (white = top), packed into the alpha")
     ap.add_argument("--rough-from-spec", help="single mode: derive a starting roughness from a specular map")
     ap.add_argument("--spec-range", type=float, nargs=2, default=(0.25, 0.9), metavar=("LO", "HI"),
                     help="roughness for white / black specular with --rough-from-spec (default 0.25 0.9)")
@@ -126,7 +137,7 @@ def main():
     args = ap.parse_args()
 
     if args.base:
-        files = {"rough": args.rough, "metal": args.metal, "ao": args.ao}
+        files = {"rough": args.rough, "metal": args.metal, "ao": args.ao, "height": args.height}
         return 0 if build_one(args.base, files, args, args.output) else 1
 
     if not args.input.is_dir():

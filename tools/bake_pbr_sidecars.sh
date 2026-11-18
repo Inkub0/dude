@@ -79,6 +79,7 @@ for m in "${MAPS[@]}"; do ARGS+=(--map "$m"); done
 for g in "${MD5[@]}"; do ARGS+=(--md5 "$g"); done
 for g in "${MATCH[@]}"; do ARGS+=(--match "$g"); done
 [ "$CHAR_AO" = 1 ] || ARGS+=(--no-ao 'models/characters/*')
+ARGS+=(--height-name "$NAME")	# pbr/height/<pack>.cfg: one per pack, so packs merge in game
 ARGS+=("${EXTRA[@]}")
 
 rm -rf "$WORK"
@@ -89,7 +90,7 @@ if ! python3 "$TOOL" "${ARGS[@]}" -o "$WORK/out" > "$WORK/bake.log" 2>&1; then
 	echo "bake failed, full log: $WORK/bake.log" >&2
 	exit 1
 fi
-grep -E '^(skipped|wrote|HD map)' "$WORK/bake.log" || true
+grep -E '^(skipped|wrote|HD map)|carry a parallax height' "$WORK/bake.log" || true
 
 # hand-made sidecars already sitting loose in a game folder: keep them out of the pack
 HAND="$WORK/hand-made.txt"
@@ -130,11 +131,13 @@ echo "bake-info.txt" >> "$LIST"
 # what the channel adjust was (pbr/pbr_sidecar_adjust.cfg or --*-adjust): the engine's All sidecars sliders preview
 # relative to it. Re-bake every pack with the same settings: the game reads this file from the last-loaded pack.
 [ -f "$WORK/out/pbr/pbr_sidecar_baked.cfg" ] && echo "pbr/pbr_sidecar_baked.cfg" >> "$LIST"
+# the parallax depth of every sidecar whose alpha carries a height (the engine merges all pbr/height/*.cfg)
+[ -f "$WORK/out/pbr/height/$NAME.cfg" ] && echo "pbr/height/$NAME.cfg" >> "$LIST"
 
 PK4="$WORK/$NAME.pk4"
 rm -f "$PK4"
 ( cd "$WORK/out" && zip -q -9 -X "$PK4" -@ < "$LIST" )
-echo "packed $(($(wc -l < "$LIST") - 1)) sidecars: $PK4 ($(du -h "$PK4" | cut -f1))"
+echo "packed $(grep -c '_orm\.tga$' "$LIST") sidecars: $PK4 ($(du -h "$PK4" | cut -f1))"
 
 [ ${#INSTALL[@]} -gt 0 ] || exit 0
 # a running game has every .pk4 indexed; replacing one under it crashes its next read of the pack

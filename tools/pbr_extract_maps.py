@@ -25,6 +25,12 @@ files), derives the three channels from what is there, and writes a sidecar DUDE
              narrow crevice sees its walls steep and close and goes dark, a wide recess sees them
              low and far and stays light. Sampling wraps around, which is exactly a bake on the
              tile surrounded by its 3x3 neighbours, so seams match when it tiles
+  height     (the ALPHA channel) that same height field, whole: the parallax height DUDE marches
+             in place of the one it integrates from the normal map at load (an exact periodic
+             solve here instead of a few relaxation sweeps, so broad panels keep their depth).
+             Stretched over 0..255 per texture (white = top); its true depth, the relief in
+             texels over the texture width, goes to pbr/height/<--height-name>.cfg, which the
+             engine reads (docs/pbr-texture-maps.md). --no-height leaves the alpha out
 
 These are STARTING POINTS. The specular map does not hold enough information to rebuild PBR:
 check every metal mask (worn paint and bright decals read as metal), then repaint and repack.
@@ -865,6 +871,44 @@ def surface_height(normal, height, height_scale, size, green_sign):
     return h
 
 
+def height_alpha(h, bake_w, bump_tm, diffuse_tm, warp, size, highpass):
+    """The parallax height for the sidecar's alpha: the surface height field h (texel units of a bake_w-wide grid over
+    the bump texture) as 0..255 in the diffuse's texture space at `size`, white = top, and its depth = the stretched
+    range as a distance in the diffuse's texture coordinates (texels / width, scaled by the bump stage's repeat: a bump
+    scaled 2, 2 tiles twice per diffuse tile, so its relief is half as deep there). (None, 0) when flat."""
+    if highpass > 0:
+        h = h - periodic_blur(h, highpass * bake_w)
+    # 0.1 / 99.9 percentiles: a few outlier texels (a normal map's broken pixel integrates to a spike) must not
+    # squeeze the 8 bits the real relief gets
+    lo, hi = np.percentile(h, (0.1, 99.9))
+    depth = (hi - lo) / bake_w
+    if warp:
+        lin = (np.asarray(bump_tm, float) @ np.linalg.inv(np.asarray(diffuse_tm, float)))[:2, :2]
+        det = abs(np.linalg.det(lin))
+        depth = depth / np.sqrt(det) if det > 1e-9 else depth
+        h = stage_warp(h, bump_tm, diffuse_tm, size)
+    else:
+        h = resample(h, size)
+    if depth < 5e-4:
+        return None, 0.0
+    a = np.clip((h - lo) / (hi - lo), 0.0, 1.0)
+    return np.clip(a * 255.0 + 0.5, 0, 255).astype(np.uint8), float(depth)
+
+
+def write_height_cfg(path, entries, args):
+    """pbr/height/<name>.cfg: '<sidecar image name> <depth>' per sidecar with a height in its alpha (the engine's
+    R_PbrSidecarHeightDepth). One file per pack, so the base / RoE / LM packs merge instead of shadowing each other."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as f:
+        f.write("// DUDE sidecar parallax heights (docs/pbr-texture-maps.md), written by tools/pbr_extract_maps.py.\n")
+        f.write("// <sidecar image> <depth>: the alpha's 0..255 range as a distance in the sidecar's texture\n")
+        f.write("// coordinates (texels of relief / texture width).\n")
+        if args.height_highpass > 0:
+            f.write(f"// --height-highpass {args.height_highpass:g}\n")
+        for name, depth in sorted(entries):
+            f.write(f"{name} {depth:.6f}\n")
+
+
 def horizon_ao(h, radius, bias=0.1, directions=16):
     """Horizon-based AO of a periodic height field (texel units): per direction, the steepest
     elevation to any sample within `radius`, attenuated with distance so far walls count less;
@@ -1127,6 +1171,15 @@ def main():
                     help="normal map green convention for the height integration (+1 = Doom 3 / Quake 4: the "
                          "engine's own heightmap() convention, which integrates consistently on 115 of 120 "
                          "stock normal maps; -1 for the other convention)")
+    ap.add_argument("--no-height", action="store_true",
+                    help="leave the parallax height out of the alpha (RGB sidecars, as before)")
+    ap.add_argument("--height-highpass", type=float, default=0.0,
+                    help="drop height variation broader than this fraction of the texture width from the alpha "
+                         "height (0 = keep all, the default: the integration is periodic and exact, so broad panel "
+                         "depth is real relief)")
+    ap.add_argument("--height-name", default="sidecars",
+                    help="the depth list's name: pbr/height/NAME.cfg in the output (bake_pbr_sidecars.sh passes the "
+                         "pack name, so each pack ships its own and they merge in game)")
     ap.add_argument("--no-maps", action="store_true", help="skip the editable per-channel maps and previews")
     ap.add_argument("-v", "--verbose", action="store_true", help="list every skipped material")
     args = ap.parse_args()
@@ -1228,6 +1281,7 @@ def main():
         table_of = load_pbr_table(texts, args.default_rough)
 
     done, seen_diffuse, skipped, hd_report, tm_report = 0, set(), {}, {}, {}
+    height_entries = []	# (sidecar image name, depth) for pbr/height/<--height-name>.cfg
 
     def skip(reason, what):
         skipped.setdefault(reason, []).append(what)
@@ -1299,10 +1353,18 @@ def main():
         if shine:
             rough = np.maximum(rough / shine, 0.03)
 
-        # AO: baked on the surface at the bump sources' own resolution (--bake-size cap), then resampled
+        # the surface height field, at the bump sources' own resolution (--bake-size cap): the AO bake and the
+        # alpha's parallax height both come from it
         ao = np.ones(rough.shape)
         no_ao = any(fnmatch.fnmatch(mat["name"].lower(), g.lower()) for g in args.no_ao)
         bump_src = [i for i in (normal_img, height_img) if i]
+        surf_h = None
+        if bump_src:
+            bw = int(min(max(i.size[0] for i in bump_src), args.bake_size))
+            bake = (bw, max(1, int(round(dh * bw / dw))))
+            surf_h = surface_height(np.asarray(normal_img) / 255.0 if normal_img else None,
+                                    np.asarray(height_img) / 255.0 if height_img else None,
+                                    height_scale, bake, args.green_sign)
         baked = []
         for p in baked_by_stem.get(stem.lower(), []):
             try:
@@ -1318,24 +1380,23 @@ def main():
             covers = stack < 0.995
             n = covers.sum(axis=0)
             ao = np.where(n > 0, np.where(covers, stack, 0.0).sum(axis=0) / np.maximum(n, 1), 1.0)
-        elif bump_src and not no_ao and args.ao_strength > 0:
-            bw = int(min(max(i.size[0] for i in bump_src), args.bake_size))
-            bake = (bw, max(1, int(round(dh * bw / dw))))
-            h = surface_height(np.asarray(normal_img) / 255.0 if normal_img else None,
-                               np.asarray(height_img) / 255.0 if height_img else None,
-                               height_scale, bake, args.green_sign)
-            if h is not None:
-                radius = args.ao_radius * bake[0] / 256.0
-                # keep only relief at the scale AO looks at: integrated normal maps drift over large
-                # distances (an atlas's high-poly curvature, integration error), which would otherwise
-                # read as broad slopes and darken whole UV islands
-                if args.ao_highpass > 0:
-                    h = h - periodic_blur(h, args.ao_highpass * radius)
-                h *= args.ao_depth
-                vis = horizon_ao(h, radius, args.ao_bias)
-                ao = np.clip(1.0 - args.ao_strength * (1.0 - vis), 0.0, 1.0)
-                ao = stage_warp(ao, tms["bump"], tms["diffuse"], size) if warp_bump else resample(ao, size)
+        elif surf_h is not None and not no_ao and args.ao_strength > 0:
+            h = surf_h
+            radius = args.ao_radius * bake[0] / 256.0
+            # keep only relief at the scale AO looks at: integrated normal maps drift over large
+            # distances (an atlas's high-poly curvature, integration error), which would otherwise
+            # read as broad slopes and darken whole UV islands
+            if args.ao_highpass > 0:
+                h = h - periodic_blur(h, args.ao_highpass * radius)
+            h = h * args.ao_depth	# not in place: surf_h also feeds the alpha height
+            vis = horizon_ao(h, radius, args.ao_bias)
+            ao = np.clip(1.0 - args.ao_strength * (1.0 - vis), 0.0, 1.0)
+            ao = stage_warp(ao, tms["bump"], tms["diffuse"], size) if warp_bump else resample(ao, size)
         normal, height = normal_img, height_img
+        alpha, h_depth = (None, 0.0)
+        if surf_h is not None and not args.no_height:
+            alpha, h_depth = height_alpha(surf_h, bake[0], tms["bump"], tms["diffuse"], warp_bump, size,
+                                          args.height_highpass)
 
         # global channel adjust (--ao-adjust / --rough-adjust / --metal-adjust), the engine's
         # r_pbrSidecarAO / Rough / Metal preview (PBR editor, All sidecars tab) baked in
@@ -1345,18 +1406,25 @@ def main():
 
         out = args.output / f"{stem}_{args.layout}.tga"
         out.parent.mkdir(parents=True, exist_ok=True)
-        pack(*(np.clip(c * 255.0 + 0.5, 0, 255).astype(np.uint8) for c in (rough, metal, ao)),
-             args.layout).save(out, compression=None)
+        img = pack(*(np.clip(c * 255.0 + 0.5, 0, 255).astype(np.uint8) for c in (rough, metal, ao)), args.layout)
+        if alpha is not None:
+            img.putalpha(Image.fromarray(alpha, "L"))
+            height_entries.append((f"{stem}_{args.layout}", h_depth))
+        img.save(out, compression=None)
         if not args.no_maps:
             maps = args.output / "_maps" / stem
             maps.parent.mkdir(parents=True, exist_ok=True)
             for suffix, chan in (("roughness", rough), ("metallic", metal), ("ao", ao)):
                 Image.fromarray(np.clip(chan * 255.0 + 0.5, 0, 255).astype(np.uint8), "L").save(
                     f"{maps}_{suffix}.png")
+            if alpha is not None:
+                Image.fromarray(alpha, "L").save(f"{maps}_height.png")
             preview(diffuse, rough, metal, ao, f"{maps}_preview.png")
         used = ", ".join(k for k, v in (("spec", spec), ("normal", normal), ("height", height)) if v is not None)
         if baked:
             used += f", baked AO x{len(baked)}"
+        if alpha is not None:
+            used += f", height depth {h_depth:.4f}"
         note = ""
         if spec is None:
             note = ", no specular map: flat table values" if table else ", no specular map: flat defaults"
@@ -1379,6 +1447,9 @@ def main():
         for w in what:
             print(f"    {w}")
     write_adjust_cfg(args.output / "pbr" / "pbr_sidecar_baked.cfg", args)
+    if height_entries:
+        write_height_cfg(args.output / "pbr" / "height" / f"{args.height_name}.cfg", height_entries, args)
+        print(f"{len(height_entries)} sidecar(s) carry a parallax height in the alpha")
     print(f"wrote {done} sidecar(s) to {args.output}")
     return 0 if done else 1
 

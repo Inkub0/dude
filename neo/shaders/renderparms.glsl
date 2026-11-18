@@ -94,7 +94,11 @@ UBO_BINDING(0) uniform RenderParams {
 	                            // z = min march steps (head-on), w = max march steps
 	                            // (grazing). Height map on unit 11 (u_parallaxMap).
 	vec4 u_parallaxParms2;       // DUDE parallax extras: x = self-shadow strength
-	                            // (0 = off). yzw spare.
+	                            // (0 = off), y = height source (0 = runtime field R in
+	                            // bump space, 1 = sidecar ALPHA in diffuse space;
+	                            // parallax.glsl), z = the height level kept on
+	                            // the polygon (0.5 runtime field, a sidecar's main
+	                            // face). w spare.
 
 	vec4 u_shadowProjectionS;    // UNBAKED light-projection texgen for the 2D shadow-map
 	vec4 u_shadowProjectionT;    // lookup. The cookie texgen (u_lightProjectionS/T/Q) carries

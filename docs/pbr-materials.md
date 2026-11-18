@@ -344,6 +344,11 @@ table metalness/roughness per texel. No `.mtr` edit: the file's name is the opt-
 | `<diffuse>_orm.tga` | AO | roughness | metalness | glTF / Unreal / Substance "ORM" |
 | `<diffuse>_rmao.tga` | roughness | metalness | AO | RBDOOM-3-BFG; also what the community `batch_orm.py` writes, despite its name |
 
+**Alpha = parallax height** (optional, both orders; added 2026-11-17): white = top, read in the
+diffuse's texture space, with its baked depth in `pbr/height/*.cfg`. Detected by the image's
+load-time `alphaVaries` stat; the parallax pass marches it instead of the runtime height field.
+Design in [parallax.md](parallax.md) Phase F.
+
 Both orders are accepted because both are in circulation and a swapped file reads as
 "metal where it should be rough"; the suffix says which one the author meant. A `foo_d`
 diffuse also finds `foo_orm` / `foo_rmao` (same rule as the `_ao` convention). Lookup tries
