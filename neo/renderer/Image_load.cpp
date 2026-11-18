@@ -606,15 +606,46 @@ recipe, textures.c) - the st rectangle enclosing the texels whose gamma luminanc
 their mean LINEAR colour and their share of the samples, on a grid of at most ~256 x 256 texels (exact to 1/256
 of the image; 65k reads for a 2K texture). Zeroed (= not valid) when not wanted: a normal map is never a glow
 or diffuse stage, so its extents are never read.
+
+alpha (when given): whether the alpha carries data - neither all 255 nor all 0, SelectInternalFormat's needAlpha
+test, over every texel (a height field in an ORM sidecar's alpha may dip in only a few grooves) - and the level most
+of it sits at: the peak of the alpha histogram smoothed over +-4 levels, so texel noise on a flat face does not split
+its peak. For a height that is the surface's main face (a wall panel's front, not its vents), the plane parallax
+keeps glued to the polygon.
 ================
 */
-static void R_ImageStatsRGBA( const byte *pic, int w, int h, float avg[3], imageEmissiveExtents_t *ext, bool wantExtents ) {
+static void R_ImageStatsRGBA( const byte *pic, int w, int h, float avg[3], imageEmissiveExtents_t *ext, bool wantExtents,
+                              imageAlphaStats_t *alpha ) {
 	if ( ext ) {
 		memset( ext, 0, sizeof( *ext ) );
+	}
+	if ( alpha ) {
+		alpha->varies = false;
+		alpha->plane = 255;
 	}
 	const int numTexels = w * h;
 	if ( pic == NULL || w <= 0 || h <= 0 ) {
 		return;
+	}
+
+	if ( alpha ) {
+		int hist[256] = { 0 };
+		for ( int i = 0; i < numTexels; i++ ) {
+			hist[ pic[i * 4 + 3] ]++;
+		}
+		alpha->varies = !( hist[255] == numTexels || hist[0] == numTexels );
+		int best = -1, bestLevel = 255;
+		for ( int v = 0; v < 256; v++ ) {
+			int sum = 0;
+			for ( int k = ( v > 4 ? v - 4 : 0 ); k <= ( v < 251 ? v + 4 : 255 ); k++ ) {
+				sum += hist[k];
+			}
+			if ( sum > best ) {
+				best = sum;
+				bestLevel = v;
+			}
+		}
+		alpha->plane = (byte)bestLevel;
 	}
 
 	// the mean
@@ -726,7 +757,7 @@ void idImage::GenerateImage( const byte *pic, int width, int height,
 			// RXGB swizzle below — the GL path samples them further down, but the Vulkan branch returns
 			// before reaching it, so sample here or averageColor stays white
 			if ( !R_ImageStatsCurrent( this ) ) {
-				R_ImageStatsRGBA( pic, width, height, averageColor, &glowExtents, depth != TD_BUMP );
+				R_ImageStatsRGBA( pic, width, height, averageColor, &glowExtents, depth != TD_BUMP, &alphaStats );
 				statsTimestamp = timestamp;
 			}
 			// normal maps: the shaders decode the RXGB layout unconditionally
@@ -819,7 +850,7 @@ void idImage::GenerateImage( const byte *pic, int width, int height,
 
 	// DUDE: the source statistics (emissive GUI fill-light tint, RT emissive extents)
 	if ( !R_ImageStatsCurrent( this ) ) {
-		R_ImageStatsRGBA( pic, width, height, averageColor, &glowExtents, depth != TD_BUMP );
+		R_ImageStatsRGBA( pic, width, height, averageColor, &glowExtents, depth != TD_BUMP, &alphaStats );
 		statsTimestamp = timestamp;
 	}
 
@@ -1819,7 +1850,7 @@ rectangle is a texel-threshold bound, which a quarter-size mip places within one
 st. false (stats untouched) for a BC7 file, which has no CPU decoder here.
 ===============
 */
-static bool R_DdsEmissiveStats( const byte *data, int len, float averageColor[3], imageEmissiveExtents_t *ext ) {
+static bool R_DdsEmissiveStats( const byte *data, int len, float averageColor[3], imageEmissiveExtents_t *ext, imageAlphaStats_t *alpha ) {
 	if ( len < (int)sizeof( ddsFileHeader_t ) + 4 ) {
 		return false;
 	}
@@ -1851,7 +1882,7 @@ static bool R_DdsEmissiveStats( const byte *data, int len, float averageColor[3]
 			byte *rgba = (byte *)R_StaticAlloc( w * h * 4 );
 			const bool ok = R_DecodeDDSLevelRGBA( level, w, h, fourCC, rgba );
 			if ( ok ) {
-				R_ImageStatsRGBA( rgba, w, h, averageColor, ext, true );
+				R_ImageStatsRGBA( rgba, w, h, averageColor, ext, true, alpha );
 			}
 			R_StaticFree( rgba );
 			return ok;
@@ -1966,7 +1997,7 @@ void idImage::UploadPrecompressedImageRhi( const byte *data, int len, bool sampl
 	// the stats the decoded source would have given (see R_DdsEmissiveStats); a normal map has
 	// no use for them, and the parallel load sampled them on the worker already (sampleStats false)
 	if ( sampleStats && depth != TD_BUMP && !R_ImageStatsCurrent( this ) ) {
-		R_DdsEmissiveStats( data, len, averageColor, &glowExtents );
+		R_DdsEmissiveStats( data, len, averageColor, &glowExtents, &alphaStats );
 		statsTimestamp = timestamp;
 	}
 }
@@ -2380,7 +2411,8 @@ bool idImage::LoadImageCpuGL() {
 	t0 = Sys_MillisecondsPrecise();
 	if ( !R_ImageStatsCurrent( this ) ) {		// a same-source reload keeps the statistics it has
 		parallelData->averageColor[0] = parallelData->averageColor[1] = parallelData->averageColor[2] = 1.0f;
-		R_ImageStatsRGBA( pic, width, height, parallelData->averageColor, &parallelData->glowExtents, depth != TD_BUMP );
+		R_ImageStatsRGBA( pic, width, height, parallelData->averageColor, &parallelData->glowExtents, depth != TD_BUMP,
+		                  &parallelData->alphaStats );
 		parallelData->hasAverageColor = true;
 	}
 
@@ -2520,7 +2552,8 @@ bool idImage::LoadImageCpu() {
 			// source would have given: take them from a small mip of the blocks, here on the worker
 			if ( isVulkan && depth != TD_BUMP && !R_ImageStatsCurrent( this ) ) {
 				t0 = Sys_MillisecondsPrecise();
-				parallelData->hasAverageColor = R_DdsEmissiveStats( dds, ddsLen, parallelData->averageColor, &parallelData->glowExtents );
+				parallelData->hasAverageColor = R_DdsEmissiveStats( dds, ddsLen, parallelData->averageColor, &parallelData->glowExtents,
+				                                                    &parallelData->alphaStats );
 				R_ImageWorkerAdd( r_imgWorkerStatsUs, t0 );
 			}
 			return true;
@@ -2564,7 +2597,8 @@ bool idImage::LoadImageCpu() {
 	t0 = Sys_MillisecondsPrecise();
 	if ( !R_ImageStatsCurrent( this ) ) {
 		parallelData->averageColor[0] = parallelData->averageColor[1] = parallelData->averageColor[2] = 1.0f;
-		R_ImageStatsRGBA( pic, width, height, parallelData->averageColor, &parallelData->glowExtents, depth != TD_BUMP );
+		R_ImageStatsRGBA( pic, width, height, parallelData->averageColor, &parallelData->glowExtents, depth != TD_BUMP,
+		                  &parallelData->alphaStats );
 		parallelData->hasAverageColor = true;
 	}
 	R_ImageWorkerAdd( r_imgWorkerStatsUs, t0 );
@@ -2705,6 +2739,7 @@ void idImage::UploadImageCpu() {
 		averageColor[1] = parallelData->averageColor[1];
 		averageColor[2] = parallelData->averageColor[2];
 		glowExtents   = parallelData->glowExtents;
+		alphaStats    = parallelData->alphaStats;
 		statsTimestamp = timestamp;
 	}
 
@@ -3166,7 +3201,7 @@ void idImage::UploadScratch( const byte *data, int cols, int rows ) {
 			return;
 		}
 		// keep the mean colour current for the emissive video-screen fill light
-		R_ImageStatsRGBA( data, cols, rows, averageColor, NULL, false );
+		R_ImageStatsRGBA( data, cols, rows, averageColor, NULL, false, NULL );
 
 		rhi::RHI *r = rhi::GetRHI();
 		if ( rhiHandle == 0 || uploadWidth != cols || uploadHeight != rows || type != TT_2D ) {
@@ -3226,7 +3261,7 @@ void idImage::UploadScratch( const byte *data, int cols, int rows ) {
 
 		// DUDE: keep the mean colour current for cinematic/video screens so their
 		// emissive fill light tracks what's actually playing
-		R_ImageStatsRGBA( data, cols, rows, averageColor, NULL, false );
+		R_ImageStatsRGBA( data, cols, rows, averageColor, NULL, false, NULL );
 
 		Bind();
 

@@ -972,6 +972,10 @@ extern idCVar r_pbrDebugView;			// PBR material debug view: 0 off, 1 AO, 2 rough
 enum { PBR_MAP_NONE = 0, PBR_MAP_ORM = 1, PBR_MAP_RMAO = 2 };
 idImage *R_PbrTextureMap( const idMaterial *mat, int &layout );
 bool R_PbrTextureMapInfo( const idMaterial *mat, idStr &file, int &layout );
+// The sidecar's alpha height (docs/pbr-texture-maps.md): 1 = its alpha carries a height field (bakedDepth = the depth
+// a pbr/height cfg lists for it, 0 = none listed; plane = the height level parallax keeps on the polygon, 0..1), 0 = no
+// height in it, -1 = not known yet (the image is not loaded). Loads nothing, for the in-game material editor.
+int R_PbrTextureMapHeightInfo( const idMaterial *mat, float &bakedDepth, float &plane );
 void R_ResetPbrTextureMapCache( void );
 // In-game PBR editor: a live brightness / contrast / gamma edit of one sidecar texture's channels (index 0 = AO,
 // 1 = roughness, 2 = metalness), previewed on every surface that uses that image, then written into the texture by
@@ -1387,8 +1391,8 @@ extern idCVar r_dofFocusEnd;			// DUDE: DoF scene raw-depth where the blur maxes
 extern idCVar r_weaponReloadFocus;		// DUDE: DoF strength bridge (game-written 0..1 envelope)
 extern idCVar r_parallax;				// DUDE: master toggle for parallax occlusion mapping (Vulkan)
 extern idCVar r_parallaxScale;			// DUDE: global multiplier on per-material POM height scale
-extern idCVar r_parallaxMinSteps;		// DUDE: POM march steps head-on
-extern idCVar r_parallaxMaxSteps;		// DUDE: POM march steps at grazing angle (loop cap 32)
+extern idCVar r_parallaxMinSteps;		// DUDE: POM adaptive march, fewest steps
+extern idCVar r_parallaxMaxSteps;		// DUDE: POM adaptive march, most steps (loop cap 128)
 extern idCVar r_parallaxShadow;			// DUDE: POM self-shadow strength (0 = off)
 
 // clears the per-material generated-AO lookup cache (RhiWorld.cpp) so freshly baked maps

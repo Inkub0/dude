@@ -28,6 +28,7 @@ Doom 3 GPL Source Code (see ArbProgram.cpp for license header)
 #include "renderer/rhi/RenderParams.h"
 #include "renderer/rhi/RhiTess.h"
 #include "framework/FileSystem.h"
+#include "idlib/containers/HashTable.h"		// idHashTable (the sidecar depth list, R_PbrSidecarHeightDepth)
 #include "framework/DeclSkin.h"					// idDeclSkin (entity skin -> AO name for lazy bake)
 #include "tools/compilers/aobake/aobake.h"		// AO_BakeModelToCache (lazy occlusion-map baking)
 #include "framework/DeclManager.h"					// DECL_MATERIAL enumeration (decal image precache)
@@ -1102,9 +1103,80 @@ struct rhiPbrMapEntry_t { const idMaterial *mat; idImage *img; int layout; };
 static idList<rhiPbrMapEntry_t> rhiPbrMapCache;
 static idHashIndex               rhiPbrMapHash;
 
+// DUDE sidecar height (docs/pbr-texture-maps.md, "Height in the alpha"): the baked depth of each sidecar's alpha
+// height field, from every pbr/height/*.cfg (tools/bake_pbr_sidecars.sh ships one per pack, so the base / RoE / LM
+// packs merge; where two list a stem, the higher-priority pack's line wins, as its image does). One
+// "<sidecar image name> <depth>" per line: the field's full 0..255 range as a distance in the
+// sidecar's own texture coordinates (texels of relief / texture width). Loaded on first use, dropped with the
+// sidecar cache below (reloadPbrTable).
+// NOT an idDict: idDict keys / values live in shared global string pools that idLib::ShutDown clears (idDict::Shutdown),
+// so a static idDict still holding entries asserts in its destructor at exit (idStrPool::FreeString, numUsers >= 1).
+// idHashTable owns plain C-heap idStr keys. Keys are lowercased (the table compares case-sensitively).
+static idHashTable<float> rhiPbrHeightDepth( 4096 );
+static bool   rhiPbrHeightDepthLoaded = false;
+
 void R_ResetPbrTextureMapCache( void ) {
 	rhiPbrMapCache.Clear();
 	rhiPbrMapHash.Free();
+	rhiPbrHeightDepth.Clear();
+	rhiPbrHeightDepthLoaded = false;
+}
+
+// an image already loaded (GL texture or Vulkan handle): its load-time stats (alphaStats) are known
+static bool RB_RHI_ImageLoaded( const idImage *img ) {
+	return img->texnum != idImage::TEXTURE_NOT_LOADED || img->rhiHandle != 0;
+}
+
+// the baked depth of this sidecar's alpha height field, or 0 when no pbr/height/*.cfg lists it (a hand-made one)
+static float R_PbrSidecarHeightDepth( const idImage *img ) {
+	if ( !rhiPbrHeightDepthLoaded ) {
+		rhiPbrHeightDepthLoaded = true;
+		// unsorted = search-path order, highest priority first: a stem two packs list (RoE and LM both visible under
+		// LM) takes the depth of the pack whose sidecar image wins, so the first entry stays
+		idFileList *files = fileSystem->ListFiles( "pbr/height", ".cfg", false );
+		for ( int f = 0; f < files->GetNumFiles(); f++ ) {
+			const idStr path = idStr( "pbr/height/" ) + files->GetFile( f );
+			char *buf = NULL;
+			if ( fileSystem->ReadFile( path.c_str(), (void **)&buf ) < 0 || buf == NULL ) {
+				continue;
+			}
+			idStrList lines;
+			idStr text( buf );
+			fileSystem->FreeFile( buf );
+			text.Replace( "\r", "" );
+			int start = 0;
+			while ( start < text.Length() ) {
+				int end = text.Find( '\n', start );
+				if ( end < 0 ) {
+					end = text.Length();
+				}
+				idStr line = text.Mid( start, end - start );
+				start = end + 1;
+				line.StripLeading( ' ' );
+				line.StripTrailingWhitespace();
+				const int sep = line.Last( ' ' );
+				if ( line.Length() == 0 || line[0] == '#' || line[0] == '/' || sep <= 0 ) {
+					continue;
+				}
+				idStr name = line.Left( sep );
+				name.StripTrailingWhitespace();
+				const float depth = atof( line.c_str() + sep + 1 );
+				name.ToLower();
+				float d = depth;
+				if ( depth > 0.0f && !rhiPbrHeightDepth.Get( name.c_str() ) ) {
+					rhiPbrHeightDepth.Set( name.c_str(), d );
+				}
+			}
+		}
+		fileSystem->FreeFileList( files );
+	}
+	if ( img == NULL ) {
+		return 0.0f;
+	}
+	idStr key = img->imgName;
+	key.ToLower();
+	float *depth = NULL;
+	return rhiPbrHeightDepth.Get( key.c_str(), &depth ) ? *depth : 0.0f;
 }
 
 // ---- in-game PBR editor: live channel edit of one sidecar, and writing it into the texture ----
@@ -1370,6 +1442,22 @@ idImage *R_PbrTextureMap( const idMaterial *mat, int &layout ) {
 	return e.img;
 }
 
+int R_PbrTextureMapHeightInfo( const idMaterial *mat, float &bakedDepth, float &plane ) {
+	bakedDepth = 0.0f;
+	plane = 0.5f;
+	int layout;
+	idImage *img = R_PbrTextureMap( mat, layout );
+	if ( img == NULL || !RB_RHI_ImageLoaded( img ) ) {
+		return -1;
+	}
+	if ( !img->alphaStats.varies ) {
+		return 0;
+	}
+	bakedDepth = R_PbrSidecarHeightDepth( img );
+	plane = img->alphaStats.plane / 255.0f;
+	return 1;
+}
+
 // In-game PBR editor "Save to texture": read the sidecar's pixels, apply the live channel edit in its own channel
 // order, write <stem>.tga to fs_savepath (a loose file there overrides the pk4 copy, and tools/bake_pbr_sidecars.sh
 // leaves loose sidecars alone), reload the image and clear the edit (it now lives in the texture).
@@ -1404,12 +1492,13 @@ bool R_PbrSaveSidecarEdit( const idMaterial *mat, idStr &written, idStr &error )
 			lut[c][v] = (byte)idMath::ClampInt( 0, 255, idMath::Ftoi( R_PbrSidecarAdjustValue( v / 255.0f, c ) * 255.0f + 0.5f ) );
 		}
 	}
+	// the alpha is left as read: a sidecar's alpha may carry its parallax height field (docs/pbr-texture-maps.md),
+	// and one without reads 255 here and stays 255
 	for ( int i = 0; i < w * h; i++ ) {
 		byte *px = pic + i * 4;
 		for ( int c = 0; c < 3; c++ ) {
 			px[ofs[c]] = lut[c][px[ofs[c]]];
 		}
-		px[3] = 255;
 	}
 	written = stem + ".tga";
 	R_WriteTGA( written.c_str(), pic, w, h, false );
@@ -2473,70 +2562,98 @@ static idImage *RB_RHI_FillOcclusionParms( rhi::RenderParams &parms, const drawI
 	return occlusionImage;
 }
 
-// DUDE parallax in the G-buffer (docs/parallax.md): the same eligibility + parms as the interaction path, keyed by a
-// surface (material + space) instead of a drawInteraction, so the normal/albedo prepass the PT tier reads can march the
-// height map too. Fills parms.parallaxParms and returns the height image to bind on unit 11 (NULL = none: the shader
-// gates on parallaxParms.x). Opaque static-world surfaces only, exactly like the interaction path.
-static idImage *RB_RHI_FillParallaxParmsSurf( rhi::RenderParams &parms, const idMaterial *material, const viewEntity_t *space ) {
+// Baked sidecar depth (R_PbrSidecarHeightDepth) -> march depth per unit of r_parallaxScale. The baked depth is the
+// normal map's true relief, and shown as is it marched ~8x deeper than the runtime field at the same slider value: far
+// too deep for POM, which has no texels for a recess's walls and stretches one across them ("way too warped", user
+// A/B at 0.1, ORM on vs off). So the slider means the same for both sources: a sidecar of the MEDIAN world depth
+// (0.062 on mars_city1's 259 world textures) marches exactly as deep as the runtime field of a material without a
+// heightmap() (parallaxScale 5 * 0.015 per slider unit); the bake keeps the depths RELATIVE between textures.
+static const float PARALLAX_SIDECAR_DEPTH_GAIN = ( 5.0f * 0.015f ) / 0.062f;
+
+/*
+==================
+RB_RHI_ParallaxSource
+
+DUDE parallax occlusion mapping (docs/parallax.md): the height field to march for this surface, shared by the forward
+interaction pass and the G-buffer (which the Path Tracing tier lights from) so both shift the surface identically.
+Opaque static-world surfaces only: POM assumes a locally flat surface with a uniform tangent basis, which holds for
+walls and floors but not props or characters (the tessellation feature's job), and on alpha-tested surfaces the march
+swims across the holes.
+
+Two sources, best first:
+  - the surface's ORM / RMAO sidecar, when its ALPHA carries a height field (tools/pbr_extract_maps.py bakes one from
+    the full-resolution normal map; modders may paint their own). Read in the DIFFUSE stage's texture space, where the
+    sidecar lives: parallaxParms2.y = 1 tells the shaders to march there and carry the offset over to the other
+    stages. Its depth is the baked one (a .cfg under pbr/height) when listed, else the runtime field's.
+  - the material's runtime field (shaderStageExtra_t::parallaxImage, R channel, bump texture space), resolved at
+    parse time when r_parallax was on.
+The march keeps one height level on the polygon (parallaxParms2.z): for a sidecar the level most of its height sits at
+(imageAlphaStats_t::plane, the main face - a wall panel's front stays put and only its vents and bolts move), for the
+runtime field mid-height 0.5. Anchoring a sidecar at 0.5 slid a panel whose face sits at 0.85 a third of the depth with
+the view, tearing the texture where two walls meet.
+Fills parallaxParms and parallaxParms2.yz, returns the image for unit 11 (NULL = off, parallaxParms.x = 0).
+==================
+*/
+static idImage *RB_RHI_ParallaxSource( rhi::RenderParams &parms, const idMaterial *material, const viewEntity_t *space ) {
 	parms.parallaxParms[0] = 0.0f;
+	parms.parallaxParms2[1] = 0.0f;
+	parms.parallaxParms2[2] = 0.5f;
 	if ( !r_parallax.GetBool() || !R_BackendSupportsEnhancements() || material == NULL || material->Coverage() != MC_OPAQUE ) {
 		return NULL;
 	}
 	const idRenderEntityLocal *redef = space ? space->entityDef : NULL;
-	const bool worldSurf = redef && redef->parms.hModel && redef->parms.hModel->IsStaticWorldModel();
-	const shaderStage_t *px = worldSurf ? material->GetParallaxStage() : NULL;
-	const shaderStageExtra_t &pxExtra = material->GetStageExtra( px );
-	if ( px == NULL || pxExtra.parallaxImage == NULL ) {
+	if ( !redef || !redef->parms.hModel || !redef->parms.hModel->IsStaticWorldModel() ) {
 		return NULL;
 	}
-	const float depth = pxExtra.parallaxScale * r_parallaxScale.GetFloat() * 0.015f;
+	const shaderStage_t *px = material->GetParallaxStage();
+	const shaderStageExtra_t &pxExtra = material->GetStageExtra( px );
+	idImage *height = px ? pxExtra.parallaxImage : NULL;
+	// The material's parallaxScale is the heightmap() bake magnitude (~3..10, else 5); convert to a UV displacement
+	// depth. Doom 3's height maps are low-contrast (authored only to derive normals), so the per-unit factor is
+	// generous to make the relief read; r_parallaxScale is the artist master knob on top.
+	float depth = ( height ? pxExtra.parallaxScale : 5.0f ) * r_parallaxScale.GetFloat() * 0.015f;
+
+	int layout;
+	idImage *sidecar = RB_RHI_SurfacePbrMap( material, layout );
+	if ( sidecar ) {
+		if ( !RB_RHI_ImageLoaded( sidecar ) ) {
+			// sidecars load on first bind; whether the alpha carries a height is known once loaded. The caller binds
+			// unit 11 again with the source returned below.
+			RB_RHI_BindUnit( 11, sidecar );
+		}
+		if ( sidecar->alphaStats.varies ) {
+			height = sidecar;
+			parms.parallaxParms2[2] = sidecar->alphaStats.plane / 255.0f;
+			const float baked = R_PbrSidecarHeightDepth( sidecar );
+			if ( baked > 0.0f ) {
+				depth = baked * r_parallaxScale.GetFloat() * PARALLAX_SIDECAR_DEPTH_GAIN;
+			}
+			parms.parallaxParms2[1] = 1.0f;
+		}
+	}
+	if ( height == NULL ) {
+		return NULL;
+	}
 	parms.parallaxParms[0] = 1.0f;
 	parms.parallaxParms[1] = idMath::ClampFloat( 0.0f, 0.3f, depth );
 	parms.parallaxParms[2] = (float)r_parallaxMinSteps.GetInteger();
 	parms.parallaxParms[3] = (float)r_parallaxMaxSteps.GetInteger();
-	// no self-shadow term in the G-buffer (parallaxParms2.x unused here): that is a forward-lighting effect
-	return pxExtra.parallaxImage;
+	return height;
 }
 
 static idImage *RB_RHI_FillParallaxParms( rhi::RenderParams &parms, const drawInteraction_t *din ) {
-	// DUDE parallax occlusion mapping (docs/parallax.md). The interaction pass marches the
-	// bump stage's captured height map to offset the surface UVs, faking per-pixel relief on
-	// flat world geometry. Fragment-only (no geometry moved), so the flat depth prepass and
-	// GLS_DEPTHFUNC_EQUAL are untouched. Interaction pass only for now: the ambient pass keeps
-	// flat UVs until it gets a matching offset (Phase C). GetParallaxStage() is NULL on stock
-	// assets and with r_parallax off, so this stays inert on the base game.
-	//
-	// World (BSP) surfaces only: POM assumes a locally flat surface with a uniform tangent
-	// basis, which holds for walls/floors but not props/characters -- on those the offset
-	// smears and deforms edges. Props are the tessellation feature's job, not this one. The
-	// static-world test mirrors the occlusion-map path above.
-	//
-	// Opaque only: on alpha-tested (perforated) surfaces -- grates, fences, fans -- the UV
-	// march swims across the cut-out holes and fights the alpha test, looking worse than
-	// flat. The height-derived detail those need lives in their silhouette, not their depth.
-	idImage *parallaxImage = NULL;
-	if ( r_parallax.GetBool() && R_BackendSupportsEnhancements() && !din->ambientLight
-			&& din->surf->material && din->surf->material->Coverage() == MC_OPAQUE ) {
-		const idRenderEntityLocal *redef = din->surf->space ? din->surf->space->entityDef : NULL;
-		const bool worldSurf = redef && redef->parms.hModel
-		    && redef->parms.hModel->IsStaticWorldModel();
-		const shaderStage_t *px = worldSurf ? din->surf->material->GetParallaxStage() : NULL;
-		const shaderStageExtra_t &pxExtra = din->surf->material->GetStageExtra( px );
-		if ( px && pxExtra.parallaxImage ) {
-			parallaxImage = pxExtra.parallaxImage;
-			// The material's parallaxScale is the heightmap() bake magnitude (~3..10); convert
-			// to a UV displacement depth. Doom 3's height maps are low-contrast (authored only
-			// to derive normals), so the per-unit factor is generous to make the relief read;
-			// r_parallaxScale is the artist master knob on top (default 1, crank to exaggerate).
-			const float depth = pxExtra.parallaxScale * r_parallaxScale.GetFloat() * 0.015f;
-			parms.parallaxParms[0] = 1.0f;
-			parms.parallaxParms[1] = idMath::ClampFloat( 0.0f, 0.3f, depth );
-			parms.parallaxParms[2] = (float)r_parallaxMinSteps.GetInteger();
-			parms.parallaxParms[3] = (float)r_parallaxMaxSteps.GetInteger();
-			parms.parallaxParms2[0] = idMath::ClampFloat( 0.0f, 1.0f, r_parallaxShadow.GetFloat() );
-		}
+	// the interaction pass: RB_RHI_ParallaxSource, plus the self-shadow march toward this light. The ambient pass
+	// keeps flat UVs (docs/parallax.md Phase C).
+	if ( din->ambientLight ) {
+		parms.parallaxParms[0] = 0.0f;
+		parms.parallaxParms2[1] = 0.0f;
+		return NULL;
 	}
-	return parallaxImage;
+	idImage *height = RB_RHI_ParallaxSource( parms, din->surf->material, din->surf->space );
+	if ( height ) {
+		parms.parallaxParms2[0] = idMath::ClampFloat( 0.0f, 1.0f, r_parallaxShadow.GetFloat() );
+	}
+	return height;
 }
 
 /*
@@ -6337,7 +6454,10 @@ static bool RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef, int pha
 			R_GlobalPointToLocal( surf->space->modelMatrix, viewDef->renderView.vieworg, localView );
 			memcpy( parms.localViewOrigin, localView.ToFloatPtr(), sizeof( float ) * 3 );	parms.localViewOrigin[3] = 1.0f;
 		}
-		idImage *gbParallax = RB_RHI_FillParallaxParmsSurf( parms, shader, surf->space );
+		idImage *gbParallax = RB_RHI_ParallaxSource( parms, shader, surf->space );	// no self-shadow term here: a forward-lighting effect
+		if ( gbParallax && parms.parallaxParms2[1] > 0.5f && !wantAlbedo ) {
+			RB_RHI_DiffuseStageMatrix( shader, regs, parms );	// a sidecar height marches in the diffuse UV: var_TexCoverage
+		}
 		RB_RHI_BindUnit( 11, gbParallax ? gbParallax : globalImages->blackImage );	// always bound (VK descriptor); the shader gates on parallaxParms.x
 		RB_RHI_BindUnit( 2, rtgiDiffuseImg );	// RTGI H6c: receiver-albedo source (gbuffer.frag samples it only when u_localParam0.y>0.5)
 		RB_RHI_BindUnit( 4, rtgiDiffuseImg2 );	// ReSTIR DI: 2nd diffuse stage of a crossfade (summed via u_specularParms.rgb; black * 0 otherwise)

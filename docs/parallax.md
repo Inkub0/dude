@@ -279,6 +279,88 @@ it, so there is nothing to crossfade.
 load / `reloadImages`). Generated-normal materials: just an ordinary texture load of `_h`, no
 generation pass. Nothing at draw time — the shader is untouched.
 
+## Phase F (2026-11-17) — height in the PBR sidecar's alpha
+
+The runtime field of B.5 is shallow by construction: `R_NormalMapToHeightMap` runs 64 Jacobi
+sweeps (they spread height only ~8 texels) and then subtracts a 1/6-width box blur, so broad
+panels and deep grooves keep only their edges; its [min, max] stretch and the one global depth
+(`parallaxScale * r_parallaxScale * 0.015`) also make depth unrelated between materials. The
+Phase D PBR sidecar ([pbr-materials.md](pbr-materials.md) sec. 7) had a free alpha channel, so
+the offline bake now stores a better height there:
+
+- **Bake** (`tools/pbr_extract_maps.py`): the same surface height field the AO bake uses
+  (Frankot-Chellappa over the whole periodic tile, plus the `heightmap()` layer at the engine's
+  scale), not high-passed, stretched over 0..255 between its 0.1 / 99.9 percentiles, warped into
+  the diffuse's texture space. Its true depth (range in texels / width, divided by the bump
+  stage's repeat when it is scaled) goes to `pbr/height/<pack>.cfg`, one per pack so the base /
+  RoE / LM packs merge. `mcityc9`: baked depth 0.052 UV against ~0.009 from the runtime field at
+  the default slider.
+- **Detection**: `idImage::alphaVaries`, sampled with the other load-time stats
+  (`R_ImageStatsRGBA`, serial, worker and `.dds` paths): the alpha is neither all 255 nor all 0.
+  An RGB sidecar loads with alpha 255 and keeps the runtime field. No flag file needed, so a
+  modder's hand-painted height works as is.
+- **Source pick** (`RB_RHI_ParallaxSource`, shared by the interaction pass and the G-buffer): a
+  sidecar with a height wins; it is bound on unit 11 (it is also on unit 10 for its ORM channels)
+  and `u_parallaxParms2.y = 1` tells the shaders to read `.a` and march in the **diffuse** UV.
+  Depth = the baked one x `r_parallaxScale` x `PARALLAX_SIDECAR_DEPTH_GAIN` (see "Depth
+  calibration" below), or the runtime formula for an unlisted (hand-made) one. The depth lists
+  are read in search-path order and the first entry for a stem wins, like its image (under LM the
+  RoE pack is visible too, and `_roe.cfg` would sort after `_lm.cfg`). The sidecar demand-loads on first
+  bind, so the first draw before it is loaded uses the runtime field.
+- **Shaders** (`parallax.glsl`, included by `interaction.frag` and `gbuffer.frag`):
+  `dudeParallaxHeight` picks R or A; `dudeParallaxCarry` maps the offset from the height's
+  texture space to each other stage's with the screen-derivative Jacobians
+  (`J_dst * inverse( J_src )`, exact for scaled / rotated stages, untouched when the spaces
+  match); `dudeParallaxAxisScale` scales the sidecar depth along v by width / height, since the
+  baked depth is relative to the width (a 32 x 256 trim).
+- **Behaviour change on the runtime path**: the offset is now carried into the diffuse and
+  specular spaces too, where before the bump-space offset was added to them unchanged. Same
+  result wherever the stages share a transform (nearly everywhere); correct on `sofloor1`-like
+  materials.
+- The PBR editor's **Save to texture** keeps the alpha (it forced 255 before), and the editor
+  shows "A = height" for a sidecar that carries one.
+
+- **Adaptive march + binary refinement** (first in-game test, 2026-11-17: grilles such as
+  `sflgrate2` came out as stacked strips at grazing angles). The march is per pixel, but its
+  step count was a fixed ramp by view angle (6 head-on to 16 at grazing). A baked grille is
+  ~6x deeper than the runtime field: 16 steps over its ~136-texel grazing march jump ~8 texels,
+  past whole 4-texel slot walls, so neighbouring pixels stop in different layers. Now
+  `dudeParallaxSteps` sizes each pixel's march from its own length: one step per ~2 height-map
+  texels or ~2 screen pixels, whichever is fewer, clamped to `r_parallaxMinSteps` ..
+  `r_parallaxMaxSteps` (default 16 -> 64, range up to 128, loop cap 128). Shallow fields and
+  distant surfaces get fewer steps than before. Then 5 bisections of the last bracket (relief
+  mapping) and a final interpolation inside it, for sharp walls. The self-shadow march sizes
+  its climb the same way, capped at half the maximum.
+
+- **Face anchor** (second test, `mcityc5` slider 0 -> 0.1: "way too warped", panels sliding and
+  tearing at corners). The march keeps one height level on the polygon; it was mid-height (0.5,
+  tuned on the runtime field), but a sidecar's main face sits elsewhere (`mcityc5` 0.68, grille
+  tops 0.82, `sopanel15b` 0.26), so the whole face slid by (face - 0.5) x the offset with the
+  view. Now the level kept is `imageAlphaStats_t::plane`, the peak of the alpha histogram
+  smoothed over +-4 levels, measured at load (`u_parallaxParms2.z`); the runtime field keeps 0.5.
+  Measured: the faces are flat (peak 0.5 - 2 texels wide out of 7 - 13 texels of relief), so
+  integration drift is not what bends them, and a high-pass of the bake (1/4 .. 1/16 width) only
+  added halos. The remaining warping at grazing angles is POM's own: the march may shift up to
+  10x the depth there (`max( z, 0.1 )`), and a recess wall has no texels of its own, so it shows
+  one texel stretched across it. Open: whether to limit the grazing offset.
+- **Height sign verified** ("the relief caves instead of bulging"): on paper,
+  `R_HeightmapToNormalMap` stores nx = -dh/dx, ny = -dh/dy (rows), which the bake and the runtime
+  field integrate with the same sign, and the view vector uses the tangent / bitangent the
+  (visibly correct) normal-map lighting uses; in game, a temporary flip toggle (removed) A/B'd
+  and the user picked the unflipped height. Vents and grille slots are recessed in the art.
+- **Depth calibration** (third test, same wall at 0.1 with ORM on vs off). Shown as baked (the
+  first cut: baked x `r_parallaxScale / 0.12`), a sidecar marched ~8.5x deeper than the runtime
+  field at the same slider value (`mcityc5` 0.064 vs 0.0075 UV) and read as heavily warped: the
+  true relief is too deep for POM. Now the slider means the same for both sources: a sidecar of
+  the median world depth (0.062, mars_city1's 259 world textures) marches as deep as the runtime
+  field of a material without `heightmap()` (parallaxScale 5 x 0.015 per slider unit), i.e.
+  `PARALLAX_SIDECAR_DEPTH_GAIN = 0.075 / 0.062`. The bake still sets the depths relative to
+  each other; `mcityc5` marches 0.0092 at 0.1. Checked on the full bake (2026-11-17): the median world depth is
+  0.062 (Doom 3, 1303 textures), 0.063 (RoE) and 0.060 (LM), so the gain holds for all three.
+
+Still flat depth (no `gl_FragDepth`), no relief in RT shadow rays: the next steps in the
+relief plan.
+
 ## Non-goals (initial)
 
 - **Depth-correct POM** (`gl_FragDepth` write for true silhouettes/self-occlusion) — breaks

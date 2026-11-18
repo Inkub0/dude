@@ -180,6 +180,15 @@ typedef struct imageEmissiveExtents_s {
 	bool	entire;
 } imageEmissiveExtents_t;
 
+// DUDE: what the source's alpha holds, sampled at load with averageColor (R_ImageStatsRGBA). An ORM / RMAO sidecar with
+// a varying alpha carries a parallax height field there (docs/pbr-texture-maps.md); a plain RGB sidecar loads with
+// alpha 255 and reads varies = false.
+typedef struct imageAlphaStats_s {
+	bool	varies;			// neither all 255 nor all 0 (SelectInternalFormat's needAlpha test)
+	byte	plane;			// the level most of the image sits at (the mode of a smoothed alpha histogram): for a height,
+							// the surface's main face, which parallax keeps on the polygon
+} imageAlphaStats_t;
+
 class idImage {
 public:
 				idImage();
@@ -319,6 +328,7 @@ public:
 	// averageColor. glowExtents = texels above a low threshold (a glow map's lit part: an LED panel's LEDs). The table
 	// clips an emissive triangle to the rectangle so the light covers only what glows.
 	imageEmissiveExtents_t	glowExtents;
+	imageAlphaStats_t	alphaStats;				// DUDE: what the alpha holds (imageAlphaStats_t), sampled at load
 	ID_TIME_T			statsTimestamp;			// DUDE: the source timestamp averageColor / glowExtents were taken from (0 = none); a
 												// same-source reload keeps them (R_ImageStatsCurrent)
 
@@ -357,6 +367,7 @@ public:
 		float			averageColor[3];
 		bool			hasAverageColor;
 		imageEmissiveExtents_t	glowExtents;		// DUDE: sampled on the worker beside averageColor
+		imageAlphaStats_t	alphaStats;				// DUDE: likewise (idImage::alphaStats)
 	};
 	parallelLoad_t *	parallelData;
 };
@@ -392,6 +403,8 @@ ID_INLINE idImage::idImage() {
 	internalFormat = 0;
 	averageColor[0] = averageColor[1] = averageColor[2] = 1.0f;
 	memset( &glowExtents, 0, sizeof( glowExtents ) );
+	alphaStats.varies = false;
+	alphaStats.plane = 255;
 	statsTimestamp = 0;
 	cacheUsagePrev = cacheUsageNext = NULL;
 	hashNext = NULL;

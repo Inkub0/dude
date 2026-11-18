@@ -30,6 +30,9 @@ VARY(8) in vec4 var_PrevClip;
 VARY(10) in vec4 var_Color;			// vertex-colour term (interaction.vert's var_Color), albedo prepass only
 VARY(11) in vec3 var_TexViewVec;	// parallax: tangent-space view vector
 
+// parallaxUV / dudeParallaxCarry (needs u_parallaxMap above)
+#include "parallax.glsl"
+
 layout(location = 0) out vec4 fragColor;
 layout(location = 1) out vec4 out_Material;   // SSR: (roughness, metalness, spec-map luminance [DI apply only, else 0], baked occlusion [DI apply only, else 1])
 layout(location = 2) out vec2 out_Velocity;   // R1/A2 motion vector: currUV - prevUV, +Y-up
@@ -54,30 +57,17 @@ void main() {
 	vec2 uvBump = var_TexBump;
 	vec2 uvCoverage = var_TexCoverage;
 	if ( u_parallaxParms.x > 0.5 ) {
-		vec3  viewTS = normalize( var_TexViewVec );
-		float depth  = u_parallaxParms.y;
-		float nSteps = mix( u_parallaxParms.w, u_parallaxParms.z, clamp( abs( viewTS.z ), 0.0, 1.0 ) );
-		float layerDepth = 1.0 / nSteps;
-		vec2  dPx = dFdx( var_TexBump );
-		vec2  dPy = dFdy( var_TexBump );
-		vec2  P = ( viewTS.xy / max( abs( viewTS.z ), 0.1 ) ) * depth;
-		vec2  deltaUV = P * layerDepth;
-		float curLayer = 0.0;
-		vec2  curUV = var_TexBump;
-		float curDepthVal = 1.0 - textureGrad( u_parallaxMap, curUV, dPx, dPy ).r;
-		for ( int i = 0; i < 32; i++ ) {
-			if ( curLayer >= curDepthVal ) { break; }
-			curUV -= deltaUV;
-			curDepthVal = 1.0 - textureGrad( u_parallaxMap, curUV, dPx, dPy ).r;
-			curLayer += layerDepth;
-		}
-		vec2  prevUV = curUV + deltaUV;
-		float after  = curDepthVal - curLayer;
-		float before = ( 1.0 - textureGrad( u_parallaxMap, prevUV, dPx, dPy ).r ) - ( curLayer - layerDepth );
-		float w = after / ( after - before );
-		vec2  off = ( mix( curUV, prevUV, w ) - var_TexBump ) + P * 0.5;	// mid-height bias, as interaction.frag
-		uvBump += off;
-		uvCoverage += off;
+		// the same march as interaction.frag (parallax.glsl): in the bump texture space, or in the diffuse one
+		// (var_TexCoverage, which the CPU fills with the diffuse matrix then) for a sidecar's alpha height
+		vec2 bDx = dFdx( var_TexBump ),     bDy = dFdy( var_TexBump );
+		vec2 cDx = dFdx( var_TexCoverage ), cDy = dFdy( var_TexCoverage );
+		bool sidecarHeight = u_parallaxParms2.y > 0.5;
+		vec2 hUV = sidecarHeight ? var_TexCoverage : var_TexBump;
+		vec2 hDx = sidecarHeight ? cDx : bDx;
+		vec2 hDy = sidecarHeight ? cDy : bDy;
+		vec2 off = parallaxUV( hUV, normalize( var_TexViewVec ), hDx, hDy );
+		uvBump     += dudeParallaxCarry( off, hDx, hDy, bDx, bDy );
+		uvCoverage += dudeParallaxCarry( off, hDx, hDy, cDx, cDy );
 	}
 	vec4 bump = texture( u_bumpMap, uvBump );
 	bump.x = bump.a;
