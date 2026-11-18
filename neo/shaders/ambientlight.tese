@@ -26,6 +26,7 @@ VARY(6) in vec3 i_ToGlobalRow2[];
 VARY(7) in vec4 i_Color[];
 VARY(8) in vec3 i_ModelPos[];
 VARY(9) in vec4 i_ModelNormal[];
+VARY(10) in vec3 i_TexViewVec[];
 
 VARY(0) out vec2 var_TexBump;
 VARY(1) out vec2 var_TexDiffuse;
@@ -35,6 +36,8 @@ VARY(4) out vec3 var_ToGlobalRow0;
 VARY(5) out vec3 var_ToGlobalRow1;
 VARY(6) out vec3 var_ToGlobalRow2;
 VARY(7) out vec4 var_Color;
+VARY(10) out vec3 var_TexViewVec;	// parallax: only static world surfaces march, and they never tessellate;
+									// carried so the stages link
 
 void main() {
 	vec3 tc = gl_TessCoord;
@@ -54,6 +57,7 @@ void main() {
 	var_ToGlobalRow1  = i_ToGlobalRow1[0]  * tc.x + i_ToGlobalRow1[1]  * tc.y + i_ToGlobalRow1[2]  * tc.z;
 	var_ToGlobalRow2  = i_ToGlobalRow2[0]  * tc.x + i_ToGlobalRow2[1]  * tc.y + i_ToGlobalRow2[2]  * tc.z;
 	var_Color         = i_Color[0]         * tc.x + i_Color[1]         * tc.y + i_Color[2]         * tc.z;
+	var_TexViewVec    = i_TexViewVec[0]    * tc.x + i_TexViewVec[1]    * tc.y + i_TexViewVec[2]    * tc.z;
 
 	// optional normal-map displacement along the interpolated geometric normal
 	vec3 geoN = normalize( n0 * tc.x + n1 * tc.y + n2 * tc.z );

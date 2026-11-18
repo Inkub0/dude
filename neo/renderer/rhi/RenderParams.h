@@ -105,7 +105,9 @@ struct RenderParams {
 								// steps (head-on), w = max march steps (grazing). Height map
 								// on unit 11; 0 on every non-parallax draw.
 	float	parallaxParms2[4];	// DUDE parallax extras: x = self-shadow strength (0 = off,
-								// r_parallaxShadow). yzw spare (reserved for distance LOD).
+								// r_parallaxShadow), y = height source (0 runtime R, 1 sidecar
+								// alpha), z = the height level kept on the polygon, w = sin of
+								// the grazing limit (r_parallaxMinAngle). See renderparms.glsl.
 
 	float	shadowProjectionS[4];	// UNBAKED light-projection texgen for the 2D shadow-map
 	float	shadowProjectionT[4];	// lookup. The cookie texgen (lightProjectionS/T/Q) carries

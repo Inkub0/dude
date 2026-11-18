@@ -62,8 +62,11 @@ float dudeParallaxSteps( vec2 P, vec2 dPx, vec2 dPy, float lo, float hi ) {
 // that recede from the view. Fixed gradients keep the LOD stable across the whole march.
 vec2 parallaxUV( vec2 uv, vec3 viewTS, vec2 dPx, vec2 dPy ) {
 	float depth = u_parallaxParms.y;
-	// max UV shift at full depth, along the view ray's tangent-plane projection
-	vec2 P = ( viewTS.xy / max( abs( viewTS.z ), 0.1 ) ) * depth * dudeParallaxAxisScale();
+	// max UV shift at full depth, along the view ray's tangent-plane projection. The view's height above the surface
+	// is floored at the grazing limit (u_parallaxParms2.w = sin of r_parallaxMinAngle; never below the old 0.1): the
+	// shift grows as 1 / that height, so near edge-on it would stretch a recess wall over many texels (10x the depth
+	// at the old floor); flatter views march as if seen from the limit, bounding the shift at ~depth / sin(limit).
+	vec2 P = ( viewTS.xy / max( abs( viewTS.z ), max( u_parallaxParms2.w, 0.1 ) ) ) * depth * dudeParallaxAxisScale();
 	float nSteps = dudeParallaxSteps( P, dPx, dPy, u_parallaxParms.z, u_parallaxParms.w );
 	float layerDepth = 1.0 / nSteps;
 	vec2 deltaUV = P * layerDepth;

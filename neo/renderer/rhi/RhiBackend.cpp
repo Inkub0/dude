@@ -3067,7 +3067,7 @@ static bool RB_RHI_RenderSoftParticleStage( rhi::RHI *r, const viewDef_t *viewDe
 	int uniOfs = r->AllocUniforms( &parms, sizeof( parms ), &ub );
 
 	// unit 0 = particle diffuse, unit 1 = _currentDepth
-	rhi::ImageHandle vkTex[3] = { 0, 0, 0 };
+	rhi::ImageHandle vkTex[4] = { 0, 0, 0, 0 };
 	if ( vkMode ) {
 		if ( pStage->texture.image ) {
 			pStage->texture.image->Bind();	// upload trigger only under Vulkan
@@ -3122,6 +3122,7 @@ static bool RB_RHI_RenderSoftParticleStage( rhi::RHI *r, const viewDef_t *viewDe
 		da.textures[0] = vkTex[0];
 		da.textures[1] = vkTex[1];
 		da.textures[2] = vkTex[2];
+		da.textures[3] = vkTex[3];
 	}
 	r->Draw( da );
 
@@ -3341,7 +3342,7 @@ Lifted verbatim from RB_RHI_RenderShaderPasses.
 */
 static void RB_RHI_BuildStagePipeline( rhi::RHI *r, const viewDef_t *viewDef,
         const idMaterial *shader, const shaderStage_t *pStage, const rhi::StageIR &si,
-        bool tess, bool isBerserkBlit, bool isHelltimeDraw, bool litHighlight ) {
+        bool tess, bool isBerserkBlit, bool isHelltimeDraw, bool litHighlight, bool parallax ) {
 	// 2D views: legacy disables depth test entirely; equivalent here is
 	// depth-always + no depth writes
 	rhi::PipelineDesc pd;
@@ -3373,6 +3374,9 @@ static void RB_RHI_BuildStagePipeline( rhi::RHI *r, const viewDef_t *viewDef,
 	// berserk / hell-time vision: blit the accumulated feedback buffer through the `berserk`
 	// display shader instead of a plain stretch — the zoom-trail lives in that buffer.
 	pd.shader = ( isBerserkBlit || isHelltimeDraw ) ? r->LoadShader( "berserk" ) : si.program;
+	if ( parallax ) {
+		pd.shader = r->LoadShader( "generic_parallax" );	// the generic stage + the relief march (RB_RHI_StageParallax)
+	}
 	pd.vertexLayout = rhi::VL_DRAWVERT;
 	pd.cullType = RB_RHI_CullFor( viewDef, shader->GetCullType() );
 	pd.tessellate = tess;
@@ -3393,7 +3397,8 @@ static void RB_RHI_EmitStageDraw( rhi::RHI *r, const srfTriangles_t *tri, const 
         const rhi::RenderParams &parms, rhi::BufferHandle ub, int uniOfs,
         rhi::BufferHandle vb, int vertOfs, rhi::BufferHandle ib, int idxOfs,
         rhi::ImageHandle stageImage, bool tess, idImage *tessBump, bool useDeform,
-        bool isBerserkBlit, rhi::ImageHandle berserkTrail, bool isHelltimeDraw, rhi::ImageHandle helltimeTrail ) {
+        bool isBerserkBlit, rhi::ImageHandle berserkTrail, bool isHelltimeDraw, rhi::ImageHandle helltimeTrail,
+        rhi::ImageHandle parallaxHeight ) {
 	rhi::DrawArgs da;
 	memset( &da, 0, sizeof( da ) );
 	da.vertexBuffer = useDeform ? tri->tessDeformVB : vb;
@@ -3405,6 +3410,7 @@ static void RB_RHI_EmitStageDraw( rhi::RHI *r, const srfTriangles_t *tri, const 
 	da.uniformOffset = uniOfs;
 	da.uniformSize = sizeof( parms );
 	da.textures[0] = stageImage;	// Vulkan path; 0 on GL3 (binds went via idImage)
+	da.parallax = parallaxHeight;	// unit 11 for generic_parallax (Vulkan; 0 = none)
 	if ( tess ) {
 		// unit 1 = displacement bump for generic.tese (Vulkan-only; GL3 never
 		// tessellates). tessBump is flatNormalMap when the material has no bump.
@@ -3711,6 +3717,12 @@ static void RB_RHI_RenderShaderPasses( rhi::RHI *r, const viewDef_t *viewDef, co
 			tessBump = RB_RHI_TessBumpForZfill( surf, parms );
 		}
 
+		// DUDE parallax (docs/parallax.md "Pass parity"): an emissive / overlay stage of a surface whose lit passes march
+		// its relief samples where they shifted it. World surfaces only, which never tessellate or deform-once.
+		rhi::ImageHandle parallaxHeight = 0;
+		const bool parallax = si.kind == rhi::SK_GENERIC && !tess && !useDeform && viewDef->viewEntitys != NULL
+			&& !isBerserkBlit && !isHelltimeDraw && RB_RHI_StageParallax( surf, viewDef, parms, parallaxHeight );
+
 		rhi::BufferHandle ub;
 		int uniOfs = r->AllocUniforms( &parms, sizeof( parms ), &ub );
 
@@ -3721,11 +3733,11 @@ static void RB_RHI_RenderShaderPasses( rhi::RHI *r, const viewDef_t *viewDef, co
 			continue;
 		}
 
-		RB_RHI_BuildStagePipeline( r, viewDef, shader, pStage, si, tess, isBerserkBlit, isHelltimeDraw, litHighlight );
+		RB_RHI_BuildStagePipeline( r, viewDef, shader, pStage, si, tess, isBerserkBlit, isHelltimeDraw, litHighlight, parallax );
 
 		RB_RHI_EmitStageDraw( r, tri, surf, parms, ub, uniOfs, vb, vertOfs, ib, idxOfs,
 		                      stageImage, tess, tessBump, useDeform,
-		                      isBerserkBlit, berserkTrail, isHelltimeDraw, helltimeTrail );
+		                      isBerserkBlit, berserkTrail, isHelltimeDraw, helltimeTrail, parallaxHeight );
 
 		RB_RHI_StagePolyOffsetEnd( r, pStage, shader );
 	}

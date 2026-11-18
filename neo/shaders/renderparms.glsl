@@ -98,7 +98,8 @@ UBO_BINDING(0) uniform RenderParams {
 	                            // bump space, 1 = sidecar ALPHA in diffuse space;
 	                            // parallax.glsl), z = the height level kept on
 	                            // the polygon (0.5 runtime field, a sidecar's main
-	                            // face). w spare.
+	                            // face), w = sin of the grazing limit (the flattest view
+	                            // angle the march honours, r_parallaxMinAngle).
 
 	vec4 u_shadowProjectionS;    // UNBAKED light-projection texgen for the 2D shadow-map
 	vec4 u_shadowProjectionT;    // lookup. The cookie texgen (u_lightProjectionS/T/Q) carries

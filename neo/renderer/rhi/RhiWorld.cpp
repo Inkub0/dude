@@ -2638,22 +2638,69 @@ static idImage *RB_RHI_ParallaxSource( rhi::RenderParams &parms, const idMateria
 	parms.parallaxParms[1] = idMath::ClampFloat( 0.0f, 0.3f, depth );
 	parms.parallaxParms[2] = (float)r_parallaxMinSteps.GetInteger();
 	parms.parallaxParms[3] = (float)r_parallaxMaxSteps.GetInteger();
+	parms.parallaxParms2[3] = idMath::Sin( DEG2RAD( idMath::ClampFloat( 6.0f, 45.0f, r_parallaxMinAngle.GetFloat() ) ) );
 	return height;
 }
 
 static idImage *RB_RHI_FillParallaxParms( rhi::RenderParams &parms, const drawInteraction_t *din ) {
-	// the interaction pass: RB_RHI_ParallaxSource, plus the self-shadow march toward this light. The ambient pass
-	// keeps flat UVs (docs/parallax.md Phase C).
-	if ( din->ambientLight ) {
+	// the interaction and ambient passes: RB_RHI_ParallaxSource, plus (direct lights only) the self-shadow march toward
+	// this light. The ambient pass marches the same offset so it reads the relief where the direct lights do
+	// (docs/parallax.md "Pass parity"); an ambient draw the RT GI replaces (parms.color[0] = 1: draws nothing) skips it.
+	parms.parallaxParms2[0] = 0.0f;
+	if ( din->ambientLight && parms.color[0] == 1.0f ) {
 		parms.parallaxParms[0] = 0.0f;
 		parms.parallaxParms2[1] = 0.0f;
 		return NULL;
 	}
 	idImage *height = RB_RHI_ParallaxSource( parms, din->surf->material, din->surf->space );
-	if ( height ) {
+	if ( height && !din->ambientLight ) {
 		parms.parallaxParms2[0] = idMath::ClampFloat( 0.0f, 1.0f, r_parallaxShadow.GetFloat() );
 	}
 	return height;
+}
+
+/*
+===================
+RB_RHI_StageParallax
+
+The generic stage pass (RB_RHI_RenderShaderPasses): a material's ambient / emissive stages - a light panel's glow, a
+screen's add layer - draw over the lit surface, so they must sample where the lit passes shifted it, or the glow sits
+on the flat texture and drifts off the relief as the view moves (docs/parallax.md "Pass parity"). Same source and
+parms as the lit passes (RB_RHI_ParallaxSource); generic_parallax carries the offset from the height's texture space
+into the stage's own, whatever its texture matrix.
+===================
+*/
+static void RB_RHI_DiffuseStageMatrix( const idMaterial *shader, const float *regs, rhi::RenderParams &parms );
+
+bool RB_RHI_StageParallax( const drawSurf_t *surf, const viewDef_t *viewDef, rhi::RenderParams &parms,
+                           rhi::ImageHandle &vkHeight ) {
+	vkHeight = 0;
+	idImage *height = RB_RHI_ParallaxSource( parms, surf->material, surf->space );
+	if ( height == NULL ) {
+		return false;
+	}
+	idVec3 localView;
+	R_GlobalPointToLocal( surf->space->modelMatrix, viewDef->renderView.vieworg, localView );
+	memcpy( parms.localViewOrigin, localView.ToFloatPtr(), sizeof( float ) * 3 );
+	parms.localViewOrigin[3] = 1.0f;
+	// the height's texture space into u_bumpMatrix (generic.vert builds var_TexBump from it): a sidecar height lives in
+	// the diffuse stage's UV, the runtime field in the bump stage's
+	if ( parms.parallaxParms2[1] > 0.5f ) {
+		rhi::RenderParams diffuseSpace;
+		memset( &diffuseSpace, 0, sizeof( diffuseSpace ) );
+		RB_RHI_DiffuseStageMatrix( surf->material, surf->shaderRegisters, diffuseSpace );
+		memcpy( parms.bumpMatrixS, diffuseSpace.diffuseMatrixS, sizeof( parms.bumpMatrixS ) );
+		memcpy( parms.bumpMatrixT, diffuseSpace.diffuseMatrixT, sizeof( parms.bumpMatrixT ) );
+	} else {
+		memset( parms.bumpMatrixS, 0, sizeof( parms.bumpMatrixS ) );
+		memset( parms.bumpMatrixT, 0, sizeof( parms.bumpMatrixT ) );
+		RB_RHI_TessBumpForZfill( surf, parms );		// the bump stage's matrix (identity without one)
+	}
+	RB_RHI_BindUnit( 11, height );		// GL3: bound here; Vulkan: recorded for DrawArgs::parallax
+	if ( rhi::GetActiveBackendType() == rhi::BT_VULKAN ) {
+		vkHeight = rhiVkUnits[11];
+	}
+	return true;
 }
 
 /*

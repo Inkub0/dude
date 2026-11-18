@@ -11,6 +11,7 @@ SAMPLER_BINDING(4) uniform sampler2D u_diffuseMap;
 SAMPLER_BINDING(5) uniform sampler2D u_rtLight;    // DUDE r_rtgiAmbient floor: the RT lighting buffer (bound only when u_color.x = 2)
 SAMPLER_BINDING(9) uniform sampler2D u_ssao;   // DUDE GTAO buffer (R = ambient visibility)
 SAMPLER_BINDING(10) uniform sampler2D u_occlusionMap; // DUDE baked AO map (R = visibility)
+SAMPLER_BINDING(11) uniform sampler2D u_parallaxMap;  // DUDE parallax height (R runtime field, or a sidecar's A)
 
 VARY(0) in vec2 var_TexBump;
 VARY(1) in vec2 var_TexDiffuse;
@@ -20,12 +21,33 @@ VARY(4) in vec3 var_ToGlobalRow0;
 VARY(5) in vec3 var_ToGlobalRow1;
 VARY(6) in vec3 var_ToGlobalRow2;
 VARY(7) in vec4 var_Color;
+VARY(10) in vec3 var_TexViewVec;	// parallax: tangent-space view vector
 
 layout(location = 0) out vec4 fragColor;
 
+// parallaxUV / dudeParallaxCarry (needs u_parallaxMap above)
+#include "parallax.glsl"
+
 void main() {
+	// DUDE parallax occlusion mapping (docs/parallax.md): the same march and offset as interaction.frag, so the
+	// ambient light and the direct lights read the relief at the same point - without it an ambient-lit surface shows
+	// the flat texture under the shifted one. No self-shadow: the ambient has no light direction to march toward.
+	vec2 uvBump = var_TexBump;
+	vec2 uvDiffuse = var_TexDiffuse;
+	if ( u_parallaxParms.x > 0.5 ) {
+		vec2 bDx = dFdx( var_TexBump ),    bDy = dFdy( var_TexBump );
+		vec2 dDx = dFdx( var_TexDiffuse ), dDy = dFdy( var_TexDiffuse );
+		bool sidecarHeight = u_parallaxParms2.y > 0.5;
+		vec2 hUV = sidecarHeight ? var_TexDiffuse : var_TexBump;
+		vec2 hDx = sidecarHeight ? dDx : bDx;
+		vec2 hDy = sidecarHeight ? dDy : bDy;
+		vec2 off = parallaxUV( hUV, normalize( var_TexViewVec ), hDx, hDy );
+		uvBump    += dudeParallaxCarry( off, hDx, hDy, bDx, bDy );
+		uvDiffuse += dudeParallaxCarry( off, hDx, hDy, dDx, dDy );
+	}
+
 	// Reconstruct local normal (RXGB swizzle: bump.a -> x)
-	vec4 bump = texture( u_bumpMap, var_TexBump );
+	vec4 bump = texture( u_bumpMap, uvBump );
 	vec3 localNormal = vec3( bump.a, bump.y, bump.z ) * 2.0 - 1.0;
 
 	// DUDE: Doom 3's own ambient shading. id shipped this program (glprogs/ambientLight.vfp) for an
@@ -54,7 +76,7 @@ void main() {
 
 	// a negative dot clamps, as the fixed-point colour output of the vanilla program did
 	vec3 ambient = vec3( max( dot( ambientDir, shadeNormal ), 0.0 ) );
-	vec3 diff = texture( u_diffuseMap, var_TexDiffuse ).rgb;
+	vec3 diff = texture( u_diffuseMap, uvDiffuse ).rgb;
 	vec3 falloff = texture( u_lightFalloff, var_TexFalloff ).rgb;
 	vec3 proj = textureProj( u_lightProjection, var_TexProjection ).rgb;
 
@@ -79,7 +101,7 @@ void main() {
 	// screen-space SSAO above; the two stack multiplicatively when both are on. Sampled with
 	// the diffuse UV. u_occlusionParms.x gates it, .y is the strength (mix toward the map).
 	if ( u_occlusionParms.x > 0.5 ) {
-		float aoMap = dudeUnit10Ao( texture( u_occlusionMap, var_TexDiffuse ) );	// R, or B of an RMAO sidecar
+		float aoMap = dudeUnit10Ao( texture( u_occlusionMap, uvDiffuse ) );	// R, or B of an RMAO sidecar
 		outRgb *= mix( 1.0, aoMap, u_occlusionParms.y );
 	}
 
