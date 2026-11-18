@@ -205,6 +205,10 @@ struct RenderParams {
 								// 2x2 quad marches one of four directions spread over that cone toward the light and
 								// the quad averages them, so the shadow edge widens with distance from the occluder.
 								// yzw spare. Filled with contactParms. Appended LAST.
+	float	aoParms[4];			// DUDE light-aware AO (r_aoLightAware, docs/ssao-gtao.md "Light-aware AO"): x = strength 0..1.
+								// 0 (every other draw) = AO darkens direct light by the fixed r_ssaoDirectLight /
+								// r_occlusionMapDirect share; above 0 that share fades where this light reaches the occluded
+								// spot (GTAO bent cone, parallax self-shadow). Interaction draws + restir_di_apply. yzw spare.
 };
 
 // window depth -> view z for a view, from its projection matrix (column-major GL layout):
@@ -218,8 +222,8 @@ inline void FillDepthParms( RenderParams &p, const float *proj ) {
 	}
 }
 
-// 4 mat4 (256) + 64 vec4 (1024) = 1280 bytes, zero padding
-static_assert( sizeof( RenderParams ) == 1280, "RenderParams must match the std140 layout of renderparms.glsl" );
+// 4 mat4 (256) + 65 vec4 (1040) = 1296 bytes, zero padding
+static_assert( sizeof( RenderParams ) == 1296, "RenderParams must match the std140 layout of renderparms.glsl" );
 
 } // namespace rhi
 

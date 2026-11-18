@@ -20,6 +20,8 @@
 //   u_ssao (5)            = AO buffer (r = ambient visibility), sampled only when u_localParam1.x > 0.5
 //   u_localParam0         = ( bilateral on/off, depth sensitivity, normal power, light scale )
 //   u_localParam1         = ( AO enable, AO floor, AO direct-light strength, 0 )
+//   u_aoParms.x           = light-aware AO (r_aoLightAware): fade the AO share where the SH light direction runs down
+//                           GTAO's open cone (SH mode only; 0 = the fixed share)
 //   u_occlusionParms.z    = baked occlusion-map strength on direct light (r_occlusionMapScale * r_occlusionMapDirect); 0 = off
 //   u_occlusionParms.w    = R2: the source is LINEAR (ReLAX output / raw ReLAX-mode gather) instead of NRD-YCoCg
 //   u_localParam1.w       = SH MODE: u_sh1 (unit 6) holds the denoised SH1 (direction * luminance); the gather carried no
@@ -143,6 +145,7 @@ void main() {
 	vec4 mt     = texture( u_materialBuffer, uv );
 	bool specReshade = u_localParam1.w > 1.5;		// SH + full-res specular re-shade (r_rtReStirDISpecReshade)
 	vec3 lit;
+	float aoLightInCone = 0.0;		// light-aware AO (u_aoParms.x): how far the SH light direction runs down GTAO's open cone
 	if ( shMode ) {
 		// SH re-resolve as a BRIGHTNESS-NEUTRAL bump RATIO, not a cosine removal+reapply. The gather now stores di = the
 		// FULL irradiance (cosine IN, bit-identical to the non-SH buffer) and sh1 = direction*luminance. The OLD scheme
@@ -164,6 +167,14 @@ void main() {
 			Nw  = normalize( mat3( u_modelViewMatrix ) * ( nt0.xyz * 2.0 - 1.0 ) );
 			L   = sh1 / len;
 			k   = clamp( len / Y, 0.0, 1.0 );			// SH direction concentration, for the spec lobe
+			// light-aware AO (r_aoLightAware, docs/ssao-gtao.md): the SH direction against GTAO's bent cone (view-space bent
+			// normal -> world, the SH direction's space), weighted by k - light from many directions at once is ambient-
+			// like, and AO is right to darken it
+			if ( u_aoParms.x > 0.0 && u_localParam1.x > 0.5 ) {
+				vec4 aoT = texture( u_ssao, uv );
+				vec3 bentW = normalize( mat3( u_modelViewMatrix ) * ( aoT.gba * 2.0 - 1.0 ) );
+				aoLightInCone = k * dudeAoLightInCone( aoT.r, bentW, L );
+			}
 			float cosFull = dot( Nw,  L );
 			float cosGath = shCosGath;					// di's reduced-res cosine, blended like di (scale-independent) - cancels di cleanly
 			ndl = max( cosFull, 0.0 );
@@ -236,7 +247,7 @@ void main() {
 	if ( u_localParam1.x > 0.5 ) {
 		float ao = texture( u_ssao, uv ).r;
 		ao = mix( u_localParam1.y, 1.0, ao );
-		lit *= mix( 1.0, ao, u_localParam1.z );
+		lit *= mix( 1.0, ao, u_localParam1.z * ( 1.0 - u_aoParms.x * aoLightInCone ) );
 	}
 	// baked occlusion map (material att1 .a, 1 = none): the forward path's direct-diffuse factor
 	// mix( 1, map, scale*direct ) - applied to the combined term here (v1: diffuse + spec denoised together)
