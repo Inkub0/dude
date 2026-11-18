@@ -1122,6 +1122,12 @@ def main():
                          "(default ceramic=2.4, picked in game on mars_city1: glazed tile reads too dull at "
                          "its class roughness once the specular map adds its variation). Repeat for more "
                          "classes; 'ceramic=1' turns the default off")
+    ap.add_argument("--class-adjust", action="append", metavar="CLASS:CHANNEL=B,C,G", default=None,
+                    help="a brightness, contrast, gamma adjust of one channel (ao, rough, metal) for every texture "
+                         "of a PBR table class, applied last, after the global --ao/rough/metal-adjust - what the "
+                         "PBR editor's Edit texture channels does to one texture. Default ceramic:rough=-0.15,1,1, "
+                         "picked in game (glazed tile still read too dull). Repeat for more; "
+                         "'ceramic:rough=0,1,1' turns the default off")
     for ch, what in (("ao", "ambient occlusion"), ("rough", "roughness"), ("metal", "metalness")):
         ap.add_argument(f"--{ch}-adjust", type=float, nargs=3, default=None,
                         metavar=("BRIGHTNESS", "CONTRAST", "GAMMA"),
@@ -1185,6 +1191,8 @@ def main():
     args = ap.parse_args()
     if args.class_shine is None:
         args.class_shine = ["ceramic=2.4"]
+    if args.class_adjust is None:
+        args.class_adjust = ["ceramic:rough=-0.15,1,1"]
 
     folders = args.search or [Path("base")]
     nonmetal_words = [w.strip().lower() for w in args.nonmetal_words.split(",") if w.strip()]
@@ -1204,6 +1212,18 @@ def main():
         if not _isnum(v) or float(v) <= 0:
             ap.error(f"--class-shine wants CLASS=FACTOR, got {item!r}")
         class_shine[k.strip().lower()] = float(v)
+    class_adjust = {}	# (class, channel) -> (brightness, contrast, gamma)
+    for item in args.class_adjust:
+        key, _, v = item.partition("=")
+        cls, _, ch = key.partition(":")
+        bcg = v.split(",")
+        if ch.strip().lower() not in ("ao", "rough", "metal") or not cls.strip() or len(bcg) != 3 \
+                or not all(_isnum(t) for t in bcg):
+            ap.error(f"--class-adjust wants CLASS:CHANNEL=B,C,G (channel ao, rough or metal), got {item!r}")
+        class_adjust[(cls.strip().lower(), ch.strip().lower())] = tuple(float(t) for t in bcg)
+    if class_adjust:
+        print("class adjust (brightness contrast gamma): " + ", ".join(
+            f"{c}:{ch} {' '.join(f'{x:g}' for x in bcg)}" for (c, ch), bcg in class_adjust.items()))
     fs_bump = GameFS(folders + args.hd) if args.hd else fs	# --hd: higher-detail normal / height maps
 
     guides = {}
@@ -1349,7 +1369,8 @@ def main():
         leaf = mat["name"].lower().rsplit("/", 1)[-1]
         word = next((w for w in nonmetal_words if w in leaf), None)
         rough, metal = derive(diffuse, spec, args, table, word is not None)
-        shine = class_shine.get(table_of.category(mat["name"]) or "")
+        mat_class = table_of.category(mat["name"]) or ""
+        shine = class_shine.get(mat_class)
         if shine:
             rough = np.maximum(rough / shine, 0.03)
 
@@ -1403,6 +1424,13 @@ def main():
         ao = channel_adjust(ao, args.ao_adjust)
         rough = np.maximum(channel_adjust(rough, args.rough_adjust), 0.03)
         metal = channel_adjust(metal, args.metal_adjust)
+        # per-class adjust (--class-adjust), last: a class's look tuned on top of the global one
+        if (mat_class, "ao") in class_adjust:
+            ao = channel_adjust(ao, class_adjust[(mat_class, "ao")])
+        if (mat_class, "rough") in class_adjust:
+            rough = np.maximum(channel_adjust(rough, class_adjust[(mat_class, "rough")]), 0.03)
+        if (mat_class, "metal") in class_adjust:
+            metal = channel_adjust(metal, class_adjust[(mat_class, "metal")])
 
         out = args.output / f"{stem}_{args.layout}.tga"
         out.parent.mkdir(parents=True, exist_ok=True)

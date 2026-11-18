@@ -141,6 +141,13 @@ materials are then made 2.4 times smoother (`--class-shine ceramic=2.4`, picked 
 glazed tile reads too dull otherwise); repeat the flag for other classes, `ceramic=1` turns it
 off. Materials that share a diffuse share a sidecar, so the class of the first one baked wins.
 
+A whole class can also get a channel adjust of its own, applied last, after the global adjust:
+`--class-adjust CLASS:CHANNEL=B,C,G` (brightness, contrast, gamma; channel `ao`, `rough` or
+`metal`), the same step as the PBR editor's **Edit texture channels** on one texture, but for
+every texture of the class. The default is `ceramic:rough=-0.15,1,1` (2026-11-17, picked in
+game on `stectile1quad2` and `washroom/btile_d`: glazed tile still read too dull);
+`ceramic:rough=0,1,1` turns it off. Repeat the flag for more.
+
 AO is baked from the normal and height maps the game itself loads, so it lines up with the
 relief you see. `--hd FOLDER` bakes from a higher-resolution texture pack instead, but only use
 it for a pack your players install too: an HD pack's normal maps are often redrawn, and AO
