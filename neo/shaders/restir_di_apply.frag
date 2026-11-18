@@ -22,6 +22,7 @@
 //   u_localParam1         = ( AO enable, AO floor, AO direct-light strength, 0 )
 //   u_aoParms.x           = light-aware AO (r_aoLightAware): fade the AO share where the SH light direction runs down
 //                           GTAO's open cone (SH mode only; 0 = the fixed share)
+//   u_aoParms.y           = 1: the baked occlusion map as micro-shadows against the SH direction (r_aoMicroShadows)
 //   u_occlusionParms.z    = baked occlusion-map strength on direct light (r_occlusionMapScale * r_occlusionMapDirect); 0 = off
 //   u_occlusionParms.w    = R2: the source is LINEAR (ReLAX output / raw ReLAX-mode gather) instead of NRD-YCoCg
 //   u_localParam1.w       = SH MODE: u_sh1 (unit 6) holds the denoised SH1 (direction * luminance); the gather carried no
@@ -146,6 +147,7 @@ void main() {
 	bool specReshade = u_localParam1.w > 1.5;		// SH + full-res specular re-shade (r_rtReStirDISpecReshade)
 	vec3 lit;
 	float aoLightInCone = 0.0;		// light-aware AO (u_aoParms.x): how far the SH light direction runs down GTAO's open cone
+	float aoMicroCos = 1.0, aoMicroK = 0.0;	// AO micro-shadows (u_aoParms.y): the SH direction's cosine on the full-res normal, its concentration
 	if ( shMode ) {
 		// SH re-resolve as a BRIGHTNESS-NEUTRAL bump RATIO, not a cosine removal+reapply. The gather now stores di = the
 		// FULL irradiance (cosine IN, bit-identical to the non-SH buffer) and sh1 = direction*luminance. The OLD scheme
@@ -176,6 +178,8 @@ void main() {
 				aoLightInCone = k * dudeAoLightInCone( aoT.r, bentW, L );
 			}
 			float cosFull = dot( Nw,  L );
+			aoMicroCos = cosFull;
+			aoMicroK   = k;
 			float cosGath = shCosGath;					// di's reduced-res cosine, blended like di (scale-independent) - cancels di cleanly
 			ndl = max( cosFull, 0.0 );
 			detail   = clamp( ( max( cosFull, 0.0 ) + amb ) / ( max( cosGath, 0.0 ) + amb ), 0.0, 3.0 );
@@ -252,7 +256,15 @@ void main() {
 	// baked occlusion map (material att1 .a, 1 = none): the forward path's direct-diffuse factor
 	// mix( 1, map, scale*direct ) - applied to the combined term here (v1: diffuse + spec denoised together)
 	if ( u_occlusionParms.z > 0.0 ) {
-		lit *= mix( 1.0, mt.a, u_occlusionParms.z );
+		float occl = mt.a;
+		// AO micro-shadows (r_aoMicroShadows, as interaction.frag): saturate( |N.L| + 2 ao^2 - 1 ) with the SH light
+		// direction, weighted by its concentration k - light arriving from many directions at once is ambient-like and
+		// keeps the plain AO. SH mode only (the direction); otherwise the plain AO.
+		if ( u_aoParms.y > 0.5 && aoMicroK > 0.0 ) {
+			float microShadow = clamp( abs( aoMicroCos ) + 2.0 * mt.a * mt.a - 1.0, 0.0, 1.0 );
+			occl = mix( mt.a, microShadow, aoMicroK );
+		}
+		lit *= mix( 1.0, occl, u_occlusionParms.z );
 	}
 	fragColor = vec4( max( lit, vec3( 0.0 ) ), 0.0 );
 }

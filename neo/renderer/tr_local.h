@@ -1342,6 +1342,7 @@ extern idCVar r_ssaoBentStrength;		// blend toward the bent normal for the ambie
 extern idCVar r_ssaoNormalBuffer;		// SSAO reads a bump-mapped normal G-buffer vs depth reconstruct
 extern idCVar r_ssaoMergeNormal;		// VK: emit the SSAO normal inside the depth prepass (one pass) vs the standalone normal pass
 extern idCVar r_ssaoSpecular;			// also attenuate specular in occluded areas
+extern idCVar r_aoMicroShadows;			// DUDE: baked AO on direct light as micro-shadows (A/B vs r_aoLightAware)
 extern idCVar r_aoLightAware;			// DUDE: light-aware AO on direct light (0 = off)
 extern idCVar r_ssaoDebug;				// 1=show AO buffer, 2=show bent normals
 extern idCVar r_ssaoTemporal;			// accumulate AO across frames via camera reprojection

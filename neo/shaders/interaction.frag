@@ -674,6 +674,7 @@ void main() {
 		diffuse = vec4( 0.0 );
 	}
 	vec4 spec;
+	float microNdotL = 1.0;		// this light's cosine on the bump-mapped normal, for the AO micro-shadows (below)
 
 	if ( u_pbrParms.z > 0.5 ) {
 		// DUDE PBR path (docs/pbr-materials.md Phase A): Cook-Torrance GGX with a
@@ -704,6 +705,7 @@ void main() {
 		vec3 H = normalize( L + V );
 		float NdotLsigned = dot( N, L );		// kept signed for the skin scatter wrap
 		float NdotL = max( NdotLsigned, 0.0 );
+		microNdotL = NdotLsigned;
 		float NdotV = max( dot( N, V ), 1e-4 );
 		float NdotH = max( dot( N, H ), 0.0 );
 		float VdotH = max( dot( V, H ), 0.0 );
@@ -807,6 +809,7 @@ void main() {
 		vec3 lightV = texture( u_normalCubeMap, var_TexLightVec ).xyz * 2.0 - 1.0;
 
 		float rawNdotL = dot( lightV, localNormal );
+		microNdotL = dot( lightV, normalize( localNormal ) );
 		shadowVis = shadowVisibility( lightReaches && rawNdotL > 0.0 );
 		// DUDE contact shadows (see the PBR branch): fold the screen-space march into shadowVis.
 		shadowVis *= contactShadowTerm( lightReaches && rawNdotL > 0.0 && filmMode < 0.5, rawNdotL );
@@ -877,10 +880,21 @@ void main() {
 		// it shines into), the baked darkening there is light this light does deliver, so its share fades. Only surfaces
 		// that marched (a height and r_parallaxShadow on); elsewhere the fixed share stays.
 		float occlShare = u_occlusionParms.z;
-		if ( u_aoParms.x > 0.0 && parallaxLightVis >= 0.0 ) {
-			occlShare *= 1.0 - u_aoParms.x * parallaxLightVis;
+		if ( u_aoParms.y > 0.5 ) {
+			// AO micro-shadows (r_aoMicroShadows = u_aoParms.y; Brinck & Maximov, "The Technical Art of Uncharted 4",
+			// 2016): the baked AO read as a cone of open directions (aperture cos^2 ~ 2 * ao^2 - 1 here), shadowing
+			// this light only where it comes in outside that cone: saturate( |N.L| + 2 ao^2 - 1 ). A crease lit
+			// straight on (N.L -> 1) keeps its light; one lit at a grazing angle goes dark. Needs no height or
+			// screen-space AO, so it works on every surface with an occlusion map or sidecar AO. Replaces the
+			// fixed share and the parallax-march fade (the light-aware A/B partner) on this term.
+			float microShadow = clamp( abs( microNdotL ) + 2.0 * aoMap * aoMap - 1.0, 0.0, 1.0 );
+			diffuse.rgb *= mix( 1.0, microShadow, occlShare );
+		} else {
+			if ( u_aoParms.x > 0.0 && parallaxLightVis >= 0.0 ) {
+				occlShare *= 1.0 - u_aoParms.x * parallaxLightVis;
+			}
+			diffuse.rgb *= mix( 1.0, aoMap, occlShare );
 		}
-		diffuse.rgb *= mix( 1.0, aoMap, occlShare );
 	}
 
 	vec4 color = spec * specMap + diffuse;

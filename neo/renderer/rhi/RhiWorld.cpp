@@ -2870,6 +2870,7 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 	// (the same matrix the contact-shadow march fills).
 	if ( !din->ambientLight && R_BackendSupportsEnhancements() ) {
 		parms.aoParms[0] = idMath::ClampFloat( 0.0f, 1.0f, r_aoLightAware.GetFloat() );
+		parms.aoParms[1] = r_aoMicroShadows.GetBool() ? 1.0f : 0.0f;	// baked / sidecar AO as micro-shadows (A/B partner)
 		if ( parms.aoParms[0] > 0.0f && parms.localParam0[0] > 0.5f ) {
 			memcpy( parms.modelViewMatrix, din->surf->space->modelViewMatrix, sizeof( parms.modelViewMatrix ) );
 		}
@@ -11960,6 +11961,7 @@ void RB_RHI_ReStirDIApply( rhi::RHI *r, const viewDef_t *viewDef ) {
 	// light-aware AO (r_aoLightAware): the share fades where the SH light direction runs down GTAO's open cone, weighted
 	// by how concentrated that direction is (SH resolve only; restir_di_apply.frag)
 	parms.aoParms[0] = idMath::ClampFloat( 0.0f, 1.0f, r_aoLightAware.GetFloat() );
+	parms.aoParms[1] = r_aoMicroShadows.GetBool() ? 1.0f : 0.0f;
 	// SH resolve (u_sh1 on unit 6, inverse view below). 2 = + full-res specular re-shade (r_rtReStirDISpecReshade): the
 	// buffer is diffuse-only, so the apply rebuilds a sharp GGX highlight from the SH direction + the full-res normal.
 	const bool diSpecReshade = shResolve && r_rtReStirDISpecReshade.GetBool();

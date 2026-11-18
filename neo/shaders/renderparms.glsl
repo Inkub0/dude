@@ -174,7 +174,8 @@ UBO_BINDING(0) uniform RenderParams {
 	                             // origin offset per unit of view distance on the RT passes (r_rtShadowOriginDistScale).
 	                             // (restir_di uses xy for the FSR2 jitter shear.)
 	vec4 u_aoParms;              // DUDE light-aware AO (r_aoLightAware): x = strength 0..1, 0 = off (the fixed AO share
-	                             // on direct light). Interaction draws + restir_di_apply. yzw spare. Appended LAST.
+	                             // on direct light); y = 1: baked / sidecar AO on direct light as micro-shadows
+	                             // (r_aoMicroShadows). Interaction draws + restir_di_apply. zw spare. Appended LAST.
 };
 
 // DUDE light-aware AO (r_aoLightAware, docs/ssao-gtao.md "Light-aware AO"): how far a light direction L lies inside the
