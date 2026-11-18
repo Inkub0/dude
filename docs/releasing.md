@@ -66,6 +66,7 @@ Staging layout (`dist/release-X.Y/`), one folder per platform, then zip/tar it:
 | **`d3xp/zz_dude_roe_menu.pk4`** — the RoE menu, see below | ✓ | ✓ |
 | `base/gamepad.cfg`, `base/gamepad-d3xp.cfg`, `base/mods-cvar-translation.cfg` | ✓ | ✓ |
 | `base/pbr/pbr_materials.cfg`, `base/pbr/pbr_overrides.cfg` (else PBR classifies nothing) | ✓ | ✓ |
+| `base/emissive/game/mars_city1.cfg` — the authored emissive-lights setup behind Graphics > Lights & Atmosphere > Emissive Lights (since 0.9.10), **loose**; take it from git, never the `.cfg.recovery` | ✓ | ✓ |
 | `base/def/*.def`, `d3xp/def/*.def`, `d3le/def/*.def` — the `g_extraLights` def overrides (since 0.9.7), **loose** (see below) | ✓ | ✓ |
 | `COPYING.txt`, `COPYING-QUAKE4-EXCEPTION.txt`, `README.md` | ✓ | ✓ |
 

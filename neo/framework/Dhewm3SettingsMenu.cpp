@@ -4056,6 +4056,20 @@ static void DrawEnhGroup_NewLightEffects()
 				"the haze off and they apply again. 0 = leave AO alone." );
 			ImGui::EndDisabled();	// volumetrics off
 
+			// Emissive lights (emissive mode, r_rtEmissiveLighting; docs/rtx-light-editor.md): a map's authored setup
+			// (emissive/<map>.cfg) turns its glowing fixtures into real area lights and drops the placed lights they replace.
+			// Only Mars City 1 ships a setup so far - every other map is unchanged. The mode lights through ReSTIR DI, so it
+			// acts in the Path Tracing preset; not preset-owned, the full tuning is in Debugging > Ray Tracing > RT Emitters.
+			ImGui::Spacing();
+			CvarCheckbox( "Emissive Lights - Mars City 1 (EXPERIMENTAL)", r_rtEmissiveLighting, "The light fixtures' glowing "
+				"surfaces (ceiling panels, tubes, screens) light the room themselves, as real area lights with soft shadows, "
+				"replacing the invisible point lights the map placed under them. Only Mars City 1 has this set up so far; on "
+				"other maps nothing changes. Experimental: the look differs from the stock game. Takes effect with the Path "
+				"Tracing preset (Vulkan + ray-tracing GPU)." );
+			if ( rtCapable && r_rtEmissiveLighting.GetBool() && !( r_rtReStirDI.GetBool() && r_rtReStirDIApply.GetBool() ) ) {
+				ImGui::TextDisabled( "  (takes effect with the Path Tracing preset)" );
+			}
+
 			ImGui::EndDisabled();	// !rtCapable
 		}
 		EndSettingsGroup();
