@@ -205,8 +205,8 @@ for release.
 | cvar | default | range | purpose |
 |---|---|---|---|
 | `r_occlusionMaps` | 0 | 0/1 | master toggle (GL3/Vulkan only; non-vanilla) |
-| `r_occlusionMapScale` | 1.0 | 0–1 | AO-map strength on the ambient term (0 = off, 1 = full) |
-| `r_occlusionMapDirect` | 0.9 | 0–1 | strength on direct-light diffuse, as a fraction of the scale (0 = ambient-only) |
+| `r_occlusionMapScale` | 0.9 (1.0 before 2026-11-18) | 0–1 | AO-map strength on the ambient term (0 = off, 1 = full) |
+| `r_occlusionMapDirect` | 0.55 (0.9 before 2026-11-18; with micro-shadows on, also their strength) | 0–1 | strength on direct-light diffuse, as a fraction of the scale (0 = ambient-only) |
 | `r_occlusionMapsAutoBake` | 0 | 0/1 | DEV: lazily bake a missing model's AO on first sight (one-time hitch) |
 | `r_occlusionMapBakeSize` | 0 | 0–4096 | baker: output texture resolution; **0 = auto** (per surface, match its diffuse/bump map size so the AO is 1:1 with the shipped art) |
 | `r_occlusionMapBakeRays` | 128 | 1–4096 | baker: hemisphere rays per texel |
