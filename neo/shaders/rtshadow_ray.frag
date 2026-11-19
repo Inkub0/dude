@@ -26,6 +26,8 @@
 // Uniform packing (RB_RHI_RtShadowBlurLight):
 //   u_rtParms.xy          = TLAS device address (bit-cast lo/hi)
 //   u_rtParms.z           = ray-origin normal offset (r_rtSunShadowOffset, shared with mode 4)
+//   u_color.y             = 0: every hit counts; 1: r_rtShadowOutsideHits; 2: that, and r_rtShadowNearStart - where the
+//                           surface faces the light the ray starts DUDE_RT_NEAR_START off it instead of u_rtParms.z
 //   u_contactParms2.w     = r_rtShadowOriginDistScale: extra origin offset per unit of view distance
 //   u_rtParms.w           = 1: units 2/3 hold this light's falloff / projection images and the lookup
 //                           is the plain one (single stage, no texture matrix) - skip the ray where
@@ -69,6 +71,9 @@ layout(location = 0) out vec4 fragColor;
 // sentinel (sky / weapon / outside the light) - the tile pass skips those, matching fragColor.b == 0.
 layout(location = 1) out vec2 out_summary;
 const float RTSHADOW_HW_MAX = 24.0;		// = HW_MAX in rtshadow_tiles.frag / K in rtshadow_blur.frag
+// r_rtShadowNearStart: the ray's start, world units off the surface - the RT contact shadows' own start
+// (interaction.frag rtContactOcclusion), which the outside-hits rule makes safe
+const float DUDE_RT_NEAR_START = 0.05;
 
 // Doom 3's near-infinite far projection in GL clip depth -> linear eye z. The pair comes from the
 // view's own projection (u_depthParms); ( 0.33333333, -0.33316667 ) is its play-time value.
@@ -160,8 +165,30 @@ void main() {
 	// The mode-4 ray (interaction.frag) pushes along the interpolated VERTEX normal and never had it. The derivative
 	// normal is unreliable where its 2x2 quad straddles a depth edge; there it disagrees with the shading normal, and
 	// the bump normal is kept as before.
-	vec3  Noff = ( gLen > 1e-6 && dot( gNw, Nw ) > 0.25 ) ? gNw : Nw;
-	vec3  O    = Pw + Noff * ( u_rtParms.z + u_contactParms2.w * d );	// .w = r_rtShadowOriginDistScale
+	bool  gOk  = gLen > 1e-6 && dot( gNw, Nw ) > 0.25;
+	vec3  Noff = gOk ? gNw : Nw;
+	// r_rtShadowNearStart (u_color.y = 2, docs/rtx-shadow-blur.md "Near ray start"): the constant part of the push was
+	// r_rtSunShadowOffset, 1 unit - a self-intersection guard from when every hit counted. It also lifted the start
+	// over every occluder closer than that (a nose over a lip, a panel's edge on a wall), which is what the RT contact
+	// shadows were then needed for. With the outside-hits rule a start a hair off the surface is safe (the contact
+	// ray has always started there), and this ray sees those occluders itself. The distance term stays: it covers
+	// the depth buffer's error, not the mesh's.
+	// Only where the flat triangle FACES the light, fading back to the old start as it turns edge-on (cosine 0.15
+	// to 0): on the lit side of a low-poly round shape's terminator the triangle already faces away while its
+	// shading normal still takes light, and a ray from 0.05 units lands on that same triangle - whole facets went
+	// dark; the 1-unit start clears the triangle's edge. Ignoring hits past the triangle's own plane instead (as
+	// the scatter band below does) cured the facets but let that band's light through a real wall behind it.
+	// Both measured in tools/tests/rt_shadow_terminator_sim.py. A pixel without a reliable flat normal (its
+	// quad straddles a depth edge) keeps the old start too.
+	bool  nearStart = u_color.y > 1.5;
+	float pushC = u_rtParms.z;
+	if ( nearStart && gOk ) {
+		vec3  L0   = u_localLightOrigin.xyz - Pw;
+		float gNL0 = dot( gNw, L0 ) * inversesqrt( max( dot( L0, L0 ), 1e-8 ) );
+		pushC = mix( u_rtParms.z, min( DUDE_RT_NEAR_START, u_rtParms.z ), smoothstep( 0.0, 0.15, gNL0 ) );
+	}
+	float push = pushC + u_contactParms2.w * d;	// .w = r_rtShadowOriginDistScale
+	vec3  O    = Pw + Noff * push;
 	vec3  toL  = u_localLightOrigin.xyz - O;
 	float dL2  = dot( toL, toL );
 	if ( !( dL2 > 1.0 ) ) {						// on top of the light (also catches NaN)
@@ -208,6 +235,20 @@ void main() {
 		perfOn = dudeSegmentMeetsPerforated(
 			uvec2( floatBitsToUint( u_shadowProjectionQ.x ), floatBitsToUint( u_shadowProjectionQ.y ) ),
 			int( u_shadowFalloffS.w + 0.5 ), O, Ldir, tMax );
+	}
+	if ( perfOn && nearStart ) {
+		// a pixel whose ray can meet a grate takes the perforated traversal below, which commits solid triangles
+		// itself - no outside-hits test - so it keeps the start that never needed one
+		push = u_rtParms.z + u_contactParms2.w * d;
+		O    = Pw + Noff * push;
+		toL  = u_localLightOrigin.xyz - O;
+		dL2  = dot( toL, toL );
+		if ( !( dL2 > 1.0 ) ) {
+			return;
+		}
+		dL   = sqrt( dL2 );
+		Ldir = toL / dL;
+		tMax = min( max( dL - 1.0, 0.01 ), 100000.0 );
 	}
 	if ( !perfOn && u_color.y > 0.5 ) {
 		// r_rtShadowOutsideHits (u_color.y): count only hits on the OUTSIDE of a mesh - Doom 3's outward
@@ -284,7 +325,6 @@ void main() {
 		// head past its terminator - and stays lit, as before. Only a hit BEFORE that is something standing over
 		// the surface (a jaw over a neck), and shadows the skin's wrap light.
 		float sink = -dot( Noff, Ldir );
-		float push = u_rtParms.z + u_contactParms2.w * d;
 		if ( sink > 1e-4 && dOcc > 0.85 * push / sink ) {
 			return;
 		}
