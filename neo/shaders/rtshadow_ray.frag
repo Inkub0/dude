@@ -172,10 +172,22 @@ void main() {
 
 	// surfaces facing away from the light receive exactly zero from it (the interaction multiplies
 	// by N.L): no ray. Bump normal AND geometric normal must agree, so only whole faces are skipped.
-	if ( dot( Nw, Ldir ) < -0.05 ) {
-		vec3 gNs = ( dot( gNw, Nw ) < 0.0 ) ? -gNw : gNw;
-		if ( gLen > 1e-6 && dot( gNs, Ldir ) < -0.15 ) {
-			return;
+	// EXCEPT within a skin's scatter wrap (u_color.w = the widest wrap, r_skinScatter * 1.3; 0 = skin shading
+	// off): skin / flesh is still lit past the terminator (interaction.frag skinScatterExcess, positive down to
+	// N.L = -wrap), and "no ray = lit" there dropped every shadow that falls on that band - the jaw's on a neck
+	// turned a little from the light vanished as soon as the light was softened. No per-pixel skin flag reaches
+	// this pass, so every surface's band is traced; wrapBand marks those pixels, and below only an occluder
+	// standing OVER their surface counts for them - anything else stays lit, exactly as the skipped ray left it.
+	bool  wrapBand = false;
+	float bNL = dot( Nw, Ldir );
+	if ( bNL < -0.05 ) {
+		vec3  gNs = ( dot( gNw, Nw ) < 0.0 ) ? -gNw : gNw;
+		float gNL = dot( gNs, Ldir );
+		if ( gLen > 1e-6 && gNL < -0.15 ) {
+			if ( !( u_color.w > 0.0 ) || ( bNL < -0.05 - u_color.w && gNL < -0.15 - u_color.w ) ) {
+				return;
+			}
+			wrapBand = true;
 		}
 	}
 
@@ -197,7 +209,35 @@ void main() {
 			uvec2( floatBitsToUint( u_shadowProjectionQ.x ), floatBitsToUint( u_shadowProjectionQ.y ) ),
 			int( u_shadowFalloffS.w + 0.5 ), O, Ldir, tMax );
 	}
-	if ( !perfOn ) {
+	if ( !perfOn && u_color.y > 0.5 ) {
+		// r_rtShadowOutsideHits (u_color.y): count only hits on the OUTSIDE of a mesh - Doom 3's outward
+		// side is Vulkan's BACK face (R_DeriveFacePlanes winding; the RT contact shadows use the same rule).
+		// The start point above comes from the depth buffer, which on a tessellated character is the smoothed
+		// surface while the ray-traced copy is the coarse posed mesh: in a fold that point sits INSIDE it, and
+		// in a crease the slope-normal push can cross into the opposite side. Either way the first thing the
+		// ray met was the inside of a mesh, and the texel went black (eye corners, collar, lips). A real
+		// occluder between the surface and the light is entered from outside, so it still casts. But only
+		// NEAR the start (u_color.z = r_rtShadowInsideSkip, world units): a buried start sees the inside of
+		// the WHOLE mesh, and ignoring inside hits everywhere also dropped real self-shadows - the jaw over a
+		// neck point that sits inside the coarse head. Beyond the skip distance an inside hit casts. Candidates
+		// are confirmed one by one (slower than the all-opaque traversal below); confirming shrinks the ray,
+		// so the committed hit is the CLOSEST counted one, as the penumbra sizing needs.
+		rayQueryEXT rqf;
+		dudeRayQueryInit( rqf,
+			accelerationStructureEXT( uvec2( floatBitsToUint( u_rtParms.x ), floatBitsToUint( u_rtParms.y ) ) ),
+			gl_RayFlagsNoOpaqueEXT, 0xFDu, O, 0.0, Ldir, tMax );
+		while ( rayQueryProceedEXT( rqf ) ) {
+			if ( rayQueryGetIntersectionTypeEXT( rqf, false ) == gl_RayQueryCandidateIntersectionTriangleEXT
+					&& ( !rayQueryGetIntersectionFrontFaceEXT( rqf, false )
+					     || rayQueryGetIntersectionTEXT( rqf, false ) > u_color.z ) ) {
+				rayQueryConfirmIntersectionEXT( rqf );
+			}
+		}
+		solidHit = rayQueryGetIntersectionTypeEXT( rqf, true ) == gl_RayQueryCommittedIntersectionTriangleEXT;
+		if ( solidHit ) {
+			tSolid = rayQueryGetIntersectionTEXT( rqf, true );
+		}
+	} else if ( !perfOn ) {
 		// no grate in this light's volume (decided per light on the CPU): the ray this pass always
 		// traced, flags and mask CONSTANT - forcing everything opaque is the hardware's fastest
 		// traversal, and a runtime-selected flag word can't promise the driver that
@@ -238,6 +278,17 @@ void main() {
 	}
 
 	float dOcc = solidHit ? tSolid : tPerf;
+	if ( wrapBand ) {
+		// This pixel faces away from the light: its ray starts `push` above the surface and sinks back through the
+		// surface's own plane at push / sink. A hit from there on is the pixel's own body - a wall's back face, a
+		// head past its terminator - and stays lit, as before. Only a hit BEFORE that is something standing over
+		// the surface (a jaw over a neck), and shadows the skin's wrap light.
+		float sink = -dot( Noff, Ldir );
+		float push = u_rtParms.z + u_contactParms2.w * d;
+		if ( sink > 1e-4 && dOcc > 0.85 * push / sink ) {
+			return;
+		}
+	}
 	float gap   = dOcc / max( dL - dOcc, 1e-3 );
 	float halfW = u_localParam0.z * pow( gap, max( u_localParam1.w, 0.05 ) );
 	float rPx  = min( halfW * u_localParam0.w / max( d, 1.0 ), u_localParam1.x );

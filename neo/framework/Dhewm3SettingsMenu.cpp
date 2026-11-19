@@ -5281,6 +5281,16 @@ static void DrawDbgGroup_RTShadows()
 
 	SettingsHeading( "Performance" );
 	CvarCheckbox( "Checkerboard Shadow Rays", r_rtShadowBlurCheckerboard, nullptr );
+	CvarCheckbox( "Outside Hits Only", r_rtShadowOutsideHits, "Near its start, a shadow ray ignores hits on the inside of a mesh: the softening ray always, the hard ray on tessellated characters. Removes the black wedges and patches RT shadows left on tessellated characters (eye corners, collar, neck). A little slower; 0 = every hit counts, as before." );
+	CvarSliderI( "Character Soft Shadow Rays", r_rtShadowCharRays, 0, 16, "RT lights the softening leaves hard (penumbra under Min Penumbra) "
+		"still get a slightly soft edge on characters: this many rays per pixel over the light's size, averaged over each 2x2 pixel "
+		"block. Lights that are softened use the same blur on characters as on the world. 0 = hard there too. Costs on characters "
+		"only. Default 4." );
+	ImGui::BeginDisabled( !r_rtShadowOutsideHits.GetBool() );
+	CvarSliderF( "Inside-Hit Skip Distance", r_rtShadowInsideSkip, 0.0f, 16.0f, "%.1f units", "Outside Hits Only ignores inside hits only "
+		"this close to the shadow ray's start: enough to clear a start point buried in a character's coarse ray-traced copy or "
+		"pushed across a crease, while a real occluder farther away (the jaw over the neck) still casts. Default 3." );
+	ImGui::EndDisabled();
 	ImGui::EndDisabled();	// rtCapable
 	EndSettingsGroup();
 	}
@@ -5937,8 +5947,12 @@ static void DrawDbgGroup_RtContactShadows()
 			"Short = tight contact grounding; long = broader. Clamped to the distance to the light. Default 14." );
 
 		CvarSliderF( "Softness", r_rtContactShadowSoftness, 0.0f, 45.0f, "%.0f", "how soft the edge is: the half-angle in degrees "
-			"of the cone the rays spread over toward the light (each 2x2 pixel block traces four directions and averages "
-			"them). 0 = hard edge. Default 12." );
+			"of the cone the rays spread over toward the light (each 2x2 pixel block averages its rays, and every block "
+			"points them differently). 0 = hard edge. Default 12." );
+
+		CvarSliderI( "Rays per Pixel", r_rtContactShadowRays, 1, 8, "how many directions each pixel traces inside the softness cone. "
+			"With FSR on, 1 is enough: the directions change every frame and FSR averages them into a smooth edge. Without FSR "
+			"the edge is fine grain at 1; raise this to smooth it, at that many times the contact-shadow cost. Default 1." );
 
 		CvarSliderF( "Max Distance", r_contactShadowMaxDist, 0.0f, 4096.0f, "%.0f", "distance fade (world units), shared with the "
 			"screen-space contact shadows: the rays' screen-locked directions make far terrain crawl as the view moves (issue #25). "

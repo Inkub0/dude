@@ -112,9 +112,14 @@ occluder found by a ray instead of the depth buffer.
 - **What it traces:** in `interaction.frag` `rtContactOcclusion` (ray-query variant only), one ray from the lit
   fragment toward the light, `r_rtContactShadowLength` world units (clamped short of the light), solid geometry only
   (cull mask `0xFD`: grates are left to the shadow itself). The nearest hit's distance sets the fade.
-- **Soft edge:** the four pixels of each 2x2 quad trace four directions spread over a cone toward the light (half-angle
-  `r_rtContactShadowSoftness`, default 12 degrees; four points a quarter turn apart at 0.7 of the cone radius), and
-  `contactShadowTerm` averages them through the same quad average as the screen-space march. The first version traced
+- **Soft edge:** the pixels of each 2x2 quad trace directions spread over a cone toward the light (half-angle
+  `r_rtContactShadowSoftness`, default 12 degrees) and `contactShadowTerm` averages them through the same quad average
+  as the screen-space march. Since 2026-11-19 the quad's `4 x r_rtContactShadowRays` directions are one sunflower
+  pattern over the WHOLE cone, turned per quad by interleaved gradient noise and, while FSR2 resolves the view, per
+  frame (`dudeQuadTurn`). Before that every quad traced the same four directions on a ring at 0.7 of the cone: four
+  hard copies of each shadow, about 0.15 x the occluder distance apart (tens of pixels for a jaw over a neck at the
+  14-unit reach), which read as a blur "composed of defined lines". `r_rtContactShadowRays` (default 1) traces more
+  directions per pixel for a smooth edge without FSR2, at that many times the cost. The first version traced
   one exact ray per pixel: correct, but a hard-edged hit/miss (user, 2026-11-10: "very hard").
 - **Start point and self-hits:** the first version started the ray `r_rtSunShadowOffset` (1 unit) off the surface
   along the normal, like the RT shadow rays. That lifted the start past small occluders: no shadow under the nose.
@@ -132,9 +137,11 @@ occluder found by a ray instead of the depth buffer.
   has the ray-query variant. The backend (`RB_RHI_FillContactShadowParms`) sets `u_contactParms = (-1, length, 0,
   tan(softness), strength)`, fills the TLAS into `u_rtParms` when the draw's shadow mode didn't already, and binds
   `interaction_rt` (its shadow-map / mask paths are unchanged). It **replaces** the screen-space march on those draws.
-- **Skipped** for lights that trace the full hard RT shadow ray (mode 4: `r_rtSunShadows`, `r_rtMovingLights`,
-  `r_rtAllLights` without the blur): that ray already finds every occluder the short one could. With the blur (modes
-  5 / 6) it runs and restores the contact the blur softened.
+- **Every shadow mode gets it** (since 2026-11-19), the full hard RT shadow ray included (mode 4: `r_rtSunShadows`,
+  `r_rtMovingLights`, `r_rtAllLights` without the blur). It used to be skipped there on the grounds that the hard ray
+  already finds every occluder the short one could; but that ray starts `r_rtSunShadowOffset` (1 unit) off the surface
+  and misses exactly the close occluders this term is for, so with Soften RT Shadows off the contact shadows vanished
+  instead of staying. With the blur (modes 5 / 6) it restores the contact the blur softened.
 - **Path Tracing:** ReSTIR DI lights the scene without per-light draws, so only the lights still drawn one by one get
   it. Covering the DI-lit lights would need its own design (a per-pixel contact ray toward a stochastic light sample
   brings the dots back).
