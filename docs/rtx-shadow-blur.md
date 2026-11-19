@@ -406,11 +406,14 @@ order they were found:
   counts only a hit BEFORE the ray sinks back through the surface's own plane, so a surface's own
   back side stays lit exactly as before.
 - **Lights without a mask.** With softening on, an RT light the blur pass made no mask for (penumbra
-  under `r_rtShadowBlurMinPenumbra`) is a hard ray on the world. On an animated character
-  `r_rtShadowCharRays` (4) traces it per draw instead (`rtSoftConeVis`, shadow mode 7): rays spread
-  over the light's physical size, averaged over each 2x2 quad. This is a PHYSICAL cone, several times
-  narrower near contact than the mask's blur (which follows `r_rtShadowBlurCurve`), so a light that
-  has a mask uses the mask on characters, like the world.
+  under `r_rtShadowBlurMinPenumbra`) is a hard ray, on characters as on the world. Until the evening
+  of 2026-11-19 a character traced a small cone there instead (`r_rtShadowCharRays`, shadow mode 7).
+  Removed: the routing readout showed 0.0 such draws per frame over a whole demo, and the skip rule
+  says why. A light loses its mask only when 2 x 3 units x pixels-per-unit / its distance is under
+  the minimum, which at 1920x1080 and the 2 px default is a light more than about 2900 units away
+  (1440 units at Ultra's 4 px). A character lit by it is a few pixels tall. It was also the one path
+  with its own, physical, penumbra width, several times narrower near contact than the mask's blur.
+  With it gone a softened light has one penumbra model: the mask.
 - **Contact shadows "composed of defined lines".** Not this system: see docs/contact-shadows.md.
 
 Tried and dropped: fading the ray's result near the smooth terminator (it erased the jaw's real
@@ -462,7 +465,7 @@ What changes in the picture, and what to check before it becomes a default:
   real occluder at the facet level, and a 1-unit start hid facet steps under 1 unit), and a start
   buried deeper in a tessellated character's coarse copy than before, which leans harder on
   `r_rtShadowInsideSkip`. Look with `r_rtShadowDebug 2`.
-- The hard per-draw ray (mode 4) and the character cone (mode 7) are untouched.
+- The hard per-draw ray (mode 4) is untouched.
 
 Measure with `VARIANTS="A G H I" tools/bench/timedemo-ab.sh rtshadow 3` (H = 1, I = 2 with the
 routing readout; G is the A against A control).
@@ -470,9 +473,8 @@ routing readout; G is the A against A control).
 ## Cvars
 
 - `r_rtShadowOutsideHits` (1) / `r_rtShadowInsideSkip` (3.0): see "Characters" above.
-- `r_rtShadowCharRays` (4, 0..16): see "Characters" above. 0 = the hard ray.
 - `r_rtShadowNearStart` (0, 0..2): see "Near ray start" above. Experimental.
-- `r_rtShadowDebug` (0, not archived; Debug Views > "RT Shadow View"): 1 = a console readout once a second, per-frame averages: softened masks made / reused, masks not made (penumbra under the minimum, no opaque rect), and the lit draws per shadow mode (hard ray, mask, stale mask, character cone, shadow map, unshadowed) for world and for animated characters, plus how many trace the RT contact ray. 2 = the readout, and every light draws only its shadow term on a white surface (weighted by the light's projection and falloff; no albedo, no N.L, no specular, no contact term). 3 = only its contact shadow term. 4 = its shadow mode as a colour: red hard ray, green mask, yellow stale mask, blue character cone, white shadow map, grey unshadowed. Views 2 to 4 skip ambient lights. Where a ray mode does not trace (the surface faces away from the light) the shadow term reads black. Use it before guessing which term draws an artifact.
+- `r_rtShadowDebug` (0, not archived; Debug Views > "RT Shadow View"): 1 = a console readout once a second, per-frame averages: softened masks made / reused, masks not made (penumbra under the minimum, no opaque rect), the masks' screen rects summed and what they would sum to if four lights at a time shared their passes (sizing for a batched blur, review F6), and the lit draws per shadow mode (hard ray, mask, stale mask, shadow map, unshadowed) for world and for animated characters, plus how many trace the RT contact ray. 2 = the readout, and every light draws only its shadow term on a white surface (weighted by the light's projection and falloff; no albedo, no N.L, no specular, no contact term). 3 = only its contact shadow term. 4 = its shadow mode as a colour: red hard ray, green mask, yellow stale mask, white shadow map, grey unshadowed. Views 2 to 4 skip ambient lights. Where a ray mode does not trace (the surface faces away from the light) the shadow term reads black. Use it before guessing which term draws an artifact.
 
 - `r_rtAllLights` (0; on in the Ultra Nightmare preset, with `r_rtShadowBlur`): ray-trace every
   shadow-casting light (see above). `r_rtShadowBlurStagger` is on there too (the preset owns the on/off, not the two distances).

@@ -113,11 +113,35 @@ written); `0` (memset) on every non-skin draw.
 | `r_skinShading` | `0.6` | 0..1 | SSS strength on skin/flesh materials (0 = vanilla, 1 = full). Defaults on; preset-owned. |
 | `r_skinScatter` | `0.4` | 0..1 | Red-channel scatter reach (how far the wrap bleeds past the terminator; g/b derive shorter). Free tuning knob. |
 
-Both are `CVAR_ARCHIVE`, live (no reload), and exposed in **Graphics → Lighting**: a master
+| `r_skinShadowScatter` | `0` | 0..1 | Penumbra scattering (below). Off by default; not preset-owned. |
+
+The first two are `CVAR_ARCHIVE`, live (no reload), and exposed in **Graphics → Lighting**: a master
 **"Skin Subsurface Scattering (SSS)"** checkbox (toggles the feature between off and the last
 strength, remembered so an off/on round-trip restores the amount), with the **strength** and
 **reach** sliders below it, greyed while off. The whole risk here is **taste**, not code — both
 knobs are meant to be dialled in-game.
+
+## Penumbra scattering - `r_skinShadowScatter` (2026-11-19, opt-in)
+
+The wrap reddens the terminator, but a shadow edge on skin stayed a neutral grey ramp, although the
+same scatter carries light under it. Penner's pre-integrated model has a second lookup for exactly
+this. Without a texture: each channel's shadow visibility is the grey one raised to
+`1 / ( 1 + k * that channel's wrap width )`, `k = 3 * r_skinShadowScatter`. Red has the widest wrap,
+so it reaches furthest into the shadow, green less, blue least: a warm fringe on the shadow side of
+the edge. At full strength red's visibility is about the square root of the grey one.
+
+- 0 stays 0 and 1 stays 1, so full shadow and full light are untouched, and a hard 0 / 1 shadow
+  shows nothing. It needs a soft edge: the softened RT mask, a filtered shadow map, the contact
+  term's quad average.
+- Added as extra diffuse light: the per-channel visibility minus the grey one, times the Lambert
+  term and the wrap. Never negative; specular keeps the grey shadow.
+- It only brightens the shadow side. A physical scatter also takes that light from the lit side;
+  this does not, so high values lift the whole penumbra.
+- Rides `u_aoParms.w` (set only on skin / flesh interaction draws). "Skin Shadow Scatter", under
+  Skin in the Materials group of the Debugging tab.
+
+Seen in game on 2026-11-19 at 1.0 (Swann, softened RT lights) and kept. It stays off by default: it
+changes the look of every shadow edge on skin, so it is a choice, like the reach.
 
 ## Preset gating
 
