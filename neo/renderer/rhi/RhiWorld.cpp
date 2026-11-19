@@ -2154,6 +2154,12 @@ static void RB_RHI_RtShadowDbgFrame( const viewDef_t *viewDef ) {
 	d.frames++;
 }
 
+// r_rtShadowNearStart as the softening ray pass and the interaction draws both read it: 0 unless the outside-hits rule
+// is on - a start 0.05 units off the surface is only safe when a hit on the inside of a mesh does not count.
+static int RB_RHI_RtShadowNearStart() {
+	return r_rtShadowOutsideHits.GetBool() ? idMath::ClampInt( 0, 2, r_rtShadowNearStart.GetInteger() ) : 0;
+}
+
 // The frame phase for shaders that turn a per-quad ray pattern (interaction.frag dudeQuadTurn): 1 + frame index while
 // FSR2 resolves this view over time - the same test as the projection jitter (R_RenderView, tr_main.cpp) - so each
 // frame takes other directions and the resolve averages the dither into a gradient; 0 otherwise = a pattern that
@@ -2546,6 +2552,13 @@ static void RB_RHI_FillSsaoParms( rhi::RenderParams &parms, const drawInteractio
 }
 
 static bool RB_RHI_FillContactShadowParms( rhi::RenderParams &parms, const drawInteraction_t *din, bool &rtSun ) {
+	// r_rtShadowNearStart 2: a draw that reads a mask made THIS frame (mode 5) gets no contact term. That mask's ray
+	// started 0.05 units off the surface - where the contact ray starts - and already holds every close occluder a
+	// contact ray toward this light would find. No screen-space march either: it would be the same repeat. A stale
+	// mask (mode 6) and the per-draw rays (modes 4, 7) keep their contact ray: those still start r_rtSunShadowOffset out.
+	if ( parms.shadowParms[0] == 5.0f && RB_RHI_RtShadowNearStart() >= 2 ) {
+		return false;
+	}
 	// DUDE RT contact shadows (r_rtContactShadows, docs/contact-shadows.md): the same contact term, but the occluder is
 	// found by one short ray query through the scene TLAS (interaction.frag rtContactShadowTerm) instead of the depth
 	// march - so it needs the ray-query interaction variant and a live scene, i.e. RTX on. contactParms.x = -1 selects
@@ -11374,7 +11387,8 @@ static rhi::ImageHandle RB_RHI_RtShadowBlurLight( rhi::RHI *r, const viewDef_t *
 	// fill pass; the tile classification already ignores holes (they read as "never traced").
 	const bool cbActive = r_rtShadowBlurCheckerboard.GetBool();
 	parms.color[0] = cbActive ? 1.0f : 0.0f;					// u_color.x = checkerboard enable (rtshadow_ray.frag)
-	parms.color[1] = r_rtShadowOutsideHits.GetBool() ? 1.0f : 0.0f;	// u_color.y = outside hits only
+	// u_color.y = 1: outside hits only; 2: that and the near ray start (r_rtShadowNearStart)
+	parms.color[1] = !r_rtShadowOutsideHits.GetBool() ? 0.0f : ( RB_RHI_RtShadowNearStart() > 0 ) ? 2.0f : 1.0f;
 	parms.color[2] = Max( r_rtShadowInsideSkip.GetFloat(), 0.0f );		// u_color.z = ... within this distance
 	// u_color.w = the widest skin scatter wrap (RB_RHI_FillSkinSSS: flesh reaches r_skinScatter * 1.3): the ray pass
 	// traces that far past the terminator, where skin is still lit and a shadow on it still shows

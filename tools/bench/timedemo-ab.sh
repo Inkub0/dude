@@ -55,7 +55,8 @@
 #                RTX hybrid Nightmare, one binary. A = as merged, B = outside-hits rule off, C = RT contact shadows off,
 #                D = character rays 0, E = all three off, F = skin shading off (no scatter-band rays). Read the frame's
 #                GPU ms and the light.interact / rtblur.ray scopes. G = A with r_rtShadowDebug 1: the routing readout
-#                lands in its stdout.log (grep rtShadow). VARIANTS="A B C" = the short run
+#                lands in its stdout.log (grep rtShadow). H / I = r_rtShadowNearStart 1 / 2 (review item 3; I with
+#                the readout). VARIANTS="A B C" = the short run, VARIANTS="A G H I" = what the near start saves
 #   rounds : alternating rounds after the warm-up (default 3)
 # Env: DUDE_BIN  binary (default <repo>/build/dude)
 #      DUDE_CFG  your config, source of the display settings (default ~/.config/dude/base/dude.cfg)
@@ -95,7 +96,7 @@ case "$SET" in
 		# 2026-11-19: RTX hybrid Nightmare (dude_rtx 1, preset 5: every light ray-traced and softened, RT contact shadows on).
 		# Each variant removes one of the day's additions; the fresh sandbox starts every cvar at its default.
 		PRESET=5; RTX=1
-		NAMES=( A B C D E F G )
+		NAMES=( A B C D E F G H I )
 		DESC[A]="as merged: outside hits 1, RT contact shadows 1, character rays 4"; ARGS[A]=""
 		DESC[B]="outside-hits rule off";                    ARGS[B]="+set r_rtShadowOutsideHits 0"
 		DESC[C]="RT contact shadows off";                   ARGS[C]="+set r_rtContactShadows 0"
@@ -105,6 +106,11 @@ case "$SET" in
 		# G is not a cost variant: it is A with the routing readout on, so stdout.log holds the demo's draws per shadow
 		# mode (how many character cone draws D could remove at all, how many masks a frame makes)
 		DESC[G]="as merged + routing readout (r_rtShadowDebug 1)"; ARGS[G]="+set r_rtShadowDebug 1"
+		# review item 3 (r_rtShadowNearStart): H = the softening ray starts 0.05 units off the surface, I = that and no
+		# contact ray on draws that read a softened light's mask. Run them with G: G against A is the noise floor
+		# (identical GPU work), and the readout in I's stdout.log shows how many contact-ray draws were dropped.
+		DESC[H]="near ray start";                           ARGS[H]="+set r_rtShadowNearStart 1"
+		DESC[I]="near ray start, no contact ray on softened lights + readout"; ARGS[I]="+set r_rtShadowNearStart 2 +set r_rtShadowDebug 1"
 		;;
 	m1)
 		# Path Tracing Nightmare (dude_rtx 2, preset 5); 0.9.6 had BoostHistory 2 / BoostConfidence 0

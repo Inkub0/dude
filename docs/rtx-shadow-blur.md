@@ -417,10 +417,61 @@ Tried and dropped: fading the ray's result near the smooth terminator (it erased
 shadow), and building the animated BLAS from the deform-once tessellated buffer (no visible change
 on these defects, 64x the triangles to refit at tessellation level 8).
 
+## Near ray start - `r_rtShadowNearStart` (2026-11-19, experimental, off by default)
+
+Review item 3 (docs/rtx-shadows-review.md F1 and F3). The softening ray started `r_rtSunShadowOffset`
+(1 unit) plus the distance term off the surface. The constant was a self-intersection guard from the
+time every hit counted, and it lifts the start over any occluder closer than that: a nose over a
+lip, a panel's edge on a wall. The RT contact shadows exist on ray-traced lights to put those back,
+at 40% strength, for one more ray per pixel per light (measured: 0.65 ms, 4 to 5% of the frame in
+demo1 at Nightmare).
+
+With the outside-hits rule on, a start a hair off the surface is safe: the contact ray has always
+started 0.05 units out under the same rule. So:
+
+- **1**: where the surface's flat triangle faces the light, the softening ray starts 0.05 units out
+  (plus the distance term), and finds the close occluders itself, at full strength and with the
+  softening's own edge. As the triangle turns edge-on to the light (cosine 0.15 down to 0) the start
+  fades back to `r_rtSunShadowOffset`, and past that nothing changes.
+- **2**: that, and a draw that reads a mask made this frame (shadow mode 5) traces no RT contact
+  ray. Lights that cast no shadow, the view weapon, translucent surfaces and a reused (stale) mask
+  keep their contact ray: their rays still start a unit out, or do not exist.
+- **0**: off. Also off whenever `r_rtShadowOutsideHits` is 0.
+
+Why the fade: on the lit side of a low-poly round shape's terminator a triangle already faces away
+from the light while its shading normal still takes light. A ray from 0.05 units lands on that same
+triangle and whole facets go dark; from 1 unit it clears the triangle's edge. Ignoring hits past the
+triangle's own plane (what the scatter band does) cures the facets but lets that band's light
+through a real wall. `tools/tests/rt_shadow_terminator_sim.py` measures all four variants on
+icospheres: the near start alone darkens 26 to 77% of the facing-away band, the own-plane rule leaks
+7.5% of the lit points through a wall, the facing fade does neither.
+
+Seen in game on 2026-11-19 with settings 1 and 2: judged to look right. Its saving is not measured: the
+benchmark was left for later, and variants H and I of the `rtshadow` set are ready for it.
+
+What changes in the picture, and what to check before it becomes a default:
+
+- Close contact shadows under softened lights are the light's real shadow now: full strength, the
+  softening's edge, the light's own direction. The contact term drew them at 40% over a 12 degree
+  cone and a 14 unit reach, and on top of the main shadow.
+- Geometry under 1 unit high (trim, cables, panel edges) casts under softened lights. It did not.
+- Not covered: pixels whose ray can meet a grate keep the old start (the perforated traversal has
+  no outside-hits test), and with setting 2 they have no contact ray either. At grazing light
+  (cosine under 0.15) occluders under 1 unit are found by neither ray with setting 2.
+- Risks not ruled out offline: low-poly CONCAVE smooth-shaded surfaces (a neighbouring facet is a
+  real occluder at the facet level, and a 1-unit start hid facet steps under 1 unit), and a start
+  buried deeper in a tessellated character's coarse copy than before, which leans harder on
+  `r_rtShadowInsideSkip`. Look with `r_rtShadowDebug 2`.
+- The hard per-draw ray (mode 4) and the character cone (mode 7) are untouched.
+
+Measure with `VARIANTS="A G H I" tools/bench/timedemo-ab.sh rtshadow 3` (H = 1, I = 2 with the
+routing readout; G is the A against A control).
+
 ## Cvars
 
 - `r_rtShadowOutsideHits` (1) / `r_rtShadowInsideSkip` (3.0): see "Characters" above.
 - `r_rtShadowCharRays` (4, 0..16): see "Characters" above. 0 = the hard ray.
+- `r_rtShadowNearStart` (0, 0..2): see "Near ray start" above. Experimental.
 - `r_rtShadowDebug` (0, not archived; Debug Views > "RT Shadow View"): 1 = a console readout once a second, per-frame averages: softened masks made / reused, masks not made (penumbra under the minimum, no opaque rect), and the lit draws per shadow mode (hard ray, mask, stale mask, character cone, shadow map, unshadowed) for world and for animated characters, plus how many trace the RT contact ray. 2 = the readout, and every light draws only its shadow term on a white surface (weighted by the light's projection and falloff; no albedo, no N.L, no specular, no contact term). 3 = only its contact shadow term. 4 = its shadow mode as a colour: red hard ray, green mask, yellow stale mask, blue character cone, white shadow map, grey unshadowed. Views 2 to 4 skip ambient lights. Where a ray mode does not trace (the surface faces away from the light) the shadow term reads black. Use it before guessing which term draws an artifact.
 
 - `r_rtAllLights` (0; on in the Ultra Nightmare preset, with `r_rtShadowBlur`): ray-trace every
