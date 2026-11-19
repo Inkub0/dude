@@ -62,9 +62,6 @@ UBO_BINDING(0) uniform RenderParams {
 	                            // w = light range (point-cube radial normalizer). The 2D
 	                            // path reuses the light-projection texgen (S/T/Q + falloff);
 	                            // the cube path uses the world-space light->frag direction.
-	                            // x = 7: soft RT shadow traced per draw on an animated character (rtSoftConeVis,
-	                            // r_rtShadowCharRays): y = light radius (world units), z = rays per pixel,
-	                            // w = frame phase of the sample rotation (0 = static; FSR2 on = 1 + frame index).
 
 	vec4 u_occlusionParms;       // DUDE material AO map (docs/occlusion-maps.md):
 	                            // x = enable, y = ambient strength, z = direct-diffuse
@@ -185,7 +182,8 @@ UBO_BINDING(0) uniform RenderParams {
 	                             // on direct light); y = 1: baked / sidecar AO on direct light as
 	                             // micro-shadows (r_aoMicroShadows). Interaction draws + restir_di_apply. z = the
 	                             // r_rtShadowDebug view on interaction draws (0 off, 1 shadow term, 2 contact term,
-	                             // 3 shadow mode colour). w spare.
+	                             // 3 shadow mode colour). w = skin penumbra scattering on a skin / flesh
+	                             // interaction draw (r_skinShadowScatter * 3, 0 = off).
 	                             // Appended LAST.
 };
 

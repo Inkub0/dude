@@ -2157,6 +2157,7 @@ static CVarOption screenshotOptions[] = {
 	} ),
 	CVarOption( "r_screenshotPngCompression", "Compression level for PNG screenshots", OT_INT, 0, 9 ),
 	CVarOption( "r_screenshotJpgQuality", "Quality level for JPG screenshots", OT_INT, 1, 100 ),
+	CVarOption( "r_screenshotAsSeen", "Capture the frame as displayed (upscaling included)", OT_BOOL ),
 };
 
 // Brightness / Gamma (live), shown in the Display group.
@@ -4942,8 +4943,8 @@ static void DrawDbgGroup_DebugViews()
 		CvarTip( r_rtShadowDebug, "Diagnostics for ray-traced shadows. Any setting but Off prints a console line once a second: "
 			"softened masks made, reused and skipped, and how many lit draws used each shadow mode, world and characters apart. "
 			"The three views replace every light's shading with one term on a white surface: the shadow alone, the contact "
-			"shadow alone, or the shadow mode as a colour (red hard ray, green softened mask, yellow reused mask, blue "
-			"per-pixel character trace, white shadow map, grey unshadowed). GI, reflections and glowing surfaces still "
+			"shadow alone, or the shadow mode as a colour (red hard ray, green softened mask, yellow reused mask, "
+			"white shadow map, grey unshadowed). GI, reflections and glowing surfaces still "
 			"draw; turn RT GI off for a clean picture. Vulkan only." );
 	}
 
@@ -5138,6 +5139,11 @@ static void DrawDbgGroup_Materials()
 		"wider glow, lower = tighter. The red channel's reach; green and blue derive shorter, which is "
 		"what makes the falloff warm. Flesh scatters ~30% deeper than face skin. Default 0.32. NOT "
 		"preset-owned, so it survives a preset change." );
+
+	CvarSliderF( "Skin Shadow Scatter", r_skinShadowScatter, 0.0f, 1.0f, "%.2f",
+		"a soft shadow edge on skin bleeds warm: red reaches furthest into the shadow, as it already does "
+		"at the terminator. Only shows where the shadow has a soft edge (softened RT shadows, filtered shadow "
+		"maps, contact shadows). Uses the Scatter Reach above. Default 0 (off). NOT preset-owned." );
 	ImGui::EndDisabled();
 	EndSettingsGroup();
 	}
@@ -5297,10 +5303,6 @@ static void DrawDbgGroup_RTShadows()
 	SettingsHeading( "Performance" );
 	CvarCheckbox( "Checkerboard Shadow Rays", r_rtShadowBlurCheckerboard, nullptr );
 	CvarCheckbox( "Outside Hits Only", r_rtShadowOutsideHits, "Near its start, a shadow ray ignores hits on the inside of a mesh: the softening ray always, the hard ray on tessellated characters. Removes the black wedges and patches RT shadows left on tessellated characters (eye corners, collar, neck). A little slower; 0 = every hit counts, as before." );
-	CvarSliderI( "Character Soft Shadow Rays", r_rtShadowCharRays, 0, 16, "RT lights the softening leaves hard (penumbra under Min Penumbra) "
-		"still get a slightly soft edge on characters: this many rays per pixel over the light's size, averaged over each 2x2 pixel "
-		"block. Lights that are softened use the same blur on characters as on the world. 0 = hard there too. Costs on characters "
-		"only. Default 4." );
 	ImGui::BeginDisabled( !r_rtShadowOutsideHits.GetBool() );
 	CvarSliderF( "Inside-Hit Skip Distance", r_rtShadowInsideSkip, 0.0f, 16.0f, "%.1f units", "Outside Hits Only ignores inside hits only "
 		"this close to the shadow ray's start: enough to clear a start point buried in a character's coarse ray-traced copy or "

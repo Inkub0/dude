@@ -1012,6 +1012,7 @@ extern idCVar r_pbrEnvScale;			// Phase C.1 metal env floor GLOBAL base (per-cat
 // classifier's skin/flesh categories; diffuse-only, works on every shading model (all tiers)
 extern idCVar r_skinShading;			// SSS strength on skin/flesh materials (0 = off .. 1 = full)
 extern idCVar r_skinScatter;			// terminator wrap reach (red channel; g/b derive shorter)
+extern idCVar r_skinShadowScatter;		// penumbra scattering: a soft shadow edge on skin bleeds warm (0 = off)
 
 // DUDE PBR Phase C.2 screen-space reflections (docs/ssr.md) — GL3 backend only
 extern idCVar r_ssr;					// enable; reflectivity follows the PBR material table
@@ -1313,7 +1314,6 @@ extern idCVar r_rtShadowDebug;				// RT shadow diagnostics: 1 readout, 2 shadow 
 extern idCVar r_rtShadowNearStart;
 extern idCVar r_rtShadowOutsideHits;	// r_rtShadowBlur: the softening ray counts only hits on a mesh's outside
 extern idCVar r_rtShadowInsideSkip;	// r_rtShadowOutsideHits: inside hits ignored only this close to the start
-extern idCVar r_rtShadowCharRays;		// r_rtShadowBlur: rays per pixel for tessellated characters, traced per draw (0 = mask)
 extern idCVar r_rtShadowBlurCheckerboard;	// r_rtShadowBlur perf: trace the shadow ray at a static checkerboard, reconstruct skipped pixels in the horizontal blur
 extern idCVar r_volFastResolve;				// volumetric perf: low-res temporal + single depth-aware upsample at composite (vs upsample-then-full-res-temporal)
 extern idCVar r_rtShadowBlurCurve;			// exponent on the gap ratio: how the blur grows with distance from the caster (1 = geometric)

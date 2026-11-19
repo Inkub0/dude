@@ -53,7 +53,7 @@
 #                nearly idle, so the CPU is the limit: VARIANTS="E F G H"
 #   set rtshadow : what the 2026-11-19 fixes for characters under ray-traced lights cost (docs/rtx-shadows-review.md F4):
 #                RTX hybrid Nightmare, one binary. A = as merged, B = outside-hits rule off, C = RT contact shadows off,
-#                D = character rays 0, E = all three off, F = skin shading off (no scatter-band rays). Read the frame's
+#                F = skin shading off (no scatter-band rays). Read the frame's
 #                GPU ms and the light.interact / rtblur.ray scopes. G = A with r_rtShadowDebug 1: the routing readout
 #                lands in its stdout.log (grep rtShadow). H / I = r_rtShadowNearStart 1 / 2 (review item 3; I with
 #                the readout). VARIANTS="A B C" = the short run, VARIANTS="A G H I" = what the near start saves
@@ -96,16 +96,14 @@ case "$SET" in
 		# 2026-11-19: RTX hybrid Nightmare (dude_rtx 1, preset 5: every light ray-traced and softened, RT contact shadows on).
 		# Each variant removes one of the day's additions; the fresh sandbox starts every cvar at its default.
 		PRESET=5; RTX=1
-		NAMES=( A B C D E F G H I )
-		DESC[A]="as merged: outside hits 1, RT contact shadows 1, character rays 4"; ARGS[A]=""
+		NAMES=( A B C F G H I )		# D and E went with the character cone (r_rtShadowCharRays, removed 2026-11-19)
+		DESC[A]="defaults: outside hits 1, RT contact shadows 1"; ARGS[A]=""
 		DESC[B]="outside-hits rule off";                    ARGS[B]="+set r_rtShadowOutsideHits 0"
 		DESC[C]="RT contact shadows off";                   ARGS[C]="+set r_rtContactShadows 0"
-		DESC[D]="character rays 0 (hard ray)";              ARGS[D]="+set r_rtShadowCharRays 0"
-		DESC[E]="all three off";                            ARGS[E]="+set r_rtShadowOutsideHits 0 +set r_rtContactShadows 0 +set r_rtShadowCharRays 0"
 		DESC[F]="skin shading off (no scatter-band rays)";  ARGS[F]="+set r_skinShading 0"
-		# G is not a cost variant: it is A with the routing readout on, so stdout.log holds the demo's draws per shadow
-		# mode (how many character cone draws D could remove at all, how many masks a frame makes)
-		DESC[G]="as merged + routing readout (r_rtShadowDebug 1)"; ARGS[G]="+set r_rtShadowDebug 1"
+		# G is not a cost variant: it is A with the routing readout on - identical GPU work, so G against A is the
+		# noise floor - and its stdout.log holds the demo's draws per shadow mode and the masks a frame makes
+		DESC[G]="defaults + routing readout (r_rtShadowDebug 1)"; ARGS[G]="+set r_rtShadowDebug 1"
 		# review item 3 (r_rtShadowNearStart): H = the softening ray starts 0.05 units off the surface, I = that and no
 		# contact ray on draws that read a softened light's mask. Run them with G: G against A is the noise floor
 		# (identical GPU work), and the readout in I's stdout.log shows how many contact-ray draws were dropped.

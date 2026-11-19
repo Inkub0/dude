@@ -2113,17 +2113,55 @@ static void RB_RHI_FillPerforatedParms( rhi::RHI *r, rhi::RenderParams &parms, c
 static float RB_RHI_RtShadowBlurLightRadius( const renderLight_t &lp, const idVec3 &lorg, const idVec3 &viewOrg );
 
 // r_rtShadowDebug (docs/rtx-shadows-review.md F9): what the RT shadow system did, summed over the primary view's frames
-// and printed once a second as per-frame averages. Counted only while the cvar is on. The question it answers is the
+// and printed once a second as per-frame averages. Counted only while the cvar is on - EVERY counter: the mask counts
+// once ran unguarded, piled up while it was off, and the first line after switching it on read "masks made 307.6". The question it answers is the
 // one that cost a day on 2026-11-19: which shadow mode does a light really use on a character, and did it get a mask.
-enum { RTSD_NONE, RTSD_MAP, RTSD_HARD, RTSD_MASK, RTSD_STALE, RTSD_CONE, RTSD_MODES };
+enum { RTSD_NONE, RTSD_MAP, RTSD_HARD, RTSD_MASK, RTSD_STALE, RTSD_MODES };
 struct rtShadowDbg_t {
 	int frames;
 	int maskMade, maskReused, maskSkipPenumbra, maskSkipNoRect;
 	int draws[2][RTSD_MODES];		// [0 world and props / 1 animated character][shadow mode]
 	int contactDraws[2];			// lit draws that also trace the RT contact shadow ray
+	// sizing for a batched blur (docs/rtx-shadows-review.md F6): each mask's ray / tile / blur passes run over its
+	// own screen rect. maskArea = those rects summed, in pixels. maskAreaBatched = the same if four lights at a
+	// time, in the order they come, shared one set of passes: the smaller of the four's bounding rect and their sum.
+	double maskArea, maskAreaBatched, screenArea;
+	int    batchN, batchRect[4];	// the open group of up to four: how many, and their bounding rect
+	double batchSum;				// ... and the sum of their rects
 	int lastPrintMs;
 };
 static rtShadowDbg_t rhiRtShadowDbg;
+
+static void RB_RHI_RtShadowDbgCloseBatch() {
+	rtShadowDbg_t &d = rhiRtShadowDbg;
+	if ( d.batchN > 0 ) {
+		const double box = (double)( d.batchRect[2] - d.batchRect[0] + 1 ) * (double)( d.batchRect[3] - d.batchRect[1] + 1 );
+		d.maskAreaBatched += Min( box, d.batchSum );
+		d.batchN = 0;
+		d.batchSum = 0.0;
+	}
+}
+
+// one mask made: its ray rect (inclusive pixel bounds) on a w x h view
+static void RB_RHI_RtShadowDbgMaskRect( int x1, int y1, int x2, int y2, int w, int h ) {
+	if ( r_rtShadowDebug.GetInteger() <= 0 || x2 < x1 || y2 < y1 ) {
+		return;
+	}
+	rtShadowDbg_t &d = rhiRtShadowDbg;
+	const double area = (double)( x2 - x1 + 1 ) * (double)( y2 - y1 + 1 );
+	d.screenArea = (double)w * (double)h;
+	d.maskArea += area;
+	if ( d.batchN == 0 ) {
+		d.batchRect[0] = x1; d.batchRect[1] = y1; d.batchRect[2] = x2; d.batchRect[3] = y2;
+	} else {
+		d.batchRect[0] = Min( d.batchRect[0], x1 ); d.batchRect[1] = Min( d.batchRect[1], y1 );
+		d.batchRect[2] = Max( d.batchRect[2], x2 ); d.batchRect[3] = Max( d.batchRect[3], y2 );
+	}
+	d.batchSum += area;
+	if ( ++d.batchN == 4 ) {
+		RB_RHI_RtShadowDbgCloseBatch();
+	}
+}
 
 // once per primary view, before its lights draw
 static void RB_RHI_RtShadowDbgFrame( const viewDef_t *viewDef ) {
@@ -2135,16 +2173,21 @@ static void RB_RHI_RtShadowDbgFrame( const viewDef_t *viewDef ) {
 	if ( viewDef == NULL || viewDef->isSubview || !viewDef->isWindowView ) {
 		return;
 	}
+	RB_RHI_RtShadowDbgCloseBatch();		// the last frame's lights are all in: a group never spans two frames
 	const int now = Sys_Milliseconds();
 	if ( d.frames > 0 && now - d.lastPrintMs >= 1000 ) {
 		const float f = 1.0f / (float)d.frames;
 		common->Printf( "rtShadow/frame: masks made %.1f reused %.1f | no mask: penumbra under min %.1f, no opaque rect %.1f\n",
 		                d.maskMade * f, d.maskReused * f, d.maskSkipPenumbra * f, d.maskSkipNoRect * f );
+		if ( d.screenArea > 0.0 ) {
+			common->Printf( "  mask rects: %.2f screens light by light, %.2f if four lights at a time shared their passes\n",
+			                d.maskArea * f / d.screenArea, d.maskAreaBatched * f / d.screenArea );
+		}
 		for ( int c = 0; c < 2; c++ ) {
-			common->Printf( "  %s draws: hard ray %.1f, mask %.1f, stale mask %.1f, character cone %.1f, shadow map %.1f, unshadowed %.1f | with contact ray %.1f\n",
+			common->Printf( "  %s draws: hard ray %.1f, mask %.1f, stale mask %.1f, shadow map %.1f, unshadowed %.1f | with contact ray %.1f\n",
 			                c ? "character" : "world    ",
 			                d.draws[c][RTSD_HARD] * f, d.draws[c][RTSD_MASK] * f, d.draws[c][RTSD_STALE] * f,
-			                d.draws[c][RTSD_CONE] * f, d.draws[c][RTSD_MAP] * f, d.draws[c][RTSD_NONE] * f,
+			                d.draws[c][RTSD_MAP] * f, d.draws[c][RTSD_NONE] * f,
 			                d.contactDraws[c] * f );
 		}
 		memset( &d, 0, sizeof( d ) );
@@ -2171,11 +2214,10 @@ static float RB_RHI_QuadTurnPhase( void ) {
 	return temporal ? (float)( 1 + ( tr.frameCount & 1023 ) ) : 0.0f;
 }
 
-// An animated character surface (md5: monsters, NPCs, heads) that the per-draw soft trace serves: not the view weapon
-// or another depth-hacked model (the ray would start in its compressed depth range) and not translucent (eyeballs,
-// glows - they never read a shadow mask anyway). Wider than the tessellation classifier on purpose: a character's
-// untessellated parts (a body mesh, a collar, a skin the classifier excludes) want the same soft edge.
-static bool RB_RHI_CharSoftSurf( const drawSurf_t *surf ) {
+// An animated character surface (md5: monsters, NPCs, heads) for the r_rtShadowDebug readout: not the view weapon or
+// another depth-hacked model and not translucent (eyeballs, glows). Wider than the tessellation classifier on
+// purpose: a character's untessellated parts (a body mesh, a collar, a skin the classifier excludes) count too.
+static bool RB_RHI_CharacterSurf( const drawSurf_t *surf ) {
 	const viewEntity_t *space = surf->space;
 	if ( space == NULL || space->entityDef == NULL || space->entityDef->index == 0
 	     || space->weaponDepthHack || space->modelDepthHack != 0.0f ) {
@@ -2195,43 +2237,13 @@ static void RB_RHI_RtShadowDbgCountDraw( const rhi::RenderParams &parms, const d
 		return;
 	}
 	const float m = parms.shadowParms[0];
-	const int mode = ( m > 6.5f ) ? RTSD_CONE : ( m > 5.5f ) ? RTSD_STALE : ( m > 4.5f ) ? RTSD_MASK
+	const int mode = ( m > 5.5f ) ? RTSD_STALE : ( m > 4.5f ) ? RTSD_MASK
 	               : ( m > 3.5f ) ? RTSD_HARD : ( m > 0.5f ) ? RTSD_MAP : RTSD_NONE;
-	const int cls = RB_RHI_CharSoftSurf( surf ) ? 1 : 0;
+	const int cls = RB_RHI_CharacterSurf( surf ) ? 1 : 0;
 	rhiRtShadowDbg.draws[cls][mode]++;
 	if ( parms.contactParms[0] < -0.5f ) {
 		rhiRtShadowDbg.contactDraws[cls]++;
 	}
-}
-
-// r_rtShadowCharRays (mode 7, interaction.frag rtSoftConeVis): with softening on, an RT light the softening pass made
-// NO mask for this frame (its penumbra is under r_rtShadowBlurMinPenumbra, ...) is traced per draw on an animated
-// CHARACTER, like the RT contact shadows: a few rays over the light's physical size, averaged over each 2x2 quad, so a
-// face keeps a slightly soft edge where the world shows a hard one. A light WITH a mask uses the mask on characters
-// too (RB_RHI_FillBlurMaskParms): the screen-space blur follows r_rtShadowBlurCurve and is several times wider near
-// contact than a physical cone, so a cone-traced character read as "defined lines" next to the softened world. (The
-// mask was wrong on skin until its ray pass traced the scatter-wrap band - rtshadow_ray.frag wrapBand.) False = not a
-// character / rays 0 / no RT variant or TLAS: the caller's hard ray.
-static bool RB_RHI_FillCharSoftParms( rhi::RenderParams &parms, const drawInteraction_t *din, bool &rtSun ) {
-	const int rays = r_rtShadowCharRays.GetInteger();
-	if ( rays <= 0 || ictx.interactionRtProg == 0 || !RB_RHI_CharSoftSurf( din->surf ) ) {
-		return false;
-	}
-	const unsigned long long tlas = ictx.r->GetTlasAddress();
-	const viewLight_t *vLight = backEnd.vLight;
-	if ( tlas == 0 || vLight == NULL || vLight->lightDef == NULL || backEnd.viewDef == NULL ) {
-		return false;
-	}
-	parms.shadowParms[0] = 7.0f;
-	parms.shadowParms[1] = RB_RHI_RtShadowBlurLightRadius( vLight->lightDef->parms, vLight->globalLightOrigin,
-	                                                       backEnd.viewDef->renderView.vieworg );
-	parms.shadowParms[2] = (float)idMath::ClampInt( 1, 16, rays );
-	parms.shadowParms[3] = RB_RHI_QuadTurnPhase();	// per-quad sample rotation: per frame under FSR2, else static
-	RB_RHI_PackAddr( &parms.rtParms[0], tlas );	// bit-cast, NOT a value cast
-	parms.rtParms[2] = r_rtSunShadowOffset.GetFloat();
-	parms.rtParms[3] = 100000.0f;
-	rtSun = true;		// bind the ray-query interaction variant for this draw
-	return true;
 }
 
 // r_rtShadowBlur: shader parms for an interaction that looks this light's blurred mask up
@@ -2360,6 +2372,9 @@ static void RB_RHI_FillSkinSSS( rhi::RenderParams &parms, const drawInteraction_
 				parms.skinParms[2] = rad * 0.35f;
 				parms.skinParms[3] = rad * 0.20f;
 			}
+			// u_aoParms.w: penumbra scattering, the per-channel shadow edge (interaction.frag). x3: at full strength
+			// red's visibility is the grey one to the power 1 / ( 1 + 3 * its wrap width ) - about a square root
+			parms.aoParms[3] = idMath::ClampFloat( 0.0f, 1.0f, r_skinShadowScatter.GetFloat() ) * 3.0f;
 		}
 	}
 }
@@ -2442,9 +2457,6 @@ static void RB_RHI_FillShadowParms( rhi::RenderParams &parms, const drawInteract
 			// (R_RtWorldUpdate auto-builds it while r_rtSunShadows is on).
 			if ( blurMask ) {
 				RB_RHI_FillBlurMaskParms( parms, rtSun );
-			} else if ( r_rtShadowBlur.GetBool() && r_rtSunShadows.GetBool() && RB_RHI_FillCharSoftParms( parms, din, rtSun ) ) {
-				// softening on but no mask this light this frame (Min Penumbra skip, stagger, ...): a tessellated
-				// character is traced per draw anyway - it never needed the mask
 			} else if ( r_rtSunShadows.GetBool() && ictx.interactionRtProg != 0 ) {
 				const unsigned long long tlas = ictx.r->GetTlasAddress();
 				if ( tlas != 0 ) {
@@ -2470,9 +2482,6 @@ static void RB_RHI_FillShadowParms( rhi::RenderParams &parms, const drawInteract
 			const unsigned long long tlas = ictx.r->GetTlasAddress();
 			if ( blurMask ) {
 				RB_RHI_FillBlurMaskParms( parms, rtSun );
-			} else if ( r_rtShadowBlur.GetBool() && RB_RHI_FillCharSoftParms( parms, din, rtSun ) ) {
-				// softening on but no mask for this light this frame (Min Penumbra skip, stagger, r_rtAllLights
-				// lights the blur pass passed over...): a tessellated character is traced per draw anyway
 			} else if ( tlas != 0 && ictx.interactionRtProg != 0 ) {
 				parms.shadowParms[0] = 4.0f;
 				RB_RHI_PackAddr( &parms.rtParms[0], tlas );	// bit-cast, NOT a value cast
@@ -2555,7 +2564,7 @@ static bool RB_RHI_FillContactShadowParms( rhi::RenderParams &parms, const drawI
 	// r_rtShadowNearStart 2: a draw that reads a mask made THIS frame (mode 5) gets no contact term. That mask's ray
 	// started 0.05 units off the surface - where the contact ray starts - and already holds every close occluder a
 	// contact ray toward this light would find. No screen-space march either: it would be the same repeat. A stale
-	// mask (mode 6) and the per-draw rays (modes 4, 7) keep their contact ray: those still start r_rtSunShadowOffset out.
+	// mask (mode 6) and the per-draw hard ray (mode 4) keep their contact ray: those still start r_rtSunShadowOffset out.
 	if ( parms.shadowParms[0] == 5.0f && RB_RHI_RtShadowNearStart() >= 2 ) {
 		return false;
 	}
@@ -11293,7 +11302,7 @@ static rhi::ImageHandle RB_RHI_RtShadowBlurLight( rhi::RHI *r, const viewDef_t *
 	const int w = rhiRtBlurW, h = rhiRtBlurH;
 	const idScreenRect lr = RB_RHI_RtShadowBlurRect( viewDef, vLight, w, h );
 	if ( lr.x2 < lr.x1 || lr.y2 < lr.y1 ) {
-		rhiRtShadowDbg.maskSkipNoRect++;
+		if ( r_rtShadowDebug.GetInteger() > 0 ) { rhiRtShadowDbg.maskSkipNoRect++; }
 		return 0;		// no opaque surface of this light on screen: nothing would sample a mask
 	}
 
@@ -11328,7 +11337,7 @@ static rhi::ImageHandle RB_RHI_RtShadowBlurLight( rhi::RHI *r, const viewDef_t *
 		const float pxPerUnit = viewDef->projectionMatrix[0] * 0.5f * (float)w;	// at view depth 1
 		const float penumbraPx = 2.0f * lightRadius * pxPerUnit / depth;			// full width, gap ratio ~1
 		if ( penumbraPx < minPenumbra ) {
-			rhiRtShadowDbg.maskSkipPenumbra++;
+			if ( r_rtShadowDebug.GetInteger() > 0 ) { rhiRtShadowDbg.maskSkipPenumbra++; }
 			return 0;		// sub-pixel penumbra: the hard inline shadow is visually identical
 		}
 	}
@@ -11339,7 +11348,7 @@ static rhi::ImageHandle RB_RHI_RtShadowBlurLight( rhi::RHI *r, const viewDef_t *
 	{
 		const rhi::ImageHandle reused = RB_RHI_RtShadowBlurStagger( r, viewDef, vLight, w, h, slot );
 		if ( reused != 0 ) {
-			rhiRtShadowDbg.maskReused++;
+			if ( r_rtShadowDebug.GetInteger() > 0 ) { rhiRtShadowDbg.maskReused++; }
 			return reused;
 		}
 	}
@@ -11372,6 +11381,7 @@ static rhi::ImageHandle RB_RHI_RtShadowBlurLight( rhi::RHI *r, const viewDef_t *
 	// the target is undefined - which is why no stage may read beyond the previous one's rect.
 	const rtBlurRects_t rc = RB_RHI_RtShadowBlurRects( lr, w, h, blurTaps );
 	const int rx1 = rc.rx1, rx2 = rc.rx2, ry1 = rc.ry1, ry2 = rc.ry2;
+	RB_RHI_RtShadowDbgMaskRect( rx1, ry1, rx2, ry2, w, h );
 
 	// No ray where the light is black: a light's volume is a box, its projection * falloff usually
 	// round, so the box's corners receive exactly nothing - shadowed or not. The ray pass can test
@@ -11419,10 +11429,10 @@ static rhi::ImageHandle RB_RHI_RtShadowBlurLight( rhi::RHI *r, const viewDef_t *
 	if ( slot != NULL ) {
 		slot->lastUpdateFrame = rhiRtBlurFrame;
 		memcpy( slot->viewProj, rhiRtBlur.viewProj, sizeof( slot->viewProj ) );
-		rhiRtShadowDbg.maskMade++;
+		if ( r_rtShadowDebug.GetInteger() > 0 ) { rhiRtShadowDbg.maskMade++; }
 		return r->GetRenderTargetImage( slot->maskRT );
 	}
-	rhiRtShadowDbg.maskMade++;
+	if ( r_rtShadowDebug.GetInteger() > 0 ) { rhiRtShadowDbg.maskMade++; }
 	return r->GetRenderTargetImage( rhiRtBlurMaskRT );
 }
 
