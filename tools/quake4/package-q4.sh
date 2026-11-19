@@ -9,6 +9,9 @@
 #     BUILDINFO.txt                    the exact DUDE and dude-q4 commits it was built from
 #     COPYING.txt                      the GPLv3, for the DUDE idlib parts inside q4base
 #     COPYING-QUAKE4-EXCEPTION.txt     DUDE's section 7 permission to combine them with the SDK
+#     q4base/pbr/pbr_materials.cfg     DUDE's PBR material table for Quake 4 (GPLv3 DUDE data, from
+#                                      git HEAD); here, not in DUDE's archive, so only Quake 4
+#                                      players get a q4base/ folder
 #
 # DUDE's own archives stay GPL-only and never carry the SDK files; this one carries no DUDE (GPL)
 # code except inside q4base itself, whose GPL parts are DUDE's idlib at the commit in BUILDINFO.
@@ -96,6 +99,13 @@ cp "$Q4GAME_DIR/$EULA" "$STAGE/$EULA"
 # permission for combining them with the SDK game code
 cp "$DUDE/COPYING.txt" "$STAGE/COPYING.txt"
 cp "$DUDE/COPYING-QUAKE4-EXCEPTION.txt" "$STAGE/COPYING-QUAKE4-EXCEPTION.txt"
+# DUDE's PBR table for Quake 4 (docs/pbr-materials.md 6.1): without it r_pbr classifies nothing.
+# Taken from git like every shipped config, never from the working tree or the dude folder.
+mkdir -p "$STAGE/q4base/pbr"
+git -C "$DUDE" show HEAD:q4base/pbr/pbr_materials.cfg > "$STAGE/q4base/pbr/pbr_materials.cfg" ||
+	die "no q4base/pbr/pbr_materials.cfg in DUDE's HEAD"
+git -C "$DUDE" diff --quiet HEAD -- q4base/pbr/pbr_materials.cfg ||
+	echo "package-q4.sh: WARNING q4base/pbr/pbr_materials.cfg has uncommitted changes - packaged HEAD's" >&2
 
 if [ "$PLAT" = win64 ]; then EXE=dude.exe; else EXE=./dude; fi
 cat > "$STAGE/README-QUAKE4.txt" <<EOF
@@ -138,6 +148,11 @@ under GPLv3 section 7 to be combined with the Quake 4 SDK game code
 by that permission.
 
 Source of this library: https://github.com/Inkub0/dude-q4 (tag $TAG).
+
+q4base/pbr/pbr_materials.cfg is not part of the library: it is DUDE's PBR material table for
+Quake 4 (GPLv3, like DUDE; https://github.com/Inkub0/dude, tag $TAG). It holds DUDE's own
+roughness/metalness settings, listed by the names of the game's materials, and contains no
+game data. Copy it with the rest: it lands in q4base/pbr/, where DUDE reads it.
 
 Quake and Quake 4 are trademarks of their owners (id Software / ZeniMax Media).
 DUDE is an independent, non-commercial project and is not affiliated with, endorsed or

@@ -1058,6 +1058,36 @@ static idImage *RB_RHI_LoadAo( const char *name ) {
 	return ( img == globalImages->defaultImage ) ? NULL : img;
 }
 
+// An image name as a plain file path, or false for an image program. Quake 4's
+// "downsize ( <image> , <levels> )" counts as its <image>: it only marks that the image may
+// load smaller at lower texture quality, the pixels are the image's own (Image_program.cpp).
+// Raven wraps about one diffuse map in eight in it (character bodies, gibs, decals).
+static bool RB_RHI_PlainImageName( const char *name, idStr &out ) {
+	out = name ? name : "";
+	for ( int guard = 0; guard < 4; guard++ ) {
+		out.StripLeading( ' ' );	// image program names are space-separated tokens
+		out.StripTrailingWhitespace();
+		if ( out.Length() == 0 ) {
+			return false;
+		}
+		if ( out.Find( '(' ) < 0 ) {
+			return true;
+		}
+		if ( idStr::Icmpn( out.c_str(), "downsize", 8 ) != 0 ) {
+			return false;	// addnormals() / heightmap() programs have no sibling files
+		}
+		// downsize ( <inner> , <levels> ): <inner> runs to the last top-level comma
+		const int open = out.Find( '(' );
+		const int close = out.Last( ')' );
+		const int comma = out.Last( ',' );
+		if ( open < 0 || close < 0 || comma < open || comma > close ) {
+			return false;
+		}
+		out = out.Mid( open + 1, comma - open - 1 );
+	}
+	return false;
+}
+
 // Mod-friendly "_ao" naming convention (docs/occlusion-maps.md): if the surface's diffuse map
 // is textures/x/foo (or foo_d), and a sibling textures/x/foo_ao (.tga/.dds) exists, use it.
 // Lets a modpack drop in AO textures without editing materials. Returns NULL if none found.
@@ -1070,11 +1100,10 @@ static idImage *RB_RHI_ModAoConvention( const idMaterial *mat ) {
 			break;
 		}
 	}
-	if ( !diffuse || !diffuse[0] || strchr( diffuse, '(' ) ) {
+	idStr base;
+	if ( !RB_RHI_PlainImageName( diffuse, base ) ) {
 		return NULL;		// no plain diffuse (image programs like addnormals() are skipped)
 	}
-
-	idStr base = diffuse;
 	base.StripFileExtension();
 	idStr candidates[2];
 	int n = 0;
@@ -1351,11 +1380,9 @@ static bool RB_RHI_DiffuseBaseName( const idMaterial *mat, idStr &base, textureR
 	for ( int i = 0; i < mat->GetNumStages(); i++ ) {
 		const shaderStage_t *st = mat->GetStage( i );
 		if ( st->lighting == SL_DIFFUSE && st->texture.image ) {
-			const char *name = st->texture.image->imgName.c_str();
-			if ( !name[0] || strchr( name, '(' ) ) {
+			if ( !RB_RHI_PlainImageName( st->texture.image->imgName.c_str(), base ) ) {
 				return false;	// addnormals() / heightmap() programs have no sibling files
 			}
-			base = name;
 			base.StripFileExtension();
 			repeat = st->texture.image->repeat;
 			return true;
@@ -2522,9 +2549,16 @@ static idImage *RB_RHI_SurfacePbrMap( const idMaterial *mat, int &layout ) {
 	return R_PbrTextureMap( mat, layout );
 }
 
-// u_occlusionParms for a draw that has an occlusion source on unit 10 (a plain AO map or a sidecar)
-static void RB_RHI_SetOcclusionStrength( rhi::RenderParams &parms, bool ambientPass ) {
-	const float scale = idMath::ClampFloat( 0.0f, 1.0f, r_occlusionMapScale.GetFloat() );
+// Each AO source's strength on the ambient term: the AO channel of a PBR sidecar texture (r_occlusionTextureScale) or
+// a model's own baked map / an authored occlusionmap stage (r_occlusionMapScale). r_occlusionMapDirect is common to both.
+static float RB_RHI_OcclusionSourceScale( bool textureAo ) {
+	return idMath::ClampFloat( 0.0f, 1.0f, textureAo ? r_occlusionTextureScale.GetFloat() : r_occlusionMapScale.GetFloat() );
+}
+
+// u_occlusionParms for a draw that has an occlusion source on unit 10 (a plain AO map, textureAo false, or a sidecar's
+// AO channel, textureAo true)
+static void RB_RHI_SetOcclusionStrength( rhi::RenderParams &parms, bool ambientPass, bool textureAo ) {
+	const float scale = RB_RHI_OcclusionSourceScale( textureAo );
 	parms.occlusionParms[0] = 1.0f;
 	parms.occlusionParms[1] = scale;	// ambient-term strength (ambientlight.frag reads .y)
 	// direct-diffuse strength (interaction.frag reads .z); left 0 on the ambient pass
@@ -2532,10 +2566,31 @@ static void RB_RHI_SetOcclusionStrength( rhi::RenderParams &parms, bool ambientP
 		: scale * idMath::ClampFloat( 0.0f, 1.0f, r_occlusionMapDirect.GetFloat() );
 }
 
-static idImage *RB_RHI_FillOcclusionParms( rhi::RenderParams &parms, const drawInteraction_t *din ) {
+// A model's own baked occlusion map, used for AO in place of its PBR sidecar's AO channel; NULL = none (the sidecar's
+// AO stands). A sidecar belongs to a TEXTURE: on a model, its AO is the baker's map copied in, AVERAGED over every
+// mesh that shares the texture (the Quake 4 marine body is on five), or flat white where the extractor refused the copy
+// (a texture laid out differently per model); the engine's own map (generated/aomaps) is exact per mesh. Off the static
+// world only: the parallax march never runs there (RB_RHI_ParallaxSource), so unit 11 is free to carry the sidecar
+// for its roughness / metalness while the baked map takes unit 10 (u_ormParms.y = 2, renderparms.glsl).
+static idImage *RB_RHI_ModelAoOverSidecar( const drawSurf_t *surf ) {
+	if ( !r_pbrModelBakedAO.GetBool() ) {
+		return NULL;
+	}
+	const idRenderEntityLocal *redef = surf->space ? surf->space->entityDef : NULL;
+	if ( !redef || !redef->parms.hModel || redef->parms.hModel->IsStaticWorldModel() ) {
+		return NULL;
+	}
+	return RB_RHI_SurfaceOcclusionImage( surf );
+}
+
+// sidecarOnUnit11: set when the sidecar moves to unit 11 (u_ormParms.y = 2); the caller binds it there.
+static idImage *RB_RHI_FillOcclusionParms( rhi::RenderParams &parms, const drawInteraction_t *din,
+                                           idImage *&sidecarOnUnit11 ) {
+	sidecarOnUnit11 = NULL;
 	// DUDE Phase D PBR sidecar (docs/pbr-materials.md sec. 7): a <diffuse>_orm / _rmao texture
 	// overrides the table metalness/roughness per texel (interaction.frag, r_pbr path) and its AO
-	// channel replaces every other occlusion source for this surface (under r_occlusionMaps).
+	// channel replaces every other occlusion source for this surface (under r_occlusionMaps) -
+	// except a model's own baked map, which is exact per mesh (RB_RHI_ModelAoOverSidecar).
 	if ( r_pbr.GetBool() || r_occlusionMaps.GetBool() ) {
 		int layout;
 		idImage *pbrMap = RB_RHI_SurfacePbrMap( din->surf->material, layout );
@@ -2544,7 +2599,13 @@ static idImage *RB_RHI_FillOcclusionParms( rhi::RenderParams &parms, const drawI
 			parms.ormParms[1] = 1.0f;	// override metalness/roughness (read only on the r_pbr branch)
 			RB_RHI_FillOrmAdjust( parms, pbrMap );
 			if ( r_occlusionMaps.GetBool() ) {
-				RB_RHI_SetOcclusionStrength( parms, din->ambientLight );
+				idImage *modelAo = RB_RHI_ModelAoOverSidecar( din->surf );
+				RB_RHI_SetOcclusionStrength( parms, din->ambientLight, modelAo == NULL );
+				if ( modelAo ) {
+					parms.ormParms[1] = 2.0f;	// AO = the plain map on unit 10, roughness / metalness = unit 11
+					sidecarOnUnit11 = pbrMap;
+					return modelAo;
+				}
 			}
 			return pbrMap;
 		}
@@ -2557,7 +2618,7 @@ static idImage *RB_RHI_FillOcclusionParms( rhi::RenderParams &parms, const drawI
 	// GetOcclusionStage() is NULL on every stock material, so this stays inert on the base game.
 	idImage *occlusionImage = RB_RHI_SurfaceOcclusionImage( din->surf );
 	if ( occlusionImage ) {
-		RB_RHI_SetOcclusionStrength( parms, din->ambientLight );
+		RB_RHI_SetOcclusionStrength( parms, din->ambientLight, false );
 	}
 	return occlusionImage;
 }
@@ -2846,7 +2907,8 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 
 	bool contactShadows = RB_RHI_FillContactShadowParms( parms, din, rtSun );
 
-	idImage *occlusionImage = RB_RHI_FillOcclusionParms( parms, din );
+	idImage *sidecarOnUnit11 = NULL;
+	idImage *occlusionImage = RB_RHI_FillOcclusionParms( parms, din, sidecarOnUnit11 );
 
 	// RTGI reconcile (docs/rtx-rtgi.md H6c): on an AMBIENT draw with r_rtgi on, the fullscreen GI apply
 	// (RB_RHI_RtgiApply) adds real bounce light, and r_rtgiAmbient picks what the ambient light still draws. u_color.x
@@ -2875,6 +2937,13 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 	}
 
 	idImage *parallaxImage = RB_RHI_FillParallaxParms( parms, din );
+	if ( sidecarOnUnit11 && parallaxImage == NULL ) {
+		parallaxImage = sidecarOnUnit11;	// a model (never marched, parallaxParms.x = 0): unit 11 carries its sidecar
+	} else if ( sidecarOnUnit11 ) {
+		parms.ormParms[1] = 1.0f;			// unit 11 taken after all: the sidecar's own AO, as before
+		occlusionImage = sidecarOnUnit11;
+		RB_RHI_SetOcclusionStrength( parms, din->ambientLight, true );
+	}
 
 	// light-aware AO (r_aoLightAware, docs/ssao-gtao.md "Light-aware AO"): the AO share on this light fades where the light
 	// reaches the occluded spot. The GTAO bent cone needs the bent normal in model space: the surface's model -> view
@@ -6426,6 +6495,8 @@ static bool RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef, int pha
 		// Phase D PBR sidecar (docs/pbr-materials.md sec. 7): the material attachment carries the per-texel
 		// metalness/roughness the forward pass shades with, so SSR / RT reflections / the ReSTIR DI apply agree
 		// with it; the sidecar's AO channel replaces the occlusion map in .a, as it does on the forward path.
+		idImage *gbSidecarOnUnit11 = NULL;
+		bool gbTextureAo = false;	// diOcclImg is a sidecar's AO channel (r_occlusionTextureScale), else a plain map
 		if ( ssrWants ) {
 			int ormLayout;
 			idImage *pbrMap = RB_RHI_SurfacePbrMap( shader, ormLayout );
@@ -6438,6 +6509,18 @@ static bool RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef, int pha
 				}
 				parms.occlusionParms[0] = ( wantAlbedo && r_occlusionMaps.GetBool() ) ? 1.0f : 0.0f;
 				diOcclImg = pbrMap;
+				gbTextureAo = true;
+				// a model's own baked AO wins over the sidecar's, as on the forward path (RB_RHI_ModelAoOverSidecar);
+				// unit 11 is free here too (no parallax off the static world)
+				if ( r_occlusionMaps.GetBool() ) {
+					idImage *modelAo = RB_RHI_ModelAoOverSidecar( surf );
+					if ( modelAo ) {
+						parms.ormParms[1] = 2.0f;
+						gbSidecarOnUnit11 = pbrMap;
+						diOcclImg = modelAo;
+						gbTextureAo = false;
+					}
+				}
 			}
 			// r_pbrDebugView: .a always carries this surface's AO (the sidecar's, else the baked occlusion map)
 			// so the debug view can show it without the albedo prepass. ormParms.w lets gbuffer.frag write it.
@@ -6527,7 +6610,22 @@ static bool RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef, int pha
 		if ( gbParallax && parms.parallaxParms2[1] > 0.5f && !wantAlbedo ) {
 			RB_RHI_DiffuseStageMatrix( shader, regs, parms );	// a sidecar height marches in the diffuse UV: var_TexCoverage
 		}
-		RB_RHI_BindUnit( 11, gbParallax ? gbParallax : globalImages->blackImage );	// always bound (VK descriptor); the shader gates on parallaxParms.x
+		if ( gbSidecarOnUnit11 && gbParallax ) {	// unit 11 taken after all: the sidecar's own AO, as before
+			parms.ormParms[1] = 1.0f;
+			diOcclImg = gbSidecarOnUnit11;
+			gbSidecarOnUnit11 = NULL;
+			gbTextureAo = true;
+		}
+		// the stored AO (material att1 .a) carries its source's strength relative to the stronger of the two, and the
+		// DI apply scales by that stronger one * r_occlusionMapDirect: mix( 1, ao, s * direct ) per source, as forward.
+		// gbuffer.frag reads ( 1 - w ) as the ratio, so a draw that never set it keeps the AO whole.
+		{
+			const float sMax = Max( RB_RHI_OcclusionSourceScale( true ), RB_RHI_OcclusionSourceScale( false ) );
+			parms.occlusionParms[3] = ( sMax > 0.0f ) ? 1.0f - RB_RHI_OcclusionSourceScale( gbTextureAo ) / sMax : 0.0f;
+		}
+		// always bound (VK descriptor); the shader gates the march on parallaxParms.x and reads a model's sidecar here
+		// when u_ormParms.y = 2
+		RB_RHI_BindUnit( 11, gbParallax ? gbParallax : gbSidecarOnUnit11 ? gbSidecarOnUnit11 : globalImages->blackImage );
 		RB_RHI_BindUnit( 2, rtgiDiffuseImg );	// RTGI H6c: receiver-albedo source (gbuffer.frag samples it only when u_localParam0.y>0.5)
 		RB_RHI_BindUnit( 4, rtgiDiffuseImg2 );	// ReSTIR DI: 2nd diffuse stage of a crossfade (summed via u_specularParms.rgb; black * 0 otherwise)
 		RB_RHI_BindUnit( 3, diSpecImg );		// ReSTIR DI Stage D: specular map (gbuffer.frag samples it only when u_localParam0.y>0.5)
@@ -12003,9 +12101,12 @@ void RB_RHI_ReStirDIApply( rhi::RHI *r, const viewDef_t *viewDef ) {
 		parms.occlusionParms[1] = ( ( projA[5] != 0.0f ) ? 1.0f / projA[5] : 1.0f ) * -1.0f;
 		parms.diffuseModifier[2] = r_pbrFireflyClamp.GetFloat();
 	}
-	// baked occlusion maps on direct light (material att1 .a), the forward's r_occlusionMapScale * r_occlusionMapDirect
+	// occlusion maps on direct light (material att1 .a), the forward's strength * r_occlusionMapDirect. The G-buffer
+	// stored each surface's AO pre-scaled by its source's strength over the stronger one (texture AO
+	// r_occlusionTextureScale, model baked AO r_occlusionMapScale), so this is that stronger strength * direct.
 	parms.occlusionParms[2] = ( r_occlusionMaps.GetBool() && R_BackendSupportsEnhancements() )
-		? idMath::ClampFloat( 0.0f, 1.0f, r_occlusionMapScale.GetFloat() ) * idMath::ClampFloat( 0.0f, 1.0f, r_occlusionMapDirect.GetFloat() )
+		? Max( RB_RHI_OcclusionSourceScale( true ), RB_RHI_OcclusionSourceScale( false ) )
+		  * idMath::ClampFloat( 0.0f, 1.0f, r_occlusionMapDirect.GetFloat() )
 		: 0.0f;
 	parms.screenCorrection[0] = ( rhiReStirDIW > 0 ) ? 1.0f / rhiReStirDIW : 1.0f;	// reduced-res DI texel (uv)
 	parms.screenCorrection[1] = ( rhiReStirDIH > 0 ) ? 1.0f / rhiReStirDIH : 1.0f;

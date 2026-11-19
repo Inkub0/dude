@@ -199,6 +199,10 @@ tools/quake4/q4base_licence_audit.py --so build/q4base.so --sdk <pristine SDK so
 - The Quake 4 part of the notes and the dude-q4 release page carry **no donation link**.
 - Name Quake 4 only as what DUDE runs ("runs Quake 4 — not included"); no Quake 4 logo or art.
 - Never attach baked AO, env probes or other data generated from Quake 4 maps.
+- The dude-q4 archive carries one DUDE data file, `q4base/pbr/pbr_materials.cfg` (DUDE's
+  Quake 4 PBR table, GPLv3, since 0.9.10): package-q4.sh takes it from git HEAD and the README
+  says what it is. It holds DUDE's numbers keyed by material names, no game data.
+  Optional Quake 4 PBR sidecar packs follow the baked-AO rule: published on Inkub0/dude-q4 only.
 
 ## 4. Release notes + publish (user action, never the agent)
 

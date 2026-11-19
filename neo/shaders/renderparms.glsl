@@ -158,7 +158,8 @@ UBO_BINDING(0) uniform RenderParams {
 	vec4 u_ormParms;             // DUDE Phase D PBR sidecar (docs/pbr-materials.md sec. 7): unit 10 (u_occlusionMap)
 	                            // holds a packed texture. x = layout (0 = plain AO map in R, 1 = ORM: R AO / G rough /
 	                            // B metal, 2 = RMAO: R rough / G metal / B AO), y = 1: its roughness/metalness replace
-	                            // u_pbrParms.yx. z = 1: the PBR editor's live channel edit applies (u_ormAdj*). w = 1: write the AO to the material attachment for r_pbrDebugView. Read through dudeUnit10Ao / dudeUnit10RoughMetal below.
+	                            // u_pbrParms.yx; y = 2: the same, but the sidecar is on unit 11 (u_parallaxMap) and unit 10
+	                            // holds the model's own baked AO map, a plain map (r_pbrModelBakedAO). z = 1: the PBR editor's live channel edit applies (u_ormAdj*). w = 1: write the AO to the material attachment for r_pbrDebugView. Read through dudeUnit10Ao / dudeUnit10RoughMetal below.
 	vec4 u_ormAdjB;              // in-game PBR editor live channel edit (u_ormParms.z): brightness, contrast, gamma;
 	vec4 u_ormAdjC;              // xyz = AO, roughness, metalness. Same formula as "Save to texture"
 	vec4 u_ormAdjG;              // (R_PbrSidecarAdjustValue).
@@ -224,6 +225,9 @@ float dudeOrmGlobal( float v, int ch ) {
 
 // Unit 10's AO channel: R for a plain AO map and an ORM sidecar, B for an RMAO one.
 float dudeUnit10Ao( vec4 t ) {
+	if ( u_ormParms.y > 1.5 ) {
+		return t.r;		// a model's own baked AO map (the sidecar moved to unit 11): plain, no sidecar adjust
+	}
 	float a = ( u_ormParms.x > 1.5 ) ? t.b : t.r;
 	if ( u_ormParms.x > 0.5 ) {		// a sidecar (not a plain AO map): the global adjust
 		a = dudeOrmGlobal( a, 0 );

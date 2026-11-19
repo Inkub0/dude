@@ -179,7 +179,9 @@ python3 tools/pbr_extract_maps.py --search base --map game/mars_city1 \
 `--md5 GLOB` bakes every material the matching `.md5mesh` files use, skins included, for
 example `--md5 'models/md5/*'` for all characters, monsters and weapons.
 
-A sidecar's AO replaces every other AO source in game, including the AO DUDE's own baker made
+A sidecar's AO replaces every other AO source in game (except on models that have their own
+baked map while "Accurate Model Baked AO", `r_pbrModelBakedAO`, is on: there the baked map wins,
+docs/pbr-materials.md section 7), including the AO DUDE's own baker made
 for models (`bakeAO`, the `generated/aomaps/` maps in the baked AO pack). So for models (md5
 characters and monsters, and LWO / ASE props) the extractor copies that baked AO into the
 sidecar instead of guessing AO from the normal map: it holds the real geometry occlusion plus
