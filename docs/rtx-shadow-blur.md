@@ -421,6 +421,7 @@ on these defects, 64x the triangles to refit at tessellation level 8).
 
 - `r_rtShadowOutsideHits` (1) / `r_rtShadowInsideSkip` (3.0): see "Characters" above.
 - `r_rtShadowCharRays` (4, 0..16): see "Characters" above. 0 = the hard ray.
+- `r_rtShadowDebug` (0, not archived; Debug Views > "RT Shadow View"): 1 = a console readout once a second, per-frame averages: softened masks made / reused, masks not made (penumbra under the minimum, no opaque rect), and the lit draws per shadow mode (hard ray, mask, stale mask, character cone, shadow map, unshadowed) for world and for animated characters, plus how many trace the RT contact ray. 2 = the readout, and every light draws only its shadow term on a white surface (weighted by the light's projection and falloff; no albedo, no N.L, no specular, no contact term). 3 = only its contact shadow term. 4 = its shadow mode as a colour: red hard ray, green mask, yellow stale mask, blue character cone, white shadow map, grey unshadowed. Views 2 to 4 skip ambient lights. Where a ray mode does not trace (the surface faces away from the light) the shadow term reads black. Use it before guessing which term draws an artifact.
 
 - `r_rtAllLights` (0; on in the Ultra Nightmare preset, with `r_rtShadowBlur`): ray-trace every
   shadow-casting light (see above). `r_rtShadowBlurStagger` is on there too (the preset owns the on/off, not the two distances).

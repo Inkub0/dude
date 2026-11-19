@@ -4933,6 +4933,20 @@ static void DrawDbgGroup_DebugViews()
 			"Bind pbrDebugViewNext to a key to cycle the views in game. Vulkan and OpenGL 3 only." );
 	}
 
+	if ( SettingsRow( "RT Shadow View", "r_rtShadowDebug" ) ) {
+		int view = idMath::ClampInt( 0, 4, r_rtShadowDebug.GetInteger() );
+		const char *views[] = { "Off (normal view)", "Console readout only", "Shadow term", "Contact shadow term", "Shadow mode (colour)" };
+		if ( ImGui::Combo( "RT Shadow View", &view, views, IM_ARRAYSIZE( views ) ) ) {
+			r_rtShadowDebug.SetInteger( view );
+		}
+		CvarTip( r_rtShadowDebug, "Diagnostics for ray-traced shadows. Any setting but Off prints a console line once a second: "
+			"softened masks made, reused and skipped, and how many lit draws used each shadow mode, world and characters apart. "
+			"The three views replace every light's shading with one term on a white surface: the shadow alone, the contact "
+			"shadow alone, or the shadow mode as a colour (red hard ray, green softened mask, yellow reused mask, blue "
+			"per-pixel character trace, white shadow map, grey unshadowed). GI, reflections and glowing surfaces still "
+			"draw; turn RT GI off for a clean picture. Vulkan only." );
+	}
+
 	CvarSliderI( "Wireframe", r_showTris, 0, 3, "0 = off, 1 = visible triangles, 2 = all front-facing, 3 = all." );
 
 	if ( SettingsRow( "Lights (dynamic lighting)", "r_skipInteractions" ) ) {
@@ -4972,6 +4986,7 @@ static void DrawDbgGroup_DebugViews()
 				"r_whiteWorld", "r_showTris", "r_showLightCount", "r_showOverDraw", "r_showSurfaceInfo", "r_showLights",
 				"r_showPortals", "r_ssaoDebug", "r_rtaoDebug", "r_rtgiDebug", "r_rtgiCacheDebug", "r_rtReStirDIDebug",
 				"r_rtLightGridDebug", "r_rtEmissiveTableDebug", "r_mvDebug", "r_hdrEyeAdaptDebug", "r_pbrDebugView",
+				"r_rtShadowDebug",
 			};
 			for ( int i = 0; i < IM_ARRAYSIZE( views ); i++ ) {
 				ResetNamedCvar( views[i] );

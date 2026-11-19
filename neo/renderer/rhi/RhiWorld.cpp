@@ -2112,6 +2112,48 @@ static void RB_RHI_FillPerforatedParms( rhi::RHI *r, rhi::RenderParams &parms, c
 
 static float RB_RHI_RtShadowBlurLightRadius( const renderLight_t &lp, const idVec3 &lorg, const idVec3 &viewOrg );
 
+// r_rtShadowDebug (docs/rtx-shadows-review.md F9): what the RT shadow system did, summed over the primary view's frames
+// and printed once a second as per-frame averages. Counted only while the cvar is on. The question it answers is the
+// one that cost a day on 2026-11-19: which shadow mode does a light really use on a character, and did it get a mask.
+enum { RTSD_NONE, RTSD_MAP, RTSD_HARD, RTSD_MASK, RTSD_STALE, RTSD_CONE, RTSD_MODES };
+struct rtShadowDbg_t {
+	int frames;
+	int maskMade, maskReused, maskSkipPenumbra, maskSkipNoRect;
+	int draws[2][RTSD_MODES];		// [0 world and props / 1 animated character][shadow mode]
+	int contactDraws[2];			// lit draws that also trace the RT contact shadow ray
+	int lastPrintMs;
+};
+static rtShadowDbg_t rhiRtShadowDbg;
+
+// once per primary view, before its lights draw
+static void RB_RHI_RtShadowDbgFrame( const viewDef_t *viewDef ) {
+	rtShadowDbg_t &d = rhiRtShadowDbg;
+	if ( r_rtShadowDebug.GetInteger() <= 0 ) {
+		if ( d.frames != 0 ) { memset( &d, 0, sizeof( d ) ); }
+		return;
+	}
+	if ( viewDef == NULL || viewDef->isSubview || !viewDef->isWindowView ) {
+		return;
+	}
+	const int now = Sys_Milliseconds();
+	if ( d.frames > 0 && now - d.lastPrintMs >= 1000 ) {
+		const float f = 1.0f / (float)d.frames;
+		common->Printf( "rtShadow/frame: masks made %.1f reused %.1f | no mask: penumbra under min %.1f, no opaque rect %.1f\n",
+		                d.maskMade * f, d.maskReused * f, d.maskSkipPenumbra * f, d.maskSkipNoRect * f );
+		for ( int c = 0; c < 2; c++ ) {
+			common->Printf( "  %s draws: hard ray %.1f, mask %.1f, stale mask %.1f, character cone %.1f, shadow map %.1f, unshadowed %.1f | with contact ray %.1f\n",
+			                c ? "character" : "world    ",
+			                d.draws[c][RTSD_HARD] * f, d.draws[c][RTSD_MASK] * f, d.draws[c][RTSD_STALE] * f,
+			                d.draws[c][RTSD_CONE] * f, d.draws[c][RTSD_MAP] * f, d.draws[c][RTSD_NONE] * f,
+			                d.contactDraws[c] * f );
+		}
+		memset( &d, 0, sizeof( d ) );
+		d.lastPrintMs = now;
+	}
+	if ( d.lastPrintMs == 0 ) { d.lastPrintMs = now; }
+	d.frames++;
+}
+
 // The frame phase for shaders that turn a per-quad ray pattern (interaction.frag dudeQuadTurn): 1 + frame index while
 // FSR2 resolves this view over time - the same test as the projection jitter (R_RenderView, tr_main.cpp) - so each
 // frame takes other directions and the resolve averages the dither into a gradient; 0 otherwise = a pattern that
@@ -2138,6 +2180,22 @@ static bool RB_RHI_CharSoftSurf( const drawSurf_t *surf ) {
 	}
 	const idRenderModel *model = space->entityDef->parms.hModel;
 	return model != NULL && model->IsDynamicModel() == DM_CACHED;
+}
+
+// r_rtShadowDebug: one lit (non-ambient) interaction draw of the primary view, after its shadow and contact parms are set
+static void RB_RHI_RtShadowDbgCountDraw( const rhi::RenderParams &parms, const drawSurf_t *surf ) {
+	const viewDef_t *vd = backEnd.viewDef;
+	if ( vd == NULL || vd->isSubview || !vd->isWindowView ) {
+		return;
+	}
+	const float m = parms.shadowParms[0];
+	const int mode = ( m > 6.5f ) ? RTSD_CONE : ( m > 5.5f ) ? RTSD_STALE : ( m > 4.5f ) ? RTSD_MASK
+	               : ( m > 3.5f ) ? RTSD_HARD : ( m > 0.5f ) ? RTSD_MAP : RTSD_NONE;
+	const int cls = RB_RHI_CharSoftSurf( surf ) ? 1 : 0;
+	rhiRtShadowDbg.draws[cls][mode]++;
+	if ( parms.contactParms[0] < -0.5f ) {
+		rhiRtShadowDbg.contactDraws[cls]++;
+	}
 }
 
 // r_rtShadowCharRays (mode 7, interaction.frag rtSoftConeVis): with softening on, an RT light the softening pass made
@@ -2896,6 +2954,12 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 	     && !din->surf->space->weaponDepthHack && din->surf->space->modelDepthHack == 0.0f ) {
 		return;
 	}
+	// r_rtShadowDebug 2 / 3 / 4: every direct light draws one isolated term (interaction.frag, u_aoParms.z = 1 shadow,
+	// 2 contact, 3 mode colour); ambient lights have no shadow term and would only wash the picture out
+	const int rtShadowDbgView = r_rtShadowDebug.GetInteger() - 1;
+	if ( rtShadowDbgView > 0 && din->ambientLight ) {
+		return;
+	}
 	rhi::RenderParams parms;
 	memset( &parms, 0, sizeof( parms ) );
 	memcpy( parms.mvpMatrix, ictx.mvp, sizeof( parms.mvpMatrix ) );
@@ -2989,6 +3053,9 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 	RB_RHI_FillSsaoParms( parms, din );
 
 	bool contactShadows = RB_RHI_FillContactShadowParms( parms, din, rtSun );
+	if ( r_rtShadowDebug.GetInteger() > 0 && !din->ambientLight ) {
+		RB_RHI_RtShadowDbgCountDraw( parms, din->surf );
+	}
 
 	idImage *sidecarOnUnit11 = NULL;
 	bool aoFromModelMap = false;
@@ -3037,6 +3104,7 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 		parms.aoParms[0] = idMath::ClampFloat( 0.0f, 1.0f, r_aoLightAware.GetFloat() );
 		// baked / sidecar AO as micro-shadows - not a model's own baked map (RB_RHI_FillOcclusionParms)
 		parms.aoParms[1] = ( r_aoMicroShadows.GetBool() && !aoFromModelMap ) ? 1.0f : 0.0f;
+		parms.aoParms[2] = ( rtShadowDbgView > 0 ) ? (float)rtShadowDbgView : 0.0f;	// r_rtShadowDebug view
 		if ( parms.aoParms[0] > 0.0f && parms.localParam0[0] > 0.5f ) {
 			memcpy( parms.modelViewMatrix, din->surf->space->modelViewMatrix, sizeof( parms.modelViewMatrix ) );
 		}
@@ -10848,6 +10916,7 @@ Units 0-1 are rebound by each interaction draw (Vulkan binds record unconditiona
 */
 static void RB_RHI_RtShadowBlurBegin( rhi::RHI *r, const viewDef_t *viewDef ) {
 	rhiRtBlurThisView = false;
+	RB_RHI_RtShadowDbgFrame( viewDef );
 	if ( !r_rtShadowBlur.GetBool() || rhi::GetActiveBackendType() != rhi::BT_VULKAN
 			|| r_skipInteractions.GetBool()
 			|| !( r_rtSunShadows.GetBool() || r_rtMovingLights.GetBool() || r_rtAllLights.GetBool() ) ) {
@@ -11211,6 +11280,7 @@ static rhi::ImageHandle RB_RHI_RtShadowBlurLight( rhi::RHI *r, const viewDef_t *
 	const int w = rhiRtBlurW, h = rhiRtBlurH;
 	const idScreenRect lr = RB_RHI_RtShadowBlurRect( viewDef, vLight, w, h );
 	if ( lr.x2 < lr.x1 || lr.y2 < lr.y1 ) {
+		rhiRtShadowDbg.maskSkipNoRect++;
 		return 0;		// no opaque surface of this light on screen: nothing would sample a mask
 	}
 
@@ -11245,6 +11315,7 @@ static rhi::ImageHandle RB_RHI_RtShadowBlurLight( rhi::RHI *r, const viewDef_t *
 		const float pxPerUnit = viewDef->projectionMatrix[0] * 0.5f * (float)w;	// at view depth 1
 		const float penumbraPx = 2.0f * lightRadius * pxPerUnit / depth;			// full width, gap ratio ~1
 		if ( penumbraPx < minPenumbra ) {
+			rhiRtShadowDbg.maskSkipPenumbra++;
 			return 0;		// sub-pixel penumbra: the hard inline shadow is visually identical
 		}
 	}
@@ -11255,6 +11326,7 @@ static rhi::ImageHandle RB_RHI_RtShadowBlurLight( rhi::RHI *r, const viewDef_t *
 	{
 		const rhi::ImageHandle reused = RB_RHI_RtShadowBlurStagger( r, viewDef, vLight, w, h, slot );
 		if ( reused != 0 ) {
+			rhiRtShadowDbg.maskReused++;
 			return reused;
 		}
 	}
@@ -11333,8 +11405,10 @@ static rhi::ImageHandle RB_RHI_RtShadowBlurLight( rhi::RHI *r, const viewDef_t *
 	if ( slot != NULL ) {
 		slot->lastUpdateFrame = rhiRtBlurFrame;
 		memcpy( slot->viewProj, rhiRtBlur.viewProj, sizeof( slot->viewProj ) );
+		rhiRtShadowDbg.maskMade++;
 		return r->GetRenderTargetImage( slot->maskRT );
 	}
+	rhiRtShadowDbg.maskMade++;
 	return r->GetRenderTargetImage( rhiRtBlurMaskRT );
 }
 

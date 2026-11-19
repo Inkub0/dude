@@ -787,6 +787,7 @@ void main() {
 	// wrapped-diffuse excess can ride the SAME shadow term without the N.L that lightScale folds
 	// in, and the per-channel excess itself. Both stay at their no-op defaults on non-skin draws.
 	float shadowVis = 1.0;
+	float dbgShadowTerm = 1.0, dbgContactTerm = 1.0;	// r_rtShadowDebug views: the two factors of shadowVis, kept apart
 	vec3 sssExcess = vec3( 0.0 );
 
 	// the light's projection * falloff, fetched up front (it was fetched further down anyway) so
@@ -942,10 +943,12 @@ void main() {
 		// on top. kd 1 = physical, kd 0 = full albedo retained (docs sec. 5).
 		diffuse.rgb *= ( 1.0 - F ) * ( 1.0 - metal * u_pbrParms2.x );
 		shadowVis = shadowVisibility( lightReaches && lightTermReaches( NdotLsigned ) );
+		dbgShadowTerm = shadowVis;
 		// DUDE contact shadows: fold the short screen-space march into this light's visibility so it
 		// stacks with the shadow map and rides the same shadowVis the skin scatter reuses. Skipped on
 		// the wet-blood film draw (a decal glint, not a shadow receiver).
-		shadowVis *= contactShadowTerm( lightReaches && NdotL > 0.0 && filmMode < 0.5, NdotL );
+		dbgContactTerm = contactShadowTerm( lightReaches && NdotL > 0.0 && filmMode < 0.5, NdotL );
+		shadowVis *= dbgContactTerm;
 		lightScale = NdotL * shadowVis;
 		sssExcess = skinScatterExcess( NdotLsigned );	// 0 unless this is a skin/flesh draw
 	} else {
@@ -959,8 +962,10 @@ void main() {
 		float rawNdotL = dot( lightV, localNormal );
 		microNdotL = dot( lightV, normalize( localNormal ) );
 		shadowVis = shadowVisibility( lightReaches && lightTermReaches( rawNdotL ) );
+		dbgShadowTerm = shadowVis;
 		// DUDE contact shadows (see the PBR branch): fold the screen-space march into shadowVis.
-		shadowVis *= contactShadowTerm( lightReaches && rawNdotL > 0.0 && filmMode < 0.5, rawNdotL );
+		dbgContactTerm = contactShadowTerm( lightReaches && rawNdotL > 0.0 && filmMode < 0.5, rawNdotL );
+		shadowVis *= dbgContactTerm;
 		lightScale = rawNdotL * shadowVis;
 		sssExcess = skinScatterExcess( rawNdotL );		// 0 unless this is a skin/flesh draw
 
@@ -1067,5 +1072,27 @@ void main() {
 	if ( u_skinParms.x > 0.0 ) {
 		fragColor.rgb += diffuse.rgb * sssExcess * lightAtten.rgb
 		               * ( shadowVis * parallaxSelfShadow ) * var_Color.rgb;
+	}
+
+	// r_rtShadowDebug views (u_aoParms.z, 0 on every normal draw): this light's shading replaced by ONE term on a white
+	// surface, weighted by the light's own reach (projection x falloff) so several lights add up readably. No albedo,
+	// no N.L, no specular: what is left is the term itself - a line in it is a line that term draws.
+	//   1 = the shadow term alone (ray / mask / cone / map), 2 = the contact shadow term alone,
+	//   3 = the shadow mode as a colour: red hard ray (4), green mask (5), yellow stale mask (6), blue character cone (7),
+	//       white shadow map (1-3), grey unshadowed (0)
+	if ( u_aoParms.z > 0.5 ) {
+		float reach = dot( lightAtten.rgb, vec3( 0.3333 ) );
+		vec3  term;
+		if ( u_aoParms.z < 1.5 ) {
+			term = vec3( dbgShadowTerm );
+		} else if ( u_aoParms.z < 2.5 ) {
+			term = vec3( dbgContactTerm );
+		} else {
+			float m = u_shadowParms.x;
+			term = ( m > 6.5 ) ? vec3( 0.1, 0.3, 1.0 ) : ( m > 5.5 ) ? vec3( 1.0, 0.9, 0.1 ) : ( m > 4.5 ) ? vec3( 0.1, 1.0, 0.2 )
+			     : ( m > 3.5 ) ? vec3( 1.0, 0.15, 0.1 ) : ( m > 0.5 ) ? vec3( 1.0 ) : vec3( 0.35 );
+		}
+		// the wet-blood film draw is a second pass over the same pixels: it would add the term twice
+		fragColor.rgb = ( filmMode > 0.5 ) ? vec3( 0.0 ) : term * ( 0.5 * reach );
 	}
 }
