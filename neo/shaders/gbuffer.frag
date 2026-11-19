@@ -99,7 +99,8 @@ void main() {
 	// y = 2: a model's baked AO took unit 10, its sidecar rides unit 11 (r_pbrModelBakedAO)
 	vec4 sidecar = ( u_ormParms.y > 1.5 ) ? texture( u_parallaxMap, uvCoverage ) : unit10;
 	vec2 roughMetal = ( u_ormParms.y > 0.5 ) ? dudeUnit10RoughMetal( sidecar ) : u_pbrParms.yx;
-	out_Material = vec4( roughMetal, specLum, occl );
+	// .a = the AO with its micro-shadow flag (u_occlusionParms.z: not a model's own baked map), dudeEncodeMatAo
+	out_Material = vec4( roughMetal, specLum, dudeEncodeMatAo( occl, u_occlusionParms.z > 0.5 ) );
 
 	// per-pixel screen velocity (docs/fsr-temporal-pipeline.md R1/A2): divide each interpolated
 	// clip by its OWN w so large world triangles reproject correctly, take the NDC delta, scale

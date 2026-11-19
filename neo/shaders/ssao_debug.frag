@@ -18,8 +18,10 @@ void main() {
 	// r_pbrDebugView (RB_RHI_PbrDebugOverlay) reuses this blit on the material attachment
 	// (R = roughness, G = metalness, B = spec luminance, A = AO): 6 AO, 7 roughness, 8 metalness,
 	// 9 ORM as glTF packs it (R = AO, G = roughness, B = metalness)
+	bool microFlag;
+	float matAo = dudeDecodeMatAo( s.a, microFlag );	// .a carries a micro-shadow flag bit (renderparms.glsl)
 	if ( u_localParam0.x > 8.5 ) {
-		fragColor = vec4( s.a, s.r, s.g, 1.0 );
+		fragColor = vec4( matAo, s.r, s.g, 1.0 );
 		return;
 	} else if ( u_localParam0.x > 7.5 ) {
 		fragColor = vec4( vec3( s.g ), 1.0 );
@@ -28,7 +30,7 @@ void main() {
 		fragColor = vec4( vec3( s.r ), 1.0 );
 		return;
 	} else if ( u_localParam0.x > 5.5 ) {
-		fragColor = vec4( vec3( s.a ), 1.0 );
+		fragColor = vec4( vec3( matAo ), 1.0 );
 		return;
 	}
 	if ( u_localParam0.x > 4.5 ) {

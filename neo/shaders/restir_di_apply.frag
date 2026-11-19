@@ -256,14 +256,16 @@ void main() {
 	// baked occlusion map (material att1 .a, 1 = none): the forward path's direct-diffuse factor
 	// mix( 1, map, scale*direct ) - applied to the combined term here (v1: diffuse + spec denoised together)
 	if ( u_occlusionParms.z > 0.0 ) {
-		float occl = mt.a;
+		bool microOk;	// the G-buffer flags a model's own baked map: plain share, never micro-shadows
+		float aoMat = dudeDecodeMatAo( mt.a, microOk );
+		float occl = aoMat;
 		// AO micro-shadows (r_aoMicroShadows, as interaction.frag: dudeMicroShadow) with the SH light
 		// direction, weighted by its concentration k - light arriving from many directions at once is ambient-like and
 		// keeps the plain AO. SH mode only (the direction); otherwise the plain AO. Diffuse and specular arrive summed
 		// here, so it shadows both, as in the forward pass.
-		if ( u_aoParms.y > 0.5 && aoMicroK > 0.0 ) {
-			float microShadow = dudeMicroShadow( mt.a, aoMicroCos );
-			occl = mix( mt.a, microShadow, aoMicroK );
+		if ( u_aoParms.y > 0.5 && microOk && aoMicroK > 0.0 ) {
+			float microShadow = dudeMicroShadow( aoMat, aoMicroCos );
+			occl = mix( aoMat, microShadow, aoMicroK );
 		}
 		lit *= mix( 1.0, occl, u_occlusionParms.z );
 	}
