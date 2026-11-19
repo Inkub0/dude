@@ -48,6 +48,11 @@
 !/d3xp/def/
 /d3xp/def/*
 !/d3xp/def/*.def
+# DUDE's shipped RoE PBR table (RoE-only rows over base/pbr/pbr_materials.cfg); the editor's
+# d3xp/pbr/pbr_overrides.cfg stays local
+!/d3xp/pbr/
+/d3xp/pbr/*
+!/d3xp/pbr/pbr_game.cfg
 # d3le (Lost Mission) game data is ignored (its pk4s and description.txt), EXCEPT DUDE's def
 # overrides (id's restored commented-out lights), mirroring d3xp/def
 /d3le/*

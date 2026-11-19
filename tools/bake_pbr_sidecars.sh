@@ -120,7 +120,7 @@ LIST="$WORK/pack-files.txt"
 	echo "tool:     tools/pbr_extract_maps.py sha256 $(sha256sum "$TOOL" | cut -c1-16)"
 	# roughness is anchored to the PBR table, so the table is part of the recipe
 	for s in "${SEARCH[@]}"; do
-		for t in "$s"/pbr/pbr_materials.cfg "$s"/pbr/pbr_overrides.cfg; do
+		for t in "$s"/pbr/pbr_materials.cfg "$s"/pbr/pbr_game.cfg "$s"/pbr/pbr_overrides.cfg; do
 			[ -f "$t" ] && echo "table:    $t sha256 $(sha256sum "$t" | cut -c1-16)"
 		done
 	done

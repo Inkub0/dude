@@ -19,7 +19,9 @@ Materials with no signal get no entry and fall back to the r_pbr* globals.
 
 Usage:
     python3 tools/pbr_classify.py            # base game -> base/pbr/pbr_materials.cfg
-    python3 tools/pbr_classify.py --game d3xp  # base+d3xp pk4s -> d3xp/pbr/...
+    python3 tools/pbr_classify.py --game d3xp  # base+d3xp pk4s -> d3xp/pbr/... (a classifier
+                                               # baseline only: RoE ships d3xp/pbr/pbr_game.cfg,
+                                               # a delta over base's table, docs sec. 6)
 """
 
 import argparse
