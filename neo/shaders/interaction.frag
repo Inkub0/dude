@@ -718,7 +718,9 @@ void main() {
 		// Phase D PBR sidecar (docs/pbr-materials.md sec. 7): an authored <diffuse>_orm / _rmao texture on
 		// unit 10 replaces the table's per-material scalars per texel (same diffuse UV, parallax included)
 		if ( u_ormParms.y > 0.5 ) {
-			vec2 rm = dudeUnit10RoughMetal( texture( u_occlusionMap, uvDiffuse ) );
+			// y = 2: a model's baked AO took unit 10, its sidecar rides unit 11 (r_pbrModelBakedAO)
+			vec2 rm = dudeUnit10RoughMetal( ( u_ormParms.y > 1.5 ) ? texture( u_parallaxMap, uvDiffuse )
+			                                                       : texture( u_occlusionMap, uvDiffuse ) );
 			rough = rm.x;
 			metal = rm.y;
 		}

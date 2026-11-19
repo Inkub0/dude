@@ -158,6 +158,10 @@ def read_image_expr(toks, i):
                 continue
             arg, i = read_image_expr(toks, i)
             args.append(arg)
+        if head.lower() == "downsize" and args:
+            # Quake 4: "downsize( <image>, <levels> )" only marks that the image may load smaller
+            # at lower texture quality; the image is unchanged (Image_program.cpp), so it is <image>
+            return args[0], i + 1
         return (head.lower(), args), i + 1
     return head, i
 

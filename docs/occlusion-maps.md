@@ -205,8 +205,10 @@ for release.
 | cvar | default | range | purpose |
 |---|---|---|---|
 | `r_occlusionMaps` | 0 | 0/1 | master toggle (GL3/Vulkan only; non-vanilla) |
-| `r_occlusionMapScale` | 0.9 (1.0 before 2026-11-18) | 0–1 | AO-map strength on the ambient term (0 = off, 1 = full) |
-| `r_occlusionMapDirect` | 0.55 (0.9 before 2026-11-18; with micro-shadows on, also their strength) | 0–1 | strength on direct-light diffuse, as a fraction of the scale (0 = ambient-only) |
+| `r_occlusionMapScale` | 0.9 (1.0 before 2026-11-18) | 0–1 | **model baked** AO strength on the ambient term: a model's own map (generated/aomaps) or an authored `occlusionmap` stage (0 = off, 1 = full) |
+| `r_occlusionTextureScale` | 1.0 (since 2026-11-19) | 0–1 | **texture** AO strength on the ambient term: the AO channel of PBR sidecars (`<diffuse>_orm` / `_rmao`) |
+| `r_pbrModelBakedAO` | 1 (since 2026-11-19) | 0/1 | on a model with both, its own baked map gives the AO instead of its sidecar's (docs/pbr-materials.md §7) |
+| `r_occlusionMapDirect` | 0.45 (0.55 until 2026-11-19, 0.9 before 2026-11-18; with micro-shadows on, also their strength) | 0–1 | strength on direct-light diffuse, as a fraction of each source's strength, common to both (0 = ambient-only) |
 | `r_occlusionMapsAutoBake` | 0 | 0/1 | DEV: lazily bake a missing model's AO on first sight (one-time hitch) |
 | `r_occlusionMapBakeSize` | 0 | 0–4096 | baker: output texture resolution; **0 = auto** (per surface, match its diffuse/bump map size so the AO is 1:1 with the shipped art) |
 | `r_occlusionMapBakeRays` | 128 | 1–4096 | baker: hemisphere rays per texel |
@@ -218,16 +220,23 @@ for release.
 | `r_occlusionMapBakeGPU` | 1 | 0/1 | baker: cast the rays on the GPU (Vulkan ray query) when available, else the CPU; not archived; Vulkan builds only |
 | `r_occlusionMapBakeThreads` | 0 | 0–256 | baker: CPU tracer worker threads (0 = all hardware threads); not archived |
 
-Ambient strength = `r_occlusionMapScale`; direct-diffuse strength =
-`r_occlusionMapScale × r_occlusionMapDirect`.
+Ambient strength = the source's strength (`r_occlusionTextureScale` for sidecar AO,
+`r_occlusionMapScale` for a model's baked map); direct-diffuse strength = that strength ×
+`r_occlusionMapDirect`. The deferred DI apply reads the AO from the G-buffer (material att1 .a),
+which gbuffer.frag stores pre-scaled by the source's strength over the stronger one
+(`u_occlusionParms.w` = 1 − ratio); the apply then uses the stronger strength × direct. Exact for
+the plain term; with micro-shadows the weaker source's curve sees the pre-scaled AO.
 
 ## UI
 
 - **Enhancements tab** → *Ambient Occlusion* section: a "Baked Occlusion Maps" master
   checkbox, next to the SSAO toggle.
-- **Developer tab** → *Occlusion Maps* section (under the SSAO tuning): the master toggle
-  plus **AO Map Strength** (`r_occlusionMapScale`) and **Direct Light AO (map)**
-  (`r_occlusionMapDirect`) sliders, each with a reset button. Independent of `r_ssao`.
+- **Enhancements tab** → *Ambient Occlusion & GI*: "Accurate Model Baked AO"
+  (`r_pbrModelBakedAO`) under the master checkbox.
+- **Debugging tab** → *Baked and Texture Occlusion Maps* section (under the SSAO tuning):
+  **Texture AO Strength** (`r_occlusionTextureScale`), **Model Baked AO Strength**
+  (`r_occlusionMapScale`) and the common **Direct Light AO (map)** (`r_occlusionMapDirect`),
+  each with a reset button. Independent of `r_ssao`.
 
 Wired into the [quality presets](todo.md): **on for every tier except Potato**. (It was
 originally left out, on the reasoning that it was inert on stock assets — but once AO is baked

@@ -4384,6 +4384,15 @@ static void DrawEnhGroup_AmbientOcclusion()
 			"(no stock Doom 3 asset does, so this is inert on the base game and aimed at mods / "
 			"custom art). Complements SSAO; strength sliders are in the Debugging tab. Non-vanilla; "
 			"opengl3 only." );
+		// a model's own baked AO (generated/aomaps) over its PBR sidecar's AO channel (RB_RHI_ModelAoOverSidecar);
+		// inert without AO maps, and without sidecars (Graphics > Lighting > Per-Pixel PBR Textures) to override
+		ImGui::BeginDisabled( !r_occlusionMaps.GetBool() || !r_pbrTextureMaps.GetBool() );
+		CvarCheckbox( "Accurate Model Baked AO", r_pbrModelBakedAO, "On models (characters, monsters, props) that have both a PBR "
+			"texture and their own baked AO map, take the ambient occlusion from the baked map, made from that exact "
+			"model. The PBR texture's AO belongs to the texture: it is averaged over every model that shares it, or "
+			"missing. Roughness and metalness still come from the PBR texture. Off: the PBR texture's AO everywhere. "
+			"Needs Baked Occlusion Maps and Per-Pixel PBR Textures (Graphics > Lighting) on. (r_pbrModelBakedAO)" );
+		ImGui::EndDisabled();
 		EndSettingsGroup();
 	}
 }
@@ -6677,15 +6686,22 @@ static void DrawDbgGroup_GTAO()
 	ImGui::EndDisabled();	// GTAO (ssao on && !rtao && !rtgi)
 
 
-	// baked occlusion maps (docs/occlusion-maps.md): independent of SSAO; the on/off is on Graphics
-	SettingsHeading( "Baked Occlusion Maps" );
+	// occlusion maps (docs/occlusion-maps.md): independent of SSAO; the on/off is on Graphics (Baked Occlusion Maps).
+	// Two sources, each with its own strength: the AO channel of PBR sidecar textures, and a model's own baked map (or
+	// an authored occlusionmap stage); the direct-light share is common to both.
+	SettingsHeading( "Baked and Texture Occlusion Maps" );
 	ImGui::BeginDisabled( !r_occlusionMaps.GetBool() );
-	CvarSliderF( "AO Map Strength", r_occlusionMapScale, 0.0f, 1.0f, "%.2f", "How strongly the occlusion map darkens the ambient term. 0 = off, 1 = the map "
-		"at full darkening. Default 1.0." );
+	CvarSliderF( "Texture AO Strength", r_occlusionTextureScale, 0.0f, 1.0f, "%.2f", "How strongly the AO channel of PBR textures "
+		"(<diffuse>_orm / _rmao sidecars, such as the Baked PBR packs) darkens the ambient term. 0 = off, 1 = full darkening. "
+		"Default 1.0. (r_occlusionTextureScale)" );
+	CvarSliderF( "Model Baked AO Strength", r_occlusionMapScale, 0.0f, 1.0f, "%.2f", "How strongly a model's own baked AO map "
+		"(the Baked AO packs, or a mod's occlusionmap stage) darkens the ambient term. 0 = off, 1 = full darkening. "
+		"Default 0.9. (r_occlusionMapScale)" );
 
-	CvarSliderF( "Direct Light AO (map)", r_occlusionMapDirect, 0.0f, 1.0f, "%.2f", "How strongly the occlusion map darkens direct (dynamic) light's diffuse, as a "
-		"fraction of AO Map Strength. Doom 3 is mostly dynamic light, so this is what makes the "
-		"map visible; lower it if AO looks baked-in under moving lights. 0 = ambient-only. Default 0.9." );
+	CvarSliderF( "Direct Light AO (map)", r_occlusionMapDirect, 0.0f, 1.0f, "%.2f", "How strongly both kinds of AO map darken direct "
+		"(dynamic) light's diffuse, as a fraction of each one's strength above. Doom 3 is mostly dynamic light, so this is "
+		"what makes the maps visible; lower it if AO looks baked-in under moving lights. 0 = ambient-only. Default 0.45. "
+		"(r_occlusionMapDirect)" );
 	ImGui::EndDisabled();	// r_occlusionMaps
 
 	ImGui::EndDisabled();	// backend supported

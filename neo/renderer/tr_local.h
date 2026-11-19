@@ -963,6 +963,7 @@ bool R_PbrWriteOverrideLine( const idMaterial *mat, float metal, float rough,
 extern idCVar r_pbr;					// GGX interaction path; supersedes r_shading while on
 extern idCVar r_pbrRoughness;			// Phase A global fallback roughness (per-material in Phase B)
 extern idCVar r_pbrTextureMaps;			// per-texel ORM / RMAO sidecar textures override the table scalars
+extern idCVar r_pbrModelBakedAO;		// a model's own baked AO map wins over its sidecar's AO channel
 extern idCVar r_pbrDebugView;			// PBR material debug view: 0 off, 1 AO, 2 roughness, 3 metalness, 4 ORM (RB_RHI_PbrDebugOverlay)
 // Phase D per-texel PBR maps (RhiWorld.cpp): the sidecar texture next to a material's diffuse map
 // (<diffuse>_orm = glTF R=AO G=rough B=metal, <diffuse>_rmao = R=rough G=metal B=AO). Returns the
@@ -1382,7 +1383,8 @@ bool R_ShadowMapSkipStencilBuild( const idRenderLightLocal *lightDef, const idMa
 
 // DUDE: baked ambient-occlusion (occlusion) maps (enhancement backends only; docs/occlusion-maps.md)
 extern idCVar r_occlusionMaps;			// master toggle: use per-material baked AO maps
-extern idCVar r_occlusionMapScale;		// AO-map strength on the ambient term (0..1)
+extern idCVar r_occlusionMapScale;		// model baked AO-map strength on the ambient term (0..1)
+extern idCVar r_occlusionTextureScale;	// PBR sidecar (texture) AO strength on the ambient term (0..1)
 extern idCVar r_occlusionMapDirect;		// AO-map strength on direct-light diffuse (0..1 of scale)
 extern idCVar r_occlusionMapsAutoBake;	// DEV: lazily bake missing model AO maps on first sight
 

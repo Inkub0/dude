@@ -93,7 +93,12 @@ void main() {
 	bool wantOccl = ( u_localParam0.y > 0.5 && u_occlusionParms.x > 0.5 ) || u_ormParms.w > 0.5;
 	vec4 unit10 = ( u_ormParms.y > 0.5 || wantOccl ) ? texture( u_occlusionMap, uvCoverage ) : vec4( 1.0 );
 	float occl = wantOccl ? dudeUnit10Ao( unit10 ) : 1.0;
-	vec2 roughMetal = ( u_ormParms.y > 0.5 ) ? dudeUnit10RoughMetal( unit10 ) : u_pbrParms.yx;
+	// this surface's AO source strength over the stronger of the two (texture / model baked AO): the DI apply scales
+	// by that stronger one, so mix( 1, ao, ratio * it ) = this source's own strength. ( 1 - w ): unset = 1 = whole.
+	occl = 1.0 - ( 1.0 - occl ) * ( 1.0 - u_occlusionParms.w );
+	// y = 2: a model's baked AO took unit 10, its sidecar rides unit 11 (r_pbrModelBakedAO)
+	vec4 sidecar = ( u_ormParms.y > 1.5 ) ? texture( u_parallaxMap, uvCoverage ) : unit10;
+	vec2 roughMetal = ( u_ormParms.y > 0.5 ) ? dudeUnit10RoughMetal( sidecar ) : u_pbrParms.yx;
 	out_Material = vec4( roughMetal, specLum, occl );
 
 	// per-pixel screen velocity (docs/fsr-temporal-pipeline.md R1/A2): divide each interpolated

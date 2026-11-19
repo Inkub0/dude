@@ -383,6 +383,13 @@ and y = override roughness/metalness. `dudeUnit10Ao` / `dudeUnit10RoughMetal` in
   that surface (explicit `occlusionmap` stage, `_ao` file, generated bake), in the ambient
   and direct terms alike, on world geometry too (the generated bake skips the world BSP; an
   authored map is the author's call). Author white AO if the surface should keep none.
+  **Exception, `r_pbrModelBakedAO` 1 (default, "Accurate Model Baked AO" under Baked Occlusion Maps in the Ambient Occlusion & GI group,
+  2026-11-19):** on a model (not the static world) that also has its own baked map, that map
+  gives the AO and the sidecar only roughness / metalness. A sidecar belongs to a texture, so
+  on models its AO is the baked maps averaged over every mesh sharing the texture (or flat white
+  where the extractor refused the copy); the baked map is exact per mesh. Parallax never runs off
+  the static world, so the sidecar moves to unit 11 (`u_parallaxMap`) and the baked map takes
+  unit 10: `u_ormParms.y = 2` (`RB_RHI_ModelAoOverSidecar`, forward and G-buffer paths).
 - **gbuffer.frag** (SSR / RT reflections / ReSTIR DI material attachment): the same
   per-texel values, so reflections and the deferred DI shade agree with the forward pass.
   When the albedo capture is off the pass fills the diffuse texture matrix itself
@@ -511,9 +518,15 @@ excluded), eye/teeth tokens → `eyes`, rust tokens on metal → `rust`, tile on
 `textures/test`, decals) for hand editing. Retail labelling decides the look: Raven types
 most walls `solidmetal` (so do the folder priors that follow its majority — 1,875 rows)
 and the marine bodies, fatigues and two helmets `flesh` (blood decals); the Quake 4 table
-carries its own `@cat` presets, so those classes tune per title. Development install: the
-engine reads it from the dude folder (`~/.local/share/dude/q4base/pbr/`) until a shipping
-path for DUDE's Quake 4 data exists.
+carries its own `@cat` presets, so those classes tune per title. **Shipping (since 0.9.10):**
+`tools/quake4/package-q4.sh` puts it (from git HEAD) in the `dude-q4-<ver>` archive as
+`q4base/pbr/pbr_materials.cfg`, not in DUDE's own archive, so a Doom 3 install never gets a
+`q4base/` folder. Development install: a copy in the dude folder
+(`~/.local/share/dude/q4base/pbr/`) shadows the shipped one, so re-copy it after every bake.
+
+Raven wraps about one diffuse map in eight in `downsize( <image>, <levels> )`. It only marks
+that the image may load smaller at lower texture quality, so both the engine's sidecar and AO
+lookups (`RB_RHI_PlainImageName`) and the extractor treat it as `<image>`.
 
 ### Per-category defaults — a table, not cvars (refactored 2026-08-12)
 
