@@ -193,6 +193,15 @@ occluded spot. `u_aoParms.x` (a vec4 appended to the uniform block: 1280 -> 1296
 
 ### 7c. AO micro-shadows (`r_aoMicroShadows`, default ON since 2026-11-18)
 
+**Not on a model's own baked map (2026-11-19).** With a light shining straight on (N·L = 1) the curve leaves every
+texel with AO above ~0.71 undarkened; most baked AO sits at 0.72-0.9, so on characters and props it all but vanished.
+Those maps were traced against the model's real geometry, so they keep the plain share (`mix(1, ao, strength ×
+r_occlusionMapDirect)`); micro-shadows stay on sidecar (texture) AO and the world, where they shape the grooves
+between tiles. Forward: `RB_RHI_FillOcclusionParms` reports `aoFromModelMap` and `aoParms.y` drops to 0 for that draw.
+Deferred DI / Path Tracing: gbuffer.frag stores the flag in the top bit of material att1 .a (`dudeEncodeMatAo`:
+0..127 micro-eligible, 128..255 plain, 7 bits of AO each; 255 = no AO), restir_di_apply.frag and the
+r_pbrDebugView AO views decode it (`dudeDecodeMatAo`).
+
 For the **baked / sidecar AO** part of 7b: read the material AO as a cone of open directions above the texel and shadow
 a direct light only where it comes in outside it, using the normal-mapped N.L - Naughty Dog's curve
 `saturate( N.L + 2 ao^2 - 1 )` ("The Technical Art of Uncharted 4", Brinck & Maximov 2016, as Unity HDRP's

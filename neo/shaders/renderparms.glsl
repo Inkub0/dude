@@ -190,6 +190,20 @@ UBO_BINDING(0) uniform RenderParams {
 // Uncharted 4", 2016; Unity HDRP's ComputeMicroShadowing): saturate( N.L + 2 ao^2 - 1 ), the AO read as a cone of open
 // directions. Picked in game over Call of Duty's cone curve ( N.L / sqrt( 1 - ao ) )^2 (2026-11-18, a minimal difference).
 // Light behind the surface (N.L <= 0) is unshadowed here, as HDRP gates it: N.L already zeroes that light.
+// G-buffer material att1 .a (RGBA8): the stored AO plus one flag in its top bit - 0..127 = AO the DI apply may read as
+// micro-shadows (sidecar / world AO), 128..255 = a model's own baked map, kept as the plain share. 7 bits of AO each;
+// 255 (no AO, the clear value) decodes as plain AO 1. Written by gbuffer.frag, read by restir_di_apply.frag and
+// the r_pbrDebugView AO views (ssao_debug.frag).
+float dudeEncodeMatAo( float ao, bool micro ) {
+	ao = clamp( ao, 0.0, 1.0 );
+	return ( micro ? ao * 127.0 : 128.0 + ao * 127.0 ) / 255.0;
+}
+float dudeDecodeMatAo( float a, out bool micro ) {
+	float v = floor( a * 255.0 + 0.5 );
+	micro = v < 127.5;
+	return micro ? v / 127.0 : ( v - 128.0 ) / 127.0;
+}
+
 float dudeMicroShadow( float ao, float NdotL ) {
 	if ( NdotL <= 0.0 ) {
 		return 1.0;

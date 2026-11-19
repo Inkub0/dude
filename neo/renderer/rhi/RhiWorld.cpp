@@ -2583,10 +2583,20 @@ static idImage *RB_RHI_ModelAoOverSidecar( const drawSurf_t *surf ) {
 	return RB_RHI_SurfaceOcclusionImage( surf );
 }
 
+// Is this surface off the static world (a model: md5, LWO / ASE prop, moving entity)?
+static bool RB_RHI_SurfIsModel( const drawSurf_t *surf ) {
+	const idRenderEntityLocal *redef = surf->space ? surf->space->entityDef : NULL;
+	return redef && redef->parms.hModel && !redef->parms.hModel->IsStaticWorldModel();
+}
+
 // sidecarOnUnit11: set when the sidecar moves to unit 11 (u_ormParms.y = 2); the caller binds it there.
+// aoFromModelMap: the AO comes from a model's own baked map (not a sidecar's AO channel, not the world). Such a map was
+// traced against the model's real geometry, so it keeps the plain AO share: AO micro-shadows (r_aoMicroShadows), which
+// help the world's tile grooves, would let the light's open cone erase most of it (r_aoMicroShadows doc, ssao-gtao.md 7c).
 static idImage *RB_RHI_FillOcclusionParms( rhi::RenderParams &parms, const drawInteraction_t *din,
-                                           idImage *&sidecarOnUnit11 ) {
+                                           idImage *&sidecarOnUnit11, bool &aoFromModelMap ) {
 	sidecarOnUnit11 = NULL;
+	aoFromModelMap = false;
 	// DUDE Phase D PBR sidecar (docs/pbr-materials.md sec. 7): a <diffuse>_orm / _rmao texture
 	// overrides the table metalness/roughness per texel (interaction.frag, r_pbr path) and its AO
 	// channel replaces every other occlusion source for this surface (under r_occlusionMaps) -
@@ -2604,6 +2614,7 @@ static idImage *RB_RHI_FillOcclusionParms( rhi::RenderParams &parms, const drawI
 				if ( modelAo ) {
 					parms.ormParms[1] = 2.0f;	// AO = the plain map on unit 10, roughness / metalness = unit 11
 					sidecarOnUnit11 = pbrMap;
+					aoFromModelMap = true;
 					return modelAo;
 				}
 			}
@@ -2619,6 +2630,7 @@ static idImage *RB_RHI_FillOcclusionParms( rhi::RenderParams &parms, const drawI
 	idImage *occlusionImage = RB_RHI_SurfaceOcclusionImage( din->surf );
 	if ( occlusionImage ) {
 		RB_RHI_SetOcclusionStrength( parms, din->ambientLight, false );
+		aoFromModelMap = RB_RHI_SurfIsModel( din->surf );	// an authored occlusionmap on the world stays eligible
 	}
 	return occlusionImage;
 }
@@ -2908,7 +2920,8 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 	bool contactShadows = RB_RHI_FillContactShadowParms( parms, din, rtSun );
 
 	idImage *sidecarOnUnit11 = NULL;
-	idImage *occlusionImage = RB_RHI_FillOcclusionParms( parms, din, sidecarOnUnit11 );
+	bool aoFromModelMap = false;
+	idImage *occlusionImage = RB_RHI_FillOcclusionParms( parms, din, sidecarOnUnit11, aoFromModelMap );
 
 	// RTGI reconcile (docs/rtx-rtgi.md H6c): on an AMBIENT draw with r_rtgi on, the fullscreen GI apply
 	// (RB_RHI_RtgiApply) adds real bounce light, and r_rtgiAmbient picks what the ambient light still draws. u_color.x
@@ -2943,6 +2956,7 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 		parms.ormParms[1] = 1.0f;			// unit 11 taken after all: the sidecar's own AO, as before
 		occlusionImage = sidecarOnUnit11;
 		RB_RHI_SetOcclusionStrength( parms, din->ambientLight, true );
+		aoFromModelMap = false;
 	}
 
 	// light-aware AO (r_aoLightAware, docs/ssao-gtao.md "Light-aware AO"): the AO share on this light fades where the light
@@ -2950,7 +2964,8 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 	// (the same matrix the contact-shadow march fills).
 	if ( !din->ambientLight && R_BackendSupportsEnhancements() ) {
 		parms.aoParms[0] = idMath::ClampFloat( 0.0f, 1.0f, r_aoLightAware.GetFloat() );
-		parms.aoParms[1] = r_aoMicroShadows.GetBool() ? 1.0f : 0.0f;	// baked / sidecar AO as micro-shadows
+		// baked / sidecar AO as micro-shadows - not a model's own baked map (RB_RHI_FillOcclusionParms)
+		parms.aoParms[1] = ( r_aoMicroShadows.GetBool() && !aoFromModelMap ) ? 1.0f : 0.0f;
 		if ( parms.aoParms[0] > 0.0f && parms.localParam0[0] > 0.5f ) {
 			memcpy( parms.modelViewMatrix, din->surf->space->modelViewMatrix, sizeof( parms.modelViewMatrix ) );
 		}
@@ -6622,6 +6637,9 @@ static bool RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef, int pha
 		{
 			const float sMax = Max( RB_RHI_OcclusionSourceScale( true ), RB_RHI_OcclusionSourceScale( false ) );
 			parms.occlusionParms[3] = ( sMax > 0.0f ) ? 1.0f - RB_RHI_OcclusionSourceScale( gbTextureAo ) / sMax : 0.0f;
+			// .z: may the DI apply read this AO as micro-shadows? Not a model's own baked map (as the forward path,
+			// RB_RHI_FillOcclusionParms); gbuffer.frag flags it in the stored value's top bit (dudeEncodeMatAo)
+			parms.occlusionParms[2] = ( gbTextureAo || !RB_RHI_SurfIsModel( surf ) ) ? 1.0f : 0.0f;
 		}
 		// always bound (VK descriptor); the shader gates the march on parallaxParms.x and reads a model's sidecar here
 		// when u_ormParms.y = 2

@@ -6617,7 +6617,9 @@ static void DrawDbgGroup_GTAO()
 	CvarCheckbox( "AO Micro-Shadows", r_aoMicroShadows, "Baked / texture AO shadows a direct light (its diffuse and its highlight) "
 		"only where the light comes in at a grazing angle (Uncharted 4's micro-shadows), using the surface's own normal - no "
 		"parallax or screen-space AO needed, and it also works in Path Tracing. Replaces Light-Aware AO's texture-AO part (its "
-		"screen-space part stays). On by default." );
+		"screen-space part stays). Applies to texture (PBR sidecar) AO and the world, not to a model's own baked AO map, "
+		"which keeps the plain AO share: traced against the real model, most of it would vanish under direct light. "
+		"On by default." );
 
 	// ---- Screen-space GTAO: the horizon-march producer. Inert while RTAO or RTGI replaces it. ----
 	SettingsHeading( "Screen-space (GTAO)" );
