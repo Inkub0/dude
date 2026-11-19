@@ -381,7 +381,46 @@ the pass-through *read* - it is the mask write + the kernel on flagged pixels. R
 is skipping the pass-through pixels' *write* (the indirect flagged-tile + no-clear approach), a
 larger backend build.
 
+## Characters under ray-traced lights (2026-11-19)
+
+Four separate defects showed up on faces (Betruger, Swann) once every light was ray-traced. In the
+order they were found:
+
+- **Black wedges in creases (eye corners, collar, lips), softened lights only.** The mask's ray starts
+  from the depth buffer and is pushed along a slope normal. On a tessellated character that point can
+  sit inside the coarse ray-traced copy of the mesh, and in a crease the push can cross into the
+  opposite side: the first thing the ray met was the inside of a mesh. `r_rtShadowOutsideHits` (1):
+  within `r_rtShadowInsideSkip` (3 units) of its start a shadow ray counts only hits on the OUTSIDE of
+  a mesh (Doom 3's outward side is Vulkan's back face; the RT contact shadows use the same rule).
+  Beyond that distance every hit counts, so a real occluder seen from inside the same mesh still
+  casts. The mask's ray always; the per-draw hard ray on tessellated draws (`u_contactParms2.w`).
+- **A hard dark patch with a hairy outline on the neck / jaw, any ray-traced light.** Skin and flesh
+  are lit past the terminator by the scatter wrap (`skinScatterExcess`, positive down to
+  `N.L = -wrap`), and that light is multiplied by the shadow term. The ray paths skipped the ray and
+  returned "shadowed" where the bump-mapped `N.L <= 0`, cutting the wrap light along the bump map's
+  `N.L = 0` contour (the sideburn relief in Swann's height map). A shadow map is looked up
+  everywhere, so only ray-traced lights showed it. `interaction.frag` `lightTermReaches()` now gates
+  the ray on `N.L > -wrap` for skin / flesh draws. The mask's ray pass had the mirror defect (faces
+  away = no ray = lit, which dropped the jaw's shadow on a neck turned from the light):
+  `rtshadow_ray.frag` traces that band too (`u_color.w` = the widest wrap) and, for those pixels,
+  counts only a hit BEFORE the ray sinks back through the surface's own plane, so a surface's own
+  back side stays lit exactly as before.
+- **Lights without a mask.** With softening on, an RT light the blur pass made no mask for (penumbra
+  under `r_rtShadowBlurMinPenumbra`) is a hard ray on the world. On an animated character
+  `r_rtShadowCharRays` (4) traces it per draw instead (`rtSoftConeVis`, shadow mode 7): rays spread
+  over the light's physical size, averaged over each 2x2 quad. This is a PHYSICAL cone, several times
+  narrower near contact than the mask's blur (which follows `r_rtShadowBlurCurve`), so a light that
+  has a mask uses the mask on characters, like the world.
+- **Contact shadows "composed of defined lines".** Not this system: see docs/contact-shadows.md.
+
+Tried and dropped: fading the ray's result near the smooth terminator (it erased the jaw's real
+shadow), and building the animated BLAS from the deform-once tessellated buffer (no visible change
+on these defects, 64x the triangles to refit at tessellation level 8).
+
 ## Cvars
+
+- `r_rtShadowOutsideHits` (1) / `r_rtShadowInsideSkip` (3.0): see "Characters" above.
+- `r_rtShadowCharRays` (4, 0..16): see "Characters" above. 0 = the hard ray.
 
 - `r_rtAllLights` (0; on in the Ultra Nightmare preset, with `r_rtShadowBlur`): ray-trace every
   shadow-casting light (see above). `r_rtShadowBlurStagger` is on there too (the preset owns the on/off, not the two distances).

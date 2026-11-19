@@ -2110,6 +2110,66 @@ static void RB_RHI_FillPerforatedParms( rhi::RHI *r, rhi::RenderParams &parms, c
 	RB_RHI_PackAddr( &parms.shadowProjectionQ[0], cachedAddr );	// bit-cast, NOT a value cast
 }
 
+static float RB_RHI_RtShadowBlurLightRadius( const renderLight_t &lp, const idVec3 &lorg, const idVec3 &viewOrg );
+
+// The frame phase for shaders that turn a per-quad ray pattern (interaction.frag dudeQuadTurn): 1 + frame index while
+// FSR2 resolves this view over time - the same test as the projection jitter (R_RenderView, tr_main.cpp) - so each
+// frame takes other directions and the resolve averages the dither into a gradient; 0 otherwise = a pattern that
+// stays put (no temporal resolve to hide a per-frame change: it would shimmer). A screenshot's frame is static too.
+static float RB_RHI_QuadTurnPhase( void ) {
+	const viewDef_t *vd = backEnd.viewDef;
+	const bool temporal = r_fsr.GetBool() && rhi::GetActiveBackendType() == rhi::BT_VULKAN
+		&& vd != NULL && !vd->isSubview && vd->isWindowView && !tr.takingEnvProbe && !tr.takingScreenshot;
+	return temporal ? (float)( 1 + ( tr.frameCount & 1023 ) ) : 0.0f;
+}
+
+// An animated character surface (md5: monsters, NPCs, heads) that the per-draw soft trace serves: not the view weapon
+// or another depth-hacked model (the ray would start in its compressed depth range) and not translucent (eyeballs,
+// glows - they never read a shadow mask anyway). Wider than the tessellation classifier on purpose: a character's
+// untessellated parts (a body mesh, a collar, a skin the classifier excludes) want the same soft edge.
+static bool RB_RHI_CharSoftSurf( const drawSurf_t *surf ) {
+	const viewEntity_t *space = surf->space;
+	if ( space == NULL || space->entityDef == NULL || space->entityDef->index == 0
+	     || space->weaponDepthHack || space->modelDepthHack != 0.0f ) {
+		return false;
+	}
+	if ( surf->material == NULL || surf->material->Coverage() == MC_TRANSLUCENT ) {
+		return false;
+	}
+	const idRenderModel *model = space->entityDef->parms.hModel;
+	return model != NULL && model->IsDynamicModel() == DM_CACHED;
+}
+
+// r_rtShadowCharRays (mode 7, interaction.frag rtSoftConeVis): with softening on, an RT light the softening pass made
+// NO mask for this frame (its penumbra is under r_rtShadowBlurMinPenumbra, ...) is traced per draw on an animated
+// CHARACTER, like the RT contact shadows: a few rays over the light's physical size, averaged over each 2x2 quad, so a
+// face keeps a slightly soft edge where the world shows a hard one. A light WITH a mask uses the mask on characters
+// too (RB_RHI_FillBlurMaskParms): the screen-space blur follows r_rtShadowBlurCurve and is several times wider near
+// contact than a physical cone, so a cone-traced character read as "defined lines" next to the softened world. (The
+// mask was wrong on skin until its ray pass traced the scatter-wrap band - rtshadow_ray.frag wrapBand.) False = not a
+// character / rays 0 / no RT variant or TLAS: the caller's hard ray.
+static bool RB_RHI_FillCharSoftParms( rhi::RenderParams &parms, const drawInteraction_t *din, bool &rtSun ) {
+	const int rays = r_rtShadowCharRays.GetInteger();
+	if ( rays <= 0 || ictx.interactionRtProg == 0 || !RB_RHI_CharSoftSurf( din->surf ) ) {
+		return false;
+	}
+	const unsigned long long tlas = ictx.r->GetTlasAddress();
+	const viewLight_t *vLight = backEnd.vLight;
+	if ( tlas == 0 || vLight == NULL || vLight->lightDef == NULL || backEnd.viewDef == NULL ) {
+		return false;
+	}
+	parms.shadowParms[0] = 7.0f;
+	parms.shadowParms[1] = RB_RHI_RtShadowBlurLightRadius( vLight->lightDef->parms, vLight->globalLightOrigin,
+	                                                       backEnd.viewDef->renderView.vieworg );
+	parms.shadowParms[2] = (float)idMath::ClampInt( 1, 16, rays );
+	parms.shadowParms[3] = RB_RHI_QuadTurnPhase();	// per-quad sample rotation: per frame under FSR2, else static
+	RB_RHI_PackAddr( &parms.rtParms[0], tlas );	// bit-cast, NOT a value cast
+	parms.rtParms[2] = r_rtSunShadowOffset.GetFloat();
+	parms.rtParms[3] = 100000.0f;
+	rtSun = true;		// bind the ray-query interaction variant for this draw
+	return true;
+}
+
 // r_rtShadowBlur: shader parms for an interaction that looks this light's blurred mask up
 // (unit 13). A mask made THIS frame is addressed by gl_FragCoord (mode 5). A staggered light's
 // mask from an earlier frame (r_rtShadowBlurStagger) is addressed by reprojection through that
@@ -2318,6 +2378,9 @@ static void RB_RHI_FillShadowParms( rhi::RenderParams &parms, const drawInteract
 			// (R_RtWorldUpdate auto-builds it while r_rtSunShadows is on).
 			if ( blurMask ) {
 				RB_RHI_FillBlurMaskParms( parms, rtSun );
+			} else if ( r_rtShadowBlur.GetBool() && r_rtSunShadows.GetBool() && RB_RHI_FillCharSoftParms( parms, din, rtSun ) ) {
+				// softening on but no mask this light this frame (Min Penumbra skip, stagger, ...): a tessellated
+				// character is traced per draw anyway - it never needed the mask
 			} else if ( r_rtSunShadows.GetBool() && ictx.interactionRtProg != 0 ) {
 				const unsigned long long tlas = ictx.r->GetTlasAddress();
 				if ( tlas != 0 ) {
@@ -2343,6 +2406,9 @@ static void RB_RHI_FillShadowParms( rhi::RenderParams &parms, const drawInteract
 			const unsigned long long tlas = ictx.r->GetTlasAddress();
 			if ( blurMask ) {
 				RB_RHI_FillBlurMaskParms( parms, rtSun );
+			} else if ( r_rtShadowBlur.GetBool() && RB_RHI_FillCharSoftParms( parms, din, rtSun ) ) {
+				// softening on but no mask for this light this frame (Min Penumbra skip, stagger, r_rtAllLights
+				// lights the blur pass passed over...): a tessellated character is traced per draw anyway
 			} else if ( tlas != 0 && ictx.interactionRtProg != 0 ) {
 				parms.shadowParms[0] = 4.0f;
 				RB_RHI_PackAddr( &parms.rtParms[0], tlas );	// bit-cast, NOT a value cast
@@ -2425,29 +2491,34 @@ static bool RB_RHI_FillContactShadowParms( rhi::RenderParams &parms, const drawI
 	// DUDE RT contact shadows (r_rtContactShadows, docs/contact-shadows.md): the same contact term, but the occluder is
 	// found by one short ray query through the scene TLAS (interaction.frag rtContactShadowTerm) instead of the depth
 	// march - so it needs the ray-query interaction variant and a live scene, i.e. RTX on. contactParms.x = -1 selects
-	// it; .y = ray length, .z = tan of the softness cone, .w = strength. A light that already traces the full hard ray (mode 4) gets nothing more:
-	// that ray sees every occluder the short one could. Takes precedence over the screen-space march on these draws.
+	// it; .y = ray length, .z = tan of the softness cone, .w = strength. Every shadow mode gets it, the hard ray (mode 4)
+	// included: until 2026-11-19 mode 4 was left out on the grounds that its ray sees every occluder the short one could,
+	// but that ray starts r_rtSunShadowOffset (1 unit) off the surface and misses exactly the close occluders this term
+	// is for (the nose over the lip, a jaw near a neck) - so with Soften RT Shadows off the contact shadows vanished
+	// instead of staying. Takes precedence over the screen-space march on these draws.
 	if ( r_rtContactShadows.GetBool() && !din->ambientLight && ictx.interactionRtProg != 0
 	     && rhi::GetActiveBackendType() == rhi::BT_VULKAN && R_BackendSupportsEnhancements() ) {
 		const unsigned long long tlas = ictx.r->GetTlasAddress();
 		if ( tlas != 0 ) {
-			if ( parms.shadowParms[0] != 4.0f ) {
-				parms.contactParms[0] = -1.0f;
-				parms.contactParms[1] = r_rtContactShadowLength.GetFloat();
-				// tan of the cone half-angle the quad's four rays spread over (the soft edge)
-				parms.contactParms[2] = idMath::Tan( DEG2RAD( idMath::ClampFloat( 0.0f, 45.0f, r_rtContactShadowSoftness.GetFloat() ) ) );
-				parms.contactParms[3] = idMath::ClampFloat( 0.0f, 1.0f, r_rtContactShadowStrength.GetFloat() );
-				// the same distance fade as the screen-space march (issue #25): the quad's four ray directions are
-				// screen-locked too, so far terrain crawls under them as the view moves
-				parms.contactParms2[2] = idMath::ClampFloat( 0.0f, 8192.0f, r_contactShadowMaxDist.GetFloat() );
-				if ( !rtSun ) {
-					// a shadow-map / mask / unshadowed draw: hand it the TLAS and the ray-origin normal offset (the
-					// RT shadow modes fill the same lanes), and bind the ray-query variant, whose map paths are unchanged
-					RB_RHI_PackAddr( &parms.rtParms[0], tlas );	// bit-cast, NOT a value cast
-					parms.rtParms[2] = r_rtSunShadowOffset.GetFloat();
-					parms.rtParms[3] = 100000.0f;
-					rtSun = true;
-				}
+			parms.contactParms[0] = -1.0f;
+			parms.contactParms[1] = r_rtContactShadowLength.GetFloat();
+			// tan of the cone half-angle the quad's four rays spread over (the soft edge)
+			parms.contactParms[2] = idMath::Tan( DEG2RAD( idMath::ClampFloat( 0.0f, 45.0f, r_rtContactShadowSoftness.GetFloat() ) ) );
+			parms.contactParms[3] = idMath::ClampFloat( 0.0f, 1.0f, r_rtContactShadowStrength.GetFloat() );
+			// rays per pixel over the cone and the frame phase of the quad's turn (rtContactOcclusion). contactParms2.xy
+			// are the screen-space march's softness / graze bias, unused on an RT contact draw
+			parms.contactParms2[0] = (float)idMath::ClampInt( 1, 8, r_rtContactShadowRays.GetInteger() );
+			parms.contactParms2[1] = RB_RHI_QuadTurnPhase();
+			// the same distance fade as the screen-space march (issue #25): the quad's four ray directions are
+			// screen-locked too, so far terrain crawls under them as the view moves
+			parms.contactParms2[2] = idMath::ClampFloat( 0.0f, 8192.0f, r_contactShadowMaxDist.GetFloat() );
+			if ( !rtSun ) {
+				// a shadow-map / mask / unshadowed draw: hand it the TLAS and the ray-origin normal offset (the
+				// RT shadow modes fill the same lanes), and bind the ray-query variant, whose map paths are unchanged
+				RB_RHI_PackAddr( &parms.rtParms[0], tlas );	// bit-cast, NOT a value cast
+				parms.rtParms[2] = r_rtSunShadowOffset.GetFloat();
+				parms.rtParms[3] = 100000.0f;
+				rtSun = true;
 			}
 			return false;		// no captured depth to bind: the screen-space march is off on this draw
 		}
@@ -3001,6 +3072,11 @@ static void RB_RHI_DrawInteraction( const drawInteraction_t *din ) {
 	// or the depth-EQUAL test drops the surface (docs/tessellation.md). The
 	// interaction and ambientlight shaders both carry a tess variant.
 	bool tess = RB_RHI_TessellateSurf( din->surf, false );
+	// r_rtShadowOutsideHits on the hard per-draw RT ray (interaction.frag, u_contactParms2.w = the inside-hit skip distance,
+	// 0 = the fast all-opaque ray): only a tessellated surface needs it - its smoothed, displaced shape differs from
+	// the coarse posed mesh in the ray-traced scene, so the ray's start can sit inside that copy and meet its inside
+	// faces first (black patches under r_rtAllLights). World and props keep the fastest traversal.
+	parms.contactParms2[3] = ( tess && r_rtShadowOutsideHits.GetBool() ) ? Max( r_rtShadowInsideSkip.GetFloat(), 0.0f ) : 0.0f;
 	// Roadmap B: if this classifier-approved surface was deform-once dispatched, draw its pre-deformed
 	// expanded buffer (rebinds vb/ib/count, clears tess) instead of fixed-function tessellating.
 	rhi::BufferHandle dvb = ictx.vb, dib = ictx.ib;
@@ -11226,6 +11302,11 @@ static rhi::ImageHandle RB_RHI_RtShadowBlurLight( rhi::RHI *r, const viewDef_t *
 	// fill pass; the tile classification already ignores holes (they read as "never traced").
 	const bool cbActive = r_rtShadowBlurCheckerboard.GetBool();
 	parms.color[0] = cbActive ? 1.0f : 0.0f;					// u_color.x = checkerboard enable (rtshadow_ray.frag)
+	parms.color[1] = r_rtShadowOutsideHits.GetBool() ? 1.0f : 0.0f;	// u_color.y = outside hits only
+	parms.color[2] = Max( r_rtShadowInsideSkip.GetFloat(), 0.0f );		// u_color.z = ... within this distance
+	// u_color.w = the widest skin scatter wrap (RB_RHI_FillSkinSSS: flesh reaches r_skinScatter * 1.3): the ray pass
+	// traces that far past the terminator, where skin is still lit and a shadow on it still shows
+	parms.color[3] = ( r_skinShading.GetFloat() > 0.0f ) ? Max( r_skinScatter.GetFloat(), 0.0f ) * 1.30f : 0.0f;
 
 	r->GpuScopeBegin( "rtblur.ray" );
 	r->SetNextTargetPassArea( rx1, ry1, rx2 - rx1 + 1, ry2 - ry1 + 1 );

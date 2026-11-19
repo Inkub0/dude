@@ -140,11 +140,116 @@ float sampleCubeShadow( samplerCubeShadow cube, vec3 L, float ref, float dist, f
 // canReceive: false when this fragment gets exactly nothing from the light whatever the
 // visibility (faces away from it, or its projection * falloff is black here - the corners of the
 // light's box outside the round falloff). Only the inline RAY is skipped on it; the map / mask
-// modes are cheap lookups and stay in uniform control flow.
+// modes are cheap lookups and stay in uniform control flow. "Faces away" is lightTermReaches()
+// below, NOT N.L > 0: a skin / flesh draw is still lit past the terminator by its scatter wrap.
+#if defined(VULKAN) && defined(DUDE_RT_SUN)
+// The turn (radians) of a 2x2 pixel quad's ray pattern: interleaved gradient noise on the quad's coordinates, so every
+// quad points its rays elsewhere. A penumbra made of a few rays per quad is that many hard-edged copies of the shadow;
+// with the same directions in every quad they line up into "defined lines" across the surface, turned per quad they
+// break into fine dither. phase 0 = the same turn every frame (same camera -> same image, no shimmer). Otherwise
+// (1 + frame index, set only while FSR2 resolves the view over time) each frame reads the noise at a hashed offset in
+// another orientation - axes swapped / mirrored, as vol_march.frag: a pattern merely shifted per frame leaves drifting
+// residue - and the temporal resolve averages the dither into a smooth gradient.
+float dudeQuadTurn( float phase ) {
+	vec2 qc = floor( gl_FragCoord.xy * 0.5 );
+	uint fh = uint( max( phase, 0.0 ) );
+	if ( fh != 0u ) {
+		fh = fh * 747796405u + 2891336453u;
+		fh = ( ( fh >> ( ( fh >> 28u ) + 4u ) ) ^ fh ) * 277803737u;
+		fh = ( fh >> 22u ) ^ fh;
+		qc += vec2( float( ( fh >> 3u ) & 1023u ), float( ( fh >> 13u ) & 1023u ) );
+		if ( ( fh & 1u ) != 0u ) { qc = qc.yx; }
+		if ( ( fh & 2u ) != 0u ) { qc.x = -qc.x; }
+		if ( ( fh & 4u ) != 0u ) { qc.y = -qc.y; }
+	}
+	return 6.2831853 * fract( 52.9829189 * fract( dot( qc, vec2( 0.06711056, 0.00583715 ) ) ) );
+}
+
+// DUDE soft RT shadow on an animated character (mode 7, r_rtShadowCharRays): an RT light the softening pass
+// (r_rtShadowBlur) made no mask for - its penumbra is under r_rtShadowBlurMinPenumbra - would be a hard ray; on a
+// character it is traced here instead, like the RT contact shadows: from the interpolated surface point along the
+// smooth vertex normal (the mode-4 start), u_shadowParms.z rays to points spread over a disc of the softening's own
+// light radius (u_shadowParms.y, world units - RB_RHI_RtShadowBlurLightRadius); each pixel of a 2x2 quad takes a
+// quarter of the quad's sample pattern and shadowVisibility averages the quad. A PHYSICAL cone: near contact it is
+// several times narrower than the mask's blur (which follows r_rtShadowBlurCurve), so lights that have a mask use
+// the mask on characters too. Near the start only OUTSIDE hits count (u_contactParms2.w, the r_rtShadowInsideSkip
+// rule; 0 = every hit). Returns the lit fraction of this pixel's rays.
+float rtSoftConeVis( int qi ) {
+	vec4 mp = vec4( var_ModelPos, 1.0 );
+	vec3 wp = vec3( dot( u_modelMatrixRow0, mp ), dot( u_modelMatrixRow1, mp ), dot( u_modelMatrixRow2, mp ) );
+	vec4 lp = vec4( u_localLightOrigin.xyz, 1.0 );
+	vec3 wl = vec3( dot( u_modelMatrixRow0, lp ), dot( u_modelMatrixRow1, lp ), dot( u_modelMatrixRow2, lp ) );
+	vec3 wn = vec3( dot( u_modelMatrixRow0.xyz, var_ModelNormal.xyz ),
+	                dot( u_modelMatrixRow1.xyz, var_ModelNormal.xyz ),
+	                dot( u_modelMatrixRow2.xyz, var_ModelNormal.xyz ) );
+	float wnLen = length( wn );
+	wn = ( wnLen > 0.0 ) ? wn / wnLen : vec3( 0.0 );
+	vec3  O    = wp + wn * u_rtParms.z;
+	vec3  toL  = wl - O;
+	float dL   = length( toL );
+	if ( !( dL > 1.0 ) ) {
+		return 1.0;
+	}
+	vec3 dir0 = toL / dL;
+	vec3 up = ( abs( dir0.z ) < 0.9 ) ? vec3( 0.0, 0.0, 1.0 ) : vec3( 1.0, 0.0, 0.0 );
+	vec3 tx = normalize( cross( up, dir0 ) );
+	vec3 ty = cross( dir0, tx );
+	int   n    = clamp( int( u_shadowParms.z + 0.5 ), 1, 16 );
+	float R    = max( u_shadowParms.y, 0.0 );
+	float skip = u_contactParms2.w;
+	float lit  = 0.0;
+	// The quad's 4n rays are ONE sunflower (golden-angle) pattern over the light's disc - pixel qi takes points
+	// 4k + qi, so the quad average holds 4n evenly spread points - turned per quad and per frame (dudeQuadTurn).
+	float turn = dudeQuadTurn( u_shadowParms.w );
+	for ( int k = 0; k < n; k++ ) {
+		float i   = float( 4 * k + qi );
+		float r   = ( n == 1 ) ? 0.0 : R * sqrt( ( i + 0.5 ) / float( 4 * n ) );
+		float ang = 2.3999632 * i + turn;
+		vec3  tgt = wl + ( tx * cos( ang ) + ty * sin( ang ) ) * r;
+		vec3  d   = tgt - O;
+		float len = length( d );
+		if ( !( len > 1.0 ) ) {
+			lit += 1.0;
+			continue;
+		}
+		rayQueryEXT rq;
+		dudeRayQueryInit( rq,
+			accelerationStructureEXT( uvec2( floatBitsToUint( u_rtParms.x ), floatBitsToUint( u_rtParms.y ) ) ),
+			gl_RayFlagsNoOpaqueEXT | gl_RayFlagsTerminateOnFirstHitEXT, 0xFDu, O, 0.0, d / len, min( len - 1.0, 100000.0 ) );
+		while ( rayQueryProceedEXT( rq ) ) {
+			if ( rayQueryGetIntersectionTypeEXT( rq, false ) == gl_RayQueryCandidateIntersectionTriangleEXT
+					&& ( !rayQueryGetIntersectionFrontFaceEXT( rq, false ) || rayQueryGetIntersectionTEXT( rq, false ) > skip ) ) {
+				rayQueryConfirmIntersectionEXT( rq );
+			}
+		}
+		lit += ( rayQueryGetIntersectionTypeEXT( rq, true ) == gl_RayQueryCommittedIntersectionNoneEXT ) ? 1.0 : 0.0;
+	}
+	return lit / float( n );
+}
+#endif
+
 float shadowVisibility( bool canReceive ) {
 	if ( u_shadowParms.x == 0.0 ) {
 		return 1.0;
 	}
+#if defined(VULKAN) && defined(DUDE_RT_SUN)
+	if ( u_shadowParms.x > 6.5 ) {
+		// mode 7 (rtSoftConeVis above): this pixel's rays, then the 2x2 quad average - each pixel traced its own quarter
+		// turn of the disc, so the quad holds a 4n-ray penumbra. Same derivative trick as contactShadowTerm; the draw's
+		// branches are uniform (per-draw parms), so fine derivatives are defined here.
+		ivec2 q  = ivec2( gl_FragCoord.xy ) & 1;
+		int   qi = ( q.x ^ q.y ) * 2 + q.y;
+		float valid = canReceive ? 1.0 : 0.0;
+		float vis   = canReceive ? rtSoftConeVis( qi ) : 0.0;
+		vec2 sgn = vec2( q.x == 0 ? 1.0 : -1.0, q.y == 0 ? 1.0 : -1.0 );
+		vec2 v  = vec2( vis * valid, valid );
+		vec2 vh = v  + dFdxFine( v )  * sgn.x;
+		vec2 vv = v  + dFdyFine( v )  * sgn.y;
+		vec2 vd = vh + dFdyFine( vh ) * sgn.y;
+		vec2 sum = v + vh + vv + vd;
+		return canReceive ? ( ( sum.y > 0.5 ) ? sum.x / sum.y : vis ) : 0.0;
+	}
+#endif
 #if defined(VULKAN)
 	if ( u_shadowParms.x > 4.5 && u_shadowParms.x < 5.5 ) {
 		// DUDE RT shadow blur (mode 5): the same hard ray mode 4 traces inline was traced for
@@ -223,6 +328,26 @@ float shadowVisibility( bool canReceive ) {
 			perfOn = dudeSegmentMeetsPerforated(
 				uvec2( floatBitsToUint( u_shadowProjectionQ.x ), floatBitsToUint( u_shadowProjectionQ.y ) ),
 				int( u_shadowFalloffS.w + 0.5 ), wp + wn * u_rtParms.z, toLight / distLight, tMax );
+		}
+		if ( !perfOn && u_contactParms2.w > 0.0 ) {
+			// r_rtShadowOutsideHits on a tessellated surface (u_contactParms2.w = r_rtShadowInsideSkip, set per draw):
+			// its smoothed, displaced shape differs from the coarse posed mesh the rays hit, so the start point can sit
+			// inside that copy. Within the skip distance only OUTSIDE hits count (Doom 3's outward side = Vulkan's back
+			// face, as rtshadow_ray.frag and the RT contact shadows); beyond it any hit casts (the jaw over the neck).
+			// Dynamically uniform per draw; candidates are confirmed one by one, the first counted one ends the ray.
+			rayQueryEXT rqi;
+			dudeRayQueryInit( rqi,
+				accelerationStructureEXT( uvec2( floatBitsToUint( u_rtParms.x ), floatBitsToUint( u_rtParms.y ) ) ),
+				gl_RayFlagsNoOpaqueEXT | gl_RayFlagsTerminateOnFirstHitEXT, 0xFDu & ~hideBody,
+				wp + wn * u_rtParms.z, 0.0, toLight / distLight, tMax );
+			while ( rayQueryProceedEXT( rqi ) ) {
+				if ( rayQueryGetIntersectionTypeEXT( rqi, false ) == gl_RayQueryCandidateIntersectionTriangleEXT
+						&& ( !rayQueryGetIntersectionFrontFaceEXT( rqi, false )
+						     || rayQueryGetIntersectionTEXT( rqi, false ) > u_contactParms2.w ) ) {
+					rayQueryConfirmIntersectionEXT( rqi );
+				}
+			}
+			return ( rayQueryGetIntersectionTypeEXT( rqi, true ) == gl_RayQueryCommittedIntersectionNoneEXT ) ? 1.0 : 0.0;
 		}
 		if ( !perfOn ) {
 			// no grate in this light's volume (decided per light on the CPU): the ray every light
@@ -449,8 +574,12 @@ float contactOcclusion( float jitter, int qi, float NdotL ) {
 // found by a short ray query through the scene TLAS instead of the depth-buffer march - no thickness guess, and
 // occluders off screen or hidden behind other surfaces count. Same look: the light dims by the strength, faded by
 // how far along the ray the nearest occluder sits (an occluder at the surface darkens most), and the same 2x2 quad
-// average for a soft edge: each pixel of a quad traces one of four directions spread over a cone toward the light
-// (u_contactParms.z = tan of its half-angle, r_rtContactShadowSoftness), so a quad holds a four-ray penumbra.
+// average for a soft edge: the quad's rays are spread over a cone toward the light (u_contactParms.z = tan of its
+// half-angle, r_rtContactShadowSoftness). Each pixel traces u_contactParms2.x rays (r_rtContactShadowRays), and the
+// quad's 4n directions are one sunflower pattern over the WHOLE cone, turned per quad and - under FSR2 - per frame
+// (dudeQuadTurn, u_contactParms2.y = the frame phase). Until then every quad traced the same four directions on a
+// ring at 0.7 of the cone: four hard copies of each shadow, tens of pixels apart at a 12 degree cone and a 14 unit
+// reach - a soft edge "composed of defined lines" (a jaw's contact shadow on a neck).
 // u_contactParms = ( -1, ray length, tan(cone half-angle), strength ).
 //
 // Self-hits: the ray starts on the DRAWN surface, which is not exactly the ray-traced one (a tessellated, displaced
@@ -472,35 +601,41 @@ float rtContactOcclusion( int qi ) {
 	if ( len <= 0.0 ) {
 		return 0.0;
 	}
-	vec3 dir = toLight / distLight;
-	// this pixel's direction in the quad's cone: four points on a ring at 0.7 of the cone radius (the mean radius
-	// of a uniform disc), a quarter turn apart
-	vec3 up = ( abs( dir.z ) < 0.9 ) ? vec3( 0.0, 0.0, 1.0 ) : vec3( 1.0, 0.0, 0.0 );
-	vec3 tx = normalize( cross( up, dir ) );
-	vec3 ty = cross( dir, tx );
-	float ang = 1.5707963 * float( qi ) + 0.7853982;
-	dir = normalize( dir + ( tx * cos( ang ) + ty * sin( ang ) ) * ( 0.7 * u_contactParms.z ) );
+	vec3 dir0 = toLight / distLight;
+	vec3 up = ( abs( dir0.z ) < 0.9 ) ? vec3( 0.0, 0.0, 1.0 ) : vec3( 1.0, 0.0, 0.0 );
+	vec3 tx = normalize( cross( up, dir0 ) );
+	vec3 ty = cross( dir0, tx );
 	vec3 wn = vec3( dot( u_modelMatrixRow0.xyz, var_ModelNormal.xyz ),
 	                dot( u_modelMatrixRow1.xyz, var_ModelNormal.xyz ),
 	                dot( u_modelMatrixRow2.xyz, var_ModelNormal.xyz ) );
 	float wnLen = length( wn );
 	wn = ( wnLen > 0.0 ) ? wn / wnLen : vec3( 0.0 );
-	rayQueryEXT rq;
-	dudeRayQueryInit( rq,
-		accelerationStructureEXT( uvec2( floatBitsToUint( u_rtParms.x ), floatBitsToUint( u_rtParms.y ) ) ),
-		gl_RayFlagsNoOpaqueEXT, 0xF9u,	// RT contact shadows: not the view-hidden body (0x04, issue #27)
-		wp + wn * 0.05, 0.0, dir, len );
-	while ( rayQueryProceedEXT( rq ) ) {
-		// keep only hits on the outside of a mesh (Vulkan back face, see above); traversal goes on toward closer ones
-		if ( rayQueryGetIntersectionTypeEXT( rq, false ) == gl_RayQueryCandidateIntersectionTriangleEXT
-				&& !rayQueryGetIntersectionFrontFaceEXT( rq, false ) ) {
-			rayQueryConfirmIntersectionEXT( rq );
+	int   n    = clamp( int( u_contactParms2.x + 0.5 ), 1, 8 );
+	float turn = dudeQuadTurn( u_contactParms2.y );
+	float occ  = 0.0;
+	for ( int k = 0; k < n; k++ ) {
+		// point 4k + qi of the quad's 4n-point sunflower over the unit disc, scaled to the cone
+		float i   = float( 4 * k + qi );
+		float r   = sqrt( ( i + 0.5 ) / float( 4 * n ) );
+		float ang = 2.3999632 * i + turn;
+		vec3  dir = normalize( dir0 + ( tx * cos( ang ) + ty * sin( ang ) ) * ( r * u_contactParms.z ) );
+		rayQueryEXT rq;
+		dudeRayQueryInit( rq,
+			accelerationStructureEXT( uvec2( floatBitsToUint( u_rtParms.x ), floatBitsToUint( u_rtParms.y ) ) ),
+			gl_RayFlagsNoOpaqueEXT, 0xF9u,	// RT contact shadows: not the view-hidden body (0x04, issue #27)
+			wp + wn * 0.05, 0.0, dir, len );
+		while ( rayQueryProceedEXT( rq ) ) {
+			// keep only hits on the outside of a mesh (Vulkan back face, see above); traversal goes on toward closer ones
+			if ( rayQueryGetIntersectionTypeEXT( rq, false ) == gl_RayQueryCandidateIntersectionTriangleEXT
+					&& !rayQueryGetIntersectionFrontFaceEXT( rq, false ) ) {
+				rayQueryConfirmIntersectionEXT( rq );
+			}
+		}
+		if ( rayQueryGetIntersectionTypeEXT( rq, true ) != gl_RayQueryCommittedIntersectionNoneEXT ) {
+			occ += 1.0 - clamp( rayQueryGetIntersectionTEXT( rq, true ) / len, 0.0, 1.0 );	// nearer occluder -> darker
 		}
 	}
-	if ( rayQueryGetIntersectionTypeEXT( rq, true ) == gl_RayQueryCommittedIntersectionNoneEXT ) {
-		return 0.0;
-	}
-	return 1.0 - clamp( rayQueryGetIntersectionTEXT( rq, true ) / len, 0.0, 1.0 );	// nearer occluder -> darker
+	return occ / float( n );
 }
 #endif
 
@@ -587,6 +722,17 @@ vec3 skinScatterExcess( float NdotLsigned ) {
 	// N.L diffuse term reconstructs `wrapped` exactly. max() guards the [0, inf) HDR floor.
 	vec3 excess = max( wrapped - vec3( max( NdotLsigned, 0.0 ) ), vec3( 0.0 ) );
 	return excess * u_skinParms.x;
+}
+
+// Does this light's shadow matter at this (bump-mapped, signed) cosine? Where the light term is not zero: N.L > 0, and
+// on a skin / flesh draw down to where the widest scatter wrap ends (skinScatterExcess stays positive to N.L = -w, and
+// is LARGEST at N.L = 0). The ray modes return "shadowed" without tracing where this is false. With the plain N.L > 0
+// test they cut a skin's wrap light to black along the bump map's N.L = 0 contour - a hard dark patch with the relief's
+// outline (the sideburns painted into Swann's height map), on RT lights only: a shadow map is looked up everywhere,
+// so there the wrap light stayed and only the jaw's real shadow darkened the neck.
+bool lightTermReaches( float NdotLsigned ) {
+	float reach = ( u_skinParms.x > 0.0 ) ? max( u_skinParms.y, max( u_skinParms.z, u_skinParms.w ) ) : 0.0;
+	return NdotLsigned > -reach;
 }
 
 void main() {
@@ -795,7 +941,7 @@ void main() {
 		// that fraction of the albedo colour while the metallic specular still rides
 		// on top. kd 1 = physical, kd 0 = full albedo retained (docs sec. 5).
 		diffuse.rgb *= ( 1.0 - F ) * ( 1.0 - metal * u_pbrParms2.x );
-		shadowVis = shadowVisibility( lightReaches && NdotL > 0.0 );
+		shadowVis = shadowVisibility( lightReaches && lightTermReaches( NdotLsigned ) );
 		// DUDE contact shadows: fold the short screen-space march into this light's visibility so it
 		// stacks with the shadow map and rides the same shadowVis the skin scatter reuses. Skipped on
 		// the wet-blood film draw (a decal glint, not a shadow receiver).
@@ -812,7 +958,7 @@ void main() {
 
 		float rawNdotL = dot( lightV, localNormal );
 		microNdotL = dot( lightV, normalize( localNormal ) );
-		shadowVis = shadowVisibility( lightReaches && rawNdotL > 0.0 );
+		shadowVis = shadowVisibility( lightReaches && lightTermReaches( rawNdotL ) );
 		// DUDE contact shadows (see the PBR branch): fold the screen-space march into shadowVis.
 		shadowVis *= contactShadowTerm( lightReaches && rawNdotL > 0.0 && filmMode < 0.5, rawNdotL );
 		lightScale = rawNdotL * shadowVis;
