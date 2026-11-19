@@ -273,6 +273,8 @@ uploaded; `PACK_ONLY=1` bakes nothing and only re-collects and re-stamps the pac
    writes it into `<name>.tga` in your save folder (`fs_savepath`), where it overrides the
    packed copy; `tools/bake_pbr_sidecars.sh` leaves such loose sidecars out of its packs.
    `.dds` sidecars cannot be edited this way.
+   **Save for next bake** is the other way to keep the edit, and the one to use when you make packs:
+   see "One texture, for the next bake" below.
 5. Added a texture while the game was running? Press **Reload PBR Table** in the editor (or
    run `reloadPbrTable`) so DUDE looks for it again; the next level load looks again as well.
    Changed the pixels of a texture it already loaded? Run `reloadImages`.
@@ -280,6 +282,33 @@ uploaded; `PACK_ONLY=1` bakes nothing and only re-collects and re-stamps the pac
 Sidecars load with the level (`r_pbrTextureMapPrecache`, on by default; Debugging > Loading &
 Caches > "Preload PBR Textures at Level Load"), so there is no pause the first time a material
 comes into view and each level frees the previous one's.
+
+### One texture, for the next bake
+
+**Save to texture** writes pixels into a loose file in your save folder. That file overrides the
+pack on your machine only: the bake never sees it, so it is not in the next pack, and it is only
+offered while the All sidecars tab equals the last bake (what you see would otherwise include a
+change the saved pixels do not).
+
+**Save for next bake** records the edit instead of writing pixels: one line per channel in
+`pbr/edits/<game>.cfg` (`base.cfg`, `d3xp.cfg`, ...), `<sidecar image> <ao|rough|metal>
+<brightness> <contrast> <gamma>`. From then on:
+
+- the game shows the edit on top of the installed texture, on every surface that uses it, whatever
+  the All sidecars tab is set to;
+- `tools/pbr_extract_maps.py` applies every line of every `pbr/edits/*.cfg`, in order, after its
+  global and per-class adjust, so the edit is in the next pack. It lists what it applied in
+  `pbr/edits_baked/<pack>.cfg` inside the pack;
+- once a pack that lists the edit is installed, the game stops applying it on top. Nothing is
+  applied twice, and nothing is lost if the new pack is not installed yet.
+
+Pick the texture again later and the sliders start from its saved edit. Saving again replaces it;
+saving with all sliders neutral removes it. A change made after a bake becomes a second line for
+that texture, applied after the first, so keep the older lines: together they are the recipe of
+the packs. `--no-edits` bakes without them. The list is plain text and belongs under version
+control with `pbr_sidecar_adjust.cfg`.
+
+The edit follows the sidecar image, so materials that share a diffuse share it.
 
 `r_pbrTextureMaps 0` switches all sidecar textures off for comparison, live: every material
 falls back to its PBR table values, and the editor says the texture is ignored and the sliders
@@ -301,6 +330,14 @@ off, so the grey on screen is the stored value: black 0, mid grey 0.5, white 1.
   traced reflections on the surface itself, ReSTIR lighting) uses the texture.
 - Image programs as diffuse (`addnormals(...)`, `heightmap(...)` and the like) have no file
   name to hang a sidecar on, so those materials cannot take one.
+- Roughness and metalness are only as detailed as the game's specular map. id shipped some at a
+  fraction of the diffuse's size: of the 2,126 Doom 3 sidecars, 72 come from a specular map at half
+  the diffuse's resolution, 30 at a quarter and 44 at an eighth or less (the Mars City doors: 64x64
+  for a 512x512 diffuse; many `textures/mcity` walls: 32x32 for 256x256). Those read as a blur of
+  big texels in the PBR Material View, and the original game's specular highlight has the same
+  mask. Sharpening the resized map along the diffuse's edges (a guided filter) was tried on
+  2026-11-19 and not adopted: about 1.4x the edge detail at the setting that stayed clean, at the
+  price of carrying the diffuse's grime and lettering over and evening out the brightest bands.
 - The sidecar follows the **diffuse map**, so materials that share a diffuse share a sidecar.
 - A `.dds` sidecar needs an alpha format (BC3 / DXT5 or BC7) to carry a height; BC1 / DXT1
   drops it.

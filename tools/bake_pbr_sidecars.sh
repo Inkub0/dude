@@ -124,6 +124,12 @@ LIST="$WORK/pack-files.txt"
 			[ -f "$t" ] && echo "table:    $t sha256 $(sha256sum "$t" | cut -c1-16)"
 		done
 	done
+	# the per-texture steps are part of the recipe too
+	for s in "${SEARCH[@]}"; do
+		for e in "$s"/pbr/edits/*.cfg; do
+			[ -f "$e" ] && echo "edits:    $e sha256 $(sha256sum "$e" | cut -c1-16)"
+		done
+	done
 	printf 'command:  pbr_extract_maps.py'; printf ' %q' "${ARGS[@]}"; echo
 	echo "files:    $(wc -l < "$LIST") sidecars ($(wc -l < "$HAND") hand-made stems excluded)"
 } > "$WORK/out/bake-info.txt"
@@ -133,6 +139,9 @@ echo "bake-info.txt" >> "$LIST"
 [ -f "$WORK/out/pbr/pbr_sidecar_baked.cfg" ] && echo "pbr/pbr_sidecar_baked.cfg" >> "$LIST"
 # the parallax depth of every sidecar whose alpha carries a height (the engine merges all pbr/height/*.cfg)
 [ -f "$WORK/out/pbr/height/$NAME.cfg" ] && echo "pbr/height/$NAME.cfg" >> "$LIST"
+# the per-texture edit steps baked in (pbr/edits/*.cfg, the PBR editor's "Save for next bake"): with this list in the
+# pack the engine stops previewing them on top (it merges all pbr/edits_baked/*.cfg)
+[ -f "$WORK/out/pbr/edits_baked/$NAME.cfg" ] && echo "pbr/edits_baked/$NAME.cfg" >> "$LIST"
 
 PK4="$WORK/$NAME.pk4"
 rm -f "$PK4"

@@ -952,6 +952,32 @@ def parse_adjust_cfg(data):
     return out
 
 
+def parse_edit_cfg(data):
+    """pbr/edits/<game>.cfg: '<sidecar image> <ao|rough|metal> <brightness> <contrast> <gamma>' lines, the PBR editor's
+    "Save for next bake" per-texture steps. A list in file order: a texture may list a channel more than once (a step
+    saved after an earlier one was baked), and the steps apply in order."""
+    out = []
+    if data is None:
+        return out
+    for line in data.decode("latin-1").splitlines():
+        tok = line.split("//", 1)[0].split()
+        if len(tok) == 5 and tok[1].lower() in ("ao", "rough", "metal") and all(_isnum(t) for t in tok[2:]):
+            out.append((tok[0].lower().replace("\\", "/"), tok[1].lower(), tuple(float(t) for t in tok[2:])))
+    return out
+
+
+def write_edits_baked_cfg(path, entries):
+    """pbr/edits_baked/<pack>.cfg: the per-texture steps this pack's textures contain, so the engine stops previewing
+    them once the pack is installed (it previews the steps of pbr/edits/ beyond these). One file per pack, as the
+    height lists, so the base / RoE / LM packs merge."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as f:
+        f.write("// DUDE PBR per-texture channel edits baked into this pack (docs/pbr-texture-maps.md), written by\n")
+        f.write("// tools/pbr_extract_maps.py: <sidecar image> <ao|rough|metal> <brightness> <contrast> <gamma>\n")
+        for image, ch, (b, c, g) in entries:
+            f.write(f"{image} {ch} {b:.3f} {c:.3f} {g:.3f}\n")
+
+
 def write_adjust_cfg(path, args):
     path.parent.mkdir(parents=True, exist_ok=True)
     lines = ["// DUDE PBR sidecars in this pack were baked with this channel adjust (tools/pbr_extract_maps.py);",
@@ -1181,6 +1207,10 @@ def main():
                     help="normal map green convention for the height integration (+1 = Doom 3 / Quake 4: the "
                          "engine's own heightmap() convention, which integrates consistently on 115 of 120 "
                          "stock normal maps; -1 for the other convention)")
+    ap.add_argument("--no-edits", action="store_true",
+                    help="ignore the per-texture steps of pbr/edits/*.cfg (the PBR editor's \"Save for next bake\"); "
+                         "by default every step is applied, in order, after the global and per-class adjust, and the "
+                         "ones applied are listed in pbr/edits_baked/<--height-name>.cfg of the output")
     ap.add_argument("--no-height", action="store_true",
                     help="leave the parallax height out of the alpha (RGB sidecars, as before)")
     ap.add_argument("--height-highpass", type=float, default=0.0,
@@ -1210,6 +1240,17 @@ def main():
     print("channel adjust (brightness contrast gamma): " + ", ".join(
         f"{ch} {' '.join(f'{v:g}' for v in getattr(args, f'{ch}_adjust'))}" for ch in ("ao", "rough", "metal"))
         + ("  [from pbr/pbr_sidecar_adjust.cfg]" if saved else ""))
+    # per-texture steps (the PBR editor's "Save for next bake"): every pbr/edits/*.cfg of the search folders, in
+    # name order - the order the engine reads them in
+    edit_steps = {}		# sidecar image name (lower case) -> [(channel, (brightness, contrast, gamma)), ...]
+    if not args.no_edits:
+        for path in fs.list("pbr/edits/", ".cfg"):
+            for image, ch, bcg in parse_edit_cfg(fs.read(path)):
+                edit_steps.setdefault(image, []).append((ch, bcg))
+        if edit_steps:
+            print(f"per-texture edits: {sum(len(v) for v in edit_steps.values())} step(s) for "
+                  f"{len(edit_steps)} sidecar(s), from pbr/edits/")
+    edits_baked = []	# (image, channel, bcg) of the steps applied, for pbr/edits_baked/<--height-name>.cfg
     class_shine = {}
     for item in args.class_shine:
         k, _, v = item.partition("=")
@@ -1435,6 +1476,17 @@ def main():
             rough = np.maximum(channel_adjust(rough, class_adjust[(mat_class, "rough")]), 0.03)
         if (mat_class, "metal") in class_adjust:
             metal = channel_adjust(metal, class_adjust[(mat_class, "metal")])
+        # per-texture steps (pbr/edits/*.cfg), last of all and in order: where the engine previews them, after the
+        # global adjust (interaction: dudeUnit10RoughMetal / dudeUnit10Ao)
+        edit_key = f"{stem}_{args.layout}".lower()
+        for ch, bcg in edit_steps.get(edit_key, ()):
+            if ch == "ao":
+                ao = channel_adjust(ao, bcg)
+            elif ch == "rough":
+                rough = np.maximum(channel_adjust(rough, bcg), 0.03)
+            else:
+                metal = channel_adjust(metal, bcg)
+            edits_baked.append((edit_key, ch, bcg))
 
         out = args.output / f"{stem}_{args.layout}.tga"
         out.parent.mkdir(parents=True, exist_ok=True)
@@ -1479,6 +1531,13 @@ def main():
         for w in what:
             print(f"    {w}")
     write_adjust_cfg(args.output / "pbr" / "pbr_sidecar_baked.cfg", args)
+    if edits_baked:
+        write_edits_baked_cfg(args.output / "pbr" / "edits_baked" / f"{args.height_name}.cfg", edits_baked)
+        print(f"{len(edits_baked)} per-texture edit step(s) baked into {len({e[0] for e in edits_baked})} sidecar(s)")
+    unused = sorted(set(edit_steps) - {e[0] for e in edits_baked})
+    if unused:
+        print(f"per-texture edits for {len(unused)} sidecar(s) this bake did not produce (another game's, or a typo): "
+              + ", ".join(unused[:5]) + (" ..." if len(unused) > 5 else ""))
     if height_entries:
         write_height_cfg(args.output / "pbr" / "height" / f"{args.height_name}.cfg", height_entries, args)
         print(f"{len(height_entries)} sidecar(s) carry a parallax height in the alpha")

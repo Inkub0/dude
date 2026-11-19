@@ -995,6 +995,11 @@ void  R_PbrSidecarBaked( int channel, float &brightness, float &contrast, float 
 bool  R_PbrSidecarGlobalIsIdentity( void );		// true = the sliders equal the bake (preview = textures as baked)
 void  R_PbrSidecarGlobalLoad( void );			// re-read the baked + next-bake files, sliders from the latter
 bool  R_PbrSidecarSaveBakeSettings( idStr &written );	// sliders -> pbr/pbr_sidecar_adjust.cfg (fs_savepath)
+// per-texture channel edits for the next bake: a step saved to pbr/edits/<game>.cfg is previewed until a pack baked
+// with it is installed (pbr/edits_baked/*.cfg), and tools/pbr_extract_maps.py applies it (RhiWorld.cpp)
+void  R_PbrSidecarEditsLoad( void );								// re-read both lists
+bool  R_PbrSidecarEditGet( const idImage *img, float bcg[3][3] );	// its pending step per channel; false = none
+bool  R_PbrSidecarEditSave( const idImage *img, idStr &written );	// rPbrSidecarAdjust -> this sidecar's pending step
 void  R_PbrSidecarAdjustReset( void );
 bool  R_PbrSidecarAdjustIsIdentity( void );
 float R_PbrSidecarAdjustValue( float v, int channel );

@@ -382,6 +382,15 @@ pass drops the per-material cache first, so a loose file added since the last le
 without `reloadPbrTable`. Still lazy: a material first parsed after the load (a late spawn), and
 any level loaded with the precache or `image_preload` off.
 
+**Per-texture edits** (`R_PbrSidecarEditsLoad` / `Get` / `Save`, RhiWorld.cpp; since 0.9.10). The
+editor's channel edit can be saved as a step in `pbr/edits/<game>.cfg`. Every `pbr/edits/*.cfg` is
+read (one file per game folder, so a mod's list adds to the base game's), and so is every
+`pbr/edits_baked/*.cfg`, the steps each installed pack contains. Per image and channel the baked
+steps are matched from the front; what is left is pending, and `RB_RHI_FillOrmAdjust` applies it
+through the same uniforms as the editor's live edit (`u_ormAdj*`, after the global step), so no
+shader or uniform block changed. One pending step per image and channel can be previewed; the
+editor never writes more. The baker side is in docs/pbr-texture-maps.md.
+
 Loaded `TD_HIGH_QUALITY`
 (never block-compressed: DXT would bleed one channel's edges into the others) with the
 diffuse stage's wrap mode, since the sidecar tiles with it. It rides **unit 10** in place of
