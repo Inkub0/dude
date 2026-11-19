@@ -5094,7 +5094,7 @@ static void DrawDbgGroup_Materials()
 	if ( ImGui::Button( "Reload PBR Table" ) ) {
 		cmdSystem->BufferCommandText( CMD_EXEC_APPEND, "reloadPbrTable\n" );
 	}
-	AddTooltip( "Re-reads pbr/pbr_materials.cfg and pbr/pbr_overrides.cfg and re-applies them to all loaded "
+	AddTooltip( "Re-reads pbr/pbr_materials.cfg, pbr/pbr_game.cfg and pbr/pbr_overrides.cfg and re-applies them to all loaded "
 		"materials. Workflow for a single surface: r_showSurfaceInfo 1 to read its material name, add a "
 		"\"<material> <metalness> <roughness>\" line to base/pbr/pbr_overrides.cfg, then press this." );
 	}	// !filtering

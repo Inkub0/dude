@@ -53,12 +53,17 @@ editor and the reloadPbrTable command use the R_Pbr* entry points (Material.h, t
 
 	DUDE PBR per-material table (docs/pbr-materials.md Phase B)
 
-	Two files, loaded lazily on the first material parse (both via the VFS, so a
+	Three files, loaded lazily on the first material parse (all via the VFS, so a
 	writable fs_savepath copy outranks the shipped fs_basepath one):
 	  pbr/pbr_materials.cfg  — the main authored config (bootstrapped by
 	                           tools/pbr_classify.py, then hand-tuned in-game and
 	                           baked in); loaded first
-	  pbr/pbr_overrides.cfg  — per-game deltas, loaded second so they win on
+	  pbr/pbr_game.cfg       — a shipped per-game delta (d3xp/pbr/pbr_game.cfg =
+	                           RoE-only materials over base's table; LM reads it
+	                           too through fs_game_base d3xp); loaded second. It is
+	                           its own file so the editor's dude-folder
+	                           pbr_overrides.cfg can never shadow it
+	  pbr/pbr_overrides.cfg  — the user's deltas, loaded last so they win on
 	                           collision. The editor (R_PbrWriteOverrideLine) writes
 	                           these to fs_savepath (the "dude folder"), so edits are
 	                           deltas on the base baseline and win on the next load
@@ -331,6 +336,7 @@ static void PBR_EnsureTableLoaded( void ) {
 	pbrTableLoaded = true;
 	pbrTable.Clear();
 	PBR_LoadTableFile( "pbr/pbr_materials.cfg" );	// shipped table
+	PBR_LoadTableFile( "pbr/pbr_game.cfg" );		// shipped per-game delta (RoE), if any
 	PBR_LoadTableFile( "pbr/pbr_overrides.cfg" );	// baseline + dude-folder deltas (later wins)
 }
 

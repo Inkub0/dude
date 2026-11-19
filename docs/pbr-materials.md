@@ -279,16 +279,27 @@ reformats the whole table and predates the `@cat` rows (it refuses to run when i
 **RoE / mods — one common config, DRY (option 2).** Only `base/` is the shipped
 config, and a mod's file search falls back to `base/`, so **RoE keeps no
 `pbr_materials.cfg` of its own** — it inherits `base/pbr/pbr_materials.cfg`. Its
-`d3xp/pbr/pbr_overrides.cfg` is a **slim delta**: only game-only materials plus
+**`d3xp/pbr/pbr_game.cfg`** (tracked and shipped since 0.9.10; The Lost Mission reads
+it too through `fs_game_base d3xp`) is a **slim delta**: only game-only materials plus
 deliberate per-game edits, never a copy of the base table. Regenerate it against
 the parent with `tools/pbr_make_overrides.py --parent base/pbr/pbr_materials.cfg
---table <game classifier baseline> --out d3xp/pbr/pbr_overrides.cfg`, which keeps
+--table <game classifier baseline> --out d3xp/pbr/pbr_game.cfg`, which keeps
 an entry only if the parent lacks it *or* it's a genuine edit differing from both
-the game's classifier baseline and the parent's value. (d3xp files stay local /
-gitignored; base is the shipped common config.)
+the game's classifier baseline and the parent's value. Fold RoE editor edits into it
+with `tools/pbr_bake_inplace.py --table d3xp/pbr/pbr_game.cfg --overrides
+<dude folder>/d3xp/pbr/pbr_overrides.cfg --reset`.
+
+*Why a third file (2026-11-19):* until then the RoE delta lived in
+`d3xp/pbr/pbr_overrides.cfg`, which was gitignored and never shipped. It could not
+simply be shipped under that name either. The editor writes `pbr_overrides.cfg` in
+the dude folder, starting from an empty file when none is there, and the VFS loads
+only the highest-priority copy of a path. A player's first RoE edit would therefore
+have hidden all 413 shipped RoE rows. Shipped data and user edits now use different
+file names, so edits only layer on top.
 
 Runtime loads `pbr_materials.cfg` at material-parse time (name-keyed lookup), then
-merges `pbr_overrides.cfg` on top. Both share one format — a **superset** of the
+`pbr_game.cfg` if the game has one, then `pbr_overrides.cfg`, each later file winning
+on collision. Both share one format — a **superset** of the
 original generated columns, one line per material:
 
 ```
@@ -633,7 +644,8 @@ calibration-only cvars were folded once tuned.
   wins) lazily at first material parse; `idMaterial` carries `pbrMetalness/pbrRoughness`
   (-1 = no entry); the interaction fill uses them with global fallbacks; `reloadPbrTable`
   re-applies live. **Override files are now slim baked deltas** (not the full snapshots):
-  `base/pbr/pbr_overrides.cfg` ~141 active lines, `d3xp/pbr/pbr_overrides.cfg` ~413
+  `base/pbr/pbr_overrides.cfg` ~141 active lines, `d3xp/pbr/pbr_game.cfg` (was
+  `d3xp/pbr/pbr_overrides.cfg` until 2026-11-19) ~413
   (game-only materials + deliberate per-game edits; regenerate/bake per §6).
 - **Phase C — environment specular for metals**: C.1 light-glow floor **built**
   (`r_pbrEnvScale`); C.2 screen-space reflections **built** (`r_ssr`, docs/ssr.md),

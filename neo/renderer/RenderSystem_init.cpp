@@ -3574,7 +3574,7 @@ void R_InitCommands( void ) {
 	cmdSystem->AddCommand( "listParallaxMaps", R_ListParallaxMaps_f, CMD_FL_RENDERER, "lists materials with a captured parallax height map (docs/parallax.md); needs r_parallax 1 + reloadDecls" );
 	cmdSystem->AddCommand( "reloadSurface", R_ReloadSurface_f, CMD_FL_RENDERER, "reloads the decl and images for selected surface" );
 	cmdSystem->AddCommand( "pbrDebugViewNext", R_PbrDebugViewNext_f, CMD_FL_RENDERER, "cycles r_pbrDebugView: normal -> AO -> roughness -> metalness -> ORM -> normal (bind it to a key)" );
-	cmdSystem->AddCommand( "reloadPbrTable", R_ReloadPbrTable_f, CMD_FL_RENDERER, "re-reads pbr/pbr_materials.cfg + pbr/pbr_overrides.cfg and re-applies to loaded materials (docs/pbr-materials.md)" );
+	cmdSystem->AddCommand( "reloadPbrTable", R_ReloadPbrTable_f, CMD_FL_RENDERER, "re-reads pbr/pbr_materials.cfg + pbr/pbr_game.cfg + pbr/pbr_overrides.cfg and re-applies to loaded materials (docs/pbr-materials.md)" );
 }
 
 /*

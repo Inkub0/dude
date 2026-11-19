@@ -1027,7 +1027,7 @@ def derive(diffuse, spec, args, table, name_says_nonmetal=False):
 
 def load_pbr_table(table_texts, default_rough):
     """-> f(material) = (metalness, roughness) as the engine resolves them from pbr_materials.cfg +
-    pbr_overrides.cfg (later text wins), or None when the material has no row."""
+    pbr_game.cfg + pbr_overrides.cfg (later text wins), or None when the material has no row."""
     cat, rows = {}, {}
     for text in table_texts:
         for line in text.splitlines():
@@ -1093,7 +1093,7 @@ def main():
     ap.add_argument("-o", "--output", type=Path, default=Path("pbr_out"), help="output folder (mirrors game paths)")
     ap.add_argument("--layout", choices=("orm", "rmao"), default="orm", help="sidecar channel order (default orm)")
     ap.add_argument("--pbr-table", action="append", type=Path,
-                    help="pbr_materials.cfg / pbr_overrides.cfg to read metal classes from "
+                    help="pbr_materials.cfg / pbr_game.cfg / pbr_overrides.cfg to read metal classes from "
                          "(default: pbr/ in the --search folders; 'none' to skip)")
     ap.add_argument("--rough-range", type=float, nargs=2, default=(0.3, 0.85), metavar=("SHINY", "DULL"),
                     help="roughness at full and at zero specular (default 0.3 0.85)")
@@ -1296,7 +1296,7 @@ def main():
     elif args.pbr_table:
         table_of = load_pbr_table([t.read_text(errors="replace") for t in args.pbr_table], args.default_rough)
     else:
-        texts = [fs.read(p).decode("latin-1") for p in ("pbr/pbr_materials.cfg", "pbr/pbr_overrides.cfg")
+        texts = [fs.read(p).decode("latin-1") for p in ("pbr/pbr_materials.cfg", "pbr/pbr_game.cfg", "pbr/pbr_overrides.cfg")
                  if fs.read(p) is not None]
         table_of = load_pbr_table(texts, args.default_rough)
 
