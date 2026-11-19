@@ -1309,6 +1309,7 @@ extern idCVar r_rtShadowBlurStagger;		// far lights refresh their blurred mask e
 extern idCVar r_rtShadowBlurStaggerNear;	// nearer than this (viewer -> light volume): every frame
 extern idCVar r_rtShadowBlurStaggerFar;		// farther than this: every 3rd frame; between: every 2nd
 extern idCVar r_rtShadowBlurIntensity;		// blur width multiplier (0 = hard, 1 = default)
+extern idCVar r_rtShadowDebug;				// RT shadow diagnostics: 1 readout, 2 shadow term, 3 contact term, 4 mode colours
 extern idCVar r_rtShadowOutsideHits;	// r_rtShadowBlur: the softening ray counts only hits on a mesh's outside
 extern idCVar r_rtShadowInsideSkip;	// r_rtShadowOutsideHits: inside hits ignored only this close to the start
 extern idCVar r_rtShadowCharRays;		// r_rtShadowBlur: rays per pixel for tessellated characters, traced per draw (0 = mask)
