@@ -7877,16 +7877,20 @@ static void PbrEditor_DrawGlobalTab()
 static idStr pbrEditTexStatus;					// last "Save to texture" result line
 static bool  pbrEditTexStatusOk = false;
 
-// live brightness / contrast / gamma edit of the sidecar's channels (rPbrSidecarAdjust), then "Save to texture"
+// live brightness / contrast / gamma edit of the sidecar's channels (rPbrSidecarAdjust), then "Save for next bake"
+// (a step in pbr/edits/<game>.cfg the baker applies, previewed until then) or "Save to texture" (the pixels, locally)
 static void PbrEditor_DrawChannelEdit()
 {
 	if ( !ImGui::CollapsingHeader( "Edit texture channels", ImGuiTreeNodeFlags_DefaultOpen ) ) {
 		return;
 	}
 	ImGui::TextWrapped( "Brightness, contrast and gamma per channel, previewed live on every surface that uses this "
-		"texture (also in the PBR Material View debug view). Save writes them into the texture." );
+		"texture (also in the PBR Material View debug view). Save for next bake records them for this texture; the "
+		"next bake applies them." );
 	static const char *chanNames[3] = { "Ambient occlusion", "Roughness", "Metalness" };
 	pbrSidecarAdjust_t &adj = rPbrSidecarAdjust;
+	int sidecarLayout;
+	idImage *sidecar = R_PbrTextureMap( pbrEditMat, sidecarLayout );
 	bool changed = false;
 	for ( int c = 0; c < 3; c++ ) {
 		ImGui::PushID( c );
@@ -7900,20 +7904,44 @@ static void PbrEditor_DrawChannelEdit()
 		ImGui::PopID();
 	}
 	if ( changed ) {
-		int layout;
-		adj.img = R_PbrTextureMap( pbrEditMat, layout );	// preview on every draw that uses this image
+		adj.img = sidecar;	// preview on every draw that uses this image
 		pbrEditTexStatus.Clear();
 	}
 	const bool identity = R_PbrSidecarAdjustIsIdentity();
+	// what this texture has saved for the next bake: the sliders started there (PbrEditor_LoadFrom)
+	float saved[3][3];
+	const bool hasSaved = R_PbrSidecarEditGet( sidecar, saved );
+	bool sameAsSaved = true;
+	for ( int c = 0; c < 3; c++ ) {
+		sameAsSaved = sameAsSaved && idMath::Fabs( adj.brightness[c] - saved[c][0] ) < 0.0005f
+			&& idMath::Fabs( adj.contrast[c] - saved[c][1] ) < 0.0005f && idMath::Fabs( adj.gamma[c] - saved[c][2] ) < 0.0005f;
+	}
 	ImGui::BeginDisabled( identity );
 	if ( ImGui::Button( "Reset channels" ) ) {
 		R_PbrSidecarAdjustReset();
+		adj.img = sidecar;	// keep previewing THIS state: without it the saved step would show under neutral sliders
+		pbrEditTexStatus.Clear();
 	}
+	ImGui::EndDisabled();
+	ImGui::SameLine();
+	ImGui::BeginDisabled( sameAsSaved || sidecar == NULL );
+	if ( ImGui::Button( "Save for next bake" ) ) {
+		idStr written;
+		pbrEditTexStatusOk = R_PbrSidecarEditSave( sidecar, written );
+		pbrEditTexStatus = !pbrEditTexStatusOk ? idStr( "Not saved: could not write the edit list." )
+			: identity ? idStr( va( "Removed this texture's edit from %s.", written.c_str() ) )
+			           : idStr( va( "Saved to %s. It shows until a pack baked with it is installed.", written.c_str() ) );
+	}
+	ImGui::EndDisabled();
+	ImGui::SetItemTooltip( "Records these values for this texture in pbr/edits/<game>.cfg. The game keeps showing them on "
+		"top of the installed texture, and the next bake (tools/pbr_extract_maps.py) applies them after its global and "
+		"per-class adjust, so they end up in the pack. Works whatever the All sidecars tab is set to. With all sliders "
+		"neutral it removes this texture's saved edit. %s", hasSaved ? "This texture has a saved edit." : "This texture has no saved edit." );
 	ImGui::SameLine();
 	// the saved texture holds only this edit; with the global adjust also on, the preview shows both, so what is
 	// written would not match what is seen (and would be adjusted twice once the global values are baked)
 	const bool globalOn = !R_PbrSidecarGlobalIsIdentity();
-	ImGui::BeginDisabled( globalOn );
+	ImGui::BeginDisabled( identity || globalOn );
 	if ( ImGui::Button( "Save to texture" ) ) {
 		idStr written, error;
 		pbrEditTexStatusOk = R_PbrSaveSidecarEdit( pbrEditMat, written, error );
@@ -7921,17 +7949,20 @@ static void PbrEditor_DrawChannelEdit()
 		                                      : va( "Not saved: %s", error.c_str() );
 		if ( pbrEditTexStatusOk ) {
 			R_PbrTextureMapInfo( pbrEditMat, pbrEditTexFile, pbrEditTexLayout );	// now the loose .tga
+			if ( hasSaved ) {
+				// the edit is in the pixels now (the save reset the sliders): drop its step, or it would apply on top
+				idStr list;
+				R_PbrSidecarEditSave( sidecar, list );
+			}
 		}
 	}
 	ImGui::EndDisabled();
-	if ( globalOn ) {
-		ImGui::SetItemTooltip( "Set the All sidecars tab back to the last bake first: what you see includes its change, the "
-			"saved texture would not." );
-	}
-	ImGui::EndDisabled();
-	ImGui::SetItemTooltip( "Writes the edited channels into <name>.tga in your save folder (fs_savepath), next to "
-		"where the game looks first, so it replaces the texture from the .pk4 for every material that uses it. "
-		"tools/bake_pbr_sidecars.sh keeps loose sidecars like this one out of its packs." );
+	ImGui::SetItemTooltip( globalOn
+		? "Not while the All sidecars tab differs from the last bake: what you see includes its change, a saved texture "
+		  "would not. Use Save for next bake, which works either way."
+		: "Writes the edited channels into <name>.tga in your save folder (fs_savepath), next to where the game looks "
+		  "first, so it replaces the texture from the .pk4 for every material that uses it, on this machine only: "
+		  "tools/bake_pbr_sidecars.sh keeps loose sidecars like this one out of its packs. For a pack, use Save for next bake." );
 	if ( pbrEditTexStatus.Length() ) {
 		ImGui::TextColored( pbrEditTexStatusOk ? ImVec4( 0.45f, 1.0f, 0.55f, 1.0f ) : ImVec4( 1.0f, 0.5f, 0.4f, 1.0f ),
 			"%s", pbrEditTexStatus.c_str() );
@@ -7940,7 +7971,8 @@ static void PbrEditor_DrawChannelEdit()
 
 static void PbrEditor_LoadFrom( const idMaterial *mat )
 {
-	if ( mat != pbrEditMat ) {
+	const bool newPick = mat != pbrEditMat;
+	if ( newPick ) {
 		R_PbrSidecarAdjustReset();		// an unsaved channel edit belongs to the previous pick
 		pbrEditTexStatus.Clear();
 	}
@@ -7952,6 +7984,20 @@ static void PbrEditor_LoadFrom( const idMaterial *mat )
 		return;
 	}
 	R_PbrTextureMapInfo( mat, pbrEditTexFile, pbrEditTexLayout );
+	if ( newPick && pbrEditTexFile.Length() ) {
+		// the channel sliders start from what this texture has saved for the next bake, and take over its preview
+		int layout;
+		idImage *sidecar = R_PbrTextureMap( mat, layout );
+		float saved[3][3];
+		if ( sidecar && R_PbrSidecarEditGet( sidecar, saved ) ) {
+			for ( int c = 0; c < 3; c++ ) {
+				rPbrSidecarAdjust.brightness[c] = saved[c][0];
+				rPbrSidecarAdjust.contrast[c] = saved[c][1];
+				rPbrSidecarAdjust.gamma[c] = saved[c][2];
+			}
+			rPbrSidecarAdjust.img = sidecar;
+		}
+	}
 	pbrEditCat = mat->GetPbrCategory();
 	if ( pbrEditCat > PBR_CAT_NONE && pbrEditCat < PBR_CAT_COUNT ) {
 		// tracking a category: pre-fill all 4 sliders from that category's live preset,

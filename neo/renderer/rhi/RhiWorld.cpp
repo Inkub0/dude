@@ -29,6 +29,7 @@ Doom 3 GPL Source Code (see ArbProgram.cpp for license header)
 #include "renderer/rhi/RhiTess.h"
 #include "framework/FileSystem.h"
 #include "idlib/containers/HashTable.h"		// idHashTable (the sidecar depth list, R_PbrSidecarHeightDepth)
+#include "framework/Licensee.h"				// BASE_GAMEDIR (this game's per-texture edit list, pbr/edits/<game>.cfg)
 #include "framework/DeclSkin.h"					// idDeclSkin (entity skin -> AO name for lazy bake)
 #include "tools/compilers/aobake/aobake.h"		// AO_BakeModelToCache (lazy occlusion-map baking)
 #include "framework/DeclManager.h"					// DECL_MATERIAL enumeration (decal image precache)
@@ -1352,7 +1353,253 @@ bool R_PbrSidecarSaveBakeSettings( idStr &written ) {
 	return fileSystem->WriteFile( written.c_str(), text.c_str(), text.Length() ) >= 0;
 }
 
-// every sidecar draw: the global adjust (identity when off); plus the editor's edit when it uses the sidecar under edit
+// ---- per-texture channel edits for the next bake (docs/pbr-texture-maps.md "One texture, for the next bake") ----
+// "Save to texture" rewrites one sidecar's pixels as a loose file: a local override the bake never sees, and only
+// offered while the All sidecars sliders equal the bake. A pack author needs the opposite: a recorded edit the baker
+// applies. So the editor's channel edit can also be saved as a STEP - one "<sidecar image> <ao|rough|metal>
+// <brightness> <contrast> <gamma>" line in pbr/edits/<game>.cfg. tools/pbr_extract_maps.py applies every step of every
+// pbr/edits/*.cfg, in order, after its global and per-class adjust, and lists the steps a pack's textures contain in
+// pbr/edits_baked/<pack>.cfg. The engine previews what the installed textures still LACK: per image and channel, the
+// steps of pbr/edits/ beyond those pbr/edits_baked/ also lists (matched from the front), applied where the editor's
+// live edit is - after the global adjust, as the baker does. So a saved step shows at once, keeps showing until a pack
+// baked with it is installed, and is not applied twice afterwards. The editor keeps ONE pending step per image and
+// channel (saving again replaces it); if hand-edited files leave several, the last one previews and a line says so.
+struct pbrEditStep_t {
+	idStr	image;			// sidecar image name: lower case, no extension
+	int		ch;				// 0 AO, 1 roughness, 2 metalness
+	float	bcg[3];
+	bool	local;			// from this game's own file, the one the editor rewrites
+	bool	baked;			// the installed textures already contain it
+};
+struct pbrEditPending_t {
+	idStr	image;
+	float	bcg[3][3];		// [channel][brightness, contrast, gamma]; ( 0, 1, 1 ) = none
+};
+struct pbrEditImg_t { const idImage *img; int pending; };
+static idList<pbrEditStep_t>	rbPbrEditSteps;		// every step of every pbr/edits/*.cfg, in order
+static idList<pbrEditPending_t>	rbPbrEditPending;	// per image: what its installed texture still lacks
+static idList<pbrEditImg_t>		rbPbrEditImgs;		// image -> rbPbrEditPending index ( -1 none ), resolved on first draw
+static idHashIndex				rbPbrEditImgHash;
+static bool						rbPbrEditsLoaded = false;
+
+// this game's own edit list, the file the editor writes: pbr/edits/<fs_game, else the base folder>.cfg. One file per
+// game folder and every one is read, so a mod's list adds to the base game's instead of hiding it
+static idStr RB_RHI_PbrEditLocalFile() {
+	const char *game = cvarSystem->GetCVarString( "fs_game" );
+	if ( game == NULL || game[0] == '\0' ) {
+		game = BASE_GAMEDIR;
+	}
+	return idStr( "pbr/edits/" ) + game + ".cfg";
+}
+
+static void RB_RHI_ReadPbrEditDir( const char *dir, const char *localFile, idList<pbrEditStep_t> &out ) {
+	idFileList *files = fileSystem->ListFiles( dir, ".cfg", true );		// sorted: the baker reads them in name order too
+	for ( int f = 0; f < files->GetNumFiles(); f++ ) {
+		const idStr path = idStr( dir ) + "/" + files->GetFile( f );
+		char *buf = NULL;
+		if ( fileSystem->ReadFile( path.c_str(), (void **)&buf ) < 0 || buf == NULL ) {
+			continue;
+		}
+		idStr text( buf );
+		fileSystem->FreeFile( buf );
+		text.Replace( "\r", "" );
+		const bool local = localFile != NULL && idStr::Icmp( path.c_str(), localFile ) == 0;
+		int start = 0;
+		while ( start < text.Length() ) {
+			int end = text.Find( '\n', start );
+			if ( end < 0 ) {
+				end = text.Length();
+			}
+			const idStr line = text.Mid( start, end - start );
+			start = end + 1;
+			char image[256], chan[16];
+			float b, k, g;
+			if ( sscanf( line.c_str(), " %255s %15s %f %f %f", image, chan, &b, &k, &g ) != 5 || image[0] == '/' || image[0] == '#' ) {
+				continue;
+			}
+			pbrEditStep_t st;
+			st.ch = -1;
+			for ( int c = 0; c < 3; c++ ) {
+				if ( idStr::Icmp( chan, rbPbrChanKeys[c] ) == 0 ) {
+					st.ch = c;
+				}
+			}
+			if ( st.ch < 0 ) {
+				continue;
+			}
+			st.image = image;
+			st.image.ToLower();
+			st.image.BackSlashesToSlashes();
+			st.bcg[0] = idMath::ClampFloat( -1.0f, 1.0f, b );
+			st.bcg[1] = idMath::ClampFloat( 0.0f, 8.0f, k );
+			st.bcg[2] = idMath::ClampFloat( 0.05f, 10.0f, g );
+			st.local = local;
+			st.baked = false;
+			out.Append( st );
+		}
+	}
+	fileSystem->FreeFileList( files );
+}
+
+// (re)read pbr/edits/*.cfg and pbr/edits_baked/*.cfg and work out what is pending (reloadPbrTable, and after a save)
+void R_PbrSidecarEditsLoad( void ) {
+	rbPbrEditSteps.Clear();
+	rbPbrEditPending.Clear();
+	rbPbrEditImgs.Clear();
+	rbPbrEditImgHash.Free();
+	rbPbrEditsLoaded = true;
+
+	const idStr local = RB_RHI_PbrEditLocalFile();
+	idList<pbrEditStep_t> baked;
+	RB_RHI_ReadPbrEditDir( "pbr/edits", local.c_str(), rbPbrEditSteps );
+	RB_RHI_ReadPbrEditDir( "pbr/edits_baked", NULL, baked );
+	idList<bool> bakedUsed;
+	bakedUsed.SetNum( baked.Num() );
+	for ( int i = 0; i < baked.Num(); i++ ) {
+		bakedUsed[i] = false;
+	}
+	int several = 0;
+	for ( int i = 0; i < rbPbrEditSteps.Num(); i++ ) {
+		pbrEditStep_t &st = rbPbrEditSteps[i];
+		// baked steps are matched from the front: once an earlier step of this image and channel is pending, so is this
+		bool earlierPending = false;
+		for ( int j = 0; j < i && !earlierPending; j++ ) {
+			const pbrEditStep_t &e = rbPbrEditSteps[j];
+			earlierPending = !e.baked && e.ch == st.ch && e.image == st.image;
+		}
+		if ( !earlierPending ) {
+			for ( int j = 0; j < baked.Num(); j++ ) {
+				if ( bakedUsed[j] || baked[j].ch != st.ch || baked[j].image != st.image ) {
+					continue;
+				}
+				// the first baked step of this image and channel not yet matched: it has to be this very step
+				if ( RB_RHI_PbrNear( baked[j].bcg[0], st.bcg[0] ) && RB_RHI_PbrNear( baked[j].bcg[1], st.bcg[1] )
+				     && RB_RHI_PbrNear( baked[j].bcg[2], st.bcg[2] ) ) {
+					bakedUsed[j] = true;
+					st.baked = true;
+				}
+				break;
+			}
+		}
+		if ( st.baked ) {
+			continue;
+		}
+		if ( earlierPending ) {
+			several++;
+		}
+		int at = -1;
+		for ( int j = 0; j < rbPbrEditPending.Num(); j++ ) {
+			if ( rbPbrEditPending[j].image == st.image ) {
+				at = j;
+				break;
+			}
+		}
+		if ( at < 0 ) {
+			pbrEditPending_t pe;
+			pe.image = st.image;
+			for ( int c = 0; c < 3; c++ ) {
+				pe.bcg[c][0] = 0.0f;
+				pe.bcg[c][1] = 1.0f;
+				pe.bcg[c][2] = 1.0f;
+			}
+			at = rbPbrEditPending.Append( pe );
+		}
+		for ( int k = 0; k < 3; k++ ) {
+			rbPbrEditPending[at].bcg[st.ch][k] = st.bcg[k];
+		}
+	}
+	if ( rbPbrEditSteps.Num() > 0 ) {
+		common->Printf( "PBR per-texture edits: %i step(s) listed, %i texture(s) with a step not yet in the installed textures\n",
+		                rbPbrEditSteps.Num(), rbPbrEditPending.Num() );
+	}
+	if ( several > 0 ) {
+		common->Printf( "PBR per-texture edits: %i step(s) follow another pending step of the same texture and channel; "
+		                "only the last previews (the bake applies all, in order)\n", several );
+	}
+}
+
+static const pbrEditPending_t *RB_RHI_PbrEditPendingFor( const idImage *img ) {
+	if ( !rbPbrEditsLoaded ) {
+		R_PbrSidecarEditsLoad();
+	}
+	if ( rbPbrEditPending.Num() == 0 || img == NULL ) {
+		return NULL;		// the common case: no edit list, nothing per draw
+	}
+	const int key = rbPbrEditImgHash.GenerateKey( (int)( ( (size_t)img >> 4 ) & 0x7fffffff ), 0 );
+	for ( int i = rbPbrEditImgHash.First( key ); i != -1; i = rbPbrEditImgHash.Next( i ) ) {
+		if ( rbPbrEditImgs[i].img == img ) {
+			return rbPbrEditImgs[i].pending < 0 ? NULL : &rbPbrEditPending[rbPbrEditImgs[i].pending];
+		}
+	}
+	idStr name = img->imgName;
+	name.ToLower();
+	pbrEditImg_t e;
+	e.img = img;
+	e.pending = -1;
+	for ( int j = 0; j < rbPbrEditPending.Num(); j++ ) {
+		if ( rbPbrEditPending[j].image == name ) {
+			e.pending = j;
+			break;
+		}
+	}
+	rbPbrEditImgHash.Add( key, rbPbrEditImgs.Append( e ) );
+	return e.pending < 0 ? NULL : &rbPbrEditPending[e.pending];
+}
+
+// this sidecar's pending step per channel ( brightness, contrast, gamma ); identity and false when it has none
+bool R_PbrSidecarEditGet( const idImage *img, float bcg[3][3] ) {
+	for ( int c = 0; c < 3; c++ ) {
+		bcg[c][0] = 0.0f;
+		bcg[c][1] = 1.0f;
+		bcg[c][2] = 1.0f;
+	}
+	const pbrEditPending_t *pe = RB_RHI_PbrEditPendingFor( img );
+	if ( pe == NULL ) {
+		return false;
+	}
+	memcpy( bcg, pe->bcg, sizeof( pe->bcg ) );
+	return true;
+}
+
+// The editor's current channel edit (rPbrSidecarAdjust) as this sidecar's step for the next bake: this game's edit
+// list is written again (fs_savepath) with the sidecar's pending steps replaced by the edit's non-identity channels.
+// An all-identity edit just removes them. Steps already baked into the installed textures stay: they are the recipe.
+bool R_PbrSidecarEditSave( const idImage *img, idStr &written ) {
+	if ( img == NULL ) {
+		return false;
+	}
+	if ( !rbPbrEditsLoaded ) {
+		R_PbrSidecarEditsLoad();
+	}
+	idStr name = img->imgName;
+	name.ToLower();
+	idStr text = "// DUDE PBR per-texture channel edits (docs/pbr-texture-maps.md), written by the PBR editor's \"Save for next bake\".\n"
+	             "// <sidecar image> <ao|rough|metal> <brightness> <contrast> <gamma>: tools/pbr_extract_maps.py applies every\n"
+	             "// step, in order, after its global and per-class adjust. Keep the old lines: they are the recipe of the packs.\n";
+	for ( int i = 0; i < rbPbrEditSteps.Num(); i++ ) {
+		const pbrEditStep_t &st = rbPbrEditSteps[i];
+		if ( !st.local || ( !st.baked && st.image == name ) ) {
+			continue;
+		}
+		text += va( "%s %s %.3f %.3f %.3f\n", st.image.c_str(), rbPbrChanKeys[st.ch], st.bcg[0], st.bcg[1], st.bcg[2] );
+	}
+	for ( int c = 0; c < 3; c++ ) {
+		const float b = rPbrSidecarAdjust.brightness[c], k = rPbrSidecarAdjust.contrast[c], g = rPbrSidecarAdjust.gamma[c];
+		if ( RB_RHI_PbrNear( b, 0.0f ) && RB_RHI_PbrNear( k, 1.0f ) && RB_RHI_PbrNear( g, 1.0f ) ) {
+			continue;
+		}
+		text += va( "%s %s %.3f %.3f %.3f\n", name.c_str(), rbPbrChanKeys[c], b, k, g );
+	}
+	written = RB_RHI_PbrEditLocalFile();
+	if ( fileSystem->WriteFile( written.c_str(), text.c_str(), text.Length() ) < 0 ) {
+		return false;
+	}
+	R_PbrSidecarEditsLoad();
+	return true;
+}
+
+// every sidecar draw: the global adjust (identity when off); plus the editor's live edit when it is the sidecar under
+// edit, else that sidecar's pending step for the next bake
 static void RB_RHI_FillOrmAdjust( rhi::RenderParams &parms, const idImage *pbrMap ) {
 	if ( pbrMap == NULL ) {
 		return;
@@ -1365,6 +1612,15 @@ static void RB_RHI_FillOrmAdjust( rhi::RenderParams &parms, const idImage *pbrMa
 		}
 	}
 	if ( pbrMap != rPbrSidecarAdjust.img ) {
+		const pbrEditPending_t *pe = RB_RHI_PbrEditPendingFor( pbrMap );
+		if ( pe != NULL ) {
+			parms.ormParms[2] = 1.0f;
+			for ( int c = 0; c < 3; c++ ) {
+				for ( int i = 0; i < 3; i++ ) {
+					parms.ormAdjust[i][c] = pe->bcg[c][i];
+				}
+			}
+		}
 		return;
 	}
 	parms.ormParms[2] = 1.0f;
