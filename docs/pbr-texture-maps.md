@@ -274,8 +274,12 @@ uploaded; `PACK_ONLY=1` bakes nothing and only re-collects and re-stamps the pac
    packed copy; `tools/bake_pbr_sidecars.sh` leaves such loose sidecars out of its packs.
    `.dds` sidecars cannot be edited this way.
 5. Added a texture while the game was running? Press **Reload PBR Table** in the editor (or
-   run `reloadPbrTable`) so DUDE looks for it again. Changed the pixels of a texture it already
-   loaded? Run `reloadImages`.
+   run `reloadPbrTable`) so DUDE looks for it again; the next level load looks again as well.
+   Changed the pixels of a texture it already loaded? Run `reloadImages`.
+
+Sidecars load with the level (`r_pbrTextureMapPrecache`, on by default; Debugging > Loading &
+Caches > "Preload PBR Textures at Level Load"), so there is no pause the first time a material
+comes into view and each level frees the previous one's.
 
 `r_pbrTextureMaps 0` switches all sidecar textures off for comparison, live: every material
 falls back to its PBR table values, and the editor says the texture is ignored and the sliders

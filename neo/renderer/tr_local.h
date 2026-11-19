@@ -963,6 +963,7 @@ bool R_PbrWriteOverrideLine( const idMaterial *mat, float metal, float rough,
 extern idCVar r_pbr;					// GGX interaction path; supersedes r_shading while on
 extern idCVar r_pbrRoughness;			// Phase A global fallback roughness (per-material in Phase B)
 extern idCVar r_pbrTextureMaps;			// per-texel ORM / RMAO sidecar textures override the table scalars
+extern idCVar r_pbrTextureMapPrecache;	// load a level's sidecars at level load, not on first sight
 extern idCVar r_pbrModelBakedAO;		// a model's own baked AO map wins over its sidecar's AO channel
 extern idCVar r_pbrDebugView;			// PBR material debug view: 0 off, 1 AO, 2 roughness, 3 metalness, 4 ORM (RB_RHI_PbrDebugOverlay)
 // Phase D per-texel PBR maps (RhiWorld.cpp): the sidecar texture next to a material's diffuse map
