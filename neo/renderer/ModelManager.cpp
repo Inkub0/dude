@@ -552,6 +552,9 @@ void idRenderModelManagerLocal::PrecacheOcclusionMaps() {
 	// decal bump images (blood splats etc.) stall the same way on first projection; precache them too
 	extern void R_PrecacheDecalImages( void );
 	R_PrecacheDecalImages();
+	// the PBR sidecar textures of every material the level uses: same hitch, and loaded lazily they were never purged
+	extern void R_PrecachePbrTextureMaps( void );
+	R_PrecachePbrTextureMaps();
 }
 
 // free wrapper so non-renderer TUs (the timeDemo path in Session.cpp) can trigger it

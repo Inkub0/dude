@@ -5057,6 +5057,7 @@ static void DrawDbgGroup_LoadingCaches()
 	CvarSliderI( "Image Loading Threads", NamedCvar( "r_parallelImageLoadThreads" ), 0, 32, "Worker threads for parallel image loading (0 = all hardware threads)." );
 	CvarCheckbox( "Binary Model Cache", NamedCvar( "r_binaryModelCache" ), nullptr );
 	CvarCheckbox( "Preload Occlusion Maps at Level Load", NamedCvar( "r_occlusionMapPrecache" ), nullptr );
+	CvarCheckbox( "Preload PBR Textures at Level Load", NamedCvar( "r_pbrTextureMapPrecache" ), nullptr );
 	CvarCheckbox( "Auto-Bake Glass Probes", r_ssrGlassProbeBake, nullptr );
 	CvarSliderI( "Glass Probe Size", r_ssrGlassProbeSize, 64, 1024, "Face resolution of baked glass probes; re-bake with "
 		"'bakeGlassProbe force' after changing." );

@@ -1704,6 +1704,53 @@ void R_PrecacheDecalImages( void ) {
 
 /*
 ===================
+R_PrecachePbrTextureMaps
+
+DUDE (docs/pbr-texture-maps.md "Loading"): an ORM / RMAO sidecar was requested by the first draw that used its
+material (RB_RHI_SurfacePbrMap), outside the level load. Two costs. The file was read, decoded and uploaded on the
+render path: a hitch per material never seen before. And the image manager treats an image first referenced outside
+a level load as permanent (referencedOutsideLevelLoad): no later level load purged it, so every sidecar a session had
+shown stayed resident - up to the whole pack, about 600 MB for Doom 3's and 770 MB for Quake 4's.
+
+Called with the other precaches while the image manager is still inside the level load: every material the level
+parsed (a level load unparses all decls first, so parsed = referenced by this level) is asked for its sidecar now.
+The image is then only marked referenced, loads on the parallel loader with the level's textures, and is purged by
+the first later level that does not use it. The per-material cache is dropped first: a sidecar it remembers from the
+last level must be referenced again or EndLevelLoad purges it (and it would come back lazily), and a "none" it
+remembers may be stale (a loose file added since). The timeDemo path calls this outside a level load, where it
+simply loads them before timing starts.
+
+A material first parsed after the load (a late spawn) still loads its sidecar on first sight, and a sidecar already
+made permanent by an earlier lazy load stays so until the game restarts.
+===================
+*/
+void R_PrecachePbrTextureMaps( void ) {
+	if ( !glConfig.rhiBackend || !r_pbrTextureMapPrecache.GetBool() || !r_pbrTextureMaps.GetBool()
+	     || !R_BackendSupportsEnhancements() || !cvarSystem->GetCVarBool( "image_preload" ) ) {
+		return;
+	}
+	if ( !r_pbr.GetBool() && !r_occlusionMaps.GetBool() && !r_parallax.GetBool() ) {
+		return;		// nothing reads a sidecar: roughness / metalness, its AO channel, the height in its alpha
+	}
+	rhiPbrMapCache.Clear();
+	rhiPbrMapHash.Free();
+	int found = 0;
+	const int n = declManager->GetNumDecls( DECL_MATERIAL );
+	for ( int i = 0; i < n; i++ ) {
+		const idDecl *d = declManager->DeclByIndex( DECL_MATERIAL, i, false );
+		if ( !d || d->GetState() != DS_PARSED ) {
+			continue;		// unreferenced this level -> don't parse it, don't load for it
+		}
+		int layout;
+		if ( R_PbrTextureMap( static_cast<const idMaterial *>( d ), layout ) != NULL ) {
+			found++;
+		}
+	}
+	common->Printf( "%i PBR sidecar textures referenced for this level\n", found );
+}
+
+/*
+===================
 RB_RHI_ResolvePbrMaterial
 
 Resolve a material's effective PBR response (docs/pbr-materials.md), outputting all

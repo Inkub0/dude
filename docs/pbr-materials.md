@@ -367,7 +367,22 @@ diffuse also finds `foo_orm` / `foo_rmao` (same rule as the `_ao` convention). L
 
 **Runtime** (`R_PbrTextureMap`, RhiWorld.cpp). Resolved once per material and cached
 (`reloadPbrTable` clears the cache, so a dropped-in file is picked up without a restart; a
-changed file's *pixels* need `reloadImages`, as any texture). Loaded `TD_HIGH_QUALITY`
+changed file's *pixels* need `reloadImages`, as any texture).
+
+**Loading** (`R_PrecachePbrTextureMaps`, `r_pbrTextureMapPrecache` 1, since 0.9.10). At level load,
+with the occlusion map and decal precaches, every material the level parsed is asked for its
+sidecar while the image manager is still inside the level load. Until then a sidecar was requested
+by the first draw that used its material, which cost twice: a read, decode and upload on the render
+path the first time each material came into view, and an image that no level load ever freed,
+because the image manager keeps anything first referenced outside a level load for the whole
+session (`referencedOutsideLevelLoad`). Every sidecar a session had shown stayed in video memory,
+up to the whole pack: about 600 MB for Doom 3's, 770 MB for Quake 4's. Precached, they load on the
+parallel loader with the level's textures and the next level frees the ones it does not use. The
+pass drops the per-material cache first, so a loose file added since the last level is found
+without `reloadPbrTable`. Still lazy: a material first parsed after the load (a late spawn), and
+any level loaded with the precache or `image_preload` off.
+
+Loaded `TD_HIGH_QUALITY`
 (never block-compressed: DXT would bleed one channel's edges into the others) with the
 diffuse stage's wrap mode, since the sidecar tiles with it. It rides **unit 10** in place of
 the occlusion map, so no new sampler binding on either backend; `u_ormParms` (appended last
