@@ -545,6 +545,7 @@ private:
 		int				offset = 0;
 		BufferHandle	handle = 0;
 		VkBufferUsageFlags	usage = 0;	// growth (GrowRing) recreates with the same usage
+		int				demand = 0;	// UBO ring: bytes this frame asked for, counting past an overflow (sizes the next grow)
 	};
 	RingBuf						uboRing[FRAMES_IN_FLIGHT];
 	RingBuf						vertRing[FRAMES_IN_FLIGHT];
@@ -564,6 +565,10 @@ private:
 	int							uboAlign = 256;
 	int							storageAlign = 256;		// minStorageBufferOffsetAlignment
 	bool						ringOverflowWarned = false;
+	// UBO ring growth (it can't grow mid-frame, see AllocFromRing): an overflow raises the target and each slot
+	// is re-created at that size the next time its fence has passed (BeginFrameRecycleSlot -> ResizeUboRing)
+	int							uboRingTarget = UBO_RING_SIZE;
+	static const int			UBO_RING_MAX = 256 << 20;
 	// geometry rings grow on mid-frame overflow instead of wrapping (a wrap
 	// stomps data in-flight draws still read — M4's "flying triangles"). The
 	// old buffer must outlive this slot's frame: destroyed after the slot's
@@ -575,6 +580,8 @@ private:
 	};
 	std::vector<RetiredRing>	retiredRings[FRAMES_IN_FLIGHT];
 	bool						GrowRing( RingBuf &ring, int minSize );
+	bool						ResizeUboRing( int slot, int newSize );
+	int							UboZeroSlice( const RingBuf &ring ) const { return ring.size - MAX_UNIFORM_SLICE; }
 	void						DrainRetiredRings( int slot );
 
 	std::vector<VkBuffer>		bufferTable;			// handle = index + 1
@@ -3560,7 +3567,11 @@ void VulkanBackend::BeginFrameRecycleSlot() {
 			appliedAnisotropy = wantAniso;
 		}
 	}
+	if ( uboRing[frameIndex].size < uboRingTarget ) {
+		ResizeUboRing( frameIndex, uboRingTarget );	// this slot's fence has passed: nothing reads its UBO ring or set 0
+	}
 	uboRing[frameIndex].offset = 0;
+	uboRing[frameIndex].demand = 0;
 	vertRing[frameIndex].offset = 0;
 	idxRing[frameIndex].offset = 0;
 	stagingRing[frameIndex].offset = 0;
@@ -4115,6 +4126,10 @@ bool VulkanBackend::CreateRings() {
 			}
 			setups[i].ring->mapped = (byte *)info.pMappedData;
 			setups[i].ring->size = setups[i].size;
+			if ( setups[i].usage == VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT ) {
+				// the overflow fallback slice (AllocFromRing): never written by an allocation, must read as zeros
+				memset( setups[i].ring->mapped + UboZeroSlice( *setups[i].ring ), 0, MAX_UNIFORM_SLICE );
+			}
 			setups[i].ring->offset = 0;
 			setups[i].ring->usage = setups[i].usage;
 			bufferTable.push_back( setups[i].ring->buffer );
@@ -4758,19 +4773,101 @@ void VulkanBackend::DrainRetiredRings( int slot ) {
 	retiredRings[slot].clear();
 }
 
+/*
+====================
+VulkanBackend::ResizeUboRing
+
+Re-creates one slot's UBO ring at newSize and re-points that slot's set 0 at it. Only called from
+BeginFrameRecycleSlot, after the slot's fence wait: no command buffer in flight binds uboSet[slot]
+or reads the old buffer, so both are replaced in place (same BufferHandle). On failure the old
+ring stays and the target drops back, so the zero-slice fallback keeps covering overflows.
+====================
+*/
+bool VulkanBackend::ResizeUboRing( int slot, int newSize ) {
+	RingBuf &ring = uboRing[slot];
+	VkBufferCreateInfo bci = {};
+	bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+	bci.size = (VkDeviceSize)newSize;
+	bci.usage = ring.usage;
+	bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+	VmaAllocationCreateInfo aci = {};
+	aci.usage = VMA_MEMORY_USAGE_AUTO;
+	aci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+	aci.requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+	VkBuffer newBuf = VK_NULL_HANDLE;
+	VmaAllocation newAlloc = NULL;
+	VmaAllocationInfo info = {};
+	if ( !vkCheck( vmaCreateBuffer( vma, &bci, &aci, &newBuf, &newAlloc, &info ), "vmaCreateBuffer(ubo ring grow)" ) ) {
+		uboRingTarget = ring.size;
+		return false;
+	}
+	vmaDestroyBuffer( vma, ring.buffer, ring.alloc );
+	ring.buffer = newBuf;
+	ring.alloc = newAlloc;
+	ring.mapped = (byte *)info.pMappedData;
+	ring.size = newSize;
+	ring.offset = 0;
+	ring.demand = 0;
+	memset( ring.mapped + UboZeroSlice( ring ), 0, MAX_UNIFORM_SLICE );
+	if ( ring.handle >= 1 && ring.handle <= (BufferHandle)bufferTable.size() ) {
+		bufferTable[ring.handle - 1] = newBuf;
+	}
+
+	VkDescriptorBufferInfo bi = {};
+	bi.buffer = newBuf;
+	bi.offset = 0;
+	bi.range = MAX_UNIFORM_SLICE;
+	VkWriteDescriptorSet w = {};
+	w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+	w.dstSet = uboSet[slot];
+	w.dstBinding = 0;
+	w.descriptorCount = 1;
+	w.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+	w.pBufferInfo = &bi;
+	vkUpdateDescriptorSets( device, 1, &w, 0, NULL );
+	common->Printf( "VK: uniform ring (slot %d) grew to %d KB\n", slot, newSize >> 10 );
+	return true;
+}
+
 int VulkanBackend::AllocFromRing( RingBuf &ring, const void *data, int size, int align,
                                   int wrapReserve, BufferHandle *buffer ) {
 	if ( ring.mapped == NULL || size <= 0 ) {
 		if ( buffer ) { *buffer = 0; }
 		return 0;
 	}
+	const bool isUbo = ( ring.usage == VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT );
+	if ( isUbo ) {
+		ring.demand = ( ( ring.demand + align - 1 ) & ~( align - 1 ) ) + size;
+	}
 	int offset = ( ring.offset + align - 1 ) & ~( align - 1 );
 	if ( offset + size > ring.size - wrapReserve ) {
-		// geometry rings grow in place (see GrowRing). The UBO ring can't — its
-		// dynamic-offset descriptor set is already bound in the recording
-		// command buffer — but at 16MB (~16k draws) it has never overflowed;
-		// wrap + warn remains the fallback for it and for a failed grow.
-		if ( ring.usage != VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT && GrowRing( ring, size ) ) {
+		// geometry rings grow in place (see GrowRing). The UBO ring can't: its dynamic-offset descriptor set is
+		// already bound in the recording command buffer. Wrapping it (the old fallback) overwrote slices that
+		// draws recorded earlier this frame still read, so those shaders read another program's parameter
+		// block - garbage indices / addresses -> MMU fault -> device lost (noclip outside the world with the
+		// D3HDP mirror floors, 2026-11-20). Instead the overflowing draw gets the ring's reserved all-zero
+		// tail slice (zero MVP = degenerate geometry, zero indices / buffer addresses are in range or gated),
+		// so the overflow costs missing surfaces for a frame or two, and every slot grows before its next use.
+		if ( isUbo ) {
+			if ( size > MAX_UNIFORM_SLICE ) {
+				common->FatalError( "VK: uniform block of %d bytes exceeds MAX_UNIFORM_SLICE (%d)", size, MAX_UNIFORM_SLICE );
+			}
+			int want = ring.size;
+			while ( want < ring.demand + 2 * MAX_UNIFORM_SLICE && want < UBO_RING_MAX ) {
+				want *= 2;
+			}
+			if ( want > uboRingTarget ) {
+				uboRingTarget = want;
+			}
+			if ( !ringOverflowWarned ) {
+				ringOverflowWarned = true;
+				common->Warning( "VK: uniform ring full (%d KB frame) - overflowing draws skipped this frame, ring grows to %d KB",
+				                 ring.size >> 10, uboRingTarget >> 10 );
+			}
+			*buffer = ring.handle;
+			return UboZeroSlice( ring );
+		}
+		if ( GrowRing( ring, size ) ) {
 			offset = 0;
 		} else {
 			if ( !ringOverflowWarned ) {
