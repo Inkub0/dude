@@ -348,11 +348,11 @@ time.
 |---|---|---|---|
 | 1 | F4 measurements, F9 debug view | DONE 2026-11-19: `r_rtShadowDebug`, bench set `rtshadow`; numbers under F4 | small |
 | 2 | F4 character flag or hardware culling | DEFERRED: measured at about 0.2 ms, 1% of the frame (outside hits 0.1, skin band 0.12) | small to medium |
-| 3 | F1 ray start, then F3 | BUILT 2026-11-19 as an opt-in, `r_rtShadowNearStart` (docs/rtx-shadow-blur.md "Near ray start"): not screen-space first, but the softening ray started 0.05 units out where the surface faces the light, which the outside-hits rule already makes safe; setting 2 drops the contact ray on softened lights. Softened lights only. Looks right in game (2026-11-19); saving not measured (bench variants H, I ready); off by default | medium |
+| 3 | F1 ray start, then F3 | BUILT 2026-11-19 as an opt-in, `r_rtShadowNearStart` (docs/rtx-shadow-blur.md "Near ray start"): not screen-space first, but the softening ray started 0.05 units out where the surface faces the light, which the outside-hits rule already makes safe; setting 2 drops the contact ray on softened lights. Softened lights only. Looks right in game (2026-11-19); saving not measured (bench variants H, I ready); default 1 since 2026-11-20 (user decision: on with softened RT shadows) | medium |
 | 4 | F2 one penumbra model, decide mode 7 | DONE 2026-11-19: mode 7 and `r_rtShadowCharRays` removed; the mask is the one model | small |
 | 5 | F5 hybrid classification | NOT RECOMMENDED: capped at the ray pass (1.68 ms), works against the near ray start, blind to characters, brings the cube maps back. See F5 | large |
 | 6 | F6 batched blur | AFTER THE RELEASE: first reading 3.69 screens against 2.05 batched, so up to 44% of tiles and blur (about 1 ms); a light loop restructure in a default-on path. See F6 | large |
-| 7 | F7 skin penumbra scattering, F8 screenshots | DONE 2026-11-19: `r_skinShadowScatter` (opt-in, seen in game and kept), `r_screenshotAsSeen` (default on, checked on a capture) | small |
+| 7 | F7 skin penumbra scattering, F8 screenshots | DONE 2026-11-19: `r_skinShadowScatter` (seen in game and kept; default on with skin shading since 2026-11-20), `r_screenshotAsSeen` (default on, checked on a capture) | small |
 
 ## Sources
 

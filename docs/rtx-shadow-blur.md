@@ -420,7 +420,7 @@ Tried and dropped: fading the ray's result near the smooth terminator (it erased
 shadow), and building the animated BLAS from the deform-once tessellated buffer (no visible change
 on these defects, 64x the triangles to refit at tessellation level 8).
 
-## Near ray start - `r_rtShadowNearStart` (2026-11-19, experimental, off by default)
+## Near ray start - `r_rtShadowNearStart` (2026-11-19; default 1 since 2026-11-20)
 
 Review item 3 (docs/rtx-shadows-review.md F1 and F3). The softening ray started `r_rtSunShadowOffset`
 (1 unit) plus the distance term off the surface. The constant was a self-intersection guard from the
@@ -452,7 +452,7 @@ icospheres: the near start alone darkens 26 to 77% of the facing-away band, the 
 Seen in game on 2026-11-19 with settings 1 and 2: judged to look right. Its saving is not measured: the
 benchmark was left for later, and variants H and I of the `rtshadow` set are ready for it.
 
-What changes in the picture, and what to check before it becomes a default:
+Default 1 since 2026-11-20 (the user's decision after seeing 1 and 2 in game; 2 also drops the contact ray and stays a choice). What changes in the picture, and what is still worth watching:
 
 - Close contact shadows under softened lights are the light's real shadow now: full strength, the
   softening's edge, the light's own direction. The contact term drew them at 40% over a 12 degree
@@ -473,7 +473,7 @@ routing readout; G is the A against A control).
 ## Cvars
 
 - `r_rtShadowOutsideHits` (1) / `r_rtShadowInsideSkip` (3.0): see "Characters" above.
-- `r_rtShadowNearStart` (0, 0..2): see "Near ray start" above. Experimental.
+- `r_rtShadowNearStart` (1, 0..2): see "Near ray start" above. Default 1 since 2026-11-20 (user decision); it only acts on softened RT shadows.
 - `r_rtShadowDebug` (0, not archived; Debug Views > "RT Shadow View"): 1 = a console readout once a second, per-frame averages: softened masks made / reused, masks not made (penumbra under the minimum, no opaque rect), the masks' screen rects summed and what they would sum to if four lights at a time shared their passes (sizing for a batched blur, review F6), and the lit draws per shadow mode (hard ray, mask, stale mask, shadow map, unshadowed) for world and for animated characters, plus how many trace the RT contact ray. 2 = the readout, and every light draws only its shadow term on a white surface (weighted by the light's projection and falloff; no albedo, no N.L, no specular, no contact term). 3 = only its contact shadow term. 4 = its shadow mode as a colour: red hard ray, green mask, yellow stale mask, white shadow map, grey unshadowed. Views 2 to 4 skip ambient lights. Where a ray mode does not trace (the surface faces away from the light) the shadow term reads black. Use it before guessing which term draws an artifact.
 
 - `r_rtAllLights` (0; on in the Ultra Nightmare preset, with `r_rtShadowBlur`): ray-trace every

@@ -5144,7 +5144,7 @@ static void DrawDbgGroup_Materials()
 	CvarSliderF( "Skin Shadow Scatter", r_skinShadowScatter, 0.0f, 1.0f, "%.2f",
 		"a soft shadow edge on skin bleeds warm: red reaches furthest into the shadow, as it already does "
 		"at the terminator. Only shows where the shadow has a soft edge (softened RT shadows, filtered shadow "
-		"maps, contact shadows). Uses the Scatter Reach above. Default 0 (off). NOT preset-owned." );
+		"maps, contact shadows). Uses the Scatter Reach above. Default 1 (on whenever skin shading is on). NOT preset-owned." );
 	ImGui::EndDisabled();
 	EndSettingsGroup();
 	}
@@ -5308,19 +5308,19 @@ static void DrawDbgGroup_RTShadows()
 	CvarSliderF( "Inside-Hit Skip Distance", r_rtShadowInsideSkip, 0.0f, 16.0f, "%.1f units", "Outside Hits Only ignores inside hits only "
 		"this close to the shadow ray's start: enough to clear a start point buried in a character's coarse ray-traced copy or "
 		"pushed across a crease, while a real occluder farther away (the jaw over the neck) still casts. Default 3." );
-	// r_rtShadowNearStart (experimental, docs/rtx-shadow-blur.md "Near ray start"): needs the outside-hits rule
+	// r_rtShadowNearStart (docs/rtx-shadow-blur.md "Near ray start", default 1 since 2026-11-20): needs the outside-hits rule
 	if ( SettingsRow( "Near Ray Start", "r_rtShadowNearStart" ) ) {
 		int nearStart = idMath::ClampInt( 0, 2, r_rtShadowNearStart.GetInteger() );
 		const char *nearStarts[] = { "Off", "On", "On, no contact ray on softened lights" };
 		if ( ImGui::Combo( "Near Ray Start", &nearStart, nearStarts, IM_ARRAYSIZE( nearStarts ) ) ) {
 			r_rtShadowNearStart.SetInteger( nearStart );
 		}
-		CvarTip( r_rtShadowNearStart, "Experimental. The softening ray starts 0.05 units off the surface instead of the Sun Ray Offset "
+		CvarTip( r_rtShadowNearStart, "The softening ray starts 0.05 units off the surface instead of the Sun Ray Offset "
 			"(1 unit), so the main shadow itself catches the occluders closer than that: a nose over a lip, a panel's edge on a "
 			"wall. They come out at full strength with the softening's own edge, where the contact shadow drew them at 40%. "
 			"The third setting also stops tracing the RT contact ray on surfaces that read a softened light's shadow, which "
 			"then only repeats it: about a ray per pixel per light saved. Lights that cast no shadow and the view weapon keep "
-			"their contact shadows. Default Off." );
+			"their contact shadows. Default On (acts only on softened RT shadows)." );
 	}
 	ImGui::EndDisabled();
 	ImGui::EndDisabled();	// rtCapable

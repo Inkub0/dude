@@ -113,7 +113,7 @@ written); `0` (memset) on every non-skin draw.
 | `r_skinShading` | `0.6` | 0..1 | SSS strength on skin/flesh materials (0 = vanilla, 1 = full). Defaults on; preset-owned. |
 | `r_skinScatter` | `0.4` | 0..1 | Red-channel scatter reach (how far the wrap bleeds past the terminator; g/b derive shorter). Free tuning knob. |
 
-| `r_skinShadowScatter` | `0` | 0..1 | Penumbra scattering (below). Off by default; not preset-owned. |
+| `r_skinShadowScatter` | `1` | 0..1 | Penumbra scattering (below). On by default, so it follows `r_skinShading`; not preset-owned. |
 
 The first two are `CVAR_ARCHIVE`, live (no reload), and exposed in **Graphics → Lighting**: a master
 **"Skin Subsurface Scattering (SSS)"** checkbox (toggles the feature between off and the last
@@ -121,7 +121,7 @@ strength, remembered so an off/on round-trip restores the amount), with the **st
 **reach** sliders below it, greyed while off. The whole risk here is **taste**, not code — both
 knobs are meant to be dialled in-game.
 
-## Penumbra scattering - `r_skinShadowScatter` (2026-11-19, opt-in)
+## Penumbra scattering - `r_skinShadowScatter` (2026-11-19; default on since 2026-11-20)
 
 The wrap reddens the terminator, but a shadow edge on skin stayed a neutral grey ramp, although the
 same scatter carries light under it. Penner's pre-integrated model has a second lookup for exactly
@@ -140,8 +140,11 @@ the edge. At full strength red's visibility is about the square root of the grey
 - Rides `u_aoParms.w` (set only on skin / flesh interaction draws). "Skin Shadow Scatter", under
   Skin in the Materials group of the Debugging tab.
 
-Seen in game on 2026-11-19 at 1.0 (Swann, softened RT lights) and kept. It stays off by default: it
-changes the look of every shadow edge on skin, so it is a choice, like the reach.
+Seen in game on 2026-11-19 at 1.0 (Swann, softened RT lights) and kept. Default on (1.0) since
+2026-11-20, the user's decision: it is the shadow half of the skin shading that is already on by
+default, and it only acts where that shading does (skin / flesh draws with `r_skinShading` > 0), so
+the Potato preset and `r_skinShading 0` keep the vanilla grey shadow edge. Set it to 0 for that edge
+with skin shading on.
 
 ## Preset gating
 
