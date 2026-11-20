@@ -4,13 +4,13 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Download DUDE for DOOM 3 and Quake 4: Windows, Linux, Steam Deck</title>
-<meta name="description" content="Download DUDE for Windows and Linux / SteamOS, the Quake 4 add-on and the optional baked ambient-occlusion packs, with a plain-language explanation of each file.">
+<meta name="description" content="Download DUDE for Windows and Linux / SteamOS, the Quake 4 add-on and the optional PBR texture and baked shading packs, explained in plain language.">
 <link rel="canonical" href="https://inkub0.github.io/dude/downloads.html">
 <meta property="og:site_name" content="DUDE">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://inkub0.github.io/dude/downloads.html">
 <meta property="og:title" content="Download DUDE for DOOM 3 and Quake 4: Windows, Linux, Steam Deck">
-<meta property="og:description" content="Download DUDE for Windows and Linux / SteamOS, the Quake 4 add-on and the optional baked ambient-occlusion packs, with a plain-language explanation of each file.">
+<meta property="og:description" content="Download DUDE for Windows and Linux / SteamOS, the Quake 4 add-on and the optional PBR texture and baked shading packs, explained in plain language.">
 <meta property="og:image" content="https://inkub0.github.io/dude/assets/img/og.jpg">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
@@ -55,6 +55,7 @@
       <tr><th>I want to play...</th><th>Download</th></tr>
       <tr><td>DOOM 3, Resurrection of Evil or The Lost Mission</td><td>DUDE for Windows <em>or</em> DUDE for Linux / SteamOS</td></tr>
       <tr><td>Quake 4</td><td>DUDE for your system <strong>+</strong> the Quake 4 add-on for your system</td></tr>
+      <tr><td>...and I'd like richer materials</td><td>Add the matching PBR texture pack (optional, DUDE 0.9.10 or newer)</td></tr>
       <tr><td>...and I'd like extra shading detail</td><td>Add the matching baked shading pack (optional)</td></tr>
     </table>
   </div>
@@ -98,6 +99,56 @@
     <div class="btns"><a class="btn btn-ghost" href="https://github.com/Inkub0/dude/releases/latest/download/dude-q4-linux-x86_64.tar.gz">Download</a></div>
   </div>
   <p class="muted">The add-on must match your DUDE version: always download both from this page, and update both together. Setup: <a href="install.html#quake4">installing for Quake 4</a>.</p>
+</section>
+
+<section id="pbr">
+  <h2>Optional: PBR texture packs</h2>
+  <p>New with DUDE 0.9.10. These packs tell the lighting what every surface is made of, texel by texel: how <strong>rough</strong> or polished it is, whether it is <strong>bare metal</strong>, and how much <strong>ambient occlusion</strong> sits in its grooves. They also carry a height map that gives the surface relief more depth. Without a pack, a whole material shares one value from DUDE's built-in table; with one, bare steel, paint, rust and grime on the same panel each catch the light their own way. The packs are generated from the games' own textures, and no original game files are included.</p>
+  <ul>
+    <li><strong>Not required.</strong> DUDE runs fine without them; they are large, so they are a separate download.</li>
+    <li><strong>Needs DUDE 0.9.10 or newer.</strong> Older versions don't read them.</li>
+    <li>Used by the <strong>High</strong> preset and above, which turn PBR on. Not used by Potato (the original look).</li>
+    <li><strong>Download once:</strong> like the shading packs, a pack only changes when the baking improves, and keeps working when you update DUDE.</li>
+    <li>They work together with the baked shading packs below: install both if you like.</li>
+    <li>You can switch them off any time: <kbd>F10</kbd> &gt; <strong>Graphics</strong> &gt; <strong>Lighting</strong> &gt; <strong>Per-Pixel PBR Textures (ORM)</strong>.</li>
+  </ul>
+  <div class="dl">
+    <div>
+      <h3>Pack for DOOM 3 <span class="tag opt">Optional</span></h3>
+      <p><code>z_pbr_sidecars.pk4</code> (version 1) - 270 MB</p>
+    </div>
+    <div class="btns"><a class="btn btn-ghost" href="https://github.com/Inkub0/dude/releases/download/baked-pbr-v1/z_pbr_sidecars.pk4">Download</a></div>
+  </div>
+  <div class="dl">
+    <div>
+      <h3>Pack for Resurrection of Evil <span class="tag opt">Optional</span></h3>
+      <p><code>z_pbr_sidecars_roe.pk4</code> (version 1) - 253 MB</p>
+    </div>
+    <div class="btns"><a class="btn btn-ghost" href="https://github.com/Inkub0/dude/releases/download/baked-pbr-v1/z_pbr_sidecars_roe.pk4">Download</a></div>
+  </div>
+  <div class="dl">
+    <div>
+      <h3>Pack for The Lost Mission <span class="tag opt">Optional</span></h3>
+      <p><code>z_pbr_sidecars_lm.pk4</code> (version 1) - 183 MB</p>
+    </div>
+    <div class="btns"><a class="btn btn-ghost" href="https://github.com/Inkub0/dude/releases/download/baked-pbr-v1/z_pbr_sidecars_lm.pk4">Download</a></div>
+  </div>
+  <div class="dl">
+    <div>
+      <h3>Pack for Quake 4 <span class="tag opt">Optional</span></h3>
+      <p><code>z_pbr_sidecars.pk4</code> (version 1) - 357 MB</p>
+    </div>
+    <div class="btns"><a class="btn btn-ghost" href="https://github.com/Inkub0/dude-q4/releases/download/baked-pbr-v1/z_pbr_sidecars.pk4">Download</a></div>
+  </div>
+  <h3>How to install a PBR pack</h3>
+  <p>No unzipping: the <code>.pk4</code> file is used as it is. Each game has its own pack, and each pack goes only into its own game's folder, because the expansions change some of DOOM 3's materials.</p>
+  <ul>
+    <li>DOOM 3 pack: into the <code>base</code> folder (next to <code>pak000.pk4</code>).</li>
+    <li>Resurrection of Evil pack: into the <code>d3xp</code> folder.</li>
+    <li>The Lost Mission pack: into the <code>d3le</code> folder.</li>
+    <li>Quake 4 pack: into the <code>q4base</code> folder.</li>
+  </ul>
+  <p class="muted">The DOOM 3 and Quake 4 packs have the same file name, so keep them apart: don't save one over the other in your Downloads folder. To go back to the table values, delete the pack.</p>
 </section>
 
 <section id="ao">
