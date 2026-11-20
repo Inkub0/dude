@@ -5144,7 +5144,7 @@ static void DrawDbgGroup_Materials()
 	CvarSliderF( "Skin Shadow Scatter", r_skinShadowScatter, 0.0f, 1.0f, "%.2f",
 		"a soft shadow edge on skin bleeds warm: red reaches furthest into the shadow, as it already does "
 		"at the terminator. Only shows where the shadow has a soft edge (softened RT shadows, filtered shadow "
-		"maps, contact shadows). Uses the Scatter Reach above. Default 0 (off). NOT preset-owned." );
+		"maps, contact shadows). Uses the Scatter Reach above. Default 1 (on whenever skin shading is on). NOT preset-owned." );
 	ImGui::EndDisabled();
 	EndSettingsGroup();
 	}
