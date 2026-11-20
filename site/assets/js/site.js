@@ -123,28 +123,43 @@
   });
 })();
 
-// Version, date and file sizes of the latest release, read from GitHub. The download
-// links (releases/latest/download/<fixed name>) work without this; the page just keeps
-// the numbers it was published with if the request fails.
+// Version, date, download links and file sizes of the latest release, read from GitHub.
+// Releases carry only the versioned archives (dude-0.9.10-win64.zip, ...), no fixed-name
+// copies, so every link to one is a template: data-asset="dude-VER-win64.zip". The HTML
+// ships with the links, names and numbers of the release the page was published with,
+// and keeps them if the request fails.
 (function () {
   var version = document.querySelectorAll('[data-latest="version"]');
   var date = document.querySelectorAll('[data-latest="date"]');
   var sizes = document.querySelectorAll("[data-size]");
-  if (!version.length && !date.length && !sizes.length) return;
+  var links = document.querySelectorAll("a[data-asset]");
+  var names = document.querySelectorAll("[data-asset-name]");
+  if (!version.length && !date.length && !sizes.length && !links.length && !names.length) return;
   if (!window.fetch) return;
   fetch("https://api.github.com/repos/Inkub0/dude/releases/latest")
     .then(function (r) { return r.ok ? r.json() : null; })
     .then(function (rel) {
-      // Only a DUDE release counts (tags v0.9.8, v1.0, ...), never a Baked AO one.
+      // Only a DUDE release counts (tags v0.9.8, v1.0, ...), never a Baked AO / PBR one.
       if (!rel || !/^v\d/.test(rel.tag_name || "")) return;
       var v = rel.tag_name.replace(/^v/, "");
+      var byName = {};
+      (rel.assets || []).forEach(function (a) { byName[a.name] = a; });
+      function asset(tmpl) { return byName[tmpl.replace("VER", v)]; }
       version.forEach(function (el) { el.textContent = v; });
       if (rel.published_at) date.forEach(function (el) { el.textContent = rel.published_at.slice(0, 10); });
-      var byName = {};
-      (rel.assets || []).forEach(function (a) { byName[a.name] = a.size; });
+      links.forEach(function (el) {
+        var a = asset(el.getAttribute("data-asset"));
+        if (!a) return;			// not in this release: keep the published link
+        el.href = a.browser_download_url;
+        if (el.hasAttribute("data-asset-text")) el.textContent = a.name;
+      });
+      names.forEach(function (el) {
+        var a = asset(el.getAttribute("data-asset-name"));
+        if (a) el.textContent = a.name;
+      });
       sizes.forEach(function (el) {
-        var n = byName[el.getAttribute("data-size")];
-        if (n) el.textContent = Math.round(n / 1e6) + " MB";
+        var a = asset(el.getAttribute("data-size"));
+        if (a) el.textContent = Math.round(a.size / 1e6) + " MB";
       });
     })
     .catch(function () {});

@@ -103,8 +103,8 @@ the packs are not rebuilt or re-uploaded per version.
 
 **Create every Baked AO release with `--latest=false`** (`gh release create baked-ao-vN ...
 --latest=false`), on both repositories. GitHub otherwise marks the newest release *Latest*,
-and the website's download buttons (`releases/latest/download/...`, section 4) would then
-point at the AO release, which has no DUDE archives.
+and the website (which reads the latest release, section 4) would then find the AO release,
+which has no DUDE archives, and keep its fallback links.
 
 **PBR sidecar packs (optional):** the same model as the baked AO, on their own `vN`
 axis, re-published when the baker or its channel adjust changes. Built by
@@ -219,17 +219,16 @@ gh release create vX.Y dist/release-X.Y/*.zip dist/release-X.Y/*.tar.gz \
 # review in the browser, then Publish (it must end up marked Latest)
 ```
 
-**On Publish, `.github/workflows/release-fixed-names.yml` adds the website's copies.** The
-site's (https://inkub0.github.io/dude/) download buttons are
-`https://github.com/Inkub0/dude/releases/latest/download/<fixed name>`, which GitHub redirects
-to that file in the release marked *Latest*. The workflow copies the release's
-`dude-X.Y-win64.zip`, `dude-X.Y-linux-x86_64.tar.gz`, `dude-q4-X.Y-win64.zip` and
-`dude-q4-X.Y-linux-x86_64.tar.gz` to the same release as `dude-win64.zip`,
-`dude-linux-x86_64.tar.gz`, `dude-q4-win64.zip` and `dude-q4-linux-x86_64.tar.gz`, so the site
-needs no edit per release. Upload the archives under their versioned names as always (DUDE's
-missing-Quake-4-library message names `dude-q4-X.Y-<platform>`); if one is missing the workflow
-run fails and says which. Check the run under *Actions* after publishing; to redo it for an
-existing release: *Actions* > *Release fixed-name archives* > *Run workflow* with the tag.
+**One file, one name (user rule, 2026-11-20).** A release carries only the versioned archives
+(`dude-X.Y-win64.zip`, `dude-X.Y-linux-x86_64.tar.gz`, `dude-q4-X.Y-win64.zip`,
+`dude-q4-X.Y-linux-x86_64.tar.gz`): no copies under other names (the fixed-name copies made by the
+old `release-fixed-names.yml` workflow, removed for 0.9.10). The website links the versioned files
+directly. Its download links are templates (`data-asset="dude-VER-win64.zip"`) that
+`site/assets/js/site.js` fills from the GitHub API's latest release (link, file name, size), so the
+site needs no edit when a release is published. Its HTML carries the links of the release it was
+last edited for as the no-JavaScript fallback: bump those (`v0.9.10` / `0.9.10` in the hrefs and
+names, `data-latest` version and date, the MB figures) when a release goes out, and bump the
+`site.js?v=N` cache-buster whenever site.js changes.
 
 (`gh repo set-default Inkub0/dude` once per clone — two remotes exist.)
 

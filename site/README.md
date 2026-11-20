@@ -9,20 +9,19 @@ One-time setup: repository **Settings → Pages → Source: GitHub Actions**.
 
 ## On every release
 
-Nothing to edit for downloads. The buttons point at
-`https://github.com/Inkub0/dude/releases/latest/download/<fixed name>`, which GitHub
-redirects to that file in the release marked **Latest**:
+Releases carry only the versioned archives, one name per file (`dude-X.Y-win64.zip`,
+`dude-X.Y-linux-x86_64.tar.gz`, `dude-q4-X.Y-win64.zip`, `dude-q4-X.Y-linux-x86_64.tar.gz`); no
+fixed-name copies. Every link to one is a template, `data-asset="dude-VER-win64.zip"` (plus
+`data-asset-name` on a displayed file name and `data-size` on a size), and `assets/js/site.js`
+fills link, name, size, version and date from the GitHub API's latest release. A release whose tag
+does not start with `v` (Baked AO, Baked PBR) is ignored, and those are created with
+`--latest=false` anyway (see `docs/releasing.md`).
 
-    dude-win64.zip   dude-linux-x86_64.tar.gz   dude-q4-win64.zip   dude-q4-linux-x86_64.tar.gz
-
-`.github/workflows/release-fixed-names.yml` adds those copies to every published `vX.Y`
-release (from its versioned archives), and every Baked AO release is created with
-`--latest=false` (see `docs/releasing.md`). The version number, release date and file sizes
-on the pages are read from the GitHub API by `assets/js/site.js`; the numbers in the HTML
-are only the fallback if that request fails, so refresh them now and then.
-
-Still by hand: the Baked AO links (`baked-ao-vN`, only when a new pack ships) and text
-that describes a specific release.
+By hand, once per release: the HTML's fallback (the hrefs `releases/download/vX.Y/...`, the file
+names, the `data-latest` version and date, the MB figures), used when the API request fails or
+JavaScript is off. When site.js changes, bump its `?v=N` in the pages' script tags so browsers do
+not keep the old one. Also by hand: the Baked AO / PBR pack links (only when a new pack ships) and
+text that describes a specific release.
 
 ## Search engines
 
