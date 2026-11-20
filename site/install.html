@@ -83,6 +83,7 @@
     <a href="#steamos">🎮 SteamOS / Steam Deck</a>
     <a href="#quake4">⚡ Quake 4</a>
     <a href="#lostmission">🛰️ The Lost Mission</a>
+    <a href="#mods">🧩 Other mods</a>
   </div>
   <p class="pick-hint" hidden>👆 Choose the one that matches your game to see its steps.</p>
 </section>
@@ -232,6 +233,16 @@
   </ol>
 </div>
 
+<div class="scenario" id="mods">
+  <h3>Other mods</h3>
+  <p>DUDE runs the DOOM 3 mods that dhewm3 supports, such as Sikkmod, LibreCoop or Doom 3: Phobos. On Windows that now includes the mods dhewm3 only offers as 32-bit files: DUDE fetches a 64-bit build of their game code for you (DUDE 0.9.10 or newer).</p>
+  <ol class="steps">
+    <li>Install DUDE into your DOOM 3 folder as described above.</li>
+    <li>Download the mod and extract its folder (for example <code>sikkmod</code>) into the DOOM 3 folder, next to <code>base</code>, following the mod's own instructions for its data. If it comes with a <code>.dll</code> or <code>.so</code> game library, you can leave that out.</li>
+    <li>Start DUDE and choose <strong>Mods</strong> &gt; the mod in the main menu. The first time, DUDE asks to download the mod's game library and says where it comes from and under which licence: accept it. Nothing is ever downloaded without asking.</li>
+  </ol>
+</div>
+
 <!-- ===================== FIRST LAUNCH ===================== -->
 <section id="first-launch">
   <h2>First launch</h2>
@@ -245,10 +256,19 @@
   <p>Resurrection of Evil: choose <strong>Mods</strong> &gt; <strong>Resurrection of Evil</strong> in the main menu.</p>
 </section>
 
+<section id="extras">
+  <h2>Optional extras</h2>
+  <p>Two kinds of packs add detail on top of DUDE. Both are single <code>.pk4</code> files: no unzipping, just drop each one into its game's folder. Neither is needed to play.</p>
+  <ul>
+    <li><strong>PBR texture packs</strong> (DUDE 0.9.10 or newer): per-pixel roughness, metalness and ambient occlusion, plus deeper surface relief, for the High preset and above. One pack per game, into <code>base</code>, <code>d3xp</code>, <code>d3le</code> or <code>q4base</code>. <a href="downloads.html#pbr">Downloads and details.</a></li>
+    <li><strong>Baked shading packs:</strong> soft shading in the creases of characters, weapons and props. One pack for DOOM 3 and both expansions, into <code>base</code>; one for Quake 4, into <code>q4base</code>. <a href="downloads.html#ao">Downloads and details.</a></li>
+  </ul>
+</section>
+
 <section id="update">
   <h2>Updating and uninstalling</h2>
   <p><strong>Update:</strong> download the new version and copy it over the old one in the same way, choosing <strong>Replace</strong> when asked. Your settings and saves are kept.</p>
-  <p><strong>Uninstall:</strong> delete what DUDE added to the game folder: <code>dude.exe</code>/<code>dude</code>, <code>base.dll</code>, <code>d3xp.dll</code>, <code>d3le.dll</code>, <code>q4base.dll</code> (or the <code>.so</code> files on Linux), the other <code>.dll</code> files from the archive, <code>base/zz_dude_menu.pk4</code> and <code>d3xp/zz_dude_roe_menu.pk4</code>. The original game keeps working either way: <code>Doom3.exe</code> ignores DUDE's files.</p>
+  <p><strong>Uninstall:</strong> delete what DUDE added to the game folder: <code>dude.exe</code>/<code>dude</code>, <code>base.dll</code>, <code>d3xp.dll</code>, <code>d3le.dll</code>, <code>q4base.dll</code> (or the <code>.so</code> files on Linux), the other <code>.dll</code> files from the archive, <code>base/zz_dude_menu.pk4</code> and <code>d3xp/zz_dude_roe_menu.pk4</code>, plus any optional packs you added (<code>z_pbr_sidecars*.pk4</code>, <code>z_baked_ao.pk4</code>). The original game keeps working either way: <code>Doom3.exe</code> ignores DUDE's files.</p>
   <p>Your DUDE settings and saves live in their own folder: <code>Documents\My Games\dude</code> on Windows, <code>~/.local/share/dude</code> on Linux and SteamOS.</p>
   <p class="muted">Stuck? See the <a href="faq.html">FAQ</a> or <a href="https://github.com/Inkub0/dude/issues">ask on GitHub</a>.</p>
 </section>
