@@ -2618,9 +2618,39 @@ static void RB_RHI_RenderTexgenStage( rhi::RHI *r, const viewDef_t *viewDef, con
 		backEnd.glState.currenttmu = 0;
 	}
 
+	// mirrorRenderMap / xrayRenderMap stages (GitHub #34): the subview was rendered with this view's
+	// projection into its own crop and captured into the stage image, so the vanilla texgen maps it
+	// straight from clip space - s,t,q = clip x,y,w through the stage texture matrix (the materials'
+	// "translate 0.5, 0.5 / scale 0.5, 0.5" turn NDC into 0..1). mirrorrender.vert does exactly that,
+	// so the picture no longer depends on the crop size or the render resolution (FSR), and the
+	// stage colour/alpha and blend apply as on ARB2. CropRenderSize makes the crop a power of two,
+	// so the capture fills its image and needs no NPOT correction.
+	const bool subviewStage = ( si.texgen == TG_SCREEN || si.texgen == TG_SCREEN2 )
+		&& ( pStage->texture.dynamic == DI_MIRROR_RENDER || pStage->texture.dynamic == DI_XRAY_RENDER );
+
 	switch ( si.texgen ) {
 	case TG_SCREEN:
 	case TG_SCREEN2: {
+		if ( subviewStage ) {
+			idImage *capImg = pStage->texture.image;
+			if ( capImg == NULL || ( vkMode && !capImg->rhiCaptured ) ) {
+				return;		// nothing captured yet (first frames of the subview)
+			}
+			if ( pStage->texture.hasMatrix ) {
+				parms.diffuseMatrixS[0] = regs[pStage->texture.matrix[0][0]];
+				parms.diffuseMatrixS[1] = regs[pStage->texture.matrix[0][1]];
+				parms.diffuseMatrixS[3] = regs[pStage->texture.matrix[0][2]];
+				parms.diffuseMatrixT[0] = regs[pStage->texture.matrix[1][0]];
+				parms.diffuseMatrixT[1] = regs[pStage->texture.matrix[1][1]];
+				parms.diffuseMatrixT[3] = regs[pStage->texture.matrix[1][2]];
+			} else {
+				parms.diffuseMatrixS[0] = 1.0f;
+				parms.diffuseMatrixT[1] = 1.0f;
+			}
+			capImg->Bind();
+			vkTex[0] = capImg->rhiHandle;
+			break;
+		}
 		// screen-position blit: portal sky samples the pre-rendered sky from
 		// _currentRender; mirror/xray stages (mirrorRenderMap sets TG_SCREEN +
 		// texture.dynamic) sample their own subview capture (_scratch), the
@@ -2841,7 +2871,7 @@ static void RB_RHI_RenderTexgenStage( rhi::RHI *r, const viewDef_t *viewDef, con
 	rhi::BufferHandle ub;
 	int uniOfs = r->AllocUniforms( &parms, sizeof( parms ), &ub );
 
-	const bool sky = ( si.texgen == TG_SCREEN || si.texgen == TG_SCREEN2
+	const bool sky = !subviewStage && ( si.texgen == TG_SCREEN || si.texgen == TG_SCREEN2
 		|| si.texgen == TG_SKYBOX_CUBE || si.texgen == TG_WOBBLESKY_CUBE );
 
 	rhi::PipelineDesc pd;

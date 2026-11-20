@@ -83,6 +83,7 @@ static const char *gl3BootPrograms[] = {
 	"helltime_accum",
 	"hdrresolve_smaa",		// fused SMAA neighborhood-blend + resolve (RB_RHI_HdrResolveSmaaFused)
 	"interaction",
+	"mirrorrender",			// mirrorRenderMap / xrayRenderMap stages (#34)
 	"portalsky",
 	"postprocess",
 	"shadow",
