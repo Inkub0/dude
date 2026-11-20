@@ -349,68 +349,67 @@ as it is.
 	LOADING_EDGE_EXTEND( "btm_edge", "load_btm_edge", "253", "0,0,0,0.8" ) \
 	LOADING_EDGE_EXTEND( "top_edgeadd", "load_top_edgeadd", "119", "0.0941,0.113,0.0392,1" ) \
 	LOADING_EDGE_EXTEND( "btm_edgeadd", "load_btm_edgeadd", "253", "0.0941,0.113,0.0392,1" ) \
-	R"DUDE(
-insert Desktop {
-	noclip	1
-}
-insert loadimg {
-	rect	(0 - "gui::dude_horPad"), (240 - (320 + "gui::dude_horPad") * 0.75), (640 + 2 * "gui::dude_horPad"), ((640 + 2 * "gui::dude_horPad") * 0.75)
-}
-insert load_dots {
-	rect	(3 - "gui::dude_horPad"), 2, 105, 25
-}
-insert button {
-	rect	-1000,0,2640,480
-}
-insert bar {
-	rect	(235 + "gui::dude_horPad"), 431, 405, 26
-}
-insert p_load_bar {
-	rect	(235 + "gui::dude_horPad"), 431, ("gui::map_loading" * 405), 26
-}
-insert bar_full {
-	rect	(235 + "gui::dude_horPad"), 431, 405, 26
-}
-insert load_text {
-	rect	(4 + "gui::dude_horPad"), 428, 624, 36
-}
-)DUDE"
+		"\n" \
+	"insert Desktop {\n" \
+	"	noclip	1\n" \
+	"}\n" \
+	"insert loadimg {\n" \
+	"	rect	(0 - \"gui::dude_horPad\"), (240 - (320 + \"gui::dude_horPad\") * 0.75), (640 + 2 * \"gui::dude_horPad\"), ((640 + 2 * \"gui::dude_horPad\") * 0.75)\n" \
+	"}\n" \
+	"insert load_dots {\n" \
+	"	rect	(3 - \"gui::dude_horPad\"), 2, 105, 25\n" \
+	"}\n" \
+	"insert button {\n" \
+	"	rect	-1000,0,2640,480\n" \
+	"}\n" \
+	"insert bar {\n" \
+	"	rect	(235 + \"gui::dude_horPad\"), 431, 405, 26\n" \
+	"}\n" \
+	"insert p_load_bar {\n" \
+	"	rect	(235 + \"gui::dude_horPad\"), 431, (\"gui::map_loading\" * 405), 26\n" \
+	"}\n" \
+	"insert bar_full {\n" \
+	"	rect	(235 + \"gui::dude_horPad\"), 431, 405, 26\n" \
+	"}\n" \
+	"insert load_text {\n" \
+	"	rect	(4 + \"gui::dude_horPad\"), 428, 624, 36\n" \
+	"}\n"
 
-#define LOADING_NAME_PATCH R"DUDE(
-insert t_levelname_grad {
-	rect	(291 + "gui::dude_horPad"), 14, 349, 22
-}
-insert t_levelname {
-	rect	(290 + "gui::dude_horPad"), 11, 336, 20
-}
-)DUDE"
+#define LOADING_NAME_PATCH \
+	"\n" \
+	"insert t_levelname_grad {\n" \
+	"	rect	(291 + \"gui::dude_horPad\"), 14, 349, 22\n" \
+	"}\n" \
+	"insert t_levelname {\n" \
+	"	rect	(290 + \"gui::dude_horPad\"), 11, 336, 20\n" \
+	"}\n"
 
-#define LOADING_GRID_PATCH R"DUDE(
-insert grid1 {
-	noclip	1
-	windowDef dude_grid_l1
-	{
-		rect	-480,0,480,480
-		background	"gfx/guis/mainmenu/bg_grid"
-		matcolor	1,1,1,0.04
-	}
-	windowDef dude_grid_l2
-	{
-		rect	-960,0,480,480
-		background	"gfx/guis/mainmenu/bg_grid"
-		matcolor	1,1,1,0.04
-	}
-}
-insert grid2 {
-	noclip	1
-	windowDef dude_grid_r1
-	{
-		rect	480,0,480,480
-		background	"gfx/guis/mainmenu/bg_grid"
-		matcolor	1,1,1,0.04
-	}
-}
-)DUDE"
+#define LOADING_GRID_PATCH \
+	"\n" \
+	"insert grid1 {\n" \
+	"	noclip	1\n" \
+	"	windowDef dude_grid_l1\n" \
+	"	{\n" \
+	"		rect	-480,0,480,480\n" \
+	"		background	\"gfx/guis/mainmenu/bg_grid\"\n" \
+	"		matcolor	1,1,1,0.04\n" \
+	"	}\n" \
+	"	windowDef dude_grid_l2\n" \
+	"	{\n" \
+	"		rect	-960,0,480,480\n" \
+	"		background	\"gfx/guis/mainmenu/bg_grid\"\n" \
+	"		matcolor	1,1,1,0.04\n" \
+	"	}\n" \
+	"}\n" \
+	"insert grid2 {\n" \
+	"	noclip	1\n" \
+	"	windowDef dude_grid_r1\n" \
+	"	{\n" \
+	"		rect	480,0,480,480\n" \
+	"		background	\"gfx/guis/mainmenu/bg_grid\"\n" \
+	"		matcolor	1,1,1,0.04\n" \
+	"	}\n" \
+	"}\n"
 
 struct guiPatch_t {
 	const char *	gui;
