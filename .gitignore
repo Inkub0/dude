@@ -53,6 +53,8 @@
 !/d3xp/pbr/
 /d3xp/pbr/*
 !/d3xp/pbr/pbr_game.cfg
+# the PBR editor's RoE per-texture steps ("Save for next bake"): a bake input of the RoE / LM sidecar packs
+!/d3xp/pbr/edits/
 # d3le (Lost Mission) game data is ignored (its pk4s and description.txt), EXCEPT DUDE's def
 # overrides (id's restored commented-out lights), mirroring d3xp/def
 /d3le/*
