@@ -275,6 +275,12 @@ static MaterialIR *IR_Build( const idMaterial *material ) {
 			switch ( stage->texture.texgen ) {
 			case TG_SCREEN:
 			case TG_SCREEN2:
+				if ( stage->texture.dynamic == DI_MIRROR_RENDER || stage->texture.dynamic == DI_XRAY_RENDER ) {
+					// mirrorRenderMap / xrayRenderMap: project the stage's own subview capture
+					// through the stage texture matrix, blended at the surface's depth (#34)
+					prog = "mirrorrender";
+					break;
+				}
 				// portal sky: blit the pre-rendered sky from _currentRender
 				prog = "portalsky";
 				s.needsCurrentRender = true;

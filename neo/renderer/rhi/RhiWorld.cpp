@@ -3810,6 +3810,36 @@ static void RB_RHI_CaptureCurrentDepth( const viewDef_t *viewDef ) {
 // depth); 1 = the deferred view weapon only, then the usual _currentDepth capture of the complete depth.
 // The depth prepass's skip test for a surface (RB_RHI_FillDepthBuffer): the DI phase gate, undrawn / translucent /
 // sky materials, surfaces with no geometry, materials with every stage conditioned off.
+/*
+=============
+RB_RHI_IsSkyMaterial
+
+True for a material the prepasses must leave out because it is drawn at the far plane: a sky
+texgen (portal sky, skybox, wobble sky) on an unlit material. idMaterial::Texgen() returns the
+FIRST non-explicit stage texgen, so a mirrorRenderMap / xrayRenderMap stage (TG_SCREEN) on an
+otherwise ordinary surface read as sky as well: the whole surface was left out of depth, its
+light interactions (depth EQUAL) drew nothing and only the mirror stage showed (GitHub #34, the
+D3HDP floors; stock textures/hell/stone2fx has the same shape). ARB2's fill-depth never had this
+test, so those surfaces stay in depth here too.
+=============
+*/
+static bool RB_RHI_IsSkyMaterial( const idMaterial *shader ) {
+	const texgen_t tg = shader->Texgen();
+	if ( tg != TG_SCREEN && tg != TG_SCREEN2 && tg != TG_SKYBOX_CUBE && tg != TG_WOBBLESKY_CUBE ) {
+		return false;
+	}
+	if ( shader->ReceivesLighting() ) {
+		return false;
+	}
+	for ( int i = 0; i < shader->GetNumStages(); i++ ) {
+		const dynamicidImage_t dyn = shader->GetStage( i )->texture.dynamic;
+		if ( dyn == DI_MIRROR_RENDER || dyn == DI_XRAY_RENDER || dyn == DI_REMOTE_RENDER ) {
+			return false;
+		}
+	}
+	return true;
+}
+
 static bool RB_RHI_ZfillSurfSkipped( const drawSurf_t *surf, int phase ) {
 	const srfTriangles_t *tri = surf->geo;
 	const idMaterial *shader = surf->material;
@@ -3827,8 +3857,7 @@ static bool RB_RHI_ZfillSurfSkipped( const drawSurf_t *surf, int phase ) {
 	// sky surfaces (portal sky, skybox) render at the far plane and must
 	// NOT seal depth here — sealing is what makes forceOpaque portal-sky
 	// occlude the geometry in front of it (see the sky shaders' z = w)
-	texgen_t tg = shader->Texgen();
-	if ( tg == TG_SCREEN || tg == TG_SCREEN2 || tg == TG_SKYBOX_CUBE || tg == TG_WOBBLESKY_CUBE ) {
+	if ( RB_RHI_IsSkyMaterial( shader ) ) {
 		return true;
 	}
 	if ( !tri->numIndexes || ( !tri->ambientCache && !tri->gpuSkinVB ) ) {
@@ -6879,8 +6908,7 @@ static bool RB_RHI_NormalPrepass( rhi::RHI *r, const viewDef_t *viewDef, int pha
 		if ( !shader->IsDrawn() || shader->Coverage() == MC_TRANSLUCENT ) {
 			continue;
 		}
-		texgen_t tg = shader->Texgen();
-		if ( tg == TG_SCREEN || tg == TG_SCREEN2 || tg == TG_SKYBOX_CUBE || tg == TG_WOBBLESKY_CUBE ) {
+		if ( RB_RHI_IsSkyMaterial( shader ) ) {
 			continue;					// sky must not seal the normal/depth buffer
 		}
 		if ( !tri->numIndexes || ( !tri->ambientCache && !tri->gpuSkinVB ) ) {
